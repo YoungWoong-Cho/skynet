@@ -1,0 +1,142 @@
+{
+  "schema_version": 2,
+  "evaluator": "libero",
+  "suite": "libero_goal",
+  "version": "catalog-v2-git-f78abd68ee28",
+  "label": "LIBERO Goal",
+  "task_source": "immutable_catalog_v2",
+  "task_selection_mode": "subset",
+  "task_selection_reason": "The OpenPI adapter executes each selected canonical LIBERO task through a pinned filtered benchmark proxy.",
+  "task_catalog_complete": true,
+  "task_catalog_provenance": {
+    "repository": "https://github.com/Lifelong-Robot-Learning/LIBERO",
+    "revision": "f78abd68ee283de9f9be3c8f7e2a9ad60246e95c",
+    "source_path": "libero/libero/benchmark/libero_suite_task_map.py"
+  },
+  "task_catalog_sha256": "583173aab3839ebb148bb9931743c7fedebc26ea6f2ce040f8abf714e4f654e4",
+  "tasks": [
+    "open_the_middle_drawer_of_the_cabinet",
+    "put_the_bowl_on_the_stove",
+    "put_the_wine_bottle_on_top_of_the_cabinet",
+    "open_the_top_drawer_and_put_the_bowl_inside",
+    "put_the_bowl_on_top_of_the_cabinet",
+    "push_the_plate_to_the_front_of_the_stove",
+    "put_the_cream_cheese_in_the_bowl",
+    "turn_on_the_stove",
+    "put_the_bowl_on_the_plate",
+    "put_the_wine_bottle_on_the_rack"
+  ],
+  "task_options": [
+    {
+      "id": "open_the_middle_drawer_of_the_cabinet",
+      "label": "open the middle drawer of the cabinet",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_goal",
+          "task_id": 0
+        }
+      }
+    },
+    {
+      "id": "put_the_bowl_on_the_stove",
+      "label": "put the bowl on the stove",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_goal",
+          "task_id": 1
+        }
+      }
+    },
+    {
+      "id": "put_the_wine_bottle_on_top_of_the_cabinet",
+      "label": "put the wine bottle on top of the cabinet",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_goal",
+          "task_id": 2
+        }
+      }
+    },
+    {
+      "id": "open_the_top_drawer_and_put_the_bowl_inside",
+      "label": "open the top drawer and put the bowl inside",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_goal",
+          "task_id": 3
+        }
+      }
+    },
+    {
+      "id": "put_the_bowl_on_top_of_the_cabinet",
+      "label": "put the bowl on top of the cabinet",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_goal",
+          "task_id": 4
+        }
+      }
+    },
+    {
+      "id": "push_the_plate_to_the_front_of_the_stove",
+      "label": "push the plate to the front of the stove",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_goal",
+          "task_id": 5
+        }
+      }
+    },
+    {
+      "id": "put_the_cream_cheese_in_the_bowl",
+      "label": "put the cream cheese in the bowl",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_goal",
+          "task_id": 6
+        }
+      }
+    },
+    {
+      "id": "turn_on_the_stove",
+      "label": "turn on the stove",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_goal",
+          "task_id": 7
+        }
+      }
+    },
+    {
+      "id": "put_the_bowl_on_the_plate",
+      "label": "put the bowl on the plate",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_goal",
+          "task_id": 8
+        }
+      }
+    },
+    {
+      "id": "put_the_wine_bottle_on_the_rack",
+      "label": "put the wine bottle on the rack",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_goal",
+          "task_id": 9
+        }
+      }
+    }
+  ],
+  "current": true
+}

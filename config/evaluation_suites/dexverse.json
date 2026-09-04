@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "evaluator": "isaac_lab",
+  "suite": "dexverse",
+  "version": "catalog-v2-unresolved-git-30cc673e2768",
+  "label": "DexVerse Isaac Lab",
+  "task_source": "unresolved_repository",
+  "task_selection_mode": "all_only",
+  "task_selection_reason": "The DexVerse task catalog must be extracted in its pinned Isaac Lab runtime before individual tasks can be selected safely.",
+  "task_catalog_complete": false,
+  "task_catalog_provenance": {
+    "repository": "https://github.com/ycyao216/DexVerse",
+    "revision": "30cc673e27684b9f10186fa6bea731aed246bc9f",
+    "source_path": "scripts/list_envs.py"
+  },
+  "task_catalog_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "tasks": [
+
+  ],
+  "task_options": [
+
+  ],
+  "current": true
+}

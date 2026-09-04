@@ -1,0 +1,142 @@
+{
+  "schema_version": 2,
+  "evaluator": "libero",
+  "suite": "libero_10",
+  "version": "catalog-v2-git-f78abd68ee28",
+  "label": "LIBERO-10",
+  "task_source": "immutable_catalog_v2",
+  "task_selection_mode": "subset",
+  "task_selection_reason": "The OpenPI adapter executes each selected canonical LIBERO task through a pinned filtered benchmark proxy.",
+  "task_catalog_complete": true,
+  "task_catalog_provenance": {
+    "repository": "https://github.com/Lifelong-Robot-Learning/LIBERO",
+    "revision": "f78abd68ee283de9f9be3c8f7e2a9ad60246e95c",
+    "source_path": "libero/libero/benchmark/libero_suite_task_map.py"
+  },
+  "task_catalog_sha256": "b77efb0074cb2c65907a1ca705115ffc3cce2177947ffed5056984c9093ea05d",
+  "tasks": [
+    "LIVING_ROOM_SCENE2_put_both_the_alphabet_soup_and_the_tomato_sauce_in_the_basket",
+    "LIVING_ROOM_SCENE2_put_both_the_cream_cheese_box_and_the_butter_in_the_basket",
+    "KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it",
+    "KITCHEN_SCENE4_put_the_black_bowl_in_the_bottom_drawer_of_the_cabinet_and_close_it",
+    "LIVING_ROOM_SCENE5_put_the_white_mug_on_the_left_plate_and_put_the_yellow_and_white_mug_on_the_right_plate",
+    "STUDY_SCENE1_pick_up_the_book_and_place_it_in_the_back_compartment_of_the_caddy",
+    "LIVING_ROOM_SCENE6_put_the_white_mug_on_the_plate_and_put_the_chocolate_pudding_to_the_right_of_the_plate",
+    "LIVING_ROOM_SCENE1_put_both_the_alphabet_soup_and_the_cream_cheese_box_in_the_basket",
+    "KITCHEN_SCENE8_put_both_moka_pots_on_the_stove",
+    "KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it"
+  ],
+  "task_options": [
+    {
+      "id": "LIVING_ROOM_SCENE2_put_both_the_alphabet_soup_and_the_tomato_sauce_in_the_basket",
+      "label": "LIVING ROOM SCENE2 put both the alphabet soup and the tomato sauce in the basket",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_10",
+          "task_id": 0
+        }
+      }
+    },
+    {
+      "id": "LIVING_ROOM_SCENE2_put_both_the_cream_cheese_box_and_the_butter_in_the_basket",
+      "label": "LIVING ROOM SCENE2 put both the cream cheese box and the butter in the basket",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_10",
+          "task_id": 1
+        }
+      }
+    },
+    {
+      "id": "KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it",
+      "label": "KITCHEN SCENE3 turn on the stove and put the moka pot on it",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_10",
+          "task_id": 2
+        }
+      }
+    },
+    {
+      "id": "KITCHEN_SCENE4_put_the_black_bowl_in_the_bottom_drawer_of_the_cabinet_and_close_it",
+      "label": "KITCHEN SCENE4 put the black bowl in the bottom drawer of the cabinet and close it",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_10",
+          "task_id": 3
+        }
+      }
+    },
+    {
+      "id": "LIVING_ROOM_SCENE5_put_the_white_mug_on_the_left_plate_and_put_the_yellow_and_white_mug_on_the_right_plate",
+      "label": "LIVING ROOM SCENE5 put the white mug on the left plate and put the yellow and white mug on the right plate",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_10",
+          "task_id": 4
+        }
+      }
+    },
+    {
+      "id": "STUDY_SCENE1_pick_up_the_book_and_place_it_in_the_back_compartment_of_the_caddy",
+      "label": "STUDY SCENE1 pick up the book and place it in the back compartment of the caddy",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_10",
+          "task_id": 5
+        }
+      }
+    },
+    {
+      "id": "LIVING_ROOM_SCENE6_put_the_white_mug_on_the_plate_and_put_the_chocolate_pudding_to_the_right_of_the_plate",
+      "label": "LIVING ROOM SCENE6 put the white mug on the plate and put the chocolate pudding to the right of the plate",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_10",
+          "task_id": 6
+        }
+      }
+    },
+    {
+      "id": "LIVING_ROOM_SCENE1_put_both_the_alphabet_soup_and_the_cream_cheese_box_in_the_basket",
+      "label": "LIVING ROOM SCENE1 put both the alphabet soup and the cream cheese box in the basket",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_10",
+          "task_id": 7
+        }
+      }
+    },
+    {
+      "id": "KITCHEN_SCENE8_put_both_moka_pots_on_the_stove",
+      "label": "KITCHEN SCENE8 put both moka pots on the stove",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_10",
+          "task_id": 8
+        }
+      }
+    },
+    {
+      "id": "KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it",
+      "label": "KITCHEN SCENE6 put the yellow and white mug in the microwave and close it",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_10",
+          "task_id": 9
+        }
+      }
+    }
+  ],
+  "current": true
+}

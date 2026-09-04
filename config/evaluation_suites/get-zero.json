@@ -1,0 +1,984 @@
+{
+  "schema_version": 2,
+  "evaluator": "isaac_gym",
+  "suite": "get_zero",
+  "version": "catalog-v2.1-git-279652da1608",
+  "label": "GET-Zero Isaac Gym",
+  "task_source": "immutable_catalog_v2",
+  "task_selection_mode": "single",
+  "task_selection_reason": "GET-Zero evaluates one native embodiment configuration per invocation and checkpoint, so each request selects exactly one case.",
+  "task_catalog_complete": true,
+  "task_catalog_provenance": {
+    "repository": "https://github.com/real-stanford/get_zero",
+    "revision": "279652da160823521e881952f67870b0d98674ce",
+    "source_path": "get_zero/distill/cfg/dataset/LeapHandRot.yaml"
+  },
+  "task_catalog_sha256": "b0e3cae9c3f6e3f9c30afb1cb3401fc039fd9f35c3c453bf459cf94e51974a02",
+  "tasks": [
+    "LeapHandRot/001",
+    "LeapHandRot/002",
+    "LeapHandRot/003",
+    "LeapHandRot/006",
+    "LeapHandRot/007",
+    "LeapHandRot/008",
+    "LeapHandRot/009",
+    "LeapHandRot/010",
+    "LeapHandRot/011",
+    "LeapHandRot/012",
+    "LeapHandRot/013",
+    "LeapHandRot/014",
+    "LeapHandRot/021",
+    "LeapHandRot/022",
+    "LeapHandRot/023",
+    "LeapHandRot/026",
+    "LeapHandRot/051",
+    "LeapHandRot/056",
+    "LeapHandRot/095",
+    "LeapHandRot/103",
+    "LeapHandRot/119",
+    "LeapHandRot/120",
+    "LeapHandRot/121",
+    "LeapHandRot/123",
+    "LeapHandRot/124",
+    "LeapHandRot/125",
+    "LeapHandRot/126",
+    "LeapHandRot/127",
+    "LeapHandRot/129",
+    "LeapHandRot/130",
+    "LeapHandRot/131",
+    "LeapHandRot/132",
+    "LeapHandRot/134",
+    "LeapHandRot/140",
+    "LeapHandRot/141",
+    "LeapHandRot/144",
+    "LeapHandRot/154",
+    "LeapHandRot/164",
+    "LeapHandRot/165",
+    "LeapHandRot/169",
+    "LeapHandRot/174",
+    "LeapHandRot/189",
+    "LeapHandRot/194",
+    "LeapHandRot/221",
+    "LeapHandRot/004",
+    "LeapHandRot/024",
+    "LeapHandRot/046",
+    "LeapHandRot/071",
+    "LeapHandRot/098",
+    "LeapHandRot/122",
+    "LeapHandRot/139",
+    "LeapHandRot/142",
+    "LeapHandRot/200",
+    "LeapHandRot/204",
+    "LeapHandRot/590",
+    "LeapHandRot/596",
+    "LeapHandRot/602",
+    "LeapHandRot/603",
+    "LeapHandRot/605",
+    "LeapHandRot/611",
+    "LeapHandRot/613",
+    "LeapHandRot/614",
+    "LeapHandRot/618",
+    "LeapHandRot/633",
+    "LeapHandRot/580",
+    "LeapHandRot/581",
+    "LeapHandRot/582",
+    "LeapHandRot/583",
+    "LeapHandRot/584",
+    "LeapHandRot/585",
+    "LeapHandRot/586",
+    "LeapHandRot/587",
+    "LeapHandRot/588",
+    "LeapHandRot/589"
+  ],
+  "task_options": [
+    {
+      "id": "LeapHandRot/001",
+      "label": "LEAP Hand Rotation 001",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/001"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/002",
+      "label": "LEAP Hand Rotation 002",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/002"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/003",
+      "label": "LEAP Hand Rotation 003",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/003"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/006",
+      "label": "LEAP Hand Rotation 006",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/006"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/007",
+      "label": "LEAP Hand Rotation 007",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/007"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/008",
+      "label": "LEAP Hand Rotation 008",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/008"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/009",
+      "label": "LEAP Hand Rotation 009",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/009"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/010",
+      "label": "LEAP Hand Rotation 010",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/010"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/011",
+      "label": "LEAP Hand Rotation 011",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/011"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/012",
+      "label": "LEAP Hand Rotation 012",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/012"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/013",
+      "label": "LEAP Hand Rotation 013",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/013"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/014",
+      "label": "LEAP Hand Rotation 014",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/014"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/021",
+      "label": "LEAP Hand Rotation 021",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/021"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/022",
+      "label": "LEAP Hand Rotation 022",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/022"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/023",
+      "label": "LEAP Hand Rotation 023",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/023"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/026",
+      "label": "LEAP Hand Rotation 026",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/026"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/051",
+      "label": "LEAP Hand Rotation 051",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/051"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/056",
+      "label": "LEAP Hand Rotation 056",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/056"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/095",
+      "label": "LEAP Hand Rotation 095",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/095"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/103",
+      "label": "LEAP Hand Rotation 103",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/103"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/119",
+      "label": "LEAP Hand Rotation 119",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/119"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/120",
+      "label": "LEAP Hand Rotation 120",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/120"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/121",
+      "label": "LEAP Hand Rotation 121",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/121"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/123",
+      "label": "LEAP Hand Rotation 123",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/123"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/124",
+      "label": "LEAP Hand Rotation 124",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/124"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/125",
+      "label": "LEAP Hand Rotation 125",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/125"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/126",
+      "label": "LEAP Hand Rotation 126",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/126"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/127",
+      "label": "LEAP Hand Rotation 127",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/127"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/129",
+      "label": "LEAP Hand Rotation 129",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/129"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/130",
+      "label": "LEAP Hand Rotation 130",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/130"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/131",
+      "label": "LEAP Hand Rotation 131",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/131"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/132",
+      "label": "LEAP Hand Rotation 132",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/132"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/134",
+      "label": "LEAP Hand Rotation 134",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/134"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/140",
+      "label": "LEAP Hand Rotation 140",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/140"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/141",
+      "label": "LEAP Hand Rotation 141",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/141"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/144",
+      "label": "LEAP Hand Rotation 144",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/144"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/154",
+      "label": "LEAP Hand Rotation 154",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/154"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/164",
+      "label": "LEAP Hand Rotation 164",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/164"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/165",
+      "label": "LEAP Hand Rotation 165",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/165"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/169",
+      "label": "LEAP Hand Rotation 169",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/169"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/174",
+      "label": "LEAP Hand Rotation 174",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/174"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/189",
+      "label": "LEAP Hand Rotation 189",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/189"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/194",
+      "label": "LEAP Hand Rotation 194",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/194"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/221",
+      "label": "LEAP Hand Rotation 221",
+      "description": "train",
+      "metadata": {
+        "split": "train",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/221"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/004",
+      "label": "LEAP Hand Rotation 004",
+      "description": "new connectivity",
+      "metadata": {
+        "split": "new_connectivity",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/004"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/024",
+      "label": "LEAP Hand Rotation 024",
+      "description": "new connectivity",
+      "metadata": {
+        "split": "new_connectivity",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/024"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/046",
+      "label": "LEAP Hand Rotation 046",
+      "description": "new connectivity",
+      "metadata": {
+        "split": "new_connectivity",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/046"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/071",
+      "label": "LEAP Hand Rotation 071",
+      "description": "new connectivity",
+      "metadata": {
+        "split": "new_connectivity",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/071"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/098",
+      "label": "LEAP Hand Rotation 098",
+      "description": "new connectivity",
+      "metadata": {
+        "split": "new_connectivity",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/098"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/122",
+      "label": "LEAP Hand Rotation 122",
+      "description": "new connectivity",
+      "metadata": {
+        "split": "new_connectivity",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/122"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/139",
+      "label": "LEAP Hand Rotation 139",
+      "description": "new connectivity",
+      "metadata": {
+        "split": "new_connectivity",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/139"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/142",
+      "label": "LEAP Hand Rotation 142",
+      "description": "new connectivity",
+      "metadata": {
+        "split": "new_connectivity",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/142"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/200",
+      "label": "LEAP Hand Rotation 200",
+      "description": "new connectivity",
+      "metadata": {
+        "split": "new_connectivity",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/200"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/204",
+      "label": "LEAP Hand Rotation 204",
+      "description": "new connectivity",
+      "metadata": {
+        "split": "new_connectivity",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/204"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/590",
+      "label": "LEAP Hand Rotation 590",
+      "description": "new link length",
+      "metadata": {
+        "split": "new_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/590"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/596",
+      "label": "LEAP Hand Rotation 596",
+      "description": "new link length",
+      "metadata": {
+        "split": "new_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/596"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/602",
+      "label": "LEAP Hand Rotation 602",
+      "description": "new link length",
+      "metadata": {
+        "split": "new_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/602"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/603",
+      "label": "LEAP Hand Rotation 603",
+      "description": "new link length",
+      "metadata": {
+        "split": "new_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/603"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/605",
+      "label": "LEAP Hand Rotation 605",
+      "description": "new link length",
+      "metadata": {
+        "split": "new_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/605"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/611",
+      "label": "LEAP Hand Rotation 611",
+      "description": "new link length",
+      "metadata": {
+        "split": "new_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/611"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/613",
+      "label": "LEAP Hand Rotation 613",
+      "description": "new link length",
+      "metadata": {
+        "split": "new_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/613"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/614",
+      "label": "LEAP Hand Rotation 614",
+      "description": "new link length",
+      "metadata": {
+        "split": "new_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/614"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/618",
+      "label": "LEAP Hand Rotation 618",
+      "description": "new link length",
+      "metadata": {
+        "split": "new_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/618"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/633",
+      "label": "LEAP Hand Rotation 633",
+      "description": "new link length",
+      "metadata": {
+        "split": "new_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/633"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/580",
+      "label": "LEAP Hand Rotation 580",
+      "description": "new connectivity and link length",
+      "metadata": {
+        "split": "new_connectivity_and_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/580"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/581",
+      "label": "LEAP Hand Rotation 581",
+      "description": "new connectivity and link length",
+      "metadata": {
+        "split": "new_connectivity_and_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/581"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/582",
+      "label": "LEAP Hand Rotation 582",
+      "description": "new connectivity and link length",
+      "metadata": {
+        "split": "new_connectivity_and_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/582"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/583",
+      "label": "LEAP Hand Rotation 583",
+      "description": "new connectivity and link length",
+      "metadata": {
+        "split": "new_connectivity_and_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/583"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/584",
+      "label": "LEAP Hand Rotation 584",
+      "description": "new connectivity and link length",
+      "metadata": {
+        "split": "new_connectivity_and_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/584"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/585",
+      "label": "LEAP Hand Rotation 585",
+      "description": "new connectivity and link length",
+      "metadata": {
+        "split": "new_connectivity_and_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/585"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/586",
+      "label": "LEAP Hand Rotation 586",
+      "description": "new connectivity and link length",
+      "metadata": {
+        "split": "new_connectivity_and_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/586"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/587",
+      "label": "LEAP Hand Rotation 587",
+      "description": "new connectivity and link length",
+      "metadata": {
+        "split": "new_connectivity_and_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/587"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/588",
+      "label": "LEAP Hand Rotation 588",
+      "description": "new connectivity and link length",
+      "metadata": {
+        "split": "new_connectivity_and_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/588"
+        }
+      }
+    },
+    {
+      "id": "LeapHandRot/589",
+      "label": "LEAP Hand Rotation 589",
+      "description": "new connectivity and link length",
+      "metadata": {
+        "split": "new_connectivity_and_link_length",
+        "native": {
+          "task": "LeapHandRot",
+          "embodiment": "LeapHand/generated/589"
+        }
+      }
+    }
+  ],
+  "current": true
+}

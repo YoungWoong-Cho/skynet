@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "evaluator": "mujoco",
+  "suite": "custom",
+  "version": "catalog-v2-user-defined-1",
+  "label": "MuJoCo custom suite",
+  "task_source": "user",
+  "task_selection_mode": "all_only",
+  "task_selection_reason": "A user-defined MuJoCo suite has no immutable task catalog or declared subset selector.",
+  "task_catalog_complete": false,
+  "task_catalog_provenance": {
+    "repository": "user-supplied-mujoco",
+    "revision": "unresolved",
+    "source_path": "evaluation-request"
+  },
+  "task_catalog_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "tasks": [
+
+  ],
+  "task_options": [
+
+  ],
+  "current": true
+}

@@ -1,0 +1,52 @@
+{
+  "schema_version": 2,
+  "evaluator": "isaac_sim",
+  "suite": "groot_gr1_isaaclab_evaltasks",
+  "version": "catalog-v2-git-460f2878bdcb",
+  "label": "GR00T N1.6 / Isaac Lab GR1-T2 Industrial Tasks",
+  "task_source": "immutable_catalog_v2",
+  "task_selection_mode": "subset",
+  "task_selection_reason": "The pinned IsaacLabEvalTasks evaluator exposes two independent GR1-T2 closed-loop task environments.",
+  "task_catalog_complete": true,
+  "task_catalog_provenance": {
+    "repository": "https://github.com/isaac-sim/IsaacLabEvalTasks",
+    "revision": "460f2878bdcb4db2d21913db789174fb316b73e2",
+    "source_path": "scripts/config/args.py"
+  },
+  "task_catalog_sha256": "bb7a5f1f7146307530c2be63f9779d47d2a16332931e637569492c361c41043e",
+  "tasks": [
+    "nutpouring",
+    "pipesorting"
+  ],
+  "task_options": [
+    {
+      "id": "nutpouring",
+      "label": "Nut pouring",
+      "description": "Pour one metallic nut into the bowl, then place the bowl on the scale.",
+      "metadata": {
+        "native": {
+          "environment_id": "Isaac-NutPour-GR1T2-ClosedLoop-v0",
+          "instruction": "Pick up the beaker and tilt it to pour out 1 metallic nut into the bowl. Pick up the bowl and place it on the metallic measuring scale.",
+          "rollout_length": 30,
+          "feedback_actions": 16,
+          "simulation_device": "cuda:0"
+        }
+      }
+    },
+    {
+      "id": "pipesorting",
+      "label": "Exhaust pipe sorting",
+      "description": "Pick up the blue exhaust pipe and place it into the blue bin.",
+      "metadata": {
+        "native": {
+          "environment_id": "Isaac-ExhaustPipe-GR1T2-ClosedLoop-v0",
+          "instruction": "Pick up the blue pipe and place it into the blue bin.",
+          "rollout_length": 20,
+          "feedback_actions": 16,
+          "simulation_device": "cuda:0"
+        }
+      }
+    }
+  ],
+  "current": true
+}

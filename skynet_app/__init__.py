@@ -1,0 +1,2 @@
+"""Skynet Slurm console."""
+

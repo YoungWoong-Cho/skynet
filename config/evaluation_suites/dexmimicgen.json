@@ -1,0 +1,121 @@
+{
+  "schema_version": 2,
+  "evaluator": "robosuite",
+  "suite": "dexmimicgen",
+  "version": "catalog-v2-git-940e8a1b3ad7",
+  "label": "DexMimicGen / robosuite",
+  "task_source": "immutable_catalog_v2",
+  "task_selection_mode": "all_only",
+  "task_selection_reason": "The task catalog is pinned, but a DexMimicGen evaluator adapter has not yet declared faithful subset execution.",
+  "task_catalog_complete": true,
+  "task_catalog_provenance": {
+    "repository": "https://github.com/NVlabs/dexmimicgen",
+    "revision": "940e8a1b3ad70eb1925ada6b364b197de6bb2af9",
+    "source_path": "environments.md"
+  },
+  "task_catalog_sha256": "ad8ab7b4e098c11e6e9f1c453b4adaf710db5f83b83bc45f97600ad670949f24",
+  "tasks": [
+    "TwoArmThreading",
+    "TwoArmThreePieceAssembly",
+    "TwoArmTransport",
+    "TwoArmDrawerCleanup",
+    "TwoArmBoxCleanup",
+    "TwoArmLiftTray",
+    "TwoArmCoffee",
+    "TwoArmPouring",
+    "TwoArmCanSortRandom"
+  ],
+  "task_options": [
+    {
+      "id": "TwoArmThreading",
+      "label": "Two Arm Threading",
+      "description": "",
+      "metadata": {
+        "native": {
+          "environment": "TwoArmThreading"
+        }
+      }
+    },
+    {
+      "id": "TwoArmThreePieceAssembly",
+      "label": "Two Arm Three Piece Assembly",
+      "description": "",
+      "metadata": {
+        "native": {
+          "environment": "TwoArmThreePieceAssembly"
+        }
+      }
+    },
+    {
+      "id": "TwoArmTransport",
+      "label": "Two Arm Transport",
+      "description": "",
+      "metadata": {
+        "native": {
+          "environment": "TwoArmTransport"
+        }
+      }
+    },
+    {
+      "id": "TwoArmDrawerCleanup",
+      "label": "Two Arm Drawer Cleanup",
+      "description": "",
+      "metadata": {
+        "native": {
+          "environment": "TwoArmDrawerCleanup"
+        }
+      }
+    },
+    {
+      "id": "TwoArmBoxCleanup",
+      "label": "Two Arm Box Cleanup",
+      "description": "",
+      "metadata": {
+        "native": {
+          "environment": "TwoArmBoxCleanup"
+        }
+      }
+    },
+    {
+      "id": "TwoArmLiftTray",
+      "label": "Two Arm Lift Tray",
+      "description": "",
+      "metadata": {
+        "native": {
+          "environment": "TwoArmLiftTray"
+        }
+      }
+    },
+    {
+      "id": "TwoArmCoffee",
+      "label": "Two Arm Coffee",
+      "description": "",
+      "metadata": {
+        "native": {
+          "environment": "TwoArmCoffee"
+        }
+      }
+    },
+    {
+      "id": "TwoArmPouring",
+      "label": "Two Arm Pouring",
+      "description": "",
+      "metadata": {
+        "native": {
+          "environment": "TwoArmPouring"
+        }
+      }
+    },
+    {
+      "id": "TwoArmCanSortRandom",
+      "label": "Two Arm Can Sort Random",
+      "description": "",
+      "metadata": {
+        "native": {
+          "environment": "TwoArmCanSortRandom"
+        }
+      }
+    }
+  ],
+  "current": true
+}

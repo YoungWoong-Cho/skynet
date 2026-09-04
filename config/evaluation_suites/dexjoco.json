@@ -1,0 +1,254 @@
+{
+  "schema_version": 2,
+  "evaluator": "mujoco",
+  "suite": "dexjoco",
+  "version": "catalog-v2.1-git-8d23b0fab23b",
+  "label": "DexJoCo",
+  "task_source": "immutable_catalog_v2",
+  "task_selection_mode": "single",
+  "task_selection_reason": "The upstream DexJoCo policy configuration and checkpoint are task-specific, so each evaluation request selects one native task.",
+  "task_catalog_complete": true,
+  "task_catalog_provenance": {
+    "repository": "https://github.com/brave-eai/dexjoco",
+    "revision": "8d23b0fab23b17a58c4b55f3942e17013aaf8267",
+    "source_path": "README.md"
+  },
+  "task_catalog_sha256": "3a9bcb63a535ee3f6519ed2d7a1e0642cb7a5106b150e7ff69708e4e93c0aa61",
+  "tasks": [
+    "bimanual_unlock_ipad",
+    "bimanual_hanoi",
+    "bimanual_assembly",
+    "bimanual_microwave_cook",
+    "bimanual_photograph",
+    "hammer_nail",
+    "click_mouse",
+    "pick_bucket",
+    "pinch_tongs",
+    "fold_glasses",
+    "water_plant"
+  ],
+  "task_options": [
+    {
+      "id": "bimanual_unlock_ipad",
+      "label": "bimanual unlock ipad",
+      "description": "",
+      "metadata": {
+        "native": {
+          "policy_config": "bimanual_unlock_ipad",
+          "profiles": {
+            "rand_obj": {
+              "config": "configs/rand_obj/bimanual_unlock_ipad.yaml",
+              "rand_full": false
+            },
+            "rand_full": {
+              "config": "configs/rand_full/bimanual_unlock_ipad.yaml",
+              "rand_full": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "bimanual_hanoi",
+      "label": "bimanual hanoi",
+      "description": "",
+      "metadata": {
+        "native": {
+          "policy_config": "bimanual_hanoi",
+          "profiles": {
+            "rand_obj": {
+              "config": "configs/rand_obj/bimanual_hanoi.yaml",
+              "rand_full": false
+            },
+            "rand_full": {
+              "config": "configs/rand_full/bimanual_hanoi.yaml",
+              "rand_full": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "bimanual_assembly",
+      "label": "bimanual assembly",
+      "description": "",
+      "metadata": {
+        "native": {
+          "policy_config": "bimanual_assembly",
+          "profiles": {
+            "rand_obj": {
+              "config": "configs/rand_obj/bimanual_assembly.yaml",
+              "rand_full": false
+            },
+            "rand_full": {
+              "config": "configs/rand_full/bimanual_assembly.yaml",
+              "rand_full": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "bimanual_microwave_cook",
+      "label": "bimanual microwave cook",
+      "description": "",
+      "metadata": {
+        "native": {
+          "policy_config": "bimanual_microwave_cook",
+          "profiles": {
+            "rand_obj": {
+              "config": "configs/rand_obj/bimanual_microwave_cook.yaml",
+              "rand_full": false
+            },
+            "rand_full": {
+              "config": "configs/rand_full/bimanual_microwave_cook.yaml",
+              "rand_full": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "bimanual_photograph",
+      "label": "bimanual photograph",
+      "description": "",
+      "metadata": {
+        "native": {
+          "policy_config": "bimanual_photograph",
+          "profiles": {
+            "rand_obj": {
+              "config": "configs/rand_obj/bimanual_photograph.yaml",
+              "rand_full": false
+            },
+            "rand_full": {
+              "config": "configs/rand_full/bimanual_photograph.yaml",
+              "rand_full": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "hammer_nail",
+      "label": "hammer nail",
+      "description": "",
+      "metadata": {
+        "native": {
+          "policy_config": "hammer_nail",
+          "profiles": {
+            "rand_obj": {
+              "config": "configs/rand_obj/hammer_nail.yaml",
+              "rand_full": false
+            },
+            "rand_full": {
+              "config": "configs/rand_full/hammer_nail.yaml",
+              "rand_full": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "click_mouse",
+      "label": "click mouse",
+      "description": "",
+      "metadata": {
+        "native": {
+          "policy_config": "click_mouse",
+          "profiles": {
+            "rand_obj": {
+              "config": "configs/rand_obj/click_mouse.yaml",
+              "rand_full": false
+            },
+            "rand_full": {
+              "config": "configs/rand_full/click_mouse.yaml",
+              "rand_full": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "pick_bucket",
+      "label": "pick bucket",
+      "description": "",
+      "metadata": {
+        "native": {
+          "policy_config": "pick_bucket",
+          "profiles": {
+            "rand_obj": {
+              "config": "configs/rand_obj/pick_bucket.yaml",
+              "rand_full": false
+            },
+            "rand_full": {
+              "config": "configs/rand_full/pick_bucket.yaml",
+              "rand_full": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "pinch_tongs",
+      "label": "pinch tongs",
+      "description": "",
+      "metadata": {
+        "native": {
+          "policy_config": "pinch_tongs",
+          "profiles": {
+            "rand_obj": {
+              "config": "configs/rand_obj/pinch_tongs.yaml",
+              "rand_full": false
+            },
+            "rand_full": {
+              "config": "configs/rand_full/pinch_tongs.yaml",
+              "rand_full": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "fold_glasses",
+      "label": "fold glasses",
+      "description": "",
+      "metadata": {
+        "native": {
+          "policy_config": "fold_glasses",
+          "profiles": {
+            "rand_obj": {
+              "config": "configs/rand_obj/fold_glasses.yaml",
+              "rand_full": false
+            },
+            "rand_full": {
+              "config": "configs/rand_full/fold_glasses.yaml",
+              "rand_full": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "water_plant",
+      "label": "water plant",
+      "description": "",
+      "metadata": {
+        "native": {
+          "policy_config": "water_plant",
+          "profiles": {
+            "rand_obj": {
+              "config": "configs/rand_obj/water_plant.yaml",
+              "rand_full": false
+            },
+            "rand_full": {
+              "config": "configs/rand_full/water_plant.yaml",
+              "rand_full": true
+            }
+          }
+        }
+      }
+    }
+  ],
+  "current": true,
+  "default_profile": "rand_obj"
+}

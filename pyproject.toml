@@ -1,0 +1,35 @@
+[project]
+name = "skynet-slurm-console"
+version = "0.2.0"
+description = "Local Slurm console for reproducible robot-learning training and evaluation workflows"
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = ["slurm", "machine-learning", "robotics", "experiment-tracking"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Web Environment",
+  "Framework :: FastAPI",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+  "fastapi>=0.115,<1",
+  "keyring>=25,<26",
+  "pydantic>=2.9,<3",
+  "uvicorn[standard]>=0.30,<1",
+]
+
+[dependency-groups]
+dev = [
+  "httpx>=0.27,<1",
+  "pytest>=8,<9",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+pythonpath = ["."]
+testpaths = ["tests"]

@@ -1,0 +1,236 @@
+{
+  "schema_version": 1,
+  "id": "skynet",
+  "label": "Skynet Slurm cluster",
+  "gateways": ["sky1", "sky2"],
+  "paths": {
+    "home_root": "/nethome/ycho420",
+    "work_root": "/coc/flash7/ycho420",
+    "workspace": "/coc/flash7/ycho420/workspace",
+    "repositories": "/coc/flash7/ycho420/repos",
+    "shared_repositories": "/coc/flash7/ycho420/repos/shared",
+    "environments": "/coc/flash7/ycho420/envs",
+    "datasets": "/coc/flash7/ycho420/datasets",
+    "artifacts": "/coc/flash7/ycho420/artifacts",
+    "logs": "/coc/flash7/ycho420/logs",
+    "jobs": "/coc/flash7/ycho420/jobs",
+    "evaluation": "/coc/flash7/ycho420/eval",
+    "uv_cache": "/coc/flash7/ycho420/.cache/uv",
+    "huggingface_cache": "/coc/flash7/ycho420/.cache/huggingface",
+    "torch_cache": "/coc/flash7/ycho420/.cache/torch"
+  },
+  "commands": {
+    "slurm_bin": "/opt/slurm/Ubuntu-20.04/current/bin",
+    "gpu_usage": "/coc/testnvme/admin/tools/skynet-utilities/gpu_usage",
+    "gpu_usage_interpreter": "/usr/bin/python3"
+  },
+  "runtime_profiles": {
+    "isaacsim-5.1.0_isaaclab-2.3.2_py311": {
+      "label": "Isaac Sim 5.1.0 + Isaac Lab 2.3.2 (Python 3.11)",
+      "description": "Shared, version-pinned Isaac runtime for DexVerse and compatible projects.",
+      "backend": "conda",
+      "environment_path": "/coc/flash7/ycho420/envs/isaacsim-5.1.0_isaaclab-2.3.2_py311",
+      "environment_operations": [
+        {
+          "name": "LD_LIBRARY_PATH",
+          "operation": "prepend",
+          "value": "{{runtime.environment_path}}/lib",
+          "separator": ":"
+        }
+      ],
+      "source_prerequisites": [
+        {
+          "kind": "git_checkout",
+          "name": "Isaac Lab",
+          "path": "/coc/flash7/ycho420/repos/shared/IsaacLab/v2.3.2",
+          "revision": "v2.3.2",
+          "required": true
+        }
+      ],
+      "versions": {
+        "python": "3.11",
+        "isaac_sim": "5.1.0",
+        "isaac_lab": "2.3.2"
+      },
+      "verification": {
+        "python_version": "3.11",
+        "distributions": {
+          "isaacsim": "5.1.0"
+        }
+      }
+    },
+    "groot-isaacsim-5.0.0_isaaclab-2.2.0_py311": {
+      "label": "GR00T evaluator: Isaac Sim 5.0.0 + Isaac Lab 2.2.0 (Python 3.11)",
+      "description": "Evaluator-owned runtime pinned to the official IsaacLabEvalTasks GR1 contract; policy serving remains in the training run's pinned GR00T runtime.",
+      "backend": "conda",
+      "environment_path": "/coc/flash7/ycho420/envs/groot-isaacsim-5.0.0_isaaclab-2.2.0_py311",
+      "environment_operations": [
+        {
+          "name": "LD_LIBRARY_PATH",
+          "operation": "prepend",
+          "value": "{{runtime.environment_path}}/lib",
+          "separator": ":"
+        },
+        {
+          "name": "LD_LIBRARY_PATH",
+          "operation": "prepend",
+          "value": "{{runtime.environment_path}}/.skynet/compat/libglu",
+          "separator": ":"
+        }
+      ],
+      "source_prerequisites": [
+        {
+          "kind": "git_checkout",
+          "name": "Isaac Lab",
+          "path": "/coc/flash7/ycho420/repos/shared/IsaacLab/v2.2.0",
+          "revision": "v2.2.0",
+          "required": true
+        },
+        {
+          "kind": "git_checkout",
+          "name": "Isaac Lab Eval Tasks",
+          "path": "/coc/flash7/ycho420/repos/shared/IsaacLabEvalTasks/460f2878bdcb4db2d21913db789174fb316b73e2",
+          "revision": "460f2878bdcb4db2d21913db789174fb316b73e2",
+          "required": true
+        }
+      ],
+      "versions": {
+      "python": "3.11",
+      "isaac_sim": "5.0.0",
+      "isaac_lab": "2.2.0",
+      "isaac_lab_eval_tasks": "460f2878bdcb4db2d21913db789174fb316b73e2"
+      },
+      "verification": {
+        "python_version": "3.11",
+        "distributions": {
+          "isaacsim": "5.0.0"
+        },
+        "required_distributions": [
+          "imageio",
+          "imageio-ffmpeg"
+        ],
+        "python_imports": [
+          "isaacsim",
+          "pinocchio",
+          "isaaclab",
+          "isaaclab_assets",
+          "isaaclab_tasks",
+          "torch",
+          "numpy",
+          "gymnasium",
+          "imageio",
+          "imageio_ffmpeg"
+        ],
+        "executables": [
+          "nvidia-smi"
+        ],
+        "executable_providers": [
+          {
+            "name": "imageio-ffmpeg encoder",
+            "module": "imageio_ffmpeg",
+            "resolver": "get_ffmpeg_exe"
+          }
+        ],
+        "shared_libraries": [
+          "libSM.so.6",
+          "libXext.so.6"
+        ],
+        "gym_registrations": [
+          {
+            "module": "isaaclab_eval_tasks.tasks",
+            "ids": [
+              "Isaac-NutPour-GR1T2-ClosedLoop-v0",
+              "Isaac-ExhaustPipe-GR1T2-ClosedLoop-v0"
+            ]
+          }
+        ],
+        "platform_system": "Linux",
+        "glibc_minimum": "2.35",
+        "requires_gpu": true,
+        "compute_attestation_path": "/coc/flash7/ycho420/envs/groot-isaacsim-5.0.0_isaaclab-2.2.0_py311/.skynet/compute-readiness-v1.json",
+        "pip_check": true,
+        "compute_smoke": {
+          "suite": "groot_gr1_isaaclab_evaltasks",
+          "adapter": "groot",
+          "resources": {
+            "queue_policy": "normal",
+            "gpu_type": "l40s",
+            "gpu_count": 1,
+            "cpus_per_task": 12,
+            "memory_gb": 64,
+            "time_limit": "02:00:00"
+          },
+          "capsule_asset": "adapter-support/groot-isaaclab.py",
+          "capsule_sha256": "13ff47cc8531c5e8834b6752412a984d6c015c2335a989e36fdf16907f225d54",
+          "argv": [
+            "{{runtime.python_executable}}",
+            "{{smoke.asset_path}}",
+            "--source-dir",
+            "{{runtime.source_dir}}",
+            "--readiness-smoke-output",
+            "{{smoke.result_path}}",
+            "--simulation-device",
+            "cuda:0"
+          ],
+          "environment": {
+            "PYTHONPATH": "{{runtime.source_dir}}/source/isaaclab_eval_tasks"
+          },
+          "result_schema": "skynet.evaluator-readiness/v1",
+          "timeout_seconds": 1800,
+          "required_checks": [
+            "environment_constructed",
+            "environment_reset",
+            "media_writer",
+            "media_nonempty"
+          ]
+        }
+      }
+    }
+  },
+  "queues": {
+    "normal": {
+      "partition": "rl2-lab",
+      "account": "rl2-lab",
+      "max_time_seconds": 14400,
+      "preemptible": false
+    },
+    "overcap": {
+      "partition": "overcap",
+      "account": "overcap",
+      "max_time_seconds": 172800,
+      "preemptible": true
+    }
+  },
+  "gpu_aliases": {
+    "any": null,
+    "a40": "a40",
+    "l40s": "l40s",
+    "rtx_6000": "rtx_6000"
+  },
+  "dashboard": {
+    "gpu_usage_columns": ["l40s", "a40", "rtx_6000"],
+    "overflow_partitions": ["overcap", "scavenger"],
+    "overflow_account_label": "overcap/scavenger"
+  },
+  "defaults": {
+    "queue_policy": "normal",
+    "gateway": "auto",
+    "runtime_backend": "uv",
+    "gpu_type": "any",
+    "gpu_profile": "recommended",
+    "cpus_per_task": 4,
+    "memory_gb": 16,
+    "time_limit": "04:00:00",
+    "checkpoint_save_steps": 1000,
+    "checkpoint_keep_last": 3,
+    "checkpoint_auto_resume": true,
+    "max_attempts": 5,
+    "uv_version": "0.8.14"
+  },
+  "limits": {
+    "max_nodes": 1,
+    "max_gpus_per_node": 16,
+    "max_cpus_per_task": 256,
+    "max_memory_gb": 2048
+  }
+}

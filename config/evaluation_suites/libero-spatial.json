@@ -1,0 +1,142 @@
+{
+  "schema_version": 2,
+  "evaluator": "libero",
+  "suite": "libero_spatial",
+  "version": "catalog-v2-git-f78abd68ee28",
+  "label": "LIBERO Spatial",
+  "task_source": "immutable_catalog_v2",
+  "task_selection_mode": "subset",
+  "task_selection_reason": "The OpenPI adapter executes each selected canonical LIBERO task through a pinned filtered benchmark proxy.",
+  "task_catalog_complete": true,
+  "task_catalog_provenance": {
+    "repository": "https://github.com/Lifelong-Robot-Learning/LIBERO",
+    "revision": "f78abd68ee283de9f9be3c8f7e2a9ad60246e95c",
+    "source_path": "libero/libero/benchmark/libero_suite_task_map.py"
+  },
+  "task_catalog_sha256": "a4d00263fa730821095e894f4824ea28d6b2fc5b5f3b0b892123b835e74aea2c",
+  "tasks": [
+    "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate",
+    "pick_up_the_black_bowl_next_to_the_ramekin_and_place_it_on_the_plate",
+    "pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate",
+    "pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate",
+    "pick_up_the_black_bowl_in_the_top_drawer_of_the_wooden_cabinet_and_place_it_on_the_plate",
+    "pick_up_the_black_bowl_on_the_ramekin_and_place_it_on_the_plate",
+    "pick_up_the_black_bowl_next_to_the_cookie_box_and_place_it_on_the_plate",
+    "pick_up_the_black_bowl_on_the_stove_and_place_it_on_the_plate",
+    "pick_up_the_black_bowl_next_to_the_plate_and_place_it_on_the_plate",
+    "pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate"
+  ],
+  "task_options": [
+    {
+      "id": "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate",
+      "label": "pick up the black bowl between the plate and the ramekin and place it on the plate",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_spatial",
+          "task_id": 0
+        }
+      }
+    },
+    {
+      "id": "pick_up_the_black_bowl_next_to_the_ramekin_and_place_it_on_the_plate",
+      "label": "pick up the black bowl next to the ramekin and place it on the plate",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_spatial",
+          "task_id": 1
+        }
+      }
+    },
+    {
+      "id": "pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate",
+      "label": "pick up the black bowl from table center and place it on the plate",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_spatial",
+          "task_id": 2
+        }
+      }
+    },
+    {
+      "id": "pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate",
+      "label": "pick up the black bowl on the cookie box and place it on the plate",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_spatial",
+          "task_id": 3
+        }
+      }
+    },
+    {
+      "id": "pick_up_the_black_bowl_in_the_top_drawer_of_the_wooden_cabinet_and_place_it_on_the_plate",
+      "label": "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_spatial",
+          "task_id": 4
+        }
+      }
+    },
+    {
+      "id": "pick_up_the_black_bowl_on_the_ramekin_and_place_it_on_the_plate",
+      "label": "pick up the black bowl on the ramekin and place it on the plate",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_spatial",
+          "task_id": 5
+        }
+      }
+    },
+    {
+      "id": "pick_up_the_black_bowl_next_to_the_cookie_box_and_place_it_on_the_plate",
+      "label": "pick up the black bowl next to the cookie box and place it on the plate",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_spatial",
+          "task_id": 6
+        }
+      }
+    },
+    {
+      "id": "pick_up_the_black_bowl_on_the_stove_and_place_it_on_the_plate",
+      "label": "pick up the black bowl on the stove and place it on the plate",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_spatial",
+          "task_id": 7
+        }
+      }
+    },
+    {
+      "id": "pick_up_the_black_bowl_next_to_the_plate_and_place_it_on_the_plate",
+      "label": "pick up the black bowl next to the plate and place it on the plate",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_spatial",
+          "task_id": 8
+        }
+      }
+    },
+    {
+      "id": "pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate",
+      "label": "pick up the black bowl on the wooden cabinet and place it on the plate",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_spatial",
+          "task_id": 9
+        }
+      }
+    }
+  ],
+  "current": true
+}

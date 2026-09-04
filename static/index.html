@@ -1,0 +1,1735 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Skynet Slurm experiment and evaluation console.">
+    <title>Skynet / Experiment Console</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260903-workflow-nav">
+    <script src="/static/app.js?v=20260904-hydra-defaults" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#cluster" data-tab-target="cluster" aria-label="Skynet console home">
+        <span class="brand-mark">S/</span>
+        <span>SKYNET CONTROL</span>
+      </a>
+
+      <nav class="tab-nav" role="tablist" aria-label="Primary navigation">
+        <a href="#cluster" class="is-active" data-tab-target="cluster" role="tab" aria-selected="true" aria-controls="cluster">Cluster</a>
+        <a id="nav-data" href="#datasets" data-tab-target="datasets" data-tab-group="data" role="tab" aria-selected="false" aria-controls="datasets collection">Data</a>
+        <a href="#experiments" data-tab-target="experiments" role="tab" aria-selected="false" aria-controls="experiments">Experiments</a>
+        <a href="#runs" data-tab-target="runs" role="tab" aria-selected="false" aria-controls="runs">Training Runs</a>
+        <a href="#evaluations" data-tab-target="evaluations" role="tab" aria-selected="false" aria-controls="evaluations">Evaluations</a>
+        <a href="#adapters" data-tab-target="adapters" role="tab" aria-selected="false" aria-controls="adapters">Adapters</a>
+        <a href="#settings" data-tab-target="settings" role="tab" aria-selected="false" aria-controls="settings">Settings</a>
+      </nav>
+
+      <div class="connection-control">
+        <label for="gateway">SSH gateway</label>
+        <select id="gateway" name="gateway">
+          <option value="auto">Auto: sky1 then sky2</option>
+          <option value="sky1">Prefer sky1</option>
+          <option value="sky2">Prefer sky2</option>
+        </select>
+        <span id="connection-dot" class="connection-dot is-loading" aria-hidden="true"></span>
+      </div>
+    </header>
+
+    <main>
+      <section id="cluster" class="tab-panel" data-tab-panel="cluster" role="tabpanel">
+        <div class="section-shell workspace-page">
+          <div class="page-heading">
+            <div>
+              <h1>Cluster</h1>
+            </div>
+            <div class="page-actions cluster-actions">
+              <div class="freshness">
+                <span id="status-label">Connecting to Slurm...</span>
+                <span id="last-updated">No snapshot yet</span>
+              </div>
+              <button id="refresh-button" class="button button-outline" type="button">Refresh</button>
+            </div>
+          </div>
+
+          <div id="error-banner" class="error-banner" role="alert" hidden></div>
+
+          <section id="usage" class="panel table-panel">
+            <div class="panel-heading">
+              <div>
+
+                <h2>GPU account usage</h2>
+              </div>
+              <p class="quiet-label">Live from <code>gpu_usage -l</code>. Values are usage / limit.</p>
+            </div>
+            <div class="table-scroll usage-scroll">
+              <table class="cluster-table usage-table">
+                <thead>
+                  <tr>
+                    <th>Account</th>
+                    <th>L40S</th>
+                    <th>A40</th>
+                    <th>RTX 6000</th>
+                  </tr>
+                </thead>
+                <tbody id="usage-body">
+                  <tr class="empty-row"><td colspan="4">Loading account usage...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+        <section id="queue" class="panel table-panel">
+            <div class="panel-heading panel-heading-tools">
+              <div>
+
+                <h2>Job queue</h2>
+              </div>
+              <div class="section-tools">
+                <span id="job-summary" class="table-count">Waiting for a Slurm snapshot.</span>
+                <span class="filter-caption">Partition</span>
+                <details class="partition-filter">
+                  <summary><span id="jobs-partition-filter-label">All partitions</span></summary>
+                  <div id="jobs-partition-filter-options" class="filter-options"></div>
+                </details>
+                <span class="filter-caption">Account</span>
+                <details class="partition-filter">
+                  <summary><span id="jobs-account-filter-label">All accounts</span></summary>
+                  <div id="jobs-account-filter-options" class="filter-options"></div>
+                </details>
+                <div class="legend" aria-label="Job state legend">
+                  <span><i class="legend-dot running"></i> Running</span>
+                  <span><i class="legend-dot pending"></i> Pending</span>
+                  <span><i class="legend-dot other"></i> Other</span>
+                </div>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table class="cluster-table job-table">
+                <thead>
+                  <tr>
+                    <th>Job</th>
+                    <th>User</th>
+                    <th>State</th>
+                    <th>Nodes</th>
+                    <th>Partition</th>
+                    <th>Account</th>
+                  </tr>
+                </thead>
+                <tbody id="jobs-body">
+                  <tr class="empty-row"><td colspan="6">Loading queue...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="experiments" class="tab-panel" data-tab-panel="experiments" role="tabpanel" hidden>
+        <div class="section-shell workspace-page">
+          <div class="page-heading">
+            <div class="page-title-row">
+              <h1>Experiments</h1>
+              <p class="workflow-position" aria-label="Training workflow step 1 of 3"><span>01</span> Configure &amp; submit</p>
+            </div>
+            <div class="page-actions">
+              <button id="refresh-experiments" class="button button-outline" type="button">Refresh</button>
+            </div>
+          </div>
+
+          <div id="experiments-error" class="inline-alert" role="alert" hidden></div>
+
+          <div class="workspace-grid workspace-grid-composer">
+            <form id="experiment-form" class="panel table-panel dense-form">
+              <div class="panel-heading">
+                <div>
+
+                  <h2>Configure a training run</h2>
+                  <p id="experiment-revision-intent" class="secondary">Submitted specifications are immutable. Changes create a new experiment revision.</p>
+                </div>
+                <span id="adapter-status" class="quiet-label">Loading adapters...</span>
+              </div>
+
+              <fieldset class="form-section">
+                <legend>Identity and source</legend>
+                <div class="form-grid">
+                  <div class="field span-2">
+                    <label for="experiment-name">Experiment name</label>
+                    <input id="experiment-name" value="encoder-baseline" maxlength="96" pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" required>
+                  </div>
+                  <div class="field span-2">
+                    <label for="experiment-adapter">Adapter</label>
+                    <select id="experiment-adapter" required disabled>
+                      <option value="">Loading active adapters...</option>
+                    </select>
+                    <small id="adapter-capabilities">Repository defaults and capabilities come from the selected adapter version.</small>
+                  </div>
+                  <div class="field span-2">
+                    <div class="field-label-row">
+                      <label for="experiment-source">Repository</label>
+                      <button id="source-ref-refresh" class="source-refresh-button" type="button">Refresh refs</button>
+                    </div>
+                    <input id="experiment-source" type="url" placeholder="https://github.com/organization/repository" required>
+                    <small id="source-ref-status" class="source-ref-status is-empty" aria-live="polite">Select an adapter or enter a repository URL.</small>
+                  </div>
+                  <div class="field">
+                    <label for="experiment-branch">Branch</label>
+                    <select id="experiment-branch" aria-describedby="source-ref-status" required disabled>
+                      <option value="">Loading branches...</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="experiment-revision">Commit</label>
+                    <select id="experiment-revision" aria-describedby="source-commit-meta" required disabled>
+                      <option value="">Choose a branch first</option>
+                    </select>
+                    <small id="source-commit-meta" class="source-commit-meta">The exact selected SHA will be recorded.</small>
+                  </div>
+                  <div class="field span-2">
+                    <label for="experiment-workdir">Project subdirectory</label>
+                    <input id="experiment-workdir" value="." placeholder="Path inside the repository, e.g. packages/trainer" required>
+                    <small>Use <code>.</code> for the repository root. This path is included in runtime inspection.</small>
+                  </div>
+                  <div class="field">
+                    <label for="experiment-runtime">Runtime</label>
+                    <select id="experiment-runtime" required disabled>
+                      <option value="">Select a commit first</option>
+                    </select>
+                    <small id="runtime-inspection-status" class="runtime-inspection-status is-empty" aria-live="polite">Runtime is resolved from files at the selected commit.</small>
+                  </div>
+                  <div class="field span-3">
+                    <label for="experiment-runtime-profile-select">Named runtime profile</label>
+                    <select id="experiment-runtime-profile-select" disabled>
+                      <option value="">Choose a runtime backend first</option>
+                    </select>
+                    <input id="experiment-runtime-profile" aria-label="Custom runtime prefix, lock file, or image" placeholder="Custom absolute prefix, lock path, or image reference">
+                    <small id="runtime-profile-help">Choose an operator profile or provide custom runtime configuration.</small>
+                  </div>
+                  <div id="runtime-evidence" class="runtime-evidence span-4" hidden>
+                  </div>
+                </div>
+              </fieldset>
+
+              <fieldset class="form-section">
+                <legend>Data inputs</legend>
+                <div class="form-grid">
+                  <div class="field span-4">
+                    <label for="experiment-data-bundle">Dataset bundle</label>
+                    <select id="experiment-data-bundle" disabled>
+                      <option value="">Loading registered bundles...</option>
+                    </select>
+                    <small id="experiment-data-bundle-status">A bundle pins exact immutable resource versions and their roles in the experiment snapshot.</small>
+                  </div>
+                </div>
+              </fieldset>
+
+              <fieldset class="form-section">
+                <legend>Common hyperparameters</legend>
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="hp-learning-rate">Learning rate</label>
+                    <input id="hp-learning-rate" type="number" min="0" step="any" aria-describedby="hp-learning-rate-default" placeholder="Default: not declared">
+                    <small id="hp-learning-rate-default">Default: not declared.</small>
+                  </div>
+                  <div class="field">
+                    <label for="hp-batch-size">Batch size</label>
+                    <input id="hp-batch-size" type="number" min="1" aria-describedby="hp-batch-size-default hp-batch-compatibility" placeholder="Default: not declared">
+                    <small id="hp-batch-size-default">Default: not declared.</small>
+                  </div>
+                  <div class="field">
+                    <label for="hp-batch-semantics">Batch semantics</label>
+                    <select id="hp-batch-semantics" aria-describedby="hp-batch-semantics-default hp-batch-compatibility">
+                      <option value="" selected>Default: not declared</option>
+                      <option value="per_device">Per device</option>
+                      <option value="global_before_accumulation">Global before accumulation</option>
+                      <option value="global_effective">Global effective</option>
+                    </select>
+                    <small id="hp-batch-semantics-default">Default: not declared.</small>
+                    <small>How batch size is interpreted across visible GPUs and accumulation steps.</small>
+                  </div>
+                  <div class="field">
+                    <label for="hp-grad-acc">Gradient accumulation</label>
+                    <input id="hp-grad-acc" type="number" min="1" aria-describedby="hp-grad-acc-default hp-batch-compatibility" placeholder="Default: not declared">
+                    <small id="hp-grad-acc-default">Default: not declared.</small>
+                  </div>
+                  <small id="hp-batch-compatibility" class="field-validation span-4" aria-live="polite">Leave batch fields blank to preserve the displayed defaults.</small>
+                  <div class="field">
+                    <label for="hp-num-workers">Data workers</label>
+                    <input id="hp-num-workers" type="number" min="0" aria-describedby="hp-num-workers-default" placeholder="Default: not declared">
+                    <small id="hp-num-workers-default">Default: not declared.</small>
+                  </div>
+                  <div class="field">
+                    <label for="hp-precision">Precision</label>
+                    <select id="hp-precision" aria-describedby="hp-precision-default hp-precision-status">
+                      <option value="bf16">BF16</option>
+                      <option value="fp32">FP32</option>
+                      <option value="fp16">FP16</option>
+                      <option value="adapter-default" selected>Default: not declared</option>
+                    </select>
+                    <small id="hp-precision-default">Default: not declared.</small>
+                    <small id="hp-precision-status">Support is determined by the selected adapter.</small>
+                  </div>
+                  <div class="field">
+                    <label for="hp-max-steps">Max steps / iterations</label>
+                    <input id="hp-max-steps" type="number" min="1" aria-describedby="hp-max-steps-default" placeholder="Default: not declared">
+                    <small id="hp-max-steps-default">Default: not declared.</small>
+                  </div>
+                  <section id="adapter-declared-fields" class="adapter-declared-fields span-4" tabindex="-1" aria-labelledby="adapter-declared-fields-title">
+                    <div class="adapter-declared-fields-heading">
+                      <strong id="adapter-declared-fields-title">Adapter-declared inputs</strong>
+                      <span id="adapter-declared-fields-status" class="quiet-label">Select an adapter.</span>
+                    </div>
+                    <p>These typed values come from the selected adapter manifest. Required values must be set before preview, save, or submit.</p>
+                    <div id="adapter-declared-fields-grid" class="adapter-declared-fields-grid"></div>
+                    <div id="adapter-declared-fields-error" class="adapter-declared-fields-error" role="alert" hidden></div>
+                  </section>
+                  <div class="field span-4">
+                    <label for="native-overrides">Advanced native values</label>
+                    <textarea id="native-overrides" rows="4" placeholder="One adapter-native key=value per line&#10;model.encoder.name=resnet50&#10;trainer.deterministic=true"></textarea>
+                    <small>Passed as ordered adapter overrides, never evaluated as shell. Do not repeat a typed field above.</small>
+                  </div>
+                </div>
+              </fieldset>
+
+              <fieldset class="form-section">
+                <legend>Slurm resources</legend>
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="resource-policy">Queue policy</label>
+                    <select id="resource-policy">
+                      <option value="auto">Auto</option>
+                      <option value="normal">Normal / rl2-lab</option>
+                      <option value="overcap">Preemptible / overcap</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="experiment-node-mode">Node placement</label>
+                    <select id="experiment-node-mode">
+                      <option value="auto">Automatic</option>
+                      <option value="manual">Manual node</option>
+                    </select>
+                  </div>
+                  <div id="experiment-node-field" class="field span-2" hidden>
+                    <label for="experiment-node-name">Node name</label>
+                    <input id="experiment-node-name" placeholder="e.g. atlas">
+                  </div>
+                  <div class="field">
+                    <label for="gpu-mode">GPU allocation</label>
+                    <select id="gpu-mode">
+                      <option value="auto">Auto</option>
+                      <option value="manual">Manual</option>
+                    </select>
+                  </div>
+                  <div id="gpu-count-field" class="field">
+                    <label for="experiment-gpu-count">GPUs / node</label>
+                    <input id="experiment-gpu-count" type="number" value="1" min="1" max="16" disabled>
+                  </div>
+                  <div class="field">
+                    <label for="experiment-gpu-type">GPU type</label>
+                    <select id="experiment-gpu-type">
+                      <option value="auto">Any compatible</option>
+                      <option value="a40">A40</option>
+                      <option value="l40s">L40S</option>
+                      <option value="rtx_6000">RTX 6000</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="resource-nodes">Nodes</label>
+                    <input id="resource-nodes" type="number" value="1" min="1" max="1" readonly>
+                  </div>
+                  <div class="field">
+                    <label for="resource-cpus">CPUs / task</label>
+                    <input id="resource-cpus" type="number" value="12" min="1" max="128">
+                  </div>
+                  <div class="field">
+                    <label for="resource-memory">Memory / GB</label>
+                    <input id="resource-memory" type="number" value="64" min="1" max="2048">
+                  </div>
+                  <div class="field">
+                    <label for="resource-time">Wall time</label>
+                    <input id="resource-time" value="04:00:00" pattern="(?:\d+-)?\d{1,3}:\d{2}:\d{2}">
+                  </div>
+                </div>
+              </fieldset>
+
+              <fieldset class="form-section">
+                <legend>Checkpoint and variants</legend>
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="checkpoint-mode">Checkpoint</label>
+                    <select id="checkpoint-mode">
+                      <option value="none">Start fresh</option>
+                      <option value="resume">Resume full state</option>
+                      <option value="weights">Initialize weights</option>
+                    </select>
+                  </div>
+                  <div id="checkpoint-path-field" class="field span-3" hidden>
+                    <label for="checkpoint-path">Checkpoint path or run ID</label>
+                    <input id="checkpoint-path" placeholder="/coc/flash7/ycho420/artifacts/.../last.ckpt">
+                  </div>
+                  <div class="field">
+                    <label for="checkpoint-save-steps">Save every optimizer steps</label>
+                    <input
+                      id="checkpoint-save-steps"
+                      type="number"
+                      min="1"
+                      placeholder="Adapter / repository default"
+                      aria-describedby="checkpoint-save-steps-default"
+                    >
+                    <small id="checkpoint-save-steps-default">Default: not declared.</small>
+                  </div>
+                  <div class="field">
+                    <label for="checkpoint-max-attempts">Maximum automatic attempts</label>
+                    <input id="checkpoint-max-attempts" type="number" value="5" min="1" max="100" required>
+                  </div>
+                  <label class="check-field span-2">
+                    <input id="checkpoint-auto-resume" type="checkbox" checked>
+                    <span>Auto-resume train/eval as a new attempt on the same run; retain the latest 3 resumable checkpoints</span>
+                  </label>
+                  <div class="field span-4">
+                    <label for="sweep-definition">Sweep / variant matrix</label>
+                    <textarea id="sweep-definition" rows="4" placeholder='JSON or adapter-supported YAML, e.g. {"model.encoder":["resnet50","dinov2"],"seed":[1,2,3]}'></textarea>
+                    <small>An empty matrix creates one variant.</small>
+                  </div>
+                </div>
+              </fieldset>
+
+              <fieldset class="form-section">
+                <legend>Tracking and evaluation</legend>
+                <div class="form-grid">
+                  <div class="tracking-provider-grid span-4">
+                    <label class="tracking-provider-option" for="wandb-enabled">
+                      <input id="wandb-enabled" type="checkbox">
+                      <span><strong>Weights &amp; Biases</strong><small id="wandb-experiment-connection">Connection not loaded</small></span>
+                    </label>
+                    <label class="tracking-provider-option" for="mlflow-enabled">
+                      <input id="mlflow-enabled" type="checkbox">
+                      <span><strong>MLflow</strong><small id="mlflow-experiment-connection">Connection not loaded</small></span>
+                    </label>
+                  </div>
+                  <div class="field span-2 tracked-field tracked-field-wandb">
+                    <label for="wandb-project">W&amp;B project</label>
+                    <input id="wandb-project" placeholder="Defaults to the Skynet experiment name" disabled>
+                    <small>The connected W&amp;B entity is used as the workspace.</small>
+                  </div>
+                  <div class="field span-2 tracked-field tracked-field-wandb">
+                    <label for="wandb-run-name">W&amp;B run name template</label>
+                    <input id="wandb-run-name" value="{experiment}/{variant}/run-{run_number}" disabled>
+                  </div>
+                  <div class="field span-2 tracked-field tracked-field-mlflow">
+                    <label for="mlflow-uri">MLflow tracking connection</label>
+                    <input id="mlflow-uri" placeholder="Connect MLflow in Settings" readonly disabled>
+                  </div>
+                  <div class="field span-2 tracked-field tracked-field-mlflow">
+                    <label for="mlflow-experiment">MLflow experiment</label>
+                    <input id="mlflow-experiment" placeholder="Defaults to the Skynet experiment name" disabled>
+                  </div>
+                  <div class="field span-2 tracked-field tracked-field-mlflow">
+                    <label for="mlflow-run-name">MLflow run name template</label>
+                    <input id="mlflow-run-name" value="{experiment}/{variant}/run-{run_number}" disabled>
+                  </div>
+                  <div class="field span-4">
+                    <span class="field-label">Resolved tracking names</span>
+                    <div id="tracking-name-preview" class="tracking-name-preview" aria-live="polite"></div>
+                    <small>Projects and experiments are created by the backend when the first run is started. Credentials are managed only in Settings.</small>
+                  </div>
+                  <label class="check-field span-4">
+                  <input id="evaluation-enabled" type="checkbox">
+                  <span>Record downstream evaluation suites in experiment metadata</span>
+                  </label>
+                  <div class="field span-4 evaluation-field">
+                    <label for="experiment-evaluation-suites">Evaluation suites</label>
+                    <select id="experiment-evaluation-suites" multiple size="4" disabled></select>
+                  <small id="evaluation-suite-status">Suites are loaded from the evaluation API.</small>
+                  <small>Runnable jobs are created in the Evaluations tab until each repository has a versioned evaluator adapter.</small>
+                  </div>
+                </div>
+              </fieldset>
+
+              <div class="form-actions sticky-actions">
+                <button id="experiment-preview-button" class="button button-outline" type="button" disabled>Preview sbatch</button>
+                <button id="save-experiment-button" class="button button-quiet" type="button" disabled>Create draft</button>
+                <button id="submit-experiment-button" class="button button-accent" type="submit" disabled title="Complete every required field and resolve all validation errors before submitting">Create and submit</button>
+              </div>
+            </form>
+
+            <aside class="panel preview-panel" aria-live="polite">
+              <div class="panel-heading">
+                <div>
+
+                  <h2>Sbatch preview</h2>
+                </div>
+              </div>
+              <div id="experiment-preview-empty" class="empty-block">
+                Preview resolves adapter mappings, variants, paths, and Slurm directives without submitting.
+              </div>
+              <div id="experiment-preview-panel" hidden>
+                <div id="experiment-preview-meta" class="preview-meta"></div>
+                <div id="experiment-preview-blockers" class="preview-blockers" role="alert" hidden>
+                  <strong>Blocked variants</strong>
+                  <ul id="experiment-preview-blocker-list"></ul>
+                </div>
+                <pre><code id="experiment-script-preview"></code></pre>
+              </div>
+            </aside>
+          </div>
+
+          <section class="panel table-panel collection-adapter-panel">
+            <div class="panel-heading">
+              <div>
+
+                <h2>Experiments</h2>
+              </div>
+              <span id="experiment-count" class="quiet-label">Not loaded</span>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Experiment</th>
+                    <th>Adapter / commit</th>
+                    <th>Variants</th>
+                    <th>Runs</th>
+                    <th>Lifecycle</th>
+                    <th>Tracking</th>
+                    <th>Updated</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="experiments-body">
+                  <tr class="empty-row"><td colspan="8">Open this tab to load experiments.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <section id="experiment-detail" class="row-disclosure inline-drawer" hidden>
+                        <div class="panel-heading row-disclosure-heading">
+                          <div>
+                            <h2 id="experiment-detail-title">Variants</h2>
+                          </div>
+                          <div class="panel-heading-actions">
+                            <span id="experiment-detail-meta" class="quiet-label"></span>
+                            <button id="close-experiment-detail" class="text-button disclosure-close" type="button">Close</button>
+                          </div>
+                        </div>
+                        <div id="experiment-detail-tracking" class="tracking-detail-strip" hidden></div>
+                        <div class="row-disclosure-body">
+                          <div class="table-scroll">
+                            <table>
+                              <thead>
+                                <tr>
+                                  <th>Variant</th>
+                                  <th>Parameters</th>
+                                  <th>Runs</th>
+                                  <th>Latest run state</th>
+                                  <th>Result</th>
+                                </tr>
+                              </thead>
+                              <tbody id="variants-body"></tbody>
+                            </table>
+                          </div>
+                        </div>
+                      </section>
+          </section>
+
+        </div>
+      </section>
+
+      <section id="runs" class="tab-panel" data-tab-panel="runs" role="tabpanel" hidden>
+        <div class="section-shell workspace-page">
+          <div class="page-heading">
+            <div class="page-title-row">
+              <h1>Training Runs</h1>
+              <p class="workflow-position" aria-label="Training workflow step 2 of 3"><span>02</span> Monitor &amp; retry</p>
+            </div>
+            <div class="page-actions">
+              <button id="refresh-runs" class="button button-outline" type="button">Refresh</button>
+            </div>
+          </div>
+
+          <div id="runs-error" class="inline-alert" role="alert" hidden></div>
+
+          <section class="panel table-panel">
+            <div class="panel-heading panel-heading-tools">
+              <div>
+
+                <h2>Training run history</h2>
+                <p class="secondary">Inspect each submitted run and its Slurm attempts. Adapter utility jobs remain identified by type.</p>
+              </div>
+              <div class="toolbar">
+                <input id="run-search" type="search" placeholder="Filter ID, experiment, variant">
+                <select id="run-status-filter">
+                  <option value="all">All states</option>
+                  <option value="running">Running</option>
+                  <option value="pending">Pending</option>
+                  <option value="failed">Failed</option>
+                  <option value="completed">Completed</option>
+                  <option value="preempted">Preempted</option>
+                </select>
+                <span id="run-count" class="quiet-label">Not loaded</span>
+              </div>
+            </div>
+            <div class="table-scroll tall-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Run</th>
+                    <th>Experiment / variant</th>
+                    <th>Run state</th>
+                    <th>Slurm</th>
+                    <th>Resources</th>
+                    <th>Latest attempt</th>
+                    <th>Progress</th>
+                    <th>ETA</th>
+                    <th>Tracking</th>
+                    <th>Updated</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="runs-body">
+                  <tr class="empty-row"><td colspan="11">Open this tab to load runs.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <section id="run-detail" class="row-disclosure inline-drawer" hidden>
+                        <div class="panel-heading row-disclosure-heading">
+                          <div>
+                            <h2 id="run-detail-title">Run</h2>
+                          </div>
+                          <div class="panel-heading-actions">
+                            <div id="run-detail-actions" class="page-actions"></div>
+                            <button id="close-run-detail" class="text-button disclosure-close" type="button">Close</button>
+                          </div>
+                        </div>
+                        <div class="row-disclosure-body">
+                          <div id="run-detail-meta" class="key-value-grid"></div>
+                          <div id="run-detail-tracking" class="tracking-detail-strip" hidden></div>
+
+                          <h3>Attempts</h3>
+                          <div class="table-frame">
+                            <div class="table-scroll run-attempts-table-scroll">
+                              <table>
+                                <thead>
+                                  <tr>
+                                    <th>Attempt</th>
+                                    <th>State</th>
+                                    <th>Slurm job</th>
+                                    <th>Gateway / node</th>
+                                    <th>Started</th>
+                                    <th>Ended</th>
+                                    <th>Error</th>
+                                    <th></th>
+                                  </tr>
+                                </thead>
+                                <tbody id="attempts-body"></tbody>
+                              </table>
+                            </div>
+                          </div>
+
+                          <section id="run-attempt-detail" class="row-disclosure inline-drawer run-attempt-disclosure" hidden>
+                            <div class="panel-heading row-disclosure-heading">
+                              <div>
+                                <h3 id="run-attempt-detail-title">Attempt</h3>
+                              </div>
+                            </div>
+                            <div class="row-disclosure-body">
+                              <div id="run-attempt-detail-meta" class="key-value-grid"></div>
+                              <div id="run-attempt-detail-tracking" class="tracking-detail-strip" hidden></div>
+                              <section class="attempt-hyperparameters" aria-labelledby="run-attempt-hyperparameters-title">
+                                <h3 id="run-attempt-hyperparameters-title">Common hyperparameters</h3>
+                                <div id="run-attempt-hyperparameters" class="key-value-grid"></div>
+                              </section>
+                              <div class="attempt-log-grid">
+                                <section>
+                                  <div class="log-heading">
+                                    <h3>stdout</h3>
+                                    <span id="run-attempt-stdout-status" class="quiet-label"></span>
+                                  </div>
+                                  <pre class="log-view"><code id="run-attempt-stdout-log">Select an attempt to load stdout.</code></pre>
+                                </section>
+                                <section>
+                                  <div class="log-heading">
+                                    <h3>stderr</h3>
+                                    <span id="run-attempt-stderr-status" class="quiet-label"></span>
+                                  </div>
+                                  <pre class="log-view"><code id="run-attempt-stderr-log">Select an attempt to load stderr.</code></pre>
+                                </section>
+                              </div>
+                            </div>
+                          </section>
+                        </div>
+                      </section>
+          </section>
+
+        </div>
+      </section>
+
+      <section id="evaluations" class="tab-panel" data-tab-panel="evaluations" role="tabpanel" hidden>
+        <div class="section-shell workspace-page">
+          <div class="page-heading">
+            <div class="page-title-row">
+              <h1>Evaluations</h1>
+              <p class="workflow-position" aria-label="Training workflow step 3 of 3"><span>03</span> Evaluate &amp; review</p>
+            </div>
+            <div class="page-actions">
+              <button id="refresh-evaluations" class="button button-outline" type="button">Refresh</button>
+            </div>
+          </div>
+
+          <div id="evaluations-error" class="inline-alert" role="alert" hidden></div>
+
+          <form id="evaluation-form" class="panel table-panel dense-form">
+            <div class="panel-heading">
+              <div>
+
+                <h2>Submit an evaluation</h2>
+                <p class="secondary">Choose a training run, configure the task, and submit its evaluation job.</p>
+              </div>
+            </div>
+            <fieldset class="form-section">
+              <legend>Evaluation target</legend>
+              <div class="form-grid">
+                <div class="field span-2">
+                  <label for="evaluation-run-id">Training run ID</label>
+                  <input id="evaluation-run-id" placeholder="run_..." aria-describedby="evaluation-run-validation" required>
+                  <small id="evaluation-run-validation" class="field-validation" aria-live="polite">Enter a training run ID.</small>
+                </div>
+                <div class="field span-2">
+                  <label for="evaluation-checkpoint">Checkpoint path override</label>
+                  <input id="evaluation-checkpoint" placeholder="Resolved from the selected run" aria-describedby="evaluation-checkpoint-validation">
+                  <small id="evaluation-checkpoint-validation" class="field-validation" aria-live="polite">A registered checkpoint will be resolved from the run.</small>
+                </div>
+                <div class="field span-2">
+                  <label for="evaluation-suite">Suite</label>
+                  <select id="evaluation-suite" required>
+                    <option value="">Loading suites...</option>
+                  </select>
+                  <small id="evaluation-plan-status" class="field-validation" aria-live="polite">Choose a suite to resolve its evaluator implementation.</small>
+                </div>
+                <div class="field derived-field">
+                  <label for="evaluation-environment">Environment</label>
+                  <input id="evaluation-environment" readonly placeholder="Choose a suite">
+                  <small>Derived from the selected suite; arbitrary suite/environment combinations are not allowed.</small>
+                </div>
+              </div>
+            </fieldset>
+            <fieldset class="form-section">
+              <legend>Execution controls</legend>
+              <div class="form-grid">
+                <div class="field">
+                  <label for="evaluation-episodes">Episodes / task</label>
+                  <input id="evaluation-episodes" type="number" value="20" min="1">
+                </div>
+                <div class="field span-2">
+                  <label for="evaluation-tasks-filter">Tasks</label>
+                  <details id="evaluation-tasks-filter" class="partition-filter evaluation-task-select is-disabled" aria-disabled="true">
+                    <summary><span id="evaluation-tasks-filter-label">Suite default</span></summary>
+                    <div class="filter-options evaluation-task-options">
+                      <div class="evaluation-task-actions">
+                        <button id="evaluation-tasks-all" type="button">Select all</button>
+                        <button id="evaluation-tasks-clear" type="button">Use suite default</button>
+                      </div>
+                      <div id="evaluation-tasks-options" class="evaluation-task-option-list"></div>
+                    </div>
+                  </details>
+                  <small id="evaluation-tasks-status" aria-live="polite">Choose a suite to load its task catalog.</small>
+                </div>
+                <div class="field">
+                  <label for="evaluation-seeds">Seeds</label>
+                  <input id="evaluation-seeds" value="0,1,2">
+                </div>
+                <div class="field">
+                  <label for="evaluation-parallelism">Parallel jobs</label>
+                  <input id="evaluation-parallelism" type="number" value="1" min="1" max="1" readonly>
+                  <small>Current evaluators support one worker only. Larger values are rejected, never silently run serially.</small>
+                </div>
+                <label class="check-field span-2">
+                  <input id="evaluation-headless" type="checkbox" checked>
+                  <span>Headless rendering</span>
+                </label>
+                <div class="field span-2">
+                  <label for="evaluation-max-attempts">Maximum automatic attempts</label>
+                  <input id="evaluation-max-attempts" type="number" value="5" min="1" max="100">
+                </div>
+                <label class="check-field span-2">
+                  <input id="evaluation-auto-resume" type="checkbox" checked>
+                  <span>Auto-resume from episode ledger</span>
+                </label>
+              </div>
+            </fieldset>
+            <fieldset class="form-section">
+              <legend>Advanced</legend>
+              <details>
+                <summary>Manual evaluator command override</summary>
+                <div class="form-grid">
+                  <div class="field span-4">
+                    <label for="evaluation-argv">Evaluator argv / optional</label>
+                    <textarea id="evaluation-argv" rows="3" placeholder='["python", "examples/libero/main.py", "--checkpoint", "/path/to/checkpoint"]'></textarea>
+                    <small>Normally the selected suite resolves a versioned evaluator adapter. A nonempty command is an explicit manual fallback and is recorded with the evaluation.</small>
+                  </div>
+                  <div class="field span-4">
+                    <label for="evaluation-resume-argv">Resume argv / optional</label>
+                    <textarea id="evaluation-resume-argv" rows="2" placeholder='["python", "examples/libero/main.py", "--resume-ledger", "/path/to/progress.jsonl"]'></textarea>
+                    <small>On a later Slurm attempt this replaces the initial argv. Leave blank when the evaluator reads <code>SKYNET_EVAL_PROGRESS_PATH</code> automatically.</small>
+                  </div>
+                </div>
+              </details>
+            </fieldset>
+            <div class="form-actions sticky-actions">
+              <button id="submit-evaluation" class="button button-accent" type="submit" disabled>Create evaluation</button>
+            </div>
+          </form>
+
+          <section class="panel table-panel">
+            <div class="panel-heading">
+              <div>
+
+                <h2>Evaluation jobs and results</h2>
+              </div>
+              <span id="evaluation-count" class="quiet-label">Not loaded</span>
+            </div>
+            <div class="table-scroll tall-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Evaluation</th>
+                    <th>Run / checkpoint</th>
+                    <th>Suite / environment</th>
+                    <th>State</th>
+                    <th>Progress</th>
+                    <th>ETA</th>
+                    <th>Primary result</th>
+                    <th>Updated</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="evaluations-body">
+                  <tr class="empty-row"><td colspan="9">Open this tab to load evaluations.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <aside id="evaluation-detail" class="row-disclosure inline-drawer" hidden>
+                        <div class="panel-heading row-disclosure-heading">
+                          <div>
+                            <h2 id="evaluation-detail-title">Evaluation</h2>
+                          </div>
+                          <div class="panel-heading-actions">
+                            <div id="evaluation-detail-actions" class="page-actions"></div>
+                            <button id="close-evaluation-detail" class="text-button disclosure-close" type="button">Close</button>
+                          </div>
+                        </div>
+                        <div class="row-disclosure-body">
+                          <div id="evaluation-detail-meta" class="key-value-grid"></div>
+
+                          <section id="evaluation-rollouts" class="evaluation-rollouts">
+                            <div class="log-heading">
+                              <h3>Rollout videos</h3>
+                              <span id="evaluation-rollout-count" class="quiet-label">loading</span>
+                            </div>
+                            <p id="evaluation-rollout-empty" class="secondary">Loading rollout records...</p>
+                            <label class="evaluation-rollout-picker" hidden>
+                              <span>Episode</span>
+                              <select id="evaluation-rollout-select"></select>
+                            </label>
+                            <video id="evaluation-rollout-video" controls preload="metadata" playsinline hidden></video>
+                            <div id="evaluation-rollout-meta" class="key-value-grid evaluation-rollout-meta" hidden></div>
+                          </section>
+
+                          <h3>Slurm attempt</h3>
+                          <div id="evaluation-attempt-meta" class="key-value-grid"></div>
+                          <div class="attempt-log-grid">
+                            <section>
+                              <div class="log-heading">
+                                <h3>stdout</h3>
+                                <span id="evaluation-stdout-status" class="quiet-label"></span>
+                              </div>
+                              <pre class="log-view"><code id="evaluation-stdout-log">No Slurm attempt selected.</code></pre>
+                            </section>
+                            <section>
+                              <div class="log-heading">
+                                <h3>stderr</h3>
+                                <span id="evaluation-stderr-status" class="quiet-label"></span>
+                              </div>
+                              <pre class="log-view"><code id="evaluation-stderr-log">No Slurm attempt selected.</code></pre>
+                            </section>
+                          </div>
+
+                          <div class="log-heading">
+                            <h3>Canonical results</h3>
+                            <span id="evaluation-result-status" class="quiet-label"></span>
+                          </div>
+                          <pre class="result-view"><code id="evaluation-result-json"></code></pre>
+                        </div>
+                      </aside>
+          </section>
+        </div>
+      </section>
+
+      <section id="collection" class="tab-panel" data-tab-panel="collection" role="tabpanel" hidden>
+        <div class="section-shell workspace-page">
+          <div class="page-heading">
+            <div class="page-title-row data-page-title">
+              <h1>Data</h1>
+              <nav class="data-subnav" aria-label="Data sections">
+                <a href="#datasets" data-tab-target="datasets" data-data-view="registry" aria-controls="datasets">Dataset Registry</a>
+                <a href="#collection" class="is-active" data-tab-target="collection" data-data-view="collection" aria-controls="collection" aria-current="page">Collection</a>
+              </nav>
+            </div>
+            <div class="page-actions">
+              <button id="refresh-collection" class="button button-outline" type="button">Refresh</button>
+            </div>
+          </div>
+
+          <div id="collection-error" class="inline-alert" role="alert" hidden></div>
+
+          <section class="panel table-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>Collection adapters</h2>
+                <p class="collection-section-help">An adapter declares native stream meaning, required setup, and the launch command. Archived adapters remain visible for existing sessions.</p>
+              </div>
+              <div>
+                <span id="collection-adapter-count" class="quiet-label">Not loaded</span>
+                <button id="add-collection-adapter" class="button button-accent disclosure-launcher" type="button" aria-controls="collection-adapter-form" aria-expanded="false">New adapter</button>
+              </div>
+            </div>
+            <div class="table-scroll tall-table">
+              <table>
+                <thead><tr><th>Adapter</th><th>Native streams</th><th>State</th><th>Updated</th><th></th></tr></thead>
+                <tbody id="collection-adapters-body"><tr class="empty-row"><td colspan="5">Open this tab to load collection adapters.</td></tr></tbody>
+              </table>
+            </div>
+          <form id="collection-adapter-form" class="dense-form collection-adapter-editor inline-drawer row-disclosure" hidden>
+            <div class="panel-heading row-disclosure-heading">
+              <div>
+                <h2 id="collection-adapter-editor-title">Collection adapter</h2>
+                <p class="collection-section-help">Keep each stream in its source representation and declare its shape, units, frame, rate, and native key explicitly.</p>
+              </div>
+              <div class="panel-heading-actions">
+                <button id="close-collection-adapter" class="text-button disclosure-close" type="button">Close</button>
+              </div>
+            </div>
+            <div class="row-disclosure-body">
+              <input id="collection-adapter-id" type="hidden">
+              <fieldset class="form-section">
+                <legend>Identity</legend>
+                <div class="form-grid">
+                  <div class="field"><label for="collection-adapter-key">Key</label><input id="collection-adapter-key" placeholder="vendor-system" required></div>
+                  <div class="field"><label for="collection-adapter-name">Display name</label><input id="collection-adapter-name" required></div>
+                  <div class="field"><label for="collection-adapter-version">Adapter version</label><input id="collection-adapter-version" value="1" required></div>
+                  <label class="check-field"><input id="collection-adapter-runnable" type="checkbox"> Runnable now</label>
+                  <div class="field span-4"><label for="collection-adapter-description">Description</label><input id="collection-adapter-description" maxlength="500"></div>
+                </div>
+              </fieldset>
+              <fieldset class="form-section">
+                <legend>Native stream declarations</legend>
+                <div class="form-grid">
+                  <div class="field span-4">
+                    <label for="collection-adapter-streams">Action, proprio, and sensor streams / JSON</label>
+                    <textarea id="collection-adapter-streams" class="collection-json-editor" rows="12" spellcheck="false" required></textarea>
+                    <small>Use <code>kind</code> values <code>action</code>, <code>proprio</code>, or <code>sensor</code>. Unresolved shapes or semantics are allowed only while the adapter is not runnable.</small>
+                  </div>
+                </div>
+              </fieldset>
+              <fieldset class="form-section">
+                <legend>Requirements and launcher</legend>
+                <div class="form-grid">
+                  <div class="field span-2"><label for="collection-adapter-requirements">Requirements / JSON</label><textarea id="collection-adapter-requirements" class="collection-json-editor" rows="9" spellcheck="false" required></textarea></div>
+                  <div class="field span-2"><label for="collection-adapter-launcher">Launcher / JSON</label><textarea id="collection-adapter-launcher" class="collection-json-editor" rows="9" spellcheck="false" required></textarea></div>
+                  <div class="field span-4"><label for="collection-adapter-capabilities">Capability declarations / JSON</label><textarea id="collection-adapter-capabilities" class="collection-json-editor" rows="8" spellcheck="false" required></textarea><small>Declare host, compute, client, network, or operator prerequisites here. Sessions can record evidence only for these IDs.</small></div>
+                  <div class="field span-2"><label for="collection-adapter-defaults">Defaults / JSON</label><textarea id="collection-adapter-defaults" class="collection-json-editor" rows="6" spellcheck="false" required></textarea></div>
+                  <div class="field span-2"><label for="collection-adapter-todos">TODOs / JSON</label><textarea id="collection-adapter-todos" class="collection-json-editor" rows="6" spellcheck="false" required></textarea></div>
+                  <div class="field span-4"><label for="collection-adapter-metadata">Metadata / JSON</label><textarea id="collection-adapter-metadata" class="collection-json-editor" rows="5" spellcheck="false" required></textarea></div>
+                </div>
+              </fieldset>
+              <div class="form-actions">
+                <button id="save-collection-adapter" class="button button-accent" type="submit">Save adapter</button>
+              </div>
+            </div>
+          </form>
+          </section>
+
+
+          <section class="panel table-panel collection-sessions-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>Collection sessions</h2>
+                <p class="collection-section-help">Sessions preserve the submitted manifest, sbatch, job identity, native output, and registration result.</p>
+              </div>
+              <div class="panel-heading-actions">
+                <span id="collection-session-count" class="quiet-label">Not loaded</span>
+                <button id="show-collection-session-form" class="button button-accent disclosure-launcher" type="button" aria-controls="collection-session-form" aria-expanded="false">New session</button>
+              </div>
+            </div>
+            <div class="table-scroll tall-table">
+              <table>
+                <thead><tr><th>Session</th><th>Adapter</th><th>Operator / task</th><th>Status</th><th>Slurm job</th><th>Native output</th><th>Updated</th><th></th></tr></thead>
+                <tbody id="collection-sessions-body"><tr class="empty-row"><td colspan="8">Open this tab to load collection sessions.</td></tr></tbody>
+              </table>
+            </div>
+            <form id="collection-session-form" class="dense-form collection-session-form row-disclosure inline-drawer" hidden>
+                        <div class="panel-heading row-disclosure-heading">
+                          <div>
+                            <h2>Create a collection session</h2>
+                            <p class="collection-section-help">Creating a session freezes the adapter and all execution inputs. To change them after launch, restart into a linked replacement session.</p>
+                          </div>
+                          <div class="panel-heading-actions">
+                            <button id="close-collection-session-form" class="text-button disclosure-close" type="button">Close</button>
+                          </div>
+                        </div>
+                        <div class="row-disclosure-body">
+                          <fieldset class="form-section">
+                            <legend>Capture identity</legend>
+                            <div class="form-grid">
+                              <div class="field span-2"><label for="collection-session-adapter">Adapter</label><select id="collection-session-adapter" required disabled><option value="">Loading runnable adapters...</option></select></div>
+                              <div class="field span-2"><label for="collection-session-name">Session name</label><input id="collection-session-name" placeholder="operator-task-run-001" required></div>
+                              <div class="field"><label for="collection-session-operator">Operator</label><input id="collection-session-operator" required></div>
+                              <div class="field"><label for="collection-session-task">Task</label><input id="collection-session-task" required></div>
+                              <div class="field span-2"><label for="collection-session-embodiment">Embodiment</label><input id="collection-session-embodiment" placeholder="robot, hand, or platform identifier" required></div>
+                              <div class="field span-2"><label for="collection-runtime-profile">Runtime profile</label><input id="collection-runtime-profile" pattern="[a-z0-9][a-z0-9._-]{0,127}" placeholder="Optional configured cluster profile"><small>The backend snapshots the selected profile into the session's software record.</small></div>
+                            </div>
+                          </fieldset>
+                          <fieldset class="form-section">
+                            <legend>Native storage and registration</legend>
+                            <div class="form-grid">
+                              <div class="field span-2"><label for="collection-output-path">Output path</label><input id="collection-output-path" placeholder="/coc/flash7/ycho420/datasets/.staging/collection/..." required></div>
+                              <div class="field"><label for="collection-native-format">Native format</label><input id="collection-native-format" placeholder="pickle-v3, hdf5, rosbag2" required></div>
+                              <label class="check-field"><input id="collection-register-output" type="checkbox" checked> Register on completion</label>
+                              <div class="field collection-registration-field"><label for="collection-register-provider">Provider</label><input id="collection-register-provider" value="local" required></div>
+                              <div class="field collection-registration-field"><label for="collection-register-namespace">Namespace</label><input id="collection-register-namespace" value="collection" required></div>
+                              <div class="field collection-registration-field"><label for="collection-register-name">Resource name</label><input id="collection-register-name" required></div>
+                              <div class="field collection-registration-field"><label for="collection-register-kind">Kind</label><input id="collection-register-kind" value="demonstrations" required></div>
+                              <div class="field span-4"><label for="collection-storage-metadata">Storage metadata / JSON</label><textarea id="collection-storage-metadata" rows="4" spellcheck="false">{}</textarea></div>
+                            </div>
+                          </fieldset>
+                          <fieldset class="form-section">
+                            <legend>Calibration and software</legend>
+                            <div class="form-grid">
+                              <div class="field"><label for="collection-calibration-identity">Calibration identity</label><input id="collection-calibration-identity" placeholder="device or calibration record" required></div>
+                              <div class="field"><label for="collection-calibration-sha">Calibration SHA-256</label><input id="collection-calibration-sha" minlength="64" maxlength="64" pattern="[A-Fa-f0-9]{64}" required></div>
+                              <div class="field span-2"><label for="collection-calibration-metadata">Calibration metadata / JSON</label><textarea id="collection-calibration-metadata" rows="7" spellcheck="false">{}</textarea></div>
+                              <div class="field span-2"><label for="collection-software">Software / JSON</label><textarea id="collection-software" rows="7" spellcheck="false">{}</textarea></div>
+                              <div class="field span-4"><label for="collection-config">Additional config / JSON</label><textarea id="collection-config" rows="6" spellcheck="false">{}</textarea><small>Operator, task, and embodiment above are added to this config snapshot.</small></div>
+                            </div>
+                          </fieldset>
+                          <fieldset class="form-section">
+                            <legend>Native capture timing</legend>
+                            <div class="form-grid">
+                              <div class="field"><label for="collection-capture-schema-name">Schema name</label><input id="collection-capture-schema-name" value="adapter-native" required></div>
+                              <div class="field"><label for="collection-capture-schema-version">Schema version</label><input id="collection-capture-schema-version" value="1" required></div>
+                              <div class="field"><label for="collection-clock-source">Clock source</label><input id="collection-clock-source" value="monotonic" required></div>
+                              <div class="field"><label for="collection-nominal-rate">Nominal rate / Hz</label><input id="collection-nominal-rate" type="number" value="60" min="0.000001" step="any" required></div>
+                              <div class="field"><label for="collection-timestamp-unit">Timestamp unit</label><input id="collection-timestamp-unit" value="seconds" required></div>
+                              <div class="field span-2"><label for="collection-alignment">Action / observation alignment</label><select id="collection-alignment" required><option value="action_then_post_state">Action then post-state</option><option value="observation_then_action">Observation then action</option><option value="synchronous">Synchronous</option><option value="adapter_defined" selected>Adapter-defined</option></select></div>
+                              <label class="check-field"><input id="collection-timestamps-recorded" type="checkbox" checked> Native timestamps recorded</label>
+                              <div class="field span-4"><label for="collection-capture-metadata">Capture metadata / JSON</label><textarea id="collection-capture-metadata" rows="5" spellcheck="false">{}</textarea></div>
+                            </div>
+                          </fieldset>
+                          <fieldset class="form-section">
+                            <legend>Capability evidence</legend>
+                            <div class="form-grid">
+                              <div class="field span-4"><label for="collection-capabilities">Declared capability evidence / JSON</label><textarea id="collection-capabilities" rows="10" spellcheck="false">{}</textarea><small id="collection-capabilities-help">Select an adapter to see its declared capability IDs. Use <code>verified</code> only with who verified it and when.</small></div>
+                            </div>
+                          </fieldset>
+                          <fieldset class="form-section">
+                            <legend>Slurm resources</legend>
+                            <div class="form-grid">
+                              <div class="field"><label for="collection-gateway">Gateway</label><select id="collection-gateway"><option value="auto">Auto: sky1 then sky2</option><option value="sky1">sky1</option><option value="sky2">sky2</option></select></div>
+                              <div class="field"><label for="collection-account">Account</label><input id="collection-account" value="rl2-lab" required></div>
+                              <div class="field"><label for="collection-partition">Partition</label><input id="collection-partition" value="rl2-lab" required></div>
+                              <div class="field"><label for="collection-node">Node</label><input id="collection-node" placeholder="Auto"></div>
+                              <div class="field"><label for="collection-gpu-count">GPUs</label><input id="collection-gpu-count" type="number" value="1" min="0" required></div>
+                              <div class="field"><label for="collection-gpu-type">GPU type</label><input id="collection-gpu-type" value="l40s" required></div>
+                              <div class="field"><label for="collection-cpu-count">CPUs</label><input id="collection-cpu-count" type="number" value="16" min="1" required></div>
+                              <div class="field"><label for="collection-memory-gb">Memory / GB</label><input id="collection-memory-gb" type="number" value="64" min="1" required></div>
+                              <div class="field"><label for="collection-time-limit">Time limit</label><input id="collection-time-limit" value="04:00:00" required></div>
+                            </div>
+                          </fieldset>
+                          <div class="form-actions sticky-actions"><button id="create-collection-session" class="button button-accent" type="submit">Create draft session</button></div>
+                        </div>
+                      </form>
+            <section id="collection-session-detail" class="row-disclosure inline-drawer" hidden>
+                        <div class="panel-heading row-disclosure-heading collection-detail-heading">
+                          <div>
+                            <h2 id="collection-session-detail-title">Collection session</h2>
+                            <p class="collection-section-help">Lifecycle actions never rewrite the frozen capture inputs. Restart creates a linked replacement.</p>
+                          </div>
+                          <div class="panel-heading-actions">
+                            <div id="collection-session-actions" class="page-actions"></div>
+                            <button id="close-collection-session-detail" class="text-button disclosure-close" type="button">Close</button>
+                          </div>
+                        </div>
+                        <div class="row-disclosure-body">
+                          <div id="collection-session-meta" class="key-value-grid"></div>
+                          <p class="collection-registry-row"><a id="collection-registry-link" href="#datasets" data-tab-target="datasets" hidden>Open registered data</a></p>
+
+                          <form id="collection-complete-form" class="collection-complete-form" hidden>
+                            <div class="form-grid">
+                              <div class="field span-2"><label for="collection-complete-manifest">Raw output manifest SHA-256</label><input id="collection-complete-manifest" minlength="64" maxlength="64" pattern="[A-Fa-f0-9]{64}" placeholder="SHA-256 of the captured file inventory" required><small>This is the native data inventory hash, not the session or adapter manifest hash.</small></div>
+                              <div class="field"><label for="collection-complete-revision">Revision</label><input id="collection-complete-revision" placeholder="Optional exact revision"></div>
+                              <div class="field"><label for="collection-complete-size">Size / bytes</label><input id="collection-complete-size" type="number" min="0" placeholder="Optional"></div>
+                            </div>
+                            <div class="form-actions"><button class="button button-accent" type="submit">Complete and register native data</button></div>
+                          </form>
+
+                          <div class="collection-output-grid">
+                            <section class="collection-output-card collection-output-card-wide">
+                              <div class="log-heading">
+                                <h3>Job log</h3>
+                                <div class="page-actions">
+                                  <button id="collection-load-stdout" class="text-button" type="button">stdout</button>
+                                  <button id="collection-load-stderr" class="text-button" type="button">stderr</button>
+                                  <span id="collection-log-status" class="quiet-label">Select a stream</span>
+                                </div>
+                              </div>
+                              <pre id="collection-session-log" class="log-view">No log loaded.</pre>
+                            </section>
+                            <section class="collection-output-card">
+                              <h3>Error</h3>
+                              <pre id="collection-session-error" class="result-view">No error recorded.</pre>
+                            </section>
+                            <section class="collection-output-card">
+                              <h3>Result and immutable snapshot</h3>
+                              <pre id="collection-session-result" class="result-view">Select a session.</pre>
+                            </section>
+                            <section class="collection-output-card collection-output-card-wide">
+                              <h3>Lifecycle events</h3>
+                              <div class="table-scroll"><table><thead><tr><th>Event</th><th>Transition</th><th>Message</th><th>Time</th></tr></thead><tbody id="collection-events-body"></tbody></table></div>
+                            </section>
+                          </div>
+                        </div>
+                      </section>
+          </section>
+
+        </div>
+      </section>
+
+      <section id="datasets" class="tab-panel" data-tab-panel="datasets" role="tabpanel" hidden>
+        <div class="section-shell workspace-page">
+          <div class="page-heading">
+            <div class="page-title-row data-page-title">
+              <h1>Data</h1>
+              <nav class="data-subnav" aria-label="Data sections">
+                <a href="#datasets" class="is-active" data-tab-target="datasets" data-data-view="registry" aria-controls="datasets" aria-current="page">Dataset Registry</a>
+                <a href="#collection" data-tab-target="collection" data-data-view="collection" aria-controls="collection">Collection</a>
+              </nav>
+            </div>
+            <div class="page-actions">
+              <button id="refresh-data-registry" class="button button-outline" type="button">Refresh</button>
+            </div>
+          </div>
+
+          <div id="data-registry-error" class="inline-alert" role="alert" hidden></div>
+
+          <section class="panel table-panel registry-section" id="data-resource-create-details">
+            <div class="panel-heading">
+              <div>
+
+                <h2>Resources</h2>
+                <p class="registry-section-help">A resource is a named data item, such as a dataset or simulator asset. Its exact files live in immutable versions. Imports normally register resources automatically.</p>
+              </div>
+              <div class="panel-heading-actions">
+                <span id="data-resource-count" class="quiet-label">Not loaded</span>
+                <button id="show-data-resource-form" class="button button-accent disclosure-launcher" type="button" aria-controls="data-resource-form" aria-expanded="false">Register a source resource</button>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>Resource</th><th>Kind</th><th>Provider</th><th>Versions</th><th>Latest revision</th><th>Status</th><th>Updated</th><th></th></tr></thead>
+                <tbody id="data-resources-body">
+                  <tr class="empty-row"><td colspan="8">Open this tab to load resources.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <form id="data-resource-form" class="dense-form registry-action-form inline-drawer row-disclosure" hidden>
+              <div class="panel-heading row-disclosure-heading">
+                <div>
+                  <h2>Register a source resource</h2>
+                </div>
+                <div class="panel-heading-actions">
+                  <button id="close-data-resource-form" class="text-button disclosure-close" type="button">Close</button>
+                </div>
+              </div>
+              <div class="row-disclosure-body">
+                <input id="data-resource-id" type="hidden">
+                <div class="form-grid">
+                  <div class="field">
+                    <label for="data-resource-provider">Provider</label>
+                    <input id="data-resource-provider" value="huggingface" list="data-provider-options" required>
+                    <datalist id="data-provider-options"><option value="huggingface"><option value="s3"><option value="local"><option value="http"></datalist>
+                  </div>
+                  <div class="field">
+                    <label for="data-resource-namespace">Namespace</label>
+                    <input id="data-resource-namespace" placeholder="organization or owner" required>
+                  </div>
+                  <div class="field">
+                    <label for="data-resource-name">Name</label>
+                    <input id="data-resource-name" placeholder="dataset name" required>
+                  </div>
+                  <div class="field">
+                    <label for="data-resource-kind">Kind</label>
+                    <input id="data-resource-kind" value="demonstrations" list="data-kind-options" required>
+                    <datalist id="data-kind-options"><option value="demonstrations"><option value="simulation_assets"><option value="evaluation_data"><option value="embodiment_assets"><option value="calibration"></datalist>
+                  </div>
+                  <div class="field span-4">
+                    <label for="data-resource-description">Description</label>
+                    <input id="data-resource-description" maxlength="500" placeholder="Purpose, license, or compatibility notes">
+                  </div>
+                </div>
+                <div class="form-actions">
+                  <button id="create-data-resource" class="button button-accent" type="submit">Register resource</button>
+                </div>
+              </div>
+            </form>
+            <form id="data-version-form" class="dense-form registry-action-form inline-drawer row-disclosure" hidden>
+              <div class="panel-heading row-disclosure-heading">
+                <div>
+                  <h2 id="data-version-resource-label">Resource version</h2>
+                  <p class="registry-section-help">A version identifies one exact, unchanged set of files. Imports normally publish it automatically; use this form for a manual publication.</p>
+                </div>
+                <div class="panel-heading-actions">
+                  <button id="close-data-version-form" class="text-button disclosure-close" type="button">Close</button>
+                </div>
+              </div>
+              <div class="row-disclosure-body">
+                <input id="data-version-resource-id" type="hidden">
+                <div class="form-grid">
+                  <div class="field"><label for="data-version-revision">Upstream revision</label><input id="data-version-revision" placeholder="Full commit or provider revision" required></div>
+                  <div class="field"><label for="data-version-format">Format</label><input id="data-version-format" placeholder="lerobot-v3, hdf5, usd-assets" required></div>
+                  <div class="field span-2"><label for="data-version-path">Materialized path</label><input id="data-version-path" placeholder="/coc/flash7/ycho420/datasets/resources/..." required></div>
+                  <div class="field span-2"><label for="data-version-source-uri">Source URI</label><input id="data-version-source-uri" placeholder="hf://namespace/name or s3://bucket/key"></div>
+                  <div class="field span-2"><label for="data-version-manifest">Manifest SHA-256</label><input id="data-version-manifest" minlength="64" maxlength="64" pattern="[A-Fa-f0-9]{64}" required></div>
+                  <div class="field"><label for="data-version-status">Status</label><select id="data-version-status"><option value="READY">Ready</option><option value="STAGING">Staging</option><option value="UNAVAILABLE">Unavailable</option></select></div>
+                  <div class="field"><label for="data-version-size">Size / bytes</label><input id="data-version-size" type="number" min="0" placeholder="Optional"></div>
+                </div>
+                <div class="form-actions"><button id="create-data-version" class="button button-accent" type="submit">Create immutable version</button></div>
+              </div>
+            </form>
+            <form id="data-import-form" class="dense-form registry-action-form inline-drawer row-disclosure" hidden>
+              <div class="panel-heading row-disclosure-heading">
+                <div>
+                  <h2 id="data-import-resource-label">Import from Hugging Face</h2>
+                  <p class="registry-section-help">Downloads one exact dataset directory through Slurm, verifies its files, publishes an immutable version, and creates its bundle.</p>
+                </div>
+                <div class="panel-heading-actions">
+                  <button id="close-data-import-form" class="text-button disclosure-close" type="button">Close</button>
+                </div>
+              </div>
+              <div class="row-disclosure-body">
+                <input id="data-import-resource-id" type="hidden">
+                <div class="form-grid">
+                  <div class="field span-2"><label for="data-import-revision">Exact Hugging Face revision</label><input id="data-import-revision" minlength="40" maxlength="40" pattern="[A-Fa-f0-9]{40}" placeholder="40-character commit SHA" required><small>Mutable names such as main are rejected.</small></div>
+                  <div class="field span-2"><label for="data-import-subset">Dataset directory</label><input id="data-import-subset" placeholder="Repository-relative directory" required><small>Enter the directory only; do not add /**.</small></div>
+                  <div class="field"><label for="data-import-format">Format</label><input id="data-import-format" placeholder="Declared format identifier" required><small>Must exactly match the format declared by the consuming adapter.</small></div>
+                  <div class="field"><label for="data-import-role">Bundle role</label><input id="data-import-role" placeholder="Bundle assignment role" required></div>
+                  <div class="field"><label for="data-import-bundle-name">Bundle name</label><input id="data-import-bundle-name" placeholder="Unique bundle name" required></div>
+                  <div class="field"><label for="data-import-bundle-version">Bundle version</label><input id="data-import-bundle-version" placeholder="Immutable bundle version" required></div>
+                  <div class="field"><label for="data-import-gateway">SSH gateway</label><select id="data-import-gateway"><option value="auto">Auto: sky1, then sky2</option><option value="sky1">sky1</option><option value="sky2">sky2</option></select></div>
+                  <div class="field"><label for="data-import-queue">Slurm queue</label><select id="data-import-queue"><option value="overcap">overcap (preemptible)</option><option value="normal">rl2-lab</option></select></div>
+                </div>
+                <div class="form-actions"><button id="submit-data-import" class="button button-accent" type="submit">Submit import job</button></div>
+              </div>
+            </form>
+          </section>
+
+          <section class="panel table-panel registry-section">
+            <div class="panel-heading">
+              <div>
+                <h2>Import jobs</h2>
+                <p class="registry-section-help">Slurm jobs that materialize exact external data before it becomes a usable immutable version.</p>
+              </div>
+              <span id="data-import-count" class="quiet-label">Not loaded</span>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>Resource / subset</th><th>Revision</th><th>State</th><th>Slurm</th><th>Bundle</th><th>Updated</th><th></th></tr></thead>
+                <tbody id="data-imports-body"><tr class="empty-row"><td colspan="7">No import jobs loaded.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel table-panel registry-section">
+            <div class="panel-heading">
+              <div>
+
+                <h2>Immutable versions</h2>
+                <p class="registry-section-help">Each version is one exact, unchanged copy of a resource. Jobs pin versions so later updates cannot change their data.</p>
+              </div>
+              <span id="data-version-count" class="quiet-label">Not loaded</span>
+            </div>
+            <div class="table-scroll tall-table">
+              <table>
+                <thead><tr><th>Resource / revision</th><th>Format</th><th>Status</th><th>Size</th><th>Materialized path</th><th>Manifest</th><th>Created</th></tr></thead>
+                <tbody id="data-versions-body"><tr class="empty-row"><td colspan="7">No versions loaded.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel table-panel registry-section" id="data-derivation-create-details">
+            <div class="panel-heading">
+              <div>
+
+                <h2>Derivation lineage</h2>
+                <p class="registry-section-help">A derivation is a receipt showing which inputs and converter made a processed output. Conversion workflows normally record it automatically.</p>
+              </div>
+              <div class="panel-heading-actions">
+                <span id="data-derivation-count" class="quiet-label">Not loaded</span>
+                <button id="show-data-derivation-form" class="button button-accent disclosure-launcher" type="button" aria-controls="data-derivation-form" aria-expanded="false">Record a derivation</button>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>Output</th><th>Inputs and roles</th><th>Converter</th><th>Runtime lock</th><th>Created</th></tr></thead>
+                <tbody id="data-derivations-body"><tr class="empty-row"><td colspan="5">No derivations loaded.</td></tr></tbody>
+              </table>
+            </div>
+            <form id="data-derivation-form" class="dense-form registry-action-form row-disclosure inline-drawer" hidden>
+              <div class="panel-heading row-disclosure-heading">
+                <div>
+                  <h2>Record a derivation</h2>
+                </div>
+                <div class="panel-heading-actions">
+                  <button id="close-data-derivation-form" class="text-button disclosure-close" type="button">Close</button>
+                </div>
+              </div>
+              <div class="row-disclosure-body">
+                <div class="form-grid">
+                  <div class="field span-2"><label for="data-derivation-output">Output version</label><select id="data-derivation-output" required disabled><option value="">No versions loaded</option></select></div>
+                  <div class="field span-2"><label for="data-derivation-inputs">Inputs / JSON</label><textarea id="data-derivation-inputs" rows="4" required placeholder='[{"version_id":"...","role":"source","position":0}]'></textarea></div>
+                  <div class="field span-2"><label for="data-converter-repository">Converter repository</label><input id="data-converter-repository" placeholder="Repository URL or canonical local source" required></div>
+                  <div class="field span-2"><label for="data-converter-commit">Converter commit</label><input id="data-converter-commit" placeholder="Exact commit SHA" required></div>
+                  <div class="field span-2"><label for="data-runtime-lock-sha">Runtime lock SHA-256</label><input id="data-runtime-lock-sha" maxlength="64" pattern="[A-Fa-f0-9]{64}" placeholder="Optional"></div>
+                  <div class="field span-2"><label for="data-converter-config">Converter config / JSON</label><textarea id="data-converter-config" rows="4">{}</textarea></div>
+                </div>
+                <div class="form-actions"><button id="create-data-derivation" class="button button-accent" type="submit">Record lineage</button></div>
+              </div>
+            </form>
+          </section>
+
+          <section class="panel table-panel registry-section" id="data-bundle-create-details">
+            <div class="panel-heading">
+              <div>
+
+                <h2>Bundles and roles</h2>
+                <p class="registry-section-help">A bundle is a saved list of exact data versions for a job. Each role says how that job uses an item, such as training data or simulator assets.</p>
+              </div>
+              <div class="panel-heading-actions">
+                <span id="data-bundle-count" class="quiet-label">Not loaded</span>
+                <button id="show-data-bundle-form" class="button button-accent disclosure-launcher" type="button" aria-controls="data-bundle-form" aria-expanded="false">Create an immutable bundle</button>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>Bundle</th><th>Assignments</th><th>Manifest</th><th>Created</th><th></th></tr></thead>
+                <tbody id="data-bundles-body"><tr class="empty-row"><td colspan="5">No bundles loaded.</td></tr></tbody>
+              </table>
+            </div>
+            <aside id="data-bundle-preview" class="row-disclosure inline-drawer dataset-preview" hidden>
+              <div class="panel-heading row-disclosure-heading">
+                <div>
+                  <h2 id="data-bundle-preview-title">Dataset preview</h2>
+                  <p id="data-bundle-preview-status" class="registry-section-help">Choose a bundle to inspect its immutable dataset contents.</p>
+                </div>
+                <div class="panel-heading-actions">
+                  <button id="close-data-bundle-preview" class="text-button disclosure-close" type="button">Close</button>
+                </div>
+              </div>
+              <div class="row-disclosure-body dataset-preview-stack">
+                <div id="data-bundle-preview-summary" class="key-value-grid"></div>
+
+                <section class="dataset-preview-section">
+                  <div class="log-heading"><h3>Usage</h3></div>
+                  <div id="data-bundle-preview-usage" class="key-value-grid"></div>
+                </section>
+
+                <section class="dataset-preview-section">
+                  <div class="log-heading"><h3>Roles</h3></div>
+                  <div class="table-scroll">
+                    <table>
+                      <thead><tr><th>Role</th><th>Intended use</th><th>Assignments</th></tr></thead>
+                      <tbody id="data-bundle-preview-roles"></tbody>
+                    </table>
+                  </div>
+                </section>
+
+                <section class="dataset-preview-section">
+                  <div class="log-heading"><h3>Immutable versions</h3></div>
+                  <div class="table-scroll">
+                    <table>
+                      <thead><tr><th>Role / position</th><th>Resource / revision</th><th>Format / status</th><th>Size / mount</th><th>Required</th></tr></thead>
+                      <tbody id="data-bundle-preview-versions"></tbody>
+                    </table>
+                  </div>
+                </section>
+
+                <section class="dataset-preview-section">
+                  <div class="log-heading"><h3>Dataset summary</h3></div>
+                  <div id="data-bundle-preview-datasets" class="dataset-preview-summary-grid"></div>
+                </section>
+
+                <div class="dataset-preview-content-grid">
+                  <section class="dataset-preview-section">
+                    <div class="log-heading"><h3>Tasks</h3></div>
+                    <div id="data-bundle-preview-tasks" class="dataset-preview-list"></div>
+                  </section>
+                  <section class="dataset-preview-section">
+                    <div class="log-heading"><h3>Episodes</h3></div>
+                    <div id="data-bundle-preview-episodes" class="dataset-preview-list"></div>
+                  </section>
+                  <section class="dataset-preview-section">
+                    <div class="log-heading"><h3>Features</h3></div>
+                    <div id="data-bundle-preview-features" class="dataset-preview-list"></div>
+                  </section>
+                  <section class="dataset-preview-section">
+                    <div class="log-heading"><h3>Modalities</h3></div>
+                    <div id="data-bundle-preview-modalities" class="dataset-preview-list"></div>
+                  </section>
+                </div>
+
+                <section class="dataset-preview-section">
+                  <div class="log-heading"><h3>Sample records</h3></div>
+                  <div id="data-bundle-preview-samples" class="dataset-preview-list"></div>
+                </section>
+
+                <section class="dataset-preview-section">
+                  <div class="log-heading"><h3>Sample media</h3></div>
+                  <p id="data-bundle-preview-media-empty" class="secondary">No playable media selected.</p>
+                  <div id="data-bundle-preview-media-controls" class="dataset-preview-media-picker" hidden>
+                    <label for="data-bundle-preview-media-select">Media</label>
+                    <select id="data-bundle-preview-media-select"></select>
+                  </div>
+                  <div id="data-bundle-preview-media-player" class="dataset-preview-media-player" hidden></div>
+                  <div id="data-bundle-preview-media-meta" class="key-value-grid dataset-preview-media-meta" hidden></div>
+                </section>
+
+                <div id="data-bundle-preview-warnings" class="dataset-preview-warnings" hidden></div>
+              </div>
+            </aside>
+            <form id="data-bundle-form" class="dense-form registry-action-form row-disclosure inline-drawer" hidden>
+              <div class="panel-heading row-disclosure-heading">
+                <div>
+                  <h2>Create an immutable bundle</h2>
+                </div>
+                <div class="panel-heading-actions">
+                  <button id="close-data-bundle-form" class="text-button disclosure-close" type="button">Close</button>
+                </div>
+              </div>
+              <div class="row-disclosure-body">
+                <div class="form-grid">
+                  <div class="field span-2"><label for="data-bundle-name">Bundle name</label><input id="data-bundle-name" placeholder="dexverse-training" required></div>
+                  <div class="field span-2"><label for="data-bundle-version">Bundle version</label><input id="data-bundle-version" placeholder="v1 or exact release identifier" required></div>
+                  <div class="field span-4"><label for="data-bundle-description">Description</label><input id="data-bundle-description" maxlength="500" placeholder="Compatibility and intended use"></div>
+                  <div class="field span-4"><label for="data-bundle-assignments">Role assignments / JSON</label><textarea id="data-bundle-assignments" rows="7" required placeholder='[{"role":"training_data","version_id":"...","mount_path":"data/train","required":true,"position":0}]'></textarea><small>Assign roles such as <code>simulation_assets</code>, <code>training_data</code>, and <code>evaluation_data</code>. Each assignment pins one immutable version.</small></div>
+                </div>
+                <div class="form-actions"><button id="create-data-bundle" class="button button-accent" type="submit">Create bundle</button></div>
+              </div>
+            </form>
+          </section>
+        </div>
+      </section>
+
+      <section id="adapters" class="tab-panel" data-tab-panel="adapters" role="tabpanel" hidden>
+        <div class="section-shell workspace-page">
+          <div class="page-heading">
+            <div>
+              <h1>Adapter Registry</h1>
+            </div>
+            <div class="page-actions">
+              <button id="refresh-adapters" class="button button-outline" type="button">Refresh</button>
+            </div>
+          </div>
+
+          <div id="adapters-error" class="inline-alert" role="alert" hidden></div>
+
+          <section class="panel table-panel adapter-index-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>Adapters</h2>
+              </div>
+              <div>
+                <span id="adapter-count" class="quiet-label">Not loaded</span>
+                <button id="add-adapter" class="button button-accent disclosure-launcher" type="button" aria-controls="adapter-editor" aria-expanded="false">Add adapter</button>
+              </div>
+            </div>
+            <div class="table-scroll tall-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Adapter</th>
+                    <th>Version</th>
+                    <th>Status</th>
+                    <th>Repository</th>
+                    <th>Runtime detection</th>
+                    <th>Updated</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="adapters-body">
+                  <tr class="empty-row"><td colspan="7">Open this tab to load adapters.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          <form id="adapter-editor" class="dense-form adapter-editor inline-drawer row-disclosure" hidden>
+            <div class="panel-heading row-disclosure-heading">
+              <div>
+                <span id="adapter-editor-mode" class="quiet-label">create</span>
+                <h2 id="adapter-editor-title">Adapter</h2>
+              </div>
+              <div class="panel-heading-actions">
+                <span id="adapter-editor-status" class="quiet-label"></span>
+                <button id="close-adapter-editor" class="text-button disclosure-close" type="button">Close</button>
+              </div>
+            </div>
+            <div class="row-disclosure-body">
+              <fieldset class="form-section">
+                <legend>Identity</legend>
+                <div class="form-grid">
+                  <div class="field span-2">
+                    <label for="adapter-editor-slug">Adapter key</label>
+                    <input id="adapter-editor-slug" pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" maxlength="96" required>
+                    <small>Immutable after creation; database IDs are treated as opaque.</small>
+                  </div>
+                  <div class="field span-2">
+                    <label for="adapter-editor-name">Display name</label>
+                    <input id="adapter-editor-name" maxlength="128" required>
+                  </div>
+                </div>
+              </fieldset>
+
+              <fieldset class="form-section">
+                <legend>Manifest</legend>
+                <div class="form-grid">
+                  <div class="field span-4">
+                    <label for="adapter-manifest">JSON manifest</label>
+                    <textarea id="adapter-manifest" class="manifest-editor" rows="22" spellcheck="false" required></textarea>
+                    <small>Editing an existing adapter creates a new immutable version; prior experiments retain their snapshot.</small>
+                  </div>
+                  <div class="field span-4">
+                    <label for="adapter-description">Registry description</label>
+                    <input id="adapter-description" maxlength="240" placeholder="Purpose and compatibility notes for this adapter">
+                  </div>
+                  <div class="field span-4">
+                    <label for="adapter-change-note">Version change note</label>
+                    <input id="adapter-change-note" maxlength="240" placeholder="Why this immutable version was created">
+                    <small>Stored with the version and shown in its history.</small>
+                  </div>
+                </div>
+              </fieldset>
+
+              <fieldset class="form-section">
+                <legend>Validate against repository</legend>
+                <div class="form-grid">
+                  <div class="field span-2">
+                    <label for="adapter-validation-repository">Repository URL</label>
+                    <input id="adapter-validation-repository" type="url" placeholder="https://github.com/organization/repository">
+                  </div>
+                  <div class="field span-2">
+                    <label for="adapter-validation-revision">Branch, tag, or commit SHA</label>
+                    <input id="adapter-validation-revision" placeholder="main or exact SHA">
+                  </div>
+                  <small class="span-4">Draft edits are validated without saving. Read-only versions also retain a saved validation record.</small>
+                  <pre id="adapter-validation-report" class="validation-report span-4" hidden></pre>
+                </div>
+              </fieldset>
+
+              <div class="form-actions">
+                <button id="edit-adapter" class="button button-outline" type="button">Edit</button>
+                <button id="validate-adapter" class="button button-outline" type="button">Validate</button>
+                <button id="save-adapter" class="button button-accent" type="submit">Save adapter</button>
+              </div>
+
+              <section id="adapter-version-section" class="adapter-version-section" hidden>
+                <div class="panel-heading">
+                  <div>
+
+                    <h3>Versions</h3>
+                  </div>
+                </div>
+                <div class="table-scroll">
+                  <table>
+                    <thead><tr><th>Version</th><th>Manifest hash</th><th>Change note</th><th>Created</th></tr></thead>
+                    <tbody id="adapter-versions-body"></tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+          </form>
+          </section>
+        </div>
+      </section>
+
+      <section id="settings" class="tab-panel" data-tab-panel="settings" role="tabpanel" hidden>
+        <div class="section-shell workspace-page">
+          <div class="page-heading">
+            <div>
+              <h1>Settings</h1>
+            </div>
+            <div class="page-actions">
+              <button id="refresh-settings" class="button button-outline" type="button">Refresh</button>
+            </div>
+          </div>
+
+          <div id="settings-error" class="inline-alert" role="alert" hidden></div>
+
+          <div class="tracking-settings-grid">
+            <form id="wandb-connection-form" class="panel tracking-connection-card" data-tracking-provider="wandb" autocomplete="off">
+              <div class="panel-heading">
+                <div>
+                  <h2>Weights &amp; Biases</h2>
+                  <p>Connect an existing W&amp;B account. The verified default entity becomes the automatic workspace.</p>
+                </div>
+                <span id="wandb-connection-status" class="state-pill is-other">Not loaded</span>
+              </div>
+              <div class="form-grid">
+                <div class="field span-2">
+                  <label for="wandb-api-key">API key</label>
+                  <input id="wandb-api-key" type="password" autocomplete="new-password" spellcheck="false" placeholder="Paste an API key to connect">
+                  <small>Sent only to the local connection API. It is never saved or prefilled by this browser.</small>
+                </div>
+                <div class="field">
+                  <label for="wandb-base-url">Base URL</label>
+                  <input id="wandb-base-url" type="url" placeholder="Optional; W&B default when blank">
+                </div>
+                <div class="field">
+                  <label for="wandb-entity">Preferred entity</label>
+                  <input id="wandb-entity" placeholder="Optional; verified from the API key">
+                </div>
+                <label class="check-field credential-persistence span-4">
+                  <input id="wandb-remember" type="checkbox" checked>
+                  <span><strong>Remember in this device credential store</strong><small>Turn off to keep the API key in backend session memory only.</small></span>
+                </label>
+              </div>
+              <p id="wandb-connection-detail" class="tracking-connection-detail" role="status" aria-live="polite">Connection status has not been loaded.</p>
+              <p id="wandb-credential-source" class="tracking-credential-source" data-source="none">Credential source: none</p>
+              <div class="form-actions tracking-connection-actions">
+                <button class="button button-accent" type="submit">Connect</button>
+                <button id="test-wandb-connection" class="button button-outline" type="button">Test</button>
+                <button id="disconnect-wandb" class="button button-quiet" type="button">Disconnect</button>
+              </div>
+            </form>
+
+            <form id="mlflow-connection-form" class="panel tracking-connection-card" data-tracking-provider="mlflow" autocomplete="off">
+              <div class="panel-heading">
+                <div>
+                  <h2>MLflow</h2>
+                  <p>Connect a reachable MLflow tracking server. Authentication is optional and is never stored in an experiment.</p>
+                </div>
+                <span id="mlflow-connection-status" class="state-pill is-other">Not loaded</span>
+              </div>
+              <div class="form-grid">
+                <div class="field span-2">
+                  <label for="mlflow-connection-uri">Tracking URI</label>
+                  <input id="mlflow-connection-uri" type="url" placeholder="https://mlflow.example" required>
+                </div>
+                <div class="field span-2">
+                  <label for="mlflow-connection-username">Username</label>
+                  <input id="mlflow-connection-username" autocomplete="off" placeholder="Optional">
+                </div>
+                <div class="field span-2">
+                  <label for="mlflow-connection-password">Password</label>
+                  <input id="mlflow-connection-password" type="password" autocomplete="new-password" spellcheck="false" placeholder="Optional; never prefilled">
+                </div>
+                <div class="field span-2">
+                  <label for="mlflow-connection-token">Bearer token</label>
+                  <input id="mlflow-connection-token" type="password" autocomplete="new-password" spellcheck="false" placeholder="Optional; never prefilled">
+                </div>
+                <label class="check-field span-4">
+                  <input id="mlflow-verify-tls" type="checkbox" checked>
+                  <span>Verify TLS certificates</span>
+                </label>
+                <label class="check-field credential-persistence span-4">
+                  <input id="mlflow-remember" type="checkbox" checked>
+                  <span><strong>Remember in this device credential store</strong><small>Turn off to keep authentication in backend session memory only.</small></span>
+                </label>
+              </div>
+              <p id="mlflow-connection-detail" class="tracking-connection-detail" role="status" aria-live="polite">Connection status has not been loaded.</p>
+              <p id="mlflow-credential-source" class="tracking-credential-source" data-source="none">Credential source: none</p>
+              <div class="form-actions tracking-connection-actions">
+                <button class="button button-accent" type="submit">Connect</button>
+                <button id="test-mlflow-connection" class="button button-outline" type="button">Test</button>
+                <button id="disconnect-mlflow" class="button button-quiet" type="button">Disconnect</button>
+              </div>
+            </form>
+          </div>
+
+          <div class="settings-grid settings-grid-single">
+            <section class="panel table-panel">
+              <div class="panel-heading">
+                <div>
+
+                  <h2>Resolved settings</h2>
+                </div>
+              </div>
+              <div class="table-scroll">
+                <table>
+                  <thead><tr><th>Key</th><th>Value</th></tr></thead>
+                  <tbody id="settings-body">
+                    <tr class="empty-row"><td colspan="2">Open this tab to load settings.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+          </div>
+
+          <section class="panel workspace-card">
+            <div>
+
+              <h2>/coc/flash7/ycho420</h2>
+              <p>Creates workspace, repos, datasets, artifacts, logs, jobs, and shared uv, Hugging Face, and Torch caches.</p>
+            </div>
+            <button id="init-workspace" class="button button-dark" type="button">Initialize directories</button>
+          </section>
+
+          <section class="panel contract-note">
+
+            <p>The browser never stores or prefills secrets. Remembering a credential saves it in this device's backend credential store; otherwise it stays in backend session memory. Disconnect removes session and saved-device credentials. Environment credentials remain managed outside Skynet.</p>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <div id="tutorial-layer" class="tutorial-layer" aria-hidden="true" hidden>
+      <div id="tutorial-blocker-top" class="tutorial-blocker" aria-hidden="true"></div>
+      <div id="tutorial-blocker-left" class="tutorial-blocker" aria-hidden="true"></div>
+      <div id="tutorial-blocker-right" class="tutorial-blocker" aria-hidden="true"></div>
+      <div id="tutorial-blocker-bottom" class="tutorial-blocker" aria-hidden="true"></div>
+      <div id="tutorial-spotlight" class="tutorial-spotlight" aria-hidden="true"></div>
+      <section id="tutorial-dialog" class="tutorial-dialog" role="dialog" aria-modal="true" aria-labelledby="tutorial-title" aria-describedby="tutorial-instruction" tabindex="-1">
+        <div class="tutorial-dialog-header">
+          <span id="tutorial-page" class="tutorial-page-label"></span>
+          <button id="tutorial-exit" class="text-button" type="button" aria-label="Exit tutorial">Exit</button>
+        </div>
+        <p id="tutorial-progress" class="tutorial-progress" role="status" aria-live="polite"></p>
+        <h2 id="tutorial-title"></h2>
+        <p id="tutorial-instruction" class="tutorial-instruction"></p>
+        <div class="tutorial-session-meta">
+          <span id="tutorial-token"></span>
+          <span id="tutorial-gate-status" role="status" aria-live="polite"></span>
+        </div>
+        <button id="tutorial-use-value" class="button button-outline tutorial-use-value" type="button" hidden>Use tutorial value</button>
+        <div id="tutorial-confirm-panel" class="tutorial-confirm-panel" hidden>
+          <p id="tutorial-confirm-summary"></p>
+          <label for="tutorial-confirm-input">Type <code id="tutorial-confirm-phrase"></code>, then click the highlighted control again.</label>
+          <input id="tutorial-confirm-input" autocomplete="off" spellcheck="false">
+        </div>
+        <p id="tutorial-error" class="tutorial-error" role="alert" hidden></p>
+        <div id="tutorial-records" class="tutorial-records" aria-live="polite"></div>
+        <div id="tutorial-resume-panel" class="tutorial-resume-panel" hidden>
+          <button id="tutorial-resume" class="button button-accent" type="button">Resume</button>
+          <button id="tutorial-restart" class="button button-outline" type="button">Restart tutorial</button>
+        </div>
+        <div class="tutorial-actions">
+          <button id="tutorial-back" class="button button-outline" type="button">Back</button>
+          <button id="tutorial-next" class="button button-accent" type="button">Next</button>
+        </div>
+      </section>
+    </div>
+
+    <div id="toast" class="toast-region" hidden></div>
+
+    <footer>
+      <span>SKYNET / SLURM EXPERIMENT CONSOLE</span>
+      <span>LOCAL OPERATOR TOOL / NO AUTH LAYER</span>
+    </footer>
+  </body>
+</html>

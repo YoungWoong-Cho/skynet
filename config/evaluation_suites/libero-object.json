@@ -1,0 +1,142 @@
+{
+  "schema_version": 2,
+  "evaluator": "libero",
+  "suite": "libero_object",
+  "version": "catalog-v2-git-f78abd68ee28",
+  "label": "LIBERO Object",
+  "task_source": "immutable_catalog_v2",
+  "task_selection_mode": "subset",
+  "task_selection_reason": "The OpenPI adapter executes each selected canonical LIBERO task through a pinned filtered benchmark proxy.",
+  "task_catalog_complete": true,
+  "task_catalog_provenance": {
+    "repository": "https://github.com/Lifelong-Robot-Learning/LIBERO",
+    "revision": "f78abd68ee283de9f9be3c8f7e2a9ad60246e95c",
+    "source_path": "libero/libero/benchmark/libero_suite_task_map.py"
+  },
+  "task_catalog_sha256": "6bad932e9362f7d880e9139a0fac9384b64722211754ead26ff4aca8391574b0",
+  "tasks": [
+    "pick_up_the_alphabet_soup_and_place_it_in_the_basket",
+    "pick_up_the_cream_cheese_and_place_it_in_the_basket",
+    "pick_up_the_salad_dressing_and_place_it_in_the_basket",
+    "pick_up_the_bbq_sauce_and_place_it_in_the_basket",
+    "pick_up_the_ketchup_and_place_it_in_the_basket",
+    "pick_up_the_tomato_sauce_and_place_it_in_the_basket",
+    "pick_up_the_butter_and_place_it_in_the_basket",
+    "pick_up_the_milk_and_place_it_in_the_basket",
+    "pick_up_the_chocolate_pudding_and_place_it_in_the_basket",
+    "pick_up_the_orange_juice_and_place_it_in_the_basket"
+  ],
+  "task_options": [
+    {
+      "id": "pick_up_the_alphabet_soup_and_place_it_in_the_basket",
+      "label": "pick up the alphabet soup and place it in the basket",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_object",
+          "task_id": 0
+        }
+      }
+    },
+    {
+      "id": "pick_up_the_cream_cheese_and_place_it_in_the_basket",
+      "label": "pick up the cream cheese and place it in the basket",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_object",
+          "task_id": 1
+        }
+      }
+    },
+    {
+      "id": "pick_up_the_salad_dressing_and_place_it_in_the_basket",
+      "label": "pick up the salad dressing and place it in the basket",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_object",
+          "task_id": 2
+        }
+      }
+    },
+    {
+      "id": "pick_up_the_bbq_sauce_and_place_it_in_the_basket",
+      "label": "pick up the bbq sauce and place it in the basket",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_object",
+          "task_id": 3
+        }
+      }
+    },
+    {
+      "id": "pick_up_the_ketchup_and_place_it_in_the_basket",
+      "label": "pick up the ketchup and place it in the basket",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_object",
+          "task_id": 4
+        }
+      }
+    },
+    {
+      "id": "pick_up_the_tomato_sauce_and_place_it_in_the_basket",
+      "label": "pick up the tomato sauce and place it in the basket",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_object",
+          "task_id": 5
+        }
+      }
+    },
+    {
+      "id": "pick_up_the_butter_and_place_it_in_the_basket",
+      "label": "pick up the butter and place it in the basket",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_object",
+          "task_id": 6
+        }
+      }
+    },
+    {
+      "id": "pick_up_the_milk_and_place_it_in_the_basket",
+      "label": "pick up the milk and place it in the basket",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_object",
+          "task_id": 7
+        }
+      }
+    },
+    {
+      "id": "pick_up_the_chocolate_pudding_and_place_it_in_the_basket",
+      "label": "pick up the chocolate pudding and place it in the basket",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_object",
+          "task_id": 8
+        }
+      }
+    },
+    {
+      "id": "pick_up_the_orange_juice_and_place_it_in_the_basket",
+      "label": "pick up the orange juice and place it in the basket",
+      "description": "",
+      "metadata": {
+        "native": {
+          "benchmark_name": "libero_object",
+          "task_id": 9
+        }
+      }
+    }
+  ],
+  "current": true
+}

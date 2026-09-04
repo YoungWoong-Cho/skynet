@@ -1,0 +1,262 @@
+{
+  "schema_version": 2,
+  "evaluator": "mujoco",
+  "suite": "groot_gr1_tabletop",
+  "version": "catalog-v3-git-9b37aa1ce69c",
+  "label": "GR00T N1.6 / RoboCasa GR1 Arms-only Tabletop",
+  "task_source": "immutable_catalog_v2",
+  "task_selection_mode": "subset",
+  "task_selection_reason": "The official rollout client accepts one environment ID per invocation, allowing selected benchmark environments to be evaluated independently.",
+  "task_catalog_complete": true,
+  "task_catalog_provenance": {
+    "repository": "https://github.com/NVIDIA/Isaac-GR00T",
+    "revision": "9b37aa1ce69c73c6d165233fa88128283bba4508",
+    "source_path": "external_dependencies/robocasa-gr1-tabletop-tasks/robocasa/utils/gym_utils/gymnasium_groot.py"
+  },
+  "task_catalog_sha256": "f4e3061c8d95f6433fd08596aee7e8adbac705641f3eea77b6e42c2390c210c8",
+  "tasks": [
+    "robocasa_gr1_arms_only_fourier_hands/PnPBottleToCabinetClose_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PnPCanToDrawerClose_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PnPCupToDrawerClose_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PnPMilkToMicrowaveClose_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PnPPotatoToMicrowaveClose_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PnPWineToCabinetClose_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromCuttingboardToBasketSplitA_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromCuttingboardToCardboardboxSplitA_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromCuttingboardToPanSplitA_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromCuttingboardToPotSplitA_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromCuttingboardToTieredbasketSplitA_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlacematToBasketSplitA_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlacematToBowlSplitA_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlacematToPlateSplitA_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlacematToTieredshelfSplitA_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlateToBowlSplitA_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlateToCardboardboxSplitA_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlateToPanSplitA_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlateToPlateSplitA_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromTrayToCardboardboxSplitA_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromTrayToPlateSplitA_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromTrayToPotSplitA_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromTrayToTieredbasketSplitA_GR1ArmsOnly_Env",
+    "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromTrayToTieredshelfSplitA_GR1ArmsOnly_Env"
+  ],
+  "task_options": [
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PnPBottleToCabinetClose_GR1ArmsOnly_Env",
+      "label": "Pick and place bottle to cabinet, then close",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PnPBottleToCabinetClose_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PnPCanToDrawerClose_GR1ArmsOnly_Env",
+      "label": "Pick and place can to drawer, then close",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PnPCanToDrawerClose_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PnPCupToDrawerClose_GR1ArmsOnly_Env",
+      "label": "Pick and place cup to drawer, then close",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PnPCupToDrawerClose_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PnPMilkToMicrowaveClose_GR1ArmsOnly_Env",
+      "label": "Pick and place milk to microwave, then close",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PnPMilkToMicrowaveClose_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PnPPotatoToMicrowaveClose_GR1ArmsOnly_Env",
+      "label": "Pick and place potato to microwave, then close",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PnPPotatoToMicrowaveClose_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PnPWineToCabinetClose_GR1ArmsOnly_Env",
+      "label": "Pick and place wine to cabinet, then close",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PnPWineToCabinetClose_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromCuttingboardToBasketSplitA_GR1ArmsOnly_Env",
+      "label": "Post-train novel pick and place: cutting board to basket, split A",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromCuttingboardToBasketSplitA_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromCuttingboardToCardboardboxSplitA_GR1ArmsOnly_Env",
+      "label": "Post-train novel pick and place: cutting board to cardboard box, split A",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromCuttingboardToCardboardboxSplitA_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromCuttingboardToPanSplitA_GR1ArmsOnly_Env",
+      "label": "Post-train novel pick and place: cutting board to pan, split A",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromCuttingboardToPanSplitA_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromCuttingboardToPotSplitA_GR1ArmsOnly_Env",
+      "label": "Post-train novel pick and place: cutting board to pot, split A",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromCuttingboardToPotSplitA_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromCuttingboardToTieredbasketSplitA_GR1ArmsOnly_Env",
+      "label": "Post-train novel pick and place: cutting board to tiered basket, split A",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromCuttingboardToTieredbasketSplitA_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlacematToBasketSplitA_GR1ArmsOnly_Env",
+      "label": "Post-train novel pick and place: placemat to basket, split A",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlacematToBasketSplitA_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlacematToBowlSplitA_GR1ArmsOnly_Env",
+      "label": "Post-train novel pick and place: placemat to bowl, split A",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlacematToBowlSplitA_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlacematToPlateSplitA_GR1ArmsOnly_Env",
+      "label": "Post-train novel pick and place: placemat to plate, split A",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlacematToPlateSplitA_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlacematToTieredshelfSplitA_GR1ArmsOnly_Env",
+      "label": "Post-train novel pick and place: placemat to tiered shelf, split A",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlacematToTieredshelfSplitA_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlateToBowlSplitA_GR1ArmsOnly_Env",
+      "label": "Post-train novel pick and place: plate to bowl, split A",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlateToBowlSplitA_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlateToCardboardboxSplitA_GR1ArmsOnly_Env",
+      "label": "Post-train novel pick and place: plate to cardboard box, split A",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlateToCardboardboxSplitA_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlateToPanSplitA_GR1ArmsOnly_Env",
+      "label": "Post-train novel pick and place: plate to pan, split A",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlateToPanSplitA_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlateToPlateSplitA_GR1ArmsOnly_Env",
+      "label": "Post-train novel pick and place: plate to plate, split A",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromPlateToPlateSplitA_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromTrayToCardboardboxSplitA_GR1ArmsOnly_Env",
+      "label": "Post-train novel pick and place: tray to cardboard box, split A",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromTrayToCardboardboxSplitA_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromTrayToPlateSplitA_GR1ArmsOnly_Env",
+      "label": "Post-train novel pick and place: tray to plate, split A",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromTrayToPlateSplitA_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromTrayToPotSplitA_GR1ArmsOnly_Env",
+      "label": "Post-train novel pick and place: tray to pot, split A",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromTrayToPotSplitA_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromTrayToTieredbasketSplitA_GR1ArmsOnly_Env",
+      "label": "Post-train novel pick and place: tray to tiered basket, split A",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromTrayToTieredbasketSplitA_GR1ArmsOnly_Env"
+        }
+      }
+    },
+    {
+      "id": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromTrayToTieredshelfSplitA_GR1ArmsOnly_Env",
+      "label": "Post-train novel pick and place: tray to tiered shelf, split A",
+      "metadata": {
+        "native": {
+          "env_name": "robocasa_gr1_arms_only_fourier_hands/PosttrainPnPNovelFromTrayToTieredshelfSplitA_GR1ArmsOnly_Env"
+        }
+      }
+    }
+  ],
+  "current": true
+}

@@ -1,0 +1,952 @@
+{
+  "schema_version": "skynet.collection-adapter/v1",
+  "key": "dexverse-cloudxr",
+  "display_name": "DexVerse CloudXR",
+  "version": "0.3.0-todo",
+  "description": "Editable DexVerse demonstration-collection manifest pinned to commit 30cc673e27684b9f10186fa6bea731aed246bc9f. It remains non-runnable until site-specific CloudXR capabilities are verified.",
+  "runnable": false,
+  "streams": [
+    {
+      "name": "shadow_right_action",
+      "kind": "action",
+      "shape": [
+        28
+      ],
+      "dynamic": false,
+      "dtype": "float32",
+      "units": "mixed: translation=m, rotation=rad, finger_joint_position=rad",
+      "frame": "isaac-world and Shadow joint coordinates",
+      "rate_hz": null,
+      "native_key": "episodes[*].actions",
+      "selector": {
+        "config.robot_type": "floating_shadow_right"
+      },
+      "required": true,
+      "metadata": {
+        "layout": [
+          {
+            "indices": [
+              0,
+              1,
+              2
+            ],
+            "names": [
+              "x_translation_joint",
+              "y_translation_joint",
+              "z_translation_joint"
+            ]
+          },
+          {
+            "indices": [
+              3,
+              4,
+              5
+            ],
+            "names": [
+              "z_rotation_joint",
+              "y_rotation_joint",
+              "x_rotation_joint"
+            ],
+            "order": "yaw_pitch_roll"
+          },
+          {
+            "slice": [
+              6,
+              28
+            ],
+            "names": [
+              "FFJ1",
+              "FFJ2",
+              "FFJ3",
+              "FFJ4",
+              "MFJ1",
+              "MFJ2",
+              "MFJ3",
+              "MFJ4",
+              "RFJ1",
+              "RFJ2",
+              "RFJ3",
+              "RFJ4",
+              "LFJ1",
+              "LFJ2",
+              "LFJ3",
+              "LFJ4",
+              "LFJ5",
+              "THJ1",
+              "THJ2",
+              "THJ3",
+              "THJ4",
+              "THJ5"
+            ]
+          }
+        ],
+        "source": "source/dexverse/dexverse/robot_agents/shadow/floating.py"
+      }
+    },
+    {
+      "name": "shadow_left_action",
+      "kind": "action",
+      "shape": [
+        28
+      ],
+      "dynamic": false,
+      "dtype": "float32",
+      "units": "mixed: translation=m, rotation=rad, finger_joint_position=rad",
+      "frame": "isaac-world and Shadow joint coordinates",
+      "rate_hz": null,
+      "native_key": "episodes[*].actions",
+      "selector": {
+        "config.robot_type": "floating_shadow_left"
+      },
+      "required": true,
+      "metadata": {
+        "layout": [
+          {
+            "indices": [
+              0,
+              1,
+              2
+            ],
+            "names": [
+              "x_translation_joint",
+              "y_translation_joint",
+              "z_translation_joint"
+            ]
+          },
+          {
+            "indices": [
+              3,
+              4,
+              5
+            ],
+            "names": [
+              "z_rotation_joint",
+              "y_rotation_joint",
+              "x_rotation_joint"
+            ],
+            "order": "yaw_pitch_roll"
+          },
+          {
+            "slice": [
+              6,
+              28
+            ],
+            "names": [
+              "FFJ1",
+              "FFJ2",
+              "FFJ3",
+              "FFJ4",
+              "MFJ1",
+              "MFJ2",
+              "MFJ3",
+              "MFJ4",
+              "RFJ1",
+              "RFJ2",
+              "RFJ3",
+              "RFJ4",
+              "LFJ1",
+              "LFJ2",
+              "LFJ3",
+              "LFJ4",
+              "LFJ5",
+              "THJ1",
+              "THJ2",
+              "THJ3",
+              "THJ4",
+              "THJ5"
+            ]
+          }
+        ],
+        "source": "source/dexverse/dexverse/robot_agents/shadow/floating.py"
+      }
+    },
+    {
+      "name": "shadow_bimanual_action",
+      "kind": "action",
+      "shape": [
+        56
+      ],
+      "dynamic": false,
+      "dtype": "float32",
+      "units": "mixed: translation=m, rotation=rad, finger_joint_position=rad",
+      "frame": "isaac-world and per-hand Shadow joint coordinates",
+      "rate_hz": null,
+      "native_key": "episodes[*].actions",
+      "selector": {
+        "config.robot_type": "floating_shadow_bimanual"
+      },
+      "required": true,
+      "metadata": {
+        "layout": [
+          {
+            "slice": [
+              0,
+              3
+            ],
+            "hand": "right",
+            "names": [
+              "rh_x_translation_joint",
+              "rh_y_translation_joint",
+              "rh_z_translation_joint"
+            ]
+          },
+          {
+            "slice": [
+              3,
+              6
+            ],
+            "hand": "right",
+            "names": [
+              "rh_z_rotation_joint",
+              "rh_y_rotation_joint",
+              "rh_x_rotation_joint"
+            ],
+            "order": "yaw_pitch_roll"
+          },
+          {
+            "slice": [
+              6,
+              9
+            ],
+            "hand": "left",
+            "names": [
+              "lh_x_translation_joint",
+              "lh_y_translation_joint",
+              "lh_z_translation_joint"
+            ]
+          },
+          {
+            "slice": [
+              9,
+              12
+            ],
+            "hand": "left",
+            "names": [
+              "lh_z_rotation_joint",
+              "lh_y_rotation_joint",
+              "lh_x_rotation_joint"
+            ],
+            "order": "yaw_pitch_roll"
+          },
+          {
+            "slice": [
+              12,
+              34
+            ],
+            "hand": "right",
+            "prefix": "rh_",
+            "names": [
+              "FFJ1",
+              "FFJ2",
+              "FFJ3",
+              "FFJ4",
+              "MFJ1",
+              "MFJ2",
+              "MFJ3",
+              "MFJ4",
+              "RFJ1",
+              "RFJ2",
+              "RFJ3",
+              "RFJ4",
+              "LFJ1",
+              "LFJ2",
+              "LFJ3",
+              "LFJ4",
+              "LFJ5",
+              "THJ1",
+              "THJ2",
+              "THJ3",
+              "THJ4",
+              "THJ5"
+            ]
+          },
+          {
+            "slice": [
+              34,
+              56
+            ],
+            "hand": "left",
+            "prefix": "lh_",
+            "names": [
+              "FFJ1",
+              "FFJ2",
+              "FFJ3",
+              "FFJ4",
+              "MFJ1",
+              "MFJ2",
+              "MFJ3",
+              "MFJ4",
+              "RFJ1",
+              "RFJ2",
+              "RFJ3",
+              "RFJ4",
+              "LFJ1",
+              "LFJ2",
+              "LFJ3",
+              "LFJ4",
+              "LFJ5",
+              "THJ1",
+              "THJ2",
+              "THJ3",
+              "THJ4",
+              "THJ5"
+            ]
+          }
+        ],
+        "source": "source/dexverse/dexverse/robot_agents/shadow/floating.py"
+      }
+    },
+    {
+      "name": "scene_initial_state",
+      "kind": "proprio",
+      "shape": null,
+      "dynamic": true,
+      "dtype": "recursive-python-tree[numpy]",
+      "units": null,
+      "frame": "Isaac scene entity frames, is_relative=true",
+      "rate_hz": null,
+      "native_key": "episodes[*].initial_state",
+      "selector": {},
+      "required": true,
+      "metadata": {
+        "dynamic_reason": "env.scene.get_state(is_relative=True) returns task- and scene-entity-dependent recursive dictionaries",
+        "source": "scripts/record_demos.py"
+      }
+    },
+    {
+      "name": "scene_post_step_states",
+      "kind": "proprio",
+      "shape": null,
+      "dynamic": true,
+      "dtype": "recursive-python-tree[numpy]",
+      "units": null,
+      "frame": "Isaac scene entity frames, is_relative=true",
+      "rate_hz": null,
+      "native_key": "episodes[*].states",
+      "selector": {},
+      "required": true,
+      "metadata": {
+        "temporal_shape": "T+1; initial state followed by one post-env.step state for each action",
+        "dynamic_reason": "entity keys and tensor shapes depend on the selected task, objects, and robot variant",
+        "source": "scripts/record_demos.py"
+      }
+    }
+  ],
+  "requirements": [
+    {
+      "scope": "config",
+      "key": "task",
+      "description": "Select a concrete DexVerse task ID.",
+      "required": true,
+      "blocking": true,
+      "equals": null
+    },
+    {
+      "scope": "config",
+      "key": "robot_type",
+      "description": "Select floating_shadow_right, floating_shadow_left, or floating_shadow_bimanual.",
+      "required": true,
+      "blocking": true,
+      "equals": null
+    },
+    {
+      "scope": "config",
+      "key": "dataset_dir",
+      "description": "Select the relative DexVerse datastorage subdirectory used by the pinned recorder.",
+      "required": true,
+      "blocking": true,
+      "equals": null
+    },
+    {
+      "scope": "config",
+      "key": "num_demos",
+      "description": "Set the target demonstration count.",
+      "required": true,
+      "blocking": true,
+      "equals": null
+    },
+    {
+      "scope": "config",
+      "key": "stream.server_address",
+      "description": "Record the allocated compute-node address entered into the Vision Pro client.",
+      "required": true,
+      "blocking": true,
+      "equals": null
+    },
+    {
+      "scope": "config",
+      "key": "gui.endpoint",
+      "description": "Record the operator GUI/DCV/X11 endpoint used for the manual Start AR workflow.",
+      "required": true,
+      "blocking": true,
+      "equals": null
+    },
+    {
+      "scope": "software",
+      "key": "runtime_profile.id",
+      "description": "Select and snapshot the shared Isaac Sim 5.1.0 / Isaac Lab 2.3.2 runtime profile.",
+      "required": true,
+      "blocking": true,
+      "equals": "isaacsim-5.1.0_isaaclab-2.3.2_py311"
+    },
+    {
+      "scope": "software",
+      "key": "dexverse_path",
+      "description": "Pin an absolute DexVerse checkout at commit 30cc673e27684b9f10186fa6bea731aed246bc9f.",
+      "required": true,
+      "blocking": true,
+      "equals": null
+    },
+    {
+      "scope": "software",
+      "key": "isaaclab_path",
+      "description": "Pin an absolute Isaac Lab v2.3.2 checkout.",
+      "required": true,
+      "blocking": true,
+      "equals": null
+    },
+    {
+      "scope": "software",
+      "key": "cloudxr_image",
+      "description": "Use the CloudXR runtime selected by Isaac Lab v2.3.2.",
+      "required": true,
+      "blocking": true,
+      "equals": "nvcr.io/nvidia/cloudxr-runtime:5.0.1"
+    },
+    {
+      "scope": "calibration",
+      "key": "identity",
+      "description": "Stable unique identifier for one operator-attested START calibration event.",
+      "required": true
+    },
+    {
+      "scope": "calibration",
+      "key": "sha256",
+      "description": "SHA-256 of the canonical calibration attestation payload declared by metadata.calibration_contract.",
+      "required": true
+    },
+    {
+      "scope": "calibration",
+      "key": "metadata.schema_version",
+      "description": "Versioned calibration metadata contract.",
+      "required": true,
+      "equals": "dexverse-visionpro-wrist-calibration/v1"
+    },
+    {
+      "scope": "calibration",
+      "key": "metadata.dexverse_commit",
+      "description": "Pinned DexVerse source used for the calibration and capture.",
+      "required": true,
+      "equals": "30cc673e27684b9f10186fa6bea731aed246bc9f"
+    },
+    {
+      "scope": "calibration",
+      "key": "metadata.isaaclab_commit",
+      "description": "Pinned Isaac Lab source used for the calibration and capture.",
+      "required": true,
+      "equals": "37ddf626871758333d6ed89cf64ad702aef127d0"
+    },
+    {
+      "scope": "calibration",
+      "key": "metadata.client_commit",
+      "description": "Pinned Apple XR client source used for the calibration and capture.",
+      "required": true,
+      "equals": "045bbbc3f960d301173b712c6ead4617f3f94eb0"
+    },
+    {
+      "scope": "calibration",
+      "key": "metadata.trigger_event",
+      "description": "DexVerse performs wrist calibration when the operator sends START.",
+      "required": true,
+      "equals": "START"
+    },
+    {
+      "scope": "calibration",
+      "key": "metadata.teleop_retargeter",
+      "description": "Wrist retargeter mode used for this calibration.",
+      "required": true
+    },
+    {
+      "scope": "calibration",
+      "key": "metadata.retargeting_scheme",
+      "description": "Finger retargeting scheme used for this calibration.",
+      "required": true
+    },
+    {
+      "scope": "calibration",
+      "key": "metadata.robot_type",
+      "description": "Robot embodiment used for this calibration.",
+      "required": true
+    },
+    {
+      "scope": "calibration",
+      "key": "metadata.calibrated_at",
+      "description": "UTC timestamp recorded when the START calibration was operator-verified.",
+      "required": true
+    },
+    {
+      "scope": "calibration",
+      "key": "metadata.operator_identity_ref",
+      "description": "Non-secret stable reference to the operator who verified the calibration.",
+      "required": true
+    }
+  ],
+  "capabilities": [
+    {
+      "id": "container-runtime",
+      "kind": "container_runtime",
+      "scope": "compute_node",
+      "description": "An administrator-supported OCI/Docker runtime is installed on the allocated compute node.",
+      "required": true,
+      "blocking": true,
+      "default_status": "UNKNOWN",
+      "tcp_ports": [],
+      "udp_ports": []
+    },
+    {
+      "id": "container-daemon",
+      "kind": "container_daemon",
+      "scope": "compute_node",
+      "description": "The user can access the container daemon inside the Slurm allocation with GPU isolation.",
+      "required": true,
+      "blocking": true,
+      "default_status": "ADMIN_REQUIRED",
+      "tcp_ports": [],
+      "udp_ports": []
+    },
+    {
+      "id": "allocated-gpu",
+      "kind": "gpu",
+      "scope": "compute_node",
+      "description": "The allocated GPU is visible to the container and provides graphics plus NVENC without exposing unallocated GPUs.",
+      "required": true,
+      "blocking": true,
+      "default_status": "UNKNOWN",
+      "tcp_ports": [],
+      "udp_ports": []
+    },
+    {
+      "id": "cloudxr-port-configuration",
+      "kind": "network_ports",
+      "scope": "network",
+      "description": "Cluster and network policy configure the pinned CloudXR server ports. Application preflight does not assert end-to-end firewall reachability.",
+      "required": true,
+      "blocking": true,
+      "default_status": "ADMIN_REQUIRED",
+      "tcp_ports": [
+        48010
+      ],
+      "udp_ports": [
+        47998,
+        47999,
+        48000,
+        48005,
+        48008,
+        48012
+      ]
+    },
+    {
+      "id": "operator-gui",
+      "kind": "gui",
+      "scope": "operator",
+      "description": "The operator has a working GUI path to the Isaac Sim AR panel and can perform Start AR.",
+      "required": true,
+      "blocking": true,
+      "default_status": "UNKNOWN",
+      "tcp_ports": [],
+      "udp_ports": []
+    },
+    {
+      "id": "stream-endpoint",
+      "kind": "stream_endpoint",
+      "scope": "client",
+      "description": "Vision Pro is configured with the allocated compute-node address and grants local-network and hand-tracking permissions.",
+      "required": true,
+      "blocking": true,
+      "default_status": "UNKNOWN",
+      "tcp_ports": [],
+      "udp_ports": []
+    },
+    {
+      "id": "visionpro-client-build",
+      "kind": "declared",
+      "scope": "client",
+      "description": "Pinned v2.3.0 Apple XR client is signed with a unique bundle identifier, installed on a physical Vision Pro, and Developer Mode is enabled.",
+      "required": true,
+      "blocking": true,
+      "default_status": "UNKNOWN"
+    },
+    {
+      "id": "visionpro-handtracking",
+      "kind": "declared",
+      "scope": "client",
+      "description": "Local Network and Hand Tracking permissions are granted and the streamed red tracked-joint markers are visible and responsive.",
+      "required": true,
+      "blocking": true,
+      "default_status": "UNKNOWN"
+    },
+    {
+      "id": "retargeting-calibration",
+      "kind": "declared",
+      "scope": "operator",
+      "description": "The operator ran debug teleoperation, sent START, and verified wrist and finger motion for the exact task, robot, modes, device, and source revisions recorded in calibration metadata.",
+      "required": true,
+      "blocking": true,
+      "default_status": "UNKNOWN"
+    }
+  ],
+  "launcher": {
+    "environment": {
+      "DEXVERSE_PATH": "{{software.dexverse_path}}",
+      "ACCEPT_EULA": "Y"
+    },
+    "environment_operations": [],
+    "steps": [
+      {
+        "name": "cloudxr-compose",
+        "argv": [
+          "./docker/container.py",
+          "start",
+          "--files",
+          "docker-compose.cloudxr-runtime.patch.yaml",
+          "{{software.dexverse_path}}/source/dexverse/docker_utils/docker-compose.dexverse.patch.yaml",
+          "--env-file",
+          ".env.cloudxr-runtime"
+        ],
+        "cwd": "{{software.isaaclab_path}}",
+        "environment": {},
+        "environment_operations": []
+      }
+    ],
+    "operator_steps": [
+      {
+        "name": "debug-teleop-and-calibrate-inside-container",
+        "argv": [
+          "/workspace/isaaclab/isaaclab.sh",
+          "-p",
+          "/workspace/dexverse/scripts/teleop_agent.py",
+          "--task",
+          "Dexverse-PickUpStick-v0",
+          "--teleop_device",
+          "handtracking",
+          "--enable_pinocchio",
+          "--robot_type",
+          "floating_shadow_right",
+          "--teleop_retargeter",
+          "relative",
+          "--retargeting_scheme",
+          "dexpilot"
+        ],
+        "cwd": "/workspace/isaaclab",
+        "environment": {},
+        "environment_operations": []
+      },
+      {
+        "name": "record-demos-inside-container",
+        "argv": [
+          "./isaaclab.sh",
+          "-p",
+          "/workspace/dexverse/scripts/record_demos.py",
+          "--task",
+          "{{config.task}}",
+          "--dataset_dir",
+          "{{config.dataset_dir}}",
+          "--teleop_device",
+          "handtracking",
+          "--enable_pinocchio",
+          "--num_demos",
+          "{{config.num_demos}}",
+          "--num_success_steps",
+          "{{config.num_success_steps}}",
+          "--robot_type",
+          "{{config.robot_type}}",
+          "--teleop_retargeter",
+          "{{config.teleop_retargeter}}",
+          "--retargeting_scheme",
+          "{{config.retargeting_scheme}}"
+        ],
+        "cwd": "/workspace/isaaclab",
+        "environment": {},
+        "environment_operations": []
+      }
+    ]
+  },
+  "defaults": {
+    "runtime_profile": "isaacsim-5.1.0_isaaclab-2.3.2_py311",
+    "config": {
+      "task": "Dexverse-PickUpStick-v0",
+      "robot_type": "floating_shadow_right",
+      "dataset_dir": "collection-session",
+      "num_demos": 50,
+      "num_success_steps": 10,
+      "teleop_retargeter": "relative",
+      "retargeting_scheme": "dexpilot",
+      "stream": {
+        "server_address": ""
+      },
+      "gui": {
+        "endpoint": ""
+      }
+    },
+    "software": {
+      "dexverse_path": "",
+      "dexverse_commit": "30cc673e27684b9f10186fa6bea731aed246bc9f",
+      "isaaclab_path": "/coc/flash7/ycho420/repos/shared/IsaacLab/v2.3.2",
+      "isaaclab_version": "v2.3.2",
+      "isaac_sim_version": "5.1.0",
+      "cloudxr_image": "nvcr.io/nvidia/cloudxr-runtime:5.0.1",
+      "credential_refs": {
+        "ngc": "",
+        "huggingface": ""
+      }
+    },
+    "calibration": {
+      "identity": "",
+      "sha256": "",
+      "metadata": {
+        "schema_version": "dexverse-visionpro-wrist-calibration/v1",
+        "dexverse_commit": "30cc673e27684b9f10186fa6bea731aed246bc9f",
+        "isaaclab_commit": "37ddf626871758333d6ed89cf64ad702aef127d0",
+        "client_commit": "045bbbc3f960d301173b712c6ead4617f3f94eb0",
+        "client_tag": "v2.3.0",
+        "trigger_event": "START",
+        "teleop_device": "handtracking",
+        "teleop_retargeter": "relative",
+        "retargeting_scheme": "dexpilot",
+        "robot_type": "floating_shadow_right",
+        "task": "Dexverse-PickUpStick-v0",
+        "hands": [
+          "right"
+        ],
+        "calibrated_at": "",
+        "operator_identity_ref": "",
+        "visionos_version": "",
+        "client_build_identifier": "",
+        "bundle_identifier": "",
+        "device_label": "",
+        "server_address": "",
+        "start_event_sequence": null,
+        "reference_pose_attestation": "",
+        "red_joint_markers_verified": false,
+        "robot_motion_verified": false,
+        "notes": ""
+      }
+    },
+    "capture": {
+      "schema_name": "dexverse_trajectory",
+      "schema_version": "3",
+      "clock_source": "isaac-simulation-step",
+      "nominal_rate_hz": 90,
+      "timestamp_unit": "step-index",
+      "alignment": "action_then_post_state",
+      "timestamps_recorded": false,
+      "metadata": {
+        "states_length": "T+1",
+        "rate_must_match_selected_task_sim_dt": true
+      }
+    },
+    "capabilities": {
+      "container-runtime": {
+        "status": "unknown",
+        "scope": "compute_node",
+        "verified_by": null,
+        "checked_at": null,
+        "details": {}
+      },
+      "container-daemon": {
+        "status": "admin_required",
+        "scope": "compute_node",
+        "verified_by": null,
+        "checked_at": null,
+        "details": {}
+      },
+      "allocated-gpu": {
+        "status": "unknown",
+        "scope": "compute_node",
+        "verified_by": null,
+        "checked_at": null,
+        "details": {}
+      },
+      "cloudxr-port-configuration": {
+        "status": "admin_required",
+        "scope": "network",
+        "verified_by": null,
+        "checked_at": null,
+        "details": {}
+      },
+      "operator-gui": {
+        "status": "unknown",
+        "scope": "operator",
+        "verified_by": null,
+        "checked_at": null,
+        "details": {}
+      },
+      "stream-endpoint": {
+        "status": "unknown",
+        "scope": "client",
+        "verified_by": null,
+        "checked_at": null,
+        "details": {}
+      },
+      "visionpro-client-build": {
+        "status": "UNKNOWN",
+        "scope": "compute_node",
+        "verified_by": null,
+        "checked_at": null,
+        "details": {}
+      },
+      "visionpro-handtracking": {
+        "status": "UNKNOWN",
+        "scope": "compute_node",
+        "verified_by": null,
+        "checked_at": null,
+        "details": {}
+      },
+      "retargeting-calibration": {
+        "status": "UNKNOWN",
+        "scope": "compute_node",
+        "verified_by": null,
+        "checked_at": null,
+        "details": {}
+      }
+    },
+    "storage": {
+      "native_format": "dexverse_trajectory_pickle_v3",
+      "metadata": {
+        "conversion_policy": "separate-data-derivation"
+      }
+    },
+    "resources": {
+      "gateway": "auto",
+      "account": "rl2-lab",
+      "partition": "rl2-lab",
+      "gpu_count": 1,
+      "gpu_type": "l40s",
+      "cpu_count": 16,
+      "memory_gb": 64,
+      "time_limit": "04:00:00",
+      "node": null
+    }
+  },
+  "todos": [
+    "Obtain administrator evidence for compute-node container runtime/daemon access, Slurm GPU isolation, graphics/NVENC support, and the CloudXR port configuration.",
+    "Verify the operator GUI path and Vision Pro stream endpoint during a real allocation; the application does not claim firewall reachability from configuration alone.",
+    "The pinned record_demos.py command is stored as an operator step, not auto-executed. Confirm the site-specific container enter/attach command and manual Start AR sequence before promoting it to an automatic launcher step.",
+    "Confirm that the requested nominal capture rate matches the selected task simulation dt; schema v3 stores step order but no per-sample timestamps.",
+    "Constrain the upstream compose definition, which requests all GPUs, to the Slurm-allocated GPU before setting runnable=true.",
+    "Store only credential references in snapshots; never persist NGC, Hugging Face, Apple, or VPN secrets."
+  ],
+  "metadata": {
+    "source_repository": "https://github.com/ycyao216/DexVerse",
+    "source_commit": "30cc673e27684b9f10186fa6bea731aed246bc9f",
+    "recorder_source": "scripts/record_demos.py",
+    "action_layout_source": "source/dexverse/dexverse/robot_agents/shadow/floating.py",
+    "client_repository": "https://github.com/isaac-sim/isaac-xr-teleop-sample-client-apple",
+    "client_commit": "045bbbc3f960d301173b712c6ead4617f3f94eb0",
+    "raw_format_policy": "preserve-native",
+    "calibration_contract": {
+      "schema_version": "dexverse-visionpro-wrist-calibration/v1",
+      "mode": "operator-attested",
+      "automatic_calibration_api": false,
+      "statement": "DexVerse calibrates wrist pose inside its teleoperation callback when the operator sends START; this adapter records an operator attestation and does not claim access to an exported calibration matrix.",
+      "identity_rule": "Create a new stable unique identity for every successfully verified START calibration event. Do not reuse it after a reset, reconnect, tracking loss, or any change to operator, device, task, robot, retargeter, retargeting scheme, client build, or pinned source.",
+      "sha256_payload": {
+        "fields": [
+          "identity",
+          "metadata"
+        ],
+        "canonicalization": "UTF-8 JSON with object keys sorted recursively, compact separators, and non-finite numbers rejected.",
+        "algorithm": "SHA-256",
+        "verification": "operator-supplied; no automatic calibration export or semantic verification is provided"
+      },
+      "required_metadata": [
+        "schema_version",
+        "dexverse_commit",
+        "isaaclab_commit",
+        "client_commit",
+        "client_tag",
+        "trigger_event",
+        "teleop_device",
+        "teleop_retargeter",
+        "retargeting_scheme",
+        "robot_type",
+        "task",
+        "hands",
+        "calibrated_at",
+        "operator_identity_ref",
+        "visionos_version",
+        "client_build_identifier",
+        "bundle_identifier",
+        "device_label",
+        "server_address",
+        "start_event_sequence",
+        "reference_pose_attestation",
+        "red_joint_markers_verified",
+        "robot_motion_verified"
+      ],
+      "deliberately_not_captured": [
+        "Internal wrist calibration transform or pose matrix, because the pinned DexVerse interface does not expose it as a calibration artifact."
+      ],
+      "recalibration_rules": [
+        "STOP makes capture inactive; every subsequent START invokes wrist calibration again and requires a new identity and hash.",
+        "RESET discards the active episode and resets the environment and teleoperation interface; RESET itself does not calibrate, and the next START performs calibration and requires a new identity and hash.",
+        "After a successful episode is finalized and the environment resets, the next START performs calibration and requires a new identity and hash.",
+        "After IK recovery, reconnect, tracking loss, or any context change listed by identity_rule, RESET if needed and create a new attestation on the next START."
+      ]
+    },
+    "operator_workflow": {
+      "source_basis": {
+        "dexverse_commit": "30cc673e27684b9f10186fa6bea731aed246bc9f",
+        "isaaclab_commit": "37ddf626871758333d6ed89cf64ad702aef127d0",
+        "apple_client_commit": "045bbbc3f960d301173b712c6ead4617f3f94eb0",
+        "apple_client_tag": "v2.3.0"
+      },
+      "steps": [
+        {
+          "id": "prepare-physical-client",
+          "actor": "operator",
+          "instruction": "Build and install the pinned v2.3.0 client on a physical Vision Pro using Xcode 26 with the visionOS 26 platform, an Apple signing team, a unique bundle identifier, and Developer Mode."
+        },
+        {
+          "id": "start-server-and-check-network",
+          "actor": "operator",
+          "instruction": "Start the pinned CloudXR/Isaac runtime, enable OpenXR and System OpenXR Runtime, start AR, and confirm the Vision Pro can reach the workstation on TCP 48010 before connecting."
+        },
+        {
+          "id": "connect-and-check-tracking",
+          "actor": "operator",
+          "instruction": "Enter the workstation address in the client, connect, grant Local Network and Hand Tracking permissions, press Play, and verify that red tracked-joint markers are visible and follow both hands."
+        },
+        {
+          "id": "debug-before-recording",
+          "actor": "operator",
+          "launcher_step": "debug-teleop-and-calibrate-inside-container",
+          "instruction": "Use the debug teleoperation command before writing demonstrations. Assume the intended reference pose, then send START; the pinned DexVerse callback calibrates wrist pose at that event."
+        },
+        {
+          "id": "verify-retargeting",
+          "actor": "operator",
+          "instruction": "Verify wrist motion, finger motion, robot type, task, relative/absolute wrist mode, and dexpilot/vector finger scheme. Use RESET for an invalid pose or IK failure, then calibrate again on the next START."
+        },
+        {
+          "id": "record-attestation",
+          "actor": "operator",
+          "instruction": "Fill every required calibration metadata field, generate a new calibration identity, compute the declared SHA-256 payload, and mark retargeting-calibration verified. This is a manual attestation, not an automatic calibration export."
+        },
+        {
+          "id": "record-demonstrations",
+          "actor": "operator",
+          "launcher_step": "record-demos-inside-container",
+          "instruction": "Begin recording only after debug verification. Treat every later START as a new calibration event and associate the exact capture segment/session with its new identity and hash."
+        }
+      ],
+      "checks": [
+        "Physical Vision Pro is used; the simulator does not provide the required hand tracking.",
+        "The pinned client build, source commits, task, robot, wrist mode, and finger scheme match calibration metadata.",
+        "Red tracked-joint markers are visible and responsive before START.",
+        "Robot wrist and fingers respond correctly after START.",
+        "RESET is recorded as invalidating the prior capture context; recalibration is recorded only after the next START."
+      ]
+    }
+  }
+}
