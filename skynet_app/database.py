@@ -1491,7 +1491,10 @@ class Database:
             SELECT e.*, p.name AS project_name, r.id AS latest_revision_id,
                    r.revision_number AS latest_revision_number,
                    r.requested_spec_sha256 AS latest_spec_sha256,
-                   r.submitted_at AS latest_revision_submitted_at
+                   r.submitted_at AS latest_revision_submitted_at,
+                   json_extract(r.requested_spec_json, '$.source.revision') AS git_revision,
+                   json_extract(r.requested_spec_json, '$.source.repository') AS repository,
+                   json_extract(r.requested_spec_json, '$.source.project_subdirectory') AS project_subdirectory
             FROM experiments e
             LEFT JOIN projects p ON p.id = e.project_id
             LEFT JOIN experiment_revisions r ON r.id = (
@@ -2688,9 +2691,27 @@ class Database:
             parameters.append(status)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self.connection() as connection:
-            return self._decode_many(connection.execute(
+            evaluations = self._decode_many(connection.execute(
                 f"SELECT * FROM evaluations {where} ORDER BY created_at DESC", parameters
             ).fetchall())
+            # Fetch result summaries in batches; list rows must not depend on
+            # opening each result detail (or issue one query per evaluation).
+            by_id = {item["id"]: item for item in evaluations}
+            identifiers = list(by_id)
+            for start in range(0, len(identifiers), 400):
+                batch = identifiers[start:start + 400]
+                placeholders = ",".join("?" for _ in batch)
+                artifacts = self._decode_many(connection.execute(f"""
+                    SELECT evaluation_id, metadata_json FROM artifacts
+                    WHERE artifact_type = 'EVALUATION_RESULT'
+                      AND evaluation_id IN ({placeholders})
+                    ORDER BY created_at
+                """, batch).fetchall())
+                for artifact in artifacts:
+                    by_id[artifact["evaluation_id"]]["aggregate"] = (
+                        artifact.get("metadata_json") or {}
+                    ).get("aggregate", [])
+            return evaluations
 
     def get_evaluation(self, evaluation_id: str) -> dict[str, Any] | None:
         with self.connection() as connection:

@@ -324,6 +324,12 @@ def test_runtime_readiness_validation_cache_avoids_repeated_ssh(monkeypatch) -> 
         (GROOT_RUNTIME_PROFILE, "sky2"),
     ]
 
+    service._verify_evaluator_runtime_readiness(
+        GROOT_RUNTIME_PROFILE, "sky2", suite_config={"suite": "test"},
+        operator_environment={"OMNI_KIT_ACCEPT_EULA": "YES"},
+    )
+    assert len(calls) == 3, "Operator environment changes must invalidate readiness"
+
 
 def test_runtime_probe_carries_full_contract_and_explicit_operator_environment() -> None:
     class ProbeCluster:

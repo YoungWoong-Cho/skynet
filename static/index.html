@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Skynet Slurm experiment and evaluation console.">
     <title>Skynet / Experiment Console</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260903-workflow-nav">
-    <script src="/static/app.js?v=20260904-hydra-defaults" defer></script>
+    <link rel="stylesheet" href="/static/styles.css?v=20260904-browser-fixes">
+    <script src="/static/app.js?v=20260904-browser-fixes" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -29,8 +29,8 @@
         <label for="gateway">SSH gateway</label>
         <select id="gateway" name="gateway">
           <option value="auto">Auto: sky1 then sky2</option>
-          <option value="sky1">Prefer sky1</option>
-          <option value="sky2">Prefer sky2</option>
+          <option value="sky1">Only sky1</option>
+          <option value="sky2">Only sky2</option>
         </select>
         <span id="connection-dot" class="connection-dot is-loading" aria-hidden="true"></span>
       </div>
@@ -97,11 +97,7 @@
                   <summary><span id="jobs-account-filter-label">All accounts</span></summary>
                   <div id="jobs-account-filter-options" class="filter-options"></div>
                 </details>
-                <div class="legend" aria-label="Job state legend">
-                  <span><i class="legend-dot running"></i> Running</span>
-                  <span><i class="legend-dot pending"></i> Pending</span>
-                  <span><i class="legend-dot other"></i> Other</span>
-                </div>
+                <span class="quiet-label">Pending jobs only; running allocations appear in node usage.</span>
               </div>
             </div>
             <div class="table-scroll">
@@ -121,6 +117,7 @@
                 </tbody>
               </table>
             </div>
+            <div class="form-actions"><button id="jobs-previous" type="button" class="button button-outline">Previous jobs</button><span id="jobs-page" role="status"></span><button id="jobs-next" type="button" class="button button-outline">Next jobs</button></div>
           </section>
         </div>
       </section>
@@ -144,7 +141,7 @@
               <div class="panel-heading">
                 <div>
 
-                  <h2>Configure a training run</h2>
+                  <h2>Configure a training run</h2><p>Choose a model adapter, pin its repository version, then select training data in a format the adapter accepts. Simulation evaluation is configured separately after a checkpoint is available.</p>
                   <p id="experiment-revision-intent" class="secondary">Submitted specifications are immutable. Changes create a new experiment revision.</p>
                 </div>
                 <span id="adapter-status" class="quiet-label">Loading adapters...</span>
@@ -388,7 +385,7 @@
                   </label>
                   <div class="field span-4">
                     <label for="sweep-definition">Sweep / variant matrix</label>
-                    <textarea id="sweep-definition" rows="4" placeholder='JSON or adapter-supported YAML, e.g. {"model.encoder":["resnet50","dinov2"],"seed":[1,2,3]}'></textarea>
+                    <textarea id="sweep-definition" rows="4" placeholder='JSON, e.g. {"model.encoder":["resnet50","dinov2"],"seed":[1,2,3]}'></textarea>
                     <small>An empty matrix creates one variant.</small>
                   </div>
                 </div>
@@ -465,6 +462,11 @@
               </div>
               <div id="experiment-preview-panel" hidden>
                 <div id="experiment-preview-meta" class="preview-meta"></div>
+                <ul id="experiment-preview-warnings" class="preview-blockers" aria-label="Preview warnings" hidden></ul>
+                <label for="experiment-preview-variant">Script variant</label>
+                <select id="experiment-preview-variant"></select>
+                <label><input id="experiment-preview-full" type="checkbox"> Show full embedded script payloads</label>
+                <button id="experiment-preview-download" class="button button-outline" type="button">Download exact script</button>
                 <div id="experiment-preview-blockers" class="preview-blockers" role="alert" hidden>
                   <strong>Blocked variants</strong>
                   <ul id="experiment-preview-blocker-list"></ul>
@@ -557,13 +559,13 @@
               </div>
               <div class="toolbar">
                 <input id="run-search" type="search" placeholder="Filter ID, experiment, variant">
-                <select id="run-status-filter">
+                <label for="run-status-filter">Run state</label><select id="run-status-filter">
                   <option value="all">All states</option>
                   <option value="running">Running</option>
                   <option value="pending">Pending</option>
                   <option value="failed">Failed</option>
                   <option value="completed">Completed</option>
-                  <option value="preempted">Preempted</option>
+                  <option value="preempted">Preempted</option><option value="draft">Draft</option><option value="cancelled">Cancelled</option><option value="timeout">Timed out</option>
                 </select>
                 <span id="run-count" class="quiet-label">Not loaded</span>
               </div>
@@ -682,7 +684,7 @@
               <div>
 
                 <h2>Submit an evaluation</h2>
-                <p class="secondary">Choose a training run, configure the task, and submit its evaluation job.</p>
+                <p class="secondary">Choose a training checkpoint and an independently versioned simulation suite. Only compatible evaluators are offered; readiness checks explain missing runtimes or unsupported tasks.</p>
               </div>
             </div>
             <fieldset class="form-section">
@@ -690,7 +692,7 @@
               <div class="form-grid">
                 <div class="field span-2">
                   <label for="evaluation-run-id">Training run ID</label>
-                  <input id="evaluation-run-id" placeholder="run_..." aria-describedby="evaluation-run-validation" required>
+                  <input id="evaluation-run-id" placeholder="Choose a run or paste its UUID" list="evaluation-run-options" aria-describedby="evaluation-run-validation" required>
                   <small id="evaluation-run-validation" class="field-validation" aria-live="polite">Enter a training run ID.</small>
                 </div>
                 <div class="field span-2">
@@ -735,7 +737,7 @@
                 </div>
                 <div class="field">
                   <label for="evaluation-seeds">Seeds</label>
-                  <input id="evaluation-seeds" value="0,1,2">
+                  <p id="evaluation-seeds-error" class="field-validation is-invalid" role="alert" hidden></p><input aria-describedby="evaluation-seeds-error" id="evaluation-seeds" value="0,1,2">
                 </div>
                 <div class="field">
                   <label for="evaluation-parallelism">Parallel jobs</label>
@@ -775,7 +777,7 @@
               </details>
             </fieldset>
             <div class="form-actions sticky-actions">
-              <button id="submit-evaluation" class="button button-accent" type="submit" disabled>Create evaluation</button>
+              <p id="evaluation-resource-summary" class="field-validation">Allocation is resolved from the selected training run.</p><button id="submit-evaluation" class="button button-accent" type="submit" disabled>Create evaluation</button>
             </div>
           </form>
 
@@ -785,7 +787,9 @@
 
                 <h2>Evaluation jobs and results</h2>
               </div>
-              <span id="evaluation-count" class="quiet-label">Not loaded</span>
+              <label for="evaluation-search">Find evaluation</label><input id="evaluation-search" type="search" placeholder="Evaluation, run or suite">
+                <label for="evaluation-state-filter">State</label><select id="evaluation-state-filter"><option value="all">All states</option><option>SUCCEEDED</option><option>FAILED</option><option>RUNNING</option><option>PENDING</option><option>CANCELLED</option></select>
+                <span id="evaluation-count" class="quiet-label">Not loaded</span>
             </div>
             <div class="table-scroll tall-table">
               <table>
@@ -857,7 +861,9 @@
                             <h3>Canonical results</h3>
                             <span id="evaluation-result-status" class="quiet-label"></span>
                           </div>
-                          <pre class="result-view"><code id="evaluation-result-json"></code></pre>
+                          <p>A completed job means the evaluation ran. Task success below measures whether the robot achieved the goal.</p>
+                          <div id="evaluation-result-summary" class="key-value-grid"></div>
+                          <details><summary>Full result record / JSON</summary><pre class="result-view"><code id="evaluation-result-json"></code></pre></details>
                         </div>
                       </aside>
           </section>
@@ -1044,7 +1050,7 @@
                               <div class="field"><label for="collection-time-limit">Time limit</label><input id="collection-time-limit" value="04:00:00" required></div>
                             </div>
                           </fieldset>
-                          <div class="form-actions sticky-actions"><button id="create-collection-session" class="button button-accent" type="submit">Create draft session</button></div>
+                          <p id="collection-session-availability" role="status"></p><div class="form-actions sticky-actions"><button id="create-collection-session" disabled class="button button-accent" type="submit">Create draft session</button></div>
                         </div>
                       </form>
             <section id="collection-session-detail" class="row-disclosure inline-drawer" hidden>
@@ -1219,8 +1225,8 @@
                 <div class="form-grid">
                   <div class="field span-2"><label for="data-import-revision">Exact Hugging Face revision</label><input id="data-import-revision" minlength="40" maxlength="40" pattern="[A-Fa-f0-9]{40}" placeholder="40-character commit SHA" required><small>Mutable names such as main are rejected.</small></div>
                   <div class="field span-2"><label for="data-import-subset">Dataset directory</label><input id="data-import-subset" placeholder="Repository-relative directory" required><small>Enter the directory only; do not add /**.</small></div>
-                  <div class="field"><label for="data-import-format">Format</label><input id="data-import-format" placeholder="Declared format identifier" required><small>Must exactly match the format declared by the consuming adapter.</small></div>
-                  <div class="field"><label for="data-import-role">Bundle role</label><input id="data-import-role" placeholder="Bundle assignment role" required></div>
+                  <div class="field"><label for="data-import-format">Format</label><input id="data-import-format" list="data-format-suggestions" placeholder="Declared format identifier" required><small>Must exactly match the format declared by the consuming adapter.</small></div>
+                  <div class="field"><label for="data-import-role">Bundle role</label><input id="data-import-role" list="data-role-suggestions" placeholder="Bundle assignment role" required></div>
                   <div class="field"><label for="data-import-bundle-name">Bundle name</label><input id="data-import-bundle-name" placeholder="Unique bundle name" required></div>
                   <div class="field"><label for="data-import-bundle-version">Bundle version</label><input id="data-import-bundle-version" placeholder="Immutable bundle version" required></div>
                   <div class="field"><label for="data-import-gateway">SSH gateway</label><select id="data-import-gateway"><option value="auto">Auto: sky1, then sky2</option><option value="sky1">sky1</option><option value="sky2">sky2</option></select></div>
@@ -1418,7 +1424,11 @@
                   <div class="field span-2"><label for="data-bundle-name">Bundle name</label><input id="data-bundle-name" placeholder="dexverse-training" required></div>
                   <div class="field span-2"><label for="data-bundle-version">Bundle version</label><input id="data-bundle-version" placeholder="v1 or exact release identifier" required></div>
                   <div class="field span-4"><label for="data-bundle-description">Description</label><input id="data-bundle-description" maxlength="500" placeholder="Compatibility and intended use"></div>
-                  <div class="field span-4"><label for="data-bundle-assignments">Role assignments / JSON</label><textarea id="data-bundle-assignments" rows="7" required placeholder='[{"role":"training_data","version_id":"...","mount_path":"data/train","required":true,"position":0}]'></textarea><small>Assign roles such as <code>simulation_assets</code>, <code>training_data</code>, and <code>evaluation_data</code>. Each assignment pins one immutable version.</small></div>
+                  <div class="field span-2"><label for="data-bundle-version-picker">Registered dataset version</label><select id="data-bundle-version-picker"><option value="">Choose a version</option></select></div>
+                  <div class="field"><label for="data-bundle-role-picker">Use as</label><select id="data-bundle-role-picker"><option value="training_data">Training data</option><option value="evaluation_data">Evaluation data</option><option value="simulation_assets">Simulation assets</option></select></div>
+                  <div class="field"><label for="data-bundle-mount-picker">Relative mount path</label><input id="data-bundle-mount-picker" placeholder="data/train"></div>
+                  <div class="span-4"><button id="add-data-bundle-assignment" type="button">Add version to bundle</button><p>Choose a registered version and its role, then add it below. Format compatibility is checked against the training adapter when you prepare an experiment. A bundle does not convert data or install a simulator.</p></div>
+                  <div class="field span-4"><label for="data-bundle-assignments">Selected assignments / editable JSON</label><textarea id="data-bundle-assignments" rows="7" required placeholder='[{"role":"training_data","version_id":"...","mount_path":"data/train","required":true,"position":0}]'></textarea><small>Assign roles such as <code>simulation_assets</code>, <code>training_data</code>, and <code>evaluation_data</code>. Each assignment pins one immutable version.</small></div>
                 </div>
                 <div class="form-actions"><button id="create-data-bundle" class="button button-accent" type="submit">Create bundle</button></div>
               </div>
@@ -1725,11 +1735,12 @@
       </section>
     </div>
 
+    <datalist id="evaluation-run-options"></datalist>
     <div id="toast" class="toast-region" hidden></div>
 
     <footer>
       <span>SKYNET / SLURM EXPERIMENT CONSOLE</span>
       <span>LOCAL OPERATOR TOOL / NO AUTH LAYER</span>
     </footer>
-  </body>
+  <datalist id="data-format-suggestions"></datalist><datalist id="data-role-suggestions"><option value="training_data"></option><option value="evaluation_data"></option><option value="simulation_assets"></option></datalist></body>
 </html>

@@ -1048,6 +1048,18 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function apiErrorMessage(detail) {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) return detail.map(apiErrorMessage).filter(Boolean).join("; ");
+  if (!detail || typeof detail !== "object") return detail == null ? "" : String(detail);
+  const message = detail.message || detail.msg || detail.reason || detail.error || detail.detail;
+  if (message) {
+    const path = Array.isArray(detail.loc) ? detail.loc.filter(part => part !== "body").join(".") : "";
+    return `${path ? `${path}: ` : ""}${apiErrorMessage(message)}`;
+  }
+  return JSON.stringify(detail, null, 2);
+}
+
 async function apiRequest(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
@@ -1063,9 +1075,7 @@ async function apiRequest(path, options = {}) {
   }
   if (!response.ok) {
     const detail = typeof payload === "object" && payload !== null ? payload.detail || payload.message : payload;
-    const message = Array.isArray(detail)
-      ? detail.map((item) => item.msg || String(item)).join("; ")
-      : detail;
+    const message = apiErrorMessage(detail);
     throw new Error(message || `Request failed (${response.status})`);
   }
   return payload;
@@ -1100,6 +1110,55 @@ function listFrom(payload, keys) {
 function entityFrom(payload, key) {
   if (payload && typeof payload === "object" && payload[key]) return payload[key];
   throw new Error(`Entity API response did not contain "${key}".`);
+}
+
+function askUserDialog(message, defaultValue = null) {
+  return new Promise((resolve) => {
+    const previousFocus = document.activeElement;
+    const dialog = document.createElement("dialog");
+    dialog.className = "action-dialog";
+    dialog.setAttribute("aria-label", defaultValue === null ? "Confirm action" : "Enter details");
+    const form = document.createElement("form");
+    form.method = "dialog";
+    const label = document.createElement("label");
+    label.textContent = message;
+    form.append(label);
+    let input = null;
+    if (defaultValue !== null) {
+      input = document.createElement("input");
+      input.value = defaultValue;
+      input.setAttribute("aria-label", message);
+      label.append(input);
+    }
+    const actions = document.createElement("div");
+    actions.className = "form-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "button button-outline";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", () => dialog.close("cancel"));
+    const confirm = document.createElement("button");
+    confirm.type = "submit";
+    confirm.className = "button button-accent";
+    confirm.textContent = "Continue";
+    actions.append(cancel, confirm);
+    form.append(actions);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      dialog.close("confirm");
+    });
+    dialog.append(form);
+    dialog.addEventListener("close", () => {
+      const accepted = dialog.returnValue === "confirm";
+      const result = input ? (accepted ? input.value : null) : accepted;
+      dialog.remove();
+      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+      resolve(result);
+    }, { once: true });
+    document.body.append(dialog);
+    dialog.showModal();
+    (input || cancel).focus();
+  });
 }
 
 function dismissToast(toast) {
@@ -1304,7 +1363,7 @@ function gpuAllocationCell(metric) {
   const assigned = users.reduce((total, user) => total + Number(user.usage || 0), 0);
   const units = Math.max(1, usage, assigned, limit || 0);
   const other = Math.max(0, usage - assigned);
-  const free = Math.max(0, units - Math.max(usage, assigned));
+  const free = hasLimit ? Math.max(0, limit - Math.max(usage, assigned)) : 0;
   const overLimit = hasLimit && usage > limit;
   const label = hasLimit ? `${usage} / ${limit}` : `${usage}`;
   const segments = users.map((user) => {
@@ -1325,7 +1384,7 @@ function gpuAllocationCell(metric) {
   }
   return `
     <div class="gpu-allocation ${overLimit ? "is-over" : ""}">
-      <div class="allocation-meta"><span>${label}</span><span>${hasLimit ? `${Math.max(0, limit - usage)} free` : "unlimited"}</span></div>
+      <div class="allocation-meta"><span>${label}</span><span>${hasLimit ? (limit === 0 ? "No GPU quota" : `${Math.max(0, limit - usage)} free`) : "Limit not reported"}</span></div>
       <div class="allocation-bar" aria-label="${label} GPUs allocated">${segments.join("")}</div>
     </div>`;
 }
@@ -1437,7 +1496,19 @@ function applyPartitionFilters() {
   renderJobs(jobs, pendingJobs.length);
 }
 
+let jobPage = 0;
+let visibleQueueJobs = [];
+let queueTotal = 0;
+const JOB_PAGE_SIZE = 100;
 function renderJobs(jobs, totalJobs = jobs.length) {
+  visibleQueueJobs = jobs;
+  queueTotal = totalJobs;
+  jobPage = Math.min(jobPage, Math.max(0, Math.ceil(jobs.length / JOB_PAGE_SIZE) - 1));
+  const start = jobPage * JOB_PAGE_SIZE;
+  const end = Math.min(start + JOB_PAGE_SIZE, jobs.length);
+  document.querySelector("#jobs-previous").disabled = jobPage === 0;
+  document.querySelector("#jobs-next").disabled = end >= jobs.length;
+  document.querySelector("#jobs-page").textContent = jobs.length ? `${start + 1}–${end} of ${jobs.length} matching jobs` : "No matching jobs";
   if (!jobs.length) {
     const message = totalJobs
       ? "No pending jobs match the selected filters."
@@ -1451,7 +1522,7 @@ function renderJobs(jobs, totalJobs = jobs.length) {
     ? `${jobs.length} pending jobs in the queue.`
     : `Showing ${jobs.length} of ${totalJobs} pending jobs.`;
 
-  elements.jobsBody.innerHTML = jobs.map((job) => {
+  elements.jobsBody.innerHTML = jobs.slice(start, end).map((job) => {
     const nodeCount = Number.isFinite(Number(job.node_count)) ? Number(job.node_count) : 0;
     const nodes = `${nodeCount} node${nodeCount === 1 ? "" : "s"}`;
     return `
@@ -2585,7 +2656,7 @@ function renderAdapterDeclaredFields(adapter = selectedAdapter()) {
       const source = choiceDiscovery?.source
         ? typeof choiceDiscovery.source === "string"
           ? choiceDiscovery.source
-          : compactJson(choiceDiscovery.source, 180)
+          : choiceDiscovery.source.entrypoint || choiceDiscovery.source.kind || "pinned repository metadata"
         : "";
       const warnings = choiceDiscovery?.warnings?.join(" ") || "";
       const allowCustom = field.choice_source.allow_custom === true;
@@ -3351,6 +3422,7 @@ function disclosureRowId(launcher) {
 function disclosureIntentForLauncher(launcher) {
   if (!launcher) return null;
   const fixed = {
+    "show-collection-session-form": [elements.collectionSessionForm, "collection-session:new"],
     "show-data-resource-form": [elements.dataResourceForm, "data-resource:new"],
     "show-data-derivation-form": [elements.dataDerivationForm, "data-derivation:new"],
     "show-data-bundle-form": [elements.dataBundleForm, "data-bundle:new"],
@@ -3597,7 +3669,7 @@ async function openAdapter(id, editable = false, launcher = null) {
     const jobRepoMatches = defaults.url && defaults.url === elements.experimentSource.value.trim();
     elements.adapterValidationRevision.value = jobRepoMatches ? elements.experimentRevision.value : "";
     elements.adapterEditorTitle.textContent = adapter.name || adapter.label || id;
-    renderAdapterVersions(nestedVersions);
+    renderAdapterVersions(versions);
     setAdapterEditorMode(editable && !adapterArchived(adapter) ? "edit" : "view");
     revealPanel(elements.adapterEditor, { focusTarget: elements.adapterEditorTitle, launcher: revealLauncher });
   } catch (error) {
@@ -3714,9 +3786,9 @@ async function validateAdapterManifest() {
 
 async function cloneAdapter(id) {
   const source = adapterRows.find((adapter) => adapterId(adapter) === id);
-  const name = window.prompt("Display name for the cloned adapter:", `${source?.name || "Adapter"} copy`);
+  const name = await askUserDialog("Display name for the cloned adapter:", `${source?.name || "Adapter"} copy`);
   if (!name) return;
-  const changeNote = window.prompt("Initial version change note:", `Cloned from ${source?.name || id}`);
+  const changeNote = await askUserDialog("Initial version change note:", `Cloned from ${source?.name || id}`);
   if (changeNote === null) return;
   try {
     const result = await api(`/api/adapters/${encodeURIComponent(id)}/clone`, {
@@ -3740,7 +3812,7 @@ async function cloneAdapter(id) {
 
 async function setAdapterArchived(id, archived) {
   const verb = archived ? "Archive" : "Restore";
-  if (!window.confirm(`${verb} adapter ${id}? Existing experiment snapshots will not change.`)) return;
+  if (!(await askUserDialog(`${verb} adapter ${id}? Existing experiment snapshots will not change.`))) return;
   try {
     await api(archived
       ? `/api/adapters/${encodeURIComponent(id)}`
@@ -3784,7 +3856,7 @@ function populateEvaluationSuites(preferredSuiteId = "", { runId = "" } = {}) {
   setSelectOptions(elements.evaluationSuite, evaluationSuites);
   elements.evaluationSuite.insertAdjacentHTML("afterbegin", '<option value="">Choose a suite...</option>');
   const desiredExists = evaluationSuites.some((suite) => evaluationSuiteId(suite) === desiredSuiteId);
-  const firstCompatibleSuiteId = runId ? evaluationSuiteId(evaluationSuites[0]) : "";
+  const firstCompatibleSuiteId = "";
   const selectedSuiteId = desiredExists ? desiredSuiteId : firstCompatibleSuiteId;
   elements.evaluationSuite.value = selectedSuiteId;
   elements.evaluationSuite.setCustomValidity("");
@@ -3794,7 +3866,9 @@ function populateEvaluationSuites(preferredSuiteId = "", { runId = "" } = {}) {
     ? desiredSuiteId
       ? `Suite ${desiredSuiteId} is not compatible with this run. Selected ${selectedSuite?.label || selectedSuite?.name || selectedSuiteId}, the first compatible suite.`
       : `Selected ${selectedSuite?.label || selectedSuite?.name || selectedSuiteId}, the first compatible suite for this run.`
-    : `${evaluationSuites.length} compatible suite${evaluationSuites.length === 1 ? "" : "s"} registered.`;
+    : desiredSuiteId && !desiredExists
+      ? `Unsupported: the previously selected suite is not compatible with this run. Choose a listed suite.`
+      : `${evaluationSuites.length} ${runId ? "compatible" : "registered"} suites available. Choose the simulation suite you intend to run.`;
   elements.evaluationSuiteStatus.textContent = selectionMessage;
   updateEvaluationEnvironmentFromSuite({ preserveTasks: desiredExists && selectedSuiteId === desiredSuiteId });
   if (elements.evaluationRunId.value.trim()) scheduleEvaluationTargetValidation();
@@ -4634,6 +4708,16 @@ function validateExperiment({ notify = true, batchValidation = null } = {}) {
     if (notify) showToast(message, true);
     return false;
   };
+  let sweepError = "";
+  const rawSweep = elements.sweepDefinition.value.trim();
+  if (rawSweep) {
+    try {
+      const sweep = JSON.parse(rawSweep);
+      if (!sweep || Array.isArray(sweep) || typeof sweep !== "object") sweepError = "Sweep must be a JSON object.";
+    } catch { sweepError = "Sweep must be valid JSON, for example {\"seed\":[1,2,3]}."; }
+  }
+  elements.sweepDefinition.setCustomValidity(sweepError);
+  if (sweepError) return reject(sweepError);
   const batchState = batchValidation || updateBatchCompatibility();
   if (!batchState.valid) return reject(batchState.errors[0]);
   const declared = collectAdapterDeclaredOverrides();
@@ -4690,9 +4774,34 @@ function validateExperiment({ notify = true, batchValidation = null } = {}) {
   return true;
 }
 
+let experimentPreviewSignature = null;
+let experimentPreviewScripts = [];
+
+function invalidateExperimentPreview() {
+  experimentPreviewSignature = null;
+  experimentPreviewScripts = [];
+  beginLogViewUpdate(elements.experimentScriptPreview);
+  clearExperimentPreviewAfterLoad();
+}
+
+function experimentPreviewIsCurrent() {
+  return experimentPreviewSignature !== null
+    && experimentPreviewSignature === JSON.stringify(experimentPayload());
+}
+
+function renderSelectedExperimentScript() {
+  const selected = document.querySelector("#experiment-preview-variant");
+  const full = document.querySelector("#experiment-preview-full").checked;
+  const script = experimentPreviewScripts[Number(selected.value)] || "# No runnable variant was generated.";
+  const displayed = full ? script : script.split("\n").map((line) => line.length > 1200
+    ? `# Embedded payload omitted (${line.length.toLocaleString()} characters). Download the exact script or enable full script.`
+    : line).join("\n");
+  updateLogView(elements.experimentScriptPreview, displayed);
+}
+
 function updateExperimentSubmitState() {
   const batchValidation = updateBatchCompatibility();
-  const ready = !experimentBusy && validateExperiment({ notify: false, batchValidation });
+  const ready = !experimentBusy && validateExperiment({ notify: false, batchValidation }) && experimentPreviewIsCurrent();
   const existingExperiment = matchingExperimentForPayload(experimentPayload());
   const latestRevision = Number(existingExperiment?.latest_revision_number);
   const nextRevision = Number.isFinite(latestRevision) ? latestRevision + 1 : null;
@@ -4716,7 +4825,7 @@ function updateExperimentSubmitState() {
     ? existingExperiment
       ? "Create a new immutable experiment revision and submit its Training Runs to Slurm"
       : "Create this experiment and submit its Training Runs to Slurm"
-    : "Complete every required field and resolve all validation errors before submitting";
+    : "Complete the required fields and preview the current configuration before submitting";
 }
 
 function setExperimentBusy(busy) {
@@ -4725,26 +4834,40 @@ function setExperimentBusy(busy) {
 }
 
 async function previewExperiment() {
-  if (!validateExperiment()) return;
-  const previewGeneration = beginLogViewUpdate(elements.experimentScriptPreview);
+  invalidateExperimentPreview();
+  if (!validateExperiment()) { updateExperimentSubmitState(); return; }
+  const signature = JSON.stringify(experimentPayload());
+  elements.toast.replaceChildren();
+  elements.toast.hidden = true;
   setExperimentBusy(true);
   try {
     const result = await api("/api/experiments/preview", {
       method: "POST",
       body: JSON.stringify(experimentPayload()),
     });
+    if (signature !== JSON.stringify(experimentPayload())) return;
     const responseScripts = Array.isArray(result.scripts)
       ? result.scripts.filter((script) => typeof script === "string")
       : [];
     const runnableScripts = responseScripts.filter(experimentPreviewScriptIsRunnable);
-    const scripts = runnableScripts.length
-      ? runnableScripts.map((script, index) => `# Runnable variant ${index + 1}\n${script}`).join("\n\n")
-      : "# No runnable variant was generated.";
     const variantCount = result.variant_count ?? responseScripts.length;
     const warnings = Array.isArray(result.warnings) ? result.warnings : [];
     const blockers = Array.isArray(result.blockers) ? result.blockers : [];
     const shapeErrors = experimentPreviewShapeErrors(result);
-    updateLogView(elements.experimentScriptPreview, scripts, { generation: previewGeneration });
+    experimentPreviewScripts = runnableScripts;
+    const variantSelect = document.querySelector("#experiment-preview-variant");
+    variantSelect.innerHTML = runnableScripts.map((_, index) => `<option value="${index}">Variant ${index + 1}</option>`).join("");
+    variantSelect.disabled = !runnableScripts.length;
+    renderSelectedExperimentScript();
+    experimentPreviewSignature = !blockers.length && !shapeErrors.length && runnableScripts.length > 0 ? signature : null;
+    const warningList = document.querySelector("#experiment-preview-warnings");
+    warningList.replaceChildren();
+    warnings.forEach((warning) => {
+      const item = document.createElement("li");
+      item.textContent = typeof warning === "string" ? warning : JSON.stringify(warning);
+      warningList.append(item);
+    });
+    warningList.hidden = !warnings.length;
     elements.experimentPreviewMeta.textContent = `${variantCount} variant${variantCount === 1 ? "" : "s"} / ${runnableScripts.length} runnable / ${blockers.length} blocked${warnings.length ? ` / ${warnings.length} warning(s)` : ""}`;
     elements.experimentPreviewBlockerList.replaceChildren();
     blockers.forEach((blocker) => {
@@ -4766,6 +4889,23 @@ async function previewExperiment() {
   } finally {
     setExperimentBusy(false);
   }
+}
+
+function submissionFeedback(payload) {
+  const records = Array.isArray(payload?.submitted) ? payload.submitted
+    : Array.isArray(payload?.experiment?.runs) ? payload.experiment.runs
+      : Array.isArray(payload?.runs) ? payload.runs
+        : payload?.run ? [payload.run] : payload?.run_id ? [payload] : [];
+  const failed = records.filter((row) => ["FAILED", "BLOCKED", "SUBMISSION_FAILED"].includes(normalizedRunState(row.status)));
+  const pending = records.some((row) => ["SUBMITTING", "PENDING"].includes(normalizedRunState(row.status)) && !row.slurm_job_id && !row.latest_attempt?.slurm_job_id);
+  if (failed.length) return { error: true, message: failed.map((row) => `${row.run_id || row.id || "Run"}: ${row.error || row.latest_attempt?.slurm_reason || row.blockers?.join("; ") || row.status}`).join("\n") };
+  return { error: false, message: pending || !records.length ? "Submission is still being confirmed. Monitor the attempt before retrying." : "Submission processed. Check the Training Run state and Slurm job ID below." };
+}
+
+function showSubmissionFeedback(payload) {
+  const feedback = submissionFeedback(payload);
+  if (feedback.error) showNotice(elements.runsError, `Submission failed: ${feedback.message}`);
+  else showToast(feedback.message);
 }
 
 function createdExperimentId(payload) {
@@ -4811,7 +4951,7 @@ function explicitlySubmittedTrainingRunRecords(...payloads) {
   payloads.filter(Boolean).forEach((payload) => {
     exactPayloads.push({
       run: payload.run,
-      runs: payload.runs,
+      runs: payload.runs || (Array.isArray(payload.submitted) ? payload.submitted : undefined),
       run_ids: [
         ...(Array.isArray(payload.run_ids) ? payload.run_ids : []),
         ...(Array.isArray(payload.submission?.run_ids) ? payload.submission.run_ids : []),
@@ -4840,13 +4980,13 @@ function resetTrainingRunListFilters() {
 async function openSubmittedTrainingRun({ experimentId, revisionNumber = null, responses = [] }) {
   let records = explicitlySubmittedTrainingRunRecords(...responses);
   let resolution = "submit response";
-  const normalizedRevision = Number(revisionNumber);
+  const normalizedRevision = revisionNumber == null || revisionNumber === "" ? NaN : Number(revisionNumber);
   if (!records.length && experimentId) {
     if (!Number.isFinite(normalizedRevision)) {
       resetTrainingRunListFilters();
       await activateTab("runs");
       await loadRuns(true);
-      showNotice(elements.runsError, "Training submission succeeded, but the submit response returned no Training Run ID and no exact experiment revision was available for resolution.");
+      showNotice(elements.runsError, "Submission returned, but the submit response returned no Training Run ID and no exact experiment revision was available for resolution.");
       return;
     }
     try {
@@ -4859,7 +4999,7 @@ async function openSubmittedTrainingRun({ experimentId, revisionNumber = null, r
     } catch (error) {
       resetTrainingRunListFilters();
       await activateTab("runs");
-      showNotice(elements.runsError, `Training submission succeeded, but its new Training Run could not be resolved: ${error.message}`);
+      showNotice(elements.runsError, `Submission returned, but its new Training Run could not be resolved: ${error.message}`);
       return;
     }
   }
@@ -4867,7 +5007,7 @@ async function openSubmittedTrainingRun({ experimentId, revisionNumber = null, r
   await activateTab("runs");
   await loadRuns(true);
   if (!records.length) {
-    showNotice(elements.runsError, `Training submission succeeded, but ${resolution} did not identify a Training Run.`);
+    showNotice(elements.runsError, `Submission returned, but ${resolution} did not identify a Training Run.`);
     return;
   }
   const primaryRecords = records.filter((record) => record.primary === true || record.is_primary === true);
@@ -5065,6 +5205,10 @@ function variantRunDisplayState(run) {
 
 async function createExperiment(shouldSubmit) {
   if (!validateExperiment()) return;
+  if (shouldSubmit && !experimentPreviewIsCurrent()) {
+    showToast("Preview the current configuration before submitting.", true);
+    return;
+  }
   const payload = experimentPayload();
   const existingExperiment = matchingExperimentForPayload(payload);
   const existingId = existingExperiment?.id || existingExperiment?.experiment_id;
@@ -5075,7 +5219,7 @@ async function createExperiment(shouldSubmit) {
     const confirmation = existingId
       ? `Create and submit ${revisionLabel} of experiment "${payload.name}"? The submitted revision will be locked.`
       : `Create and submit experiment "${payload.name}"? The submitted specification will be locked.`;
-    if (!window.confirm(confirmation)) return;
+    if (!(await askUserDialog(confirmation))) return;
   }
   setExperimentBusy(true);
   try {
@@ -5102,7 +5246,7 @@ async function createExperiment(shouldSubmit) {
         ?? nextRevision;
       createdRevisionNumber = returnedRevision;
       const createdRevisionLabel = returnedRevision ? `revision ${returnedRevision}` : "a new revision";
-      showToast(`Experiment ${existingId} ${createdRevisionLabel} created${shouldSubmit ? " and submitted / locked" : " as a draft"}.`);
+      if (!shouldSubmit) showToast(`Experiment ${existingId} ${createdRevisionLabel} created as a draft.`);
     } else if (shouldSubmit) {
       if (!id) throw new Error("Experiment was created but the API returned no experiment ID.");
       const submitted = await api(`/api/experiments/${encodeURIComponent(id)}/submit`, {
@@ -5110,11 +5254,12 @@ async function createExperiment(shouldSubmit) {
         body: JSON.stringify({ gateway: elements.gateway.value }),
       });
       submissionResult = submitted;
-      const runCount = submitted.run_count ?? submitted.runs?.length ?? submitted.variant_count;
-      showToast(`Experiment ${id} submitted and locked${runCount ? ` as ${runCount} Training Run${runCount === 1 ? "" : "s"}` : ""}.`);
+      createdRevisionNumber = submitted.revision_number ?? submitted.experiment?.latest_revision?.revision_number;
+      // Report transport failures after opening the resulting run, without claiming success.
     } else {
       showToast(`Experiment ${id || payload.name} saved as a draft.`);
     }
+    invalidateExperimentPreview();
     await loadExperiments(true);
     if (shouldSubmit) {
       await openSubmittedTrainingRun({
@@ -5122,6 +5267,7 @@ async function createExperiment(shouldSubmit) {
         revisionNumber: createdRevisionNumber,
         responses: [submissionResult, result],
       });
+      showSubmissionFeedback(submissionResult);
     }
   } catch (error) {
     showToast(`${shouldSubmit ? "Submission" : "Save"} failed: ${error.message}`, true);
@@ -5135,21 +5281,21 @@ async function submitDraftExperiment(id, launcher = null) {
   if (!experiment || experimentLifecycle(experiment).locked) return;
   const revisionNumber = experiment.latest_revision_number;
   const revisionLabel = revisionNumber ? ` revision ${revisionNumber}` : "";
-  if (!window.confirm(`Submit experiment "${experiment.name || id}"${revisionLabel}? The submitted specification will be locked.`)) return;
+  if (!(await askUserDialog(`Submit experiment "${experiment.name || id}"${revisionLabel}? The submitted specification will be locked.`))) return;
   if (launcher) launcher.disabled = true;
   try {
     const submitted = await api(`/api/experiments/${encodeURIComponent(id)}/submit`, {
       method: "POST",
       body: JSON.stringify({ gateway: elements.gateway.value }),
     });
-    const runCount = submitted.run_count ?? submitted.runs?.length ?? submitted.variant_count;
-    showToast(`Experiment ${id}${revisionLabel} submitted and locked${runCount ? ` as ${runCount} Training Run${runCount === 1 ? "" : "s"}` : ""}.`);
+
     await loadExperiments(true);
     await openSubmittedTrainingRun({
       experimentId: id,
       revisionNumber,
       responses: [submitted],
     });
+    showSubmissionFeedback(submitted);
   } catch (error) {
     showToast(`Submission failed: ${error.message}`, true);
   } finally {
@@ -5469,6 +5615,7 @@ async function hydrateExperimentConfiguration(spec, request) {
   }
   elements.experimentDataBundle.setCustomValidity("");
   elements.experimentDataBundle.removeAttribute("aria-invalid");
+  populateExperimentDataBundles();
   renderAdapterDeclaredFields();
 
   const batch = train.batch && typeof train.batch === "object" ? train.batch : {};
@@ -5575,12 +5722,13 @@ async function hydrateExperimentConfiguration(spec, request) {
   updateBatchCompatibility();
   renderTrackingNamePreview();
   updateExperimentSubmitState();
-  clearExperimentPreviewAfterLoad();
+  invalidateExperimentPreview();
   clearNotice(elements.experimentsError);
   return true;
 }
 
 async function loadExperimentConfiguration(id, revisionNumber, launcher = null) {
+  invalidateExperimentPreview();
   const request = ++experimentConfigurationLoadRequest;
   const originalLabel = launcher?.textContent || "Load configuration";
   if (launcher) {
@@ -5592,7 +5740,7 @@ async function loadExperimentConfiguration(id, revisionNumber, launcher = null) 
     if (request !== experimentConfigurationLoadRequest) return;
     const experiment = entityFrom(payload, "experiment");
     const loaded = requestedExperimentRevision(experiment, revisionNumber);
-    const hydrated = await hydrateExperimentConfiguration(loaded.spec, request);
+    const hydrated = await hydrateExperimentConfiguration({ ...loaded.spec, name: loaded.spec.name || experiment.name }, request);
     if (!hydrated || request !== experimentConfigurationLoadRequest) return;
     elements.experimentName.focus({ preventScroll: true });
     elements.experimentName.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
@@ -5784,6 +5932,7 @@ function progressSummaryLabel(summary) {
   if (Number.isFinite(completed) && Number.isFinite(total)) {
     return `${completed}/${total} ${summary.unit || "items"}`;
   }
+  if (["complete", "not_applicable"].includes(summary.eta_state)) return "No progress recorded";
   if (Number.isFinite(total)) return `Waiting for ${summary.unit || "progress"} data`;
   return "Progress unknown";
 }
@@ -5845,9 +5994,10 @@ function etaCell(summary) {
 
 function runResourceLabel(run) {
   const resources = run.resources || {};
-  const gpus = resources.gpus_per_node ?? resources.gpu_count ?? run.gpu_count ?? run.gpus;
+  const latest = run.latest_attempt || {};
+  const gpus = latest.gpu_count ?? resources.gpu?.count ?? resources.gpus_per_node ?? resources.gpu_count ?? run.gpu_count ?? run.gpus;
   const nodes = resources.nodes ?? run.nodes;
-  const gpuType = resources.gpu_type || run.gpu_type;
+  const gpuType = latest.gpu_type || resources.gpu?.type || resources.gpu_type || run.gpu_type;
   const parts = [];
   if (gpus) parts.push(`${gpus}x ${gpuType || "GPU"}`);
   if (nodes) parts.push(`${nodes} node${Number(nodes) === 1 ? "" : "s"}`);
@@ -5866,8 +6016,12 @@ function filteredRuns() {
       run.experiment_id,
       run.variant_name,
       run.variant_id,
+      run.latest_attempt?.slurm_job_id,
+      run.slurm_job_id,
     ].join(" ").toLowerCase();
-    return (!query || haystack.includes(query)) && (stateFilter === "all" || state.includes(stateFilter));
+    const matchesState = stateFilter === "all"
+      || (stateFilter === "completed" ? ["succeeded", "completed"].includes(state) : state === stateFilter);
+    return (!query || haystack.includes(query)) && matchesState;
   });
 }
 
@@ -5894,7 +6048,7 @@ function runRowDescriptor(run) {
       { html: `<span class="node-name">${escapeHtml(runLabel)}</span><span class="secondary">${escapeHtml(runSecondary)}</span>` },
       { html: `${escapeHtml(run.experiment_name || run.experiment_id || "-")}<span class="secondary">${escapeHtml([experimentRevision, variantLabel].filter(Boolean).join(" / "))}</span>` },
       { html: statusPill(state) },
-      { html: `<span class="job-id">${escapeHtml(slurm)}</span><span class="secondary">${escapeHtml(run.partition || run.resources?.partition || "")}</span>` },
+      { html: `<span class="job-id">${escapeHtml(slurm)}</span><span class="secondary">${escapeHtml(run.latest_attempt?.partition_name || run.partition || run.resources?.partition || "")}</span>` },
       { html: escapeHtml(runResourceLabel(run)) },
       { html: escapeHtml(attemptLabel) },
       { html: progressCell(progress, progressLabel) },
@@ -6220,7 +6374,7 @@ async function resolveRunAttemptCommonHyperparameters(record, action) {
   const body = action.body && typeof action.body === "object" ? action.body : {};
   if (body.allow_network === true) {
     const gateway = String(body.gateway || "").trim();
-    const confirmed = window.confirm(
+    const confirmed = await askUserDialog(
       `Resolving actual values requires network inspection of the pinned repository${gateway ? ` through ${gateway}` : ""}. Continue?`,
     );
     if (!confirmed) return;
@@ -6640,7 +6794,7 @@ function renderRunDetailContent(payload, id, { preserveAttempt = false } = {}) {
     setHtmlIfChanged(elements.runDetailActions, `
       ${runEvaluationActionButton(run, id)}
       ${trackingActionButtons}
-      ${runActionButton("resume", "Resume Training Run / new attempt", "button button-outline")}
+      ${runActionButton("resume", /no usable|from scratch|from the beginning|initial pinned/i.test(manualActions.resume?.reason || "") ? "Restart training from beginning / new attempt" : "Resume Training Run / new attempt", "button button-outline")}
       ${runActionButton("rerun", "Start new Training Run from pinned variant", "button button-outline")}
       ${cancellationActionButton("run", id, manualActions)}`);
   const existingAttemptRows = new Map(
@@ -6865,9 +7019,11 @@ async function pollRunDetail(generation, runId, { finalCycle = false, includeLis
       .catch((reason) => ({ status: "rejected", reason }));
     if (generation !== runDetailPollGeneration || !runDetailPollEligible(runId)) return;
     if (detailResult.status === "rejected") {
+      showNotice(elements.runsError, `Live run update failed; displayed data may be stale: ${detailResult.reason.message}. Retrying automatically.`);
       scheduleRunDetailPoll(RUN_DETAIL_POLL_INTERVAL_MS, { includeList: true });
       return;
     }
+    if (elements.runsError.textContent.startsWith("Live run update failed")) clearNotice(elements.runsError);
     const detail = renderRunDetail(detailResult.value, runId, { preserveAttempt: true, background: true });
     if (!detail.latestRecord) {
       closeRunAttemptDisclosure({ restoreFocus: false });
@@ -7033,6 +7189,7 @@ function evaluationCheckpointForRun(run) {
 const RUN_EVALUATION_CHECKPOINT_REQUIRED = "A registered checkpoint is required";
 
 function runEvaluationAction(run) {
+  if (run?.evaluation_blocker) return { enabled: false, reason: run.evaluation_blocker, checkpointPath: "" };
   const checkpointPath = evaluationCheckpointForRun(run);
   return checkpointPath
     ? { enabled: true, reason: "", checkpointPath }
@@ -7133,6 +7290,11 @@ function evaluationTargetSignature() {
     checkedEvaluationTaskIds(),
     elements.evaluationArgv.value.trim(),
     elements.evaluationResumeArgv.value.trim(),
+    elements.gateway.value,
+    elements.evaluationEpisodes.value,
+    elements.evaluationSeeds.value,
+    elements.evaluationParallelism.value,
+    elements.evaluationHeadless.checked,
   ]);
 }
 
@@ -7143,13 +7305,25 @@ function setEvaluationFieldValidation(element, status, state, message) {
   else element.removeAttribute("aria-invalid");
 }
 
+function evaluationSeedsValid() {
+  const raw = elements.evaluationSeeds.value.trim();
+  const valid = raw !== "" && raw.split(",").every((seed) => /^\d+$/.test(seed.trim()) && Number.isSafeInteger(Number(seed)));
+  const message = valid ? "" : "Enter comma-separated nonnegative integer seeds, for example 0,1,2.";
+  elements.evaluationSeeds.setCustomValidity(message);
+  const hint = document.querySelector("#evaluation-seeds-error");
+  if (hint) { hint.textContent = message; hint.hidden = valid; }
+  return valid;
+}
+
 function updateEvaluationSubmitState() {
   const currentIsValid = evaluationTargetValidationState.valid
     && evaluationTargetValidationState.planValid
     && evaluationTargetValidationState.signature === evaluationTargetSignature();
   elements.submitEvaluation.disabled = evaluationSubmitting
     || evaluationTargetValidationState.pending
-    || !currentIsValid;
+    || !currentIsValid
+    || !evaluationSeedsValid()
+    || !elements.evaluationForm.checkValidity();
 }
 
 async function validateEvaluationTarget(request, signature) {
@@ -7175,6 +7349,11 @@ async function validateEvaluationTarget(request, signature) {
         suite_id: suiteId || null,
         environment: elements.evaluationEnvironment.value || null,
         tasks: checkedEvaluationTaskIds(),
+        gateway: elements.gateway.value,
+        episodes_per_task: numberOrNull(elements.evaluationEpisodes),
+        seeds: elements.evaluationSeeds.value.split(",").map(seed => Number(seed.trim())),
+        parallelism: numberOrNull(elements.evaluationParallelism),
+        headless: elements.evaluationHeadless.checked,
         argv: commandOverrides.argv,
         resume_argv: commandOverrides.resumeArgv,
       }),
@@ -7206,6 +7385,11 @@ async function validateEvaluationTarget(request, signature) {
         ? checkpointPath ? "Registered checkpoint is available for this run." : "Resolved an available registered checkpoint from this run."
         : String(errors.checkpoint_path || "Checkpoint is not available for this run."),
     );
+    const resources = result.resolved_resources;
+    const budget = document.querySelector("#evaluation-resource-summary");
+    budget.textContent = resources
+      ? `Allocation inherited from training: ${resources.gpu?.count || "automatic"} ${resources.gpu?.type || "compatible"} GPU(s), ${resources.cpus_per_task} CPUs, ${resources.memory_gb} GB RAM, ${resources.time_limit} wall time; queue ${resources.queue_policy}. Gateway: ${elements.gateway.options[elements.gateway.selectedIndex].text}.`
+      : "Allocation has not been resolved. Validate a compatible checkpoint and simulation suite.";
     const evaluator = result.evaluator && typeof result.evaluator === "object" ? result.evaluator : null;
     const evaluatorLabel = evaluator
       ? `${evaluator.slug || evaluator.id || "evaluator"} / v${evaluator.version ?? evaluator.version_id ?? "?"}`
@@ -7230,6 +7414,7 @@ async function validateEvaluationTarget(request, signature) {
       planValid ? "valid" : suiteId ? "invalid" : "",
       planMessage,
     );
+    evaluationLastValidatedAt = Date.now();
     evaluationTargetValidationState = { pending: false, valid, planValid, signature: finalSignature };
     updateEvaluationSubmitState();
     return valid;
@@ -7244,10 +7429,13 @@ async function validateEvaluationTarget(request, signature) {
   }
 }
 
+let evaluationLastValidatedAt = 0;
 function scheduleEvaluationTargetValidation({ immediate = false } = {}) {
   window.clearTimeout(evaluationTargetValidationTimer);
-  const request = ++evaluationTargetValidationRequest;
+  if (!evaluationSeedsValid()) { updateEvaluationSubmitState(); return; }
   const signature = evaluationTargetSignature();
+  if (!immediate && evaluationTargetValidationState.valid && evaluationTargetValidationState.signature === signature && Date.now() - evaluationLastValidatedAt < 10000) return;
+  const request = ++evaluationTargetValidationRequest;
   const runId = elements.evaluationRunId.value.trim();
   if (!runId) {
     setEvaluationFieldValidation(elements.evaluationRunId, elements.evaluationRunValidation, "invalid", "Enter a training run ID.");
@@ -7315,7 +7503,7 @@ async function startEvaluationForRun(id) {
   await loadEvaluationSuites(false, requestedRunId);
   if (request !== evaluationPrefillRequest) return;
 
-  const suite = preferredEvaluationSuite(run || {}) || evaluationSuites[0] || null;
+  const suite = preferredEvaluationSuite(run || {}) || null;
   pendingEvaluationSuiteId = suite ? evaluationSuiteId(suite) : "";
   elements.evaluationSuite.value = pendingEvaluationSuiteId;
   updateEvaluationEnvironmentFromSuite();
@@ -7333,17 +7521,21 @@ async function startEvaluationForRun(id) {
 }
 
 async function resumeRun(id, reason = "") {
-  const actionLabel = "Resume Training Run / new attempt";
+  const actionLabel = /no usable|from scratch|initial pinned/i.test(reason) ? "Restart training from beginning / new attempt" : "Resume Training Run / new attempt";
   const explanation = reason.trim() ? `\n\n${reason.trim()}` : "";
-  if (!window.confirm(`${actionLabel} for run ${id}?${explanation}`)) return;
+  if (!(await askUserDialog(`${actionLabel} for run ${id}?${explanation}`))) return;
   try {
-    await api(`/api/runs/${encodeURIComponent(id)}/resume`, {
+    const result = await api(`/api/runs/${encodeURIComponent(id)}/resume`, {
       method: "POST",
       body: JSON.stringify({ mode: "resume", gateway: elements.gateway.value }),
     });
-    showToast(`A new attempt was requested for Training Run ${id}.`);
     await loadRuns(true);
-    await viewRun(id);
+    // Preserve the current disclosure instead of toggling it closed.
+    if (activeRunDetailId === id) startRunDetailPolling(id, null, { initialDelay: 0, includeList: false });
+    else await viewRun(id);
+    const feedback = submissionFeedback(result);
+    if (feedback.error) showNotice(elements.runsError, `Attempt failed: ${feedback.message}`);
+    else showToast(feedback.message);
   } catch (error) {
     showToast(`Resume failed: ${error.message}`, true);
   }
@@ -7389,7 +7581,7 @@ async function requestCancellation(kind, id, button, reason = "") {
   if (button.disabled || cancellationRequests.has(key)) return;
   const subject = kind === "run" ? "Training Run" : "evaluation";
   const explanation = reason.trim() ? `\n\n${reason.trim()}` : "";
-  const confirmed = window.confirm(
+  const confirmed = await askUserDialog(
     `Request cancellation for ${subject} ${id}?${explanation}\n\nRecorded progress, results, and logs will be retained.`,
   );
   if (!confirmed) return;
@@ -7452,7 +7644,7 @@ function handleCancellationAction(event) {
 async function rerunRun(id, reason = "") {
   const actionLabel = "Start new Training Run from pinned variant";
   const explanation = reason.trim() ? `\n\n${reason.trim()}` : "";
-  if (!window.confirm(`${actionLabel} for run ${id}?${explanation}`)) return;
+  if (!(await askUserDialog(`${actionLabel} for run ${id}?${explanation}`))) return;
   try {
     const result = await api(`/api/runs/${encodeURIComponent(id)}/rerun`, {
       method: "POST",
@@ -7481,7 +7673,7 @@ function evaluationPrimaryResult(evaluation) {
   for (const key of ["success_rate", "score", "mean_reward", "accuracy"]) {
     if (result[key] !== undefined) return `${key}: ${result[key]}`;
   }
-  return compactJson(result, 80);
+  return Object.keys(result).length ? compactJson(result, 80) : "No result recorded";
 }
 
 function evaluationRowCells(evaluation) {
@@ -7536,8 +7728,12 @@ function patchEvaluationSummaryRow(evaluation) {
 }
 
 function renderEvaluations({ background = false } = {}) {
-  const descriptors = evaluationRows.map(evaluationRowDescriptor);
-  const countLabel = `${evaluationRows.length} evaluation${evaluationRows.length === 1 ? "" : "s"}`;
+  const query = document.querySelector("#evaluation-search").value.trim().toLowerCase();
+  const filter = document.querySelector("#evaluation-state-filter").value;
+  const filtered = evaluationRows.filter((row) => (!query || [row.id, row.run_id, row.suite_name, row.suite_id].join(" ").toLowerCase().includes(query))
+    && (filter === "all" || String(row.status || row.state).toUpperCase() === filter));
+  const descriptors = filtered.map(evaluationRowDescriptor);
+  const countLabel = `${filtered.length} of ${evaluationRows.length} evaluations`;
   const panel = elements.evaluationsBody.closest(".panel") || elements.evaluationsBody;
   commitPanelRefresh(panel, "evaluations-list", {
     countLabel,
@@ -7564,7 +7760,7 @@ function renderEvaluations({ background = false } = {}) {
     if (!orderedRows.length) {
       const row = document.createElement("tr");
       row.className = "empty-row";
-      patchTableRow(row, [{ colSpan: 9, html: "No evaluations have been created." }]);
+      patchTableRow(row, [{ colSpan: 9, html: "No evaluations match the filters." }]);
       elements.evaluationsBody.append(row);
       return;
     }
@@ -7623,10 +7819,11 @@ function scheduleEvaluationListPolling(delay = EVALUATION_LIST_POLL_INTERVAL_MS)
     if (!evaluationListPollInFlight) {
       evaluationListPollInFlight = api("/api/evaluations")
         .then((payload) => {
+          if (elements.evaluationsError.textContent.startsWith("Live evaluation update failed")) clearNotice(elements.evaluationsError);
           evaluationRows = listFrom(payload, ["evaluations"]);
           renderEvaluations({ background: true });
         })
-        .catch(() => null)
+        .catch(error => showNotice(elements.evaluationsError, `Live evaluation update failed; displayed data may be stale: ${error.message}. Retrying automatically.`))
         .finally(() => {
           evaluationListPollInFlight = null;
         });
@@ -7644,6 +7841,11 @@ async function loadEvaluations(force = false) {
   elements.refreshEvaluations.disabled = true;
   clearNotice(elements.evaluationsError);
   await loadEvaluationSuites(force);
+  try {
+    const runPayload = await api("/api/runs");
+    const choices = listFrom(runPayload, ["runs"]);
+    document.querySelector("#evaluation-run-options").innerHTML = choices.map((run) => `<option value="${escapeHtml(run.id)}">${escapeHtml(run.experiment_name || run.id)} / ${escapeHtml(run.status)}</option>`).join("");
+  } catch (error) { showNotice(elements.evaluationsError, `Training run suggestions could not be loaded: ${error.message}. You can enter a known run ID manually.`); }
   try {
     const payload = await api("/api/evaluations");
     evaluationRows = listFrom(payload, ["evaluations"]);
@@ -7831,7 +8033,7 @@ async function loadEvaluationAttemptLogs(evaluation, attempt, requestToken, { po
     if (updateLogView(elements.evaluationStdoutLog, content || "No stdout output.", { generation: stdoutGeneration })) {
       setTextIfChanged(elements.evaluationStdoutStatus, logStreamStatus(content, "live"));
     }
-  } else if (!polling) {
+  } else {
     updateLogView(elements.evaluationStdoutLog, `Unable to load stdout: ${stdoutResult.reason.message}`, { generation: stdoutGeneration });
     elements.evaluationStdoutStatus.textContent = "unavailable";
   }
@@ -7840,7 +8042,7 @@ async function loadEvaluationAttemptLogs(evaluation, attempt, requestToken, { po
     if (updateLogView(elements.evaluationStderrLog, content || "No stderr output.", { generation: stderrGeneration })) {
       setTextIfChanged(elements.evaluationStderrStatus, logStreamStatus(content, "live"));
     }
-  } else if (!polling) {
+  } else {
     updateLogView(elements.evaluationStderrLog, `Unable to load stderr: ${stderrResult.reason.message}`, { generation: stderrGeneration });
     elements.evaluationStderrStatus.textContent = "unavailable";
   }
@@ -8038,6 +8240,7 @@ async function viewEvaluation(id, launcher = null, { polling = false } = {}) {
   } catch (error) {
     if (!disclosureTokenIsCurrent(elements.evaluationDetail, requestToken)) return;
     if (polling) {
+      showNotice(elements.evaluationsError, `Live evaluation detail update failed; displayed data may be stale: ${error.message}. Retrying automatically.`);
       scheduleEvaluationDetailPolling(id);
       return;
     }
@@ -8045,6 +8248,7 @@ async function viewEvaluation(id, launcher = null, { polling = false } = {}) {
     showToast(`Evaluation detail failed: ${error.message}`, true);
     return;
   }
+  if (elements.evaluationsError.textContent.startsWith("Live evaluation detail update failed")) clearNotice(elements.evaluationsError);
   const completed = evaluation.progress_completed ?? 0;
   const total = evaluation.progress_total ?? 0;
   const attempt = latestEvaluationAttempt(evaluation);
@@ -8071,6 +8275,14 @@ async function viewEvaluation(id, launcher = null, { polling = false } = {}) {
     ]));
     renderEvaluationAttempt(attempt);
     setTextIfChanged(elements.evaluationResultStatus, hasCanonicalResult ? "available" : "not produced");
+    const taskOutcomes = resultRecord.episodes.filter(episode => typeof episode.success === "boolean");
+    const successes = taskOutcomes.filter(episode => episode.success).length;
+    setHtmlIfChanged(document.querySelector("#evaluation-result-summary"), keyValueHtml([
+      ["Job state", resultRecord.status],
+      ["Episodes with a recorded outcome", `${taskOutcomes.length} / ${resultRecord.planned_episodes}`],
+      ["Task successes", taskOutcomes.length ? `${successes} / ${taskOutcomes.length}` : "No task outcomes recorded"],
+      ["Task success rate", evaluationPrimaryResult(evaluation)],
+    ]));
     updateLogView(elements.evaluationResultJson, JSON.stringify(resultRecord, null, 2), { generation: resultGeneration });
     renderEvaluationRollouts(evaluation);
   }, { background: polling });
@@ -8136,7 +8348,7 @@ function populateExperimentDataBundles() {
       : "";
   elements.experimentDataBundle.innerHTML = [
     ...(invalidPrevious ? [`<option value="${escapeHtml(previous)}" disabled>${escapeHtml(invalidPreviousMessage)}</option>`] : []),
-    `<option value="">${hasBindings ? "No compatible bundle / enter adapter input manually" : "No registered bundle / repository defaults"}</option>`,
+    `<option value="">${hasBindings ? "Enter dataset input manually" : "Use dataset selected by repository configuration"}</option>`,
     ...compatibleBundles.map((bundle) => {
       const count = bundle.assignment_count ?? bundle.assignments?.length ?? 0;
       const label = `${bundle.name}@${bundle.version} / ${count} role${Number(count) === 1 ? "" : "s"}`;
@@ -8153,11 +8365,12 @@ function populateExperimentDataBundles() {
   }
   const compatibleCount = compatibleBundles.length;
   const incompatibleCount = dataBundleRows.length - compatibleBundles.length;
+  const verified = compatibleBundles.filter(bundle => compatibility.get(String(bundle.id || bundle.bundle_id))?.compatible === true).length;
   elements.experimentDataBundle.setCustomValidity(invalidPreviousMessage);
   elements.experimentDataBundle.setAttribute("aria-invalid", String(invalidPrevious));
-  elements.experimentDataBundleStatus.textContent = invalidPreviousMessage || (dataBundleRows.length
-    ? `${compatibleCount} compatible immutable bundle${compatibleCount === 1 ? "" : "s"} available${incompatibleCount ? `; ${incompatibleCount} incompatible bundle${incompatibleCount === 1 ? " is" : "s are"} omitted` : ""}. A selected bundle is resolved and snapshotted on save.`
-    : "No bundles registered. The experiment will use repository defaults until a bundle is created.");
+  elements.experimentDataBundleStatus.textContent = invalidPreviousMessage || (!hasBindings ? "Dataset bundle selection is unsupported by this adapter version. Use its repository dataset configuration, or select an adapter that declares a compatible dataset binding." : "") || (dataBundleRows.length
+    ? `${verified} format-compatible / ${compatibleCount} selectable immutable bundle${compatibleCount === 1 ? "" : "s"} available${incompatibleCount ? `; ${incompatibleCount} incompatible bundle${incompatibleCount === 1 ? " is" : "s are"} omitted` : ""}. A selected bundle is resolved and snapshotted on save.`
+    : "No bundles registered. Enter a dataset path in the adapter inputs, or register a compatible bundle in Data.");
   if (renderedAdapterDeclaredScope) renderAdapterDeclaredFields();
 }
 
@@ -8165,7 +8378,7 @@ function experimentBundleCompatibility(bundle, adapter = selectedAdapter()) {
   const bindings = declaredAdapterInputFields(adapter)
     .map((field) => field.data_binding)
     .filter(Boolean);
-  if (!bindings.length) return { compatible: true, message: "" };
+  if (!bindings.length) return { compatible: false, message: "Unsupported: this adapter has no training dataset binding." };
   const assignments = Array.isArray(bundle?.assignments) ? bundle.assignments : [];
   for (const binding of bindings) {
     const assignment = assignments.find((item) => (
@@ -8198,7 +8411,7 @@ async function loadDataBundles(force = false) {
     populateExperimentDataBundles();
   } catch (error) {
     dataBundlesLoaded = false;
-    elements.experimentDataBundle.innerHTML = '<option value="">Bundle registry unavailable</option>';
+    elements.experimentDataBundle.setCustomValidity(`Dataset registry unavailable: ${error.message}. Refresh before proceeding.`);
     elements.experimentDataBundle.disabled = false;
     elements.experimentDataBundleStatus.textContent = `Bundle registry unavailable: ${error.message}`;
   }
@@ -8248,8 +8461,9 @@ function renderDataImports() {
     const error = item.error ? `<div class="notice notice-error">${escapeHtml(item.error)}</div>` : "";
     const detail = `<tr class="row-disclosure-row"><td colspan="7"><div class="row-disclosure-body">
       ${error}
+      <p>Logs are read through the import job’s recorded gateway (${escapeHtml(item.gateway || "auto")}). <button type="button" data-import-action="logs" data-id="${escapeHtml(item.id)}"${cached.loading ? " disabled" : ""}>${cached.loading ? "Loading logs..." : "Refresh logs"}</button></p>
       <div class="meta-grid"><div><span>Result path</span><strong>${escapeHtml(item.result_path || "-")}</strong></div><div><span>Published version</span><strong>${escapeHtml(item.version_id || "-")}</strong></div><div><span>Bundle</span><strong>${escapeHtml(item.bundle_id || "-")}</strong></div></div>
-      <div class="attempt-log-grid"><section><div class="panel-heading"><h3>stdout</h3></div><pre class="log-view">${escapeHtml(cached.stdout || "Log not loaded.")}</pre></section><section><div class="panel-heading"><h3>stderr</h3></div><pre class="log-view">${escapeHtml(cached.stderr || "Log not loaded.")}</pre></section></div>
+      <div class="attempt-log-grid"><section><div class="panel-heading"><h3>stdout</h3></div><pre class="log-view">${escapeHtml(cached.loading ? "Loading stdout..." : cached.stdout ?? "Click Refresh logs to load stdout.")}</pre></section><section><div class="panel-heading"><h3>stderr</h3></div><pre class="log-view">${escapeHtml(cached.loading ? "Loading stderr..." : cached.stderr ?? "Click Refresh logs to load stderr.")}</pre></section></div>
     </div></td></tr>`;
     return row + detail;
   }).join("");
@@ -8305,12 +8519,18 @@ async function toggleDataImportDetail(id) {
     return;
   }
   selectedDataImportId = id;
+  await loadDataImportLogs(id);
+}
+
+async function loadDataImportLogs(id) {
+  if (dataImportLogCache.get(String(id))?.loading) return;
+  dataImportLogCache.set(String(id), { loading: true });
   renderDataImports();
   const load = async (stream) => {
     try {
       const response = await fetch(`/api/data/imports/${encodeURIComponent(id)}/logs?stream=${stream}&lines=500`);
       if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`);
-      return await response.text();
+      return (await response.text()) || `No ${stream} output recorded.`;
     } catch (error) {
       return `Unable to load ${stream}: ${error.message}`;
     }
@@ -8334,6 +8554,13 @@ function renderDataVersions() {
     </tr>`).join("")
     : emptyRow(7, "No immutable versions have been registered.");
 
+  const picker = document.querySelector("#data-bundle-version-picker");
+  const previousVersion = picker.value;
+  picker.innerHTML = '<option value="">Choose a version</option>' + dataVersionRows.filter(version => version.status === "READY").map(version => `<option value="${escapeHtml(version.id || version.version_id)}">${escapeHtml(dataVersionLabel(version))} / ${escapeHtml(version.format)}</option>`).join("");
+  if ([...picker.options].some(option => option.value === previousVersion)) picker.value = previousVersion;
+  const formats = new Set(dataVersionRows.map(version => version.format).filter(Boolean));
+  adapterRows.forEach(adapter => declaredAdapterInputFields(adapter).forEach(field => (field.data_binding?.formats || []).forEach(format => formats.add(format))));
+  document.querySelector("#data-format-suggestions").innerHTML = [...formats].sort().map(format => `<option value="${escapeHtml(format)}"></option>`).join("");
   const previousOutput = elements.dataDerivationOutput.value;
   elements.dataDerivationOutput.innerHTML = dataVersionRows.length
     ? dataVersionRows.map((version) => `<option value="${escapeHtml(version.id || version.version_id)}">${escapeHtml(dataVersionLabel(version))}</option>`).join("")
@@ -8585,7 +8812,9 @@ function renderDataBundlePreview(payload) {
     ["Training / evaluation relationship", usage.relationship],
   ]);
 
-  let roles = dataBundlePreviewArray(bundle.roles);
+  let roles = dataBundlePreviewArray(bundle.roles).map((role) => typeof role === "string"
+    ? { role, count: assignments.filter((assignment) => assignment.role === role).length }
+    : role);
   if (!roles.length) {
     const counts = new Map();
     assignments.forEach((assignment) => {
@@ -8601,7 +8830,7 @@ function renderDataBundlePreview(payload) {
   elements.dataBundlePreviewVersions.innerHTML = assignments.length
     ? assignments.map((assignment) => {
       const version = assignment.version && typeof assignment.version === "object" ? assignment.version : {};
-      const resource = version.resource && typeof version.resource === "object" ? version.resource : {};
+      const resource = assignment.resource || version.resource || {};
       const resourceName = dataResourceIdentity(resource) !== "unknown resource"
         ? dataResourceIdentity(resource)
         : version.resource_id || "unknown resource";
@@ -8652,7 +8881,7 @@ function renderDataBundlePreview(payload) {
         record.task_indices?.length ? `tasks ${record.task_indices.join(", ")}` : null,
         record.length == null ? null : `${record.length} frames`,
       ].filter(Boolean).join(" / ") || "Metadata only";
-      return `<div class="dataset-preview-item"><strong>${escapeHtml(`${dataBundlePreviewAssignmentLabel(assignment)} / episode ${record.index ?? "-"}`)}</strong><span>${escapeHtml(detail)}</span></div>`;
+      return `<div class="dataset-preview-item"><strong>${escapeHtml(`${dataBundlePreviewAssignmentLabel(assignment)} / episode ${record.index ?? record.episode_index ?? "-"}`)}</strong><span>${escapeHtml(detail)}</span></div>`;
     }).join("")
     : '<p class="secondary dataset-preview-empty">No episode metadata was returned.</p>';
 
@@ -8778,8 +9007,8 @@ async function loadDataRegistry(force = false) {
       const id = resource.id || resource.resource_id;
       try {
         return entityFrom(await api(`/api/data/resources/${encodeURIComponent(id)}`), "resource");
-      } catch {
-        return resource;
+      } catch (error) {
+        throw new Error(`Versions for ${dataResourceIdentity(resource)} could not be loaded: ${error.message}`);
       }
     }));
     dataResourceRows = details;
@@ -8942,6 +9171,22 @@ async function createDataDerivation(event) {
   }
 }
 
+function addDataBundleAssignment() {
+  const versionId = document.querySelector("#data-bundle-version-picker").value;
+  const role = document.querySelector("#data-bundle-role-picker").value;
+  const mountPath = document.querySelector("#data-bundle-mount-picker").value.trim();
+  if (!versionId) { showToast("Choose a registered version to add.", true); return; }
+  try {
+    const assignments = parseDataJson(elements.dataBundleAssignments, "Bundle assignments", []);
+    if (!Array.isArray(assignments)) throw new Error("Bundle assignments must be a JSON list.");
+    if (assignments.some(item => item.version_id === versionId && item.role === role)) throw new Error("This version is already assigned to that role.");
+    const positions = assignments.filter(item => item.role === role).map(item => Number(item.position || 0));
+    assignments.push({ role, version_id: versionId, mount_path: mountPath || `data/${role}/${positions.length}`, required: true, position: positions.length ? Math.max(...positions) + 1 : 0 });
+    elements.dataBundleAssignments.value = JSON.stringify(assignments, null, 2);
+    elements.dataBundleAssignments.setCustomValidity("");
+  } catch (error) { showToast(error.message, true); }
+}
+
 async function createDataBundle(event) {
   event.preventDefault();
   if (!elements.dataBundleForm.reportValidity()) return;
@@ -9072,6 +9317,9 @@ function populateCollectionAdapterSelect(selectedId = "") {
 function updateCollectionCapabilityEvidence(force = false) {
   const adapter = collectionAdapterRows.find((candidate) => String(candidate.id || candidate.adapter_id) === String(elements.collectionSessionAdapter.value));
   const declarations = Array.isArray(collectionAdapterManifest(adapter).capabilities) ? collectionAdapterManifest(adapter).capabilities : [];
+  const runnable = Boolean(adapter && !adapter.archived_at && collectionAdapterManifest(adapter).runnable);
+  elements.createCollectionSession.disabled = !runnable;
+  document.querySelector("#collection-session-availability").textContent = runnable ? "Create a draft first, then check setup and submit from its details." : "Session creation is unavailable. Select a runnable adapter; draft adapters need their launcher and stream definitions completed first.";
   if (!adapter) {
     elements.collectionCapabilitiesHelp.textContent = "Select an adapter to see its declared capability IDs. Use verified only with who verified it and when.";
     if (force) elements.collectionCapabilities.value = "{}";
@@ -9259,7 +9507,7 @@ async function saveCollectionAdapter(event) {
 }
 
 async function setCollectionAdapterArchived(id, archived) {
-  if (archived && !window.confirm("Archive this collection adapter? Existing sessions will remain readable.")) return;
+  if (archived && !(await askUserDialog("Archive this collection adapter? Existing sessions will remain readable."))) return;
   try {
     if (archived) {
       await api(`/api/collection/adapters/${encodeURIComponent(id)}`, { method: "DELETE" });
@@ -9474,12 +9722,12 @@ async function runCollectionLifecycleAction(action) {
   if (["prepare", "submit"].includes(action)) {
     options.body = JSON.stringify({ gateway: collectionSessionGateway(activeCollectionSession), remote_validate: true });
   } else if (action === "cancel") {
-    if (!window.confirm("Cancel this collection job?")) return;
+    if (!(await askUserDialog("Cancel this collection job?"))) return;
     options.body = JSON.stringify({ gateway: collectionSessionGateway(activeCollectionSession) });
   } else if (action === "restart") {
     options.body = JSON.stringify({ name: null });
   } else if (action === "fail") {
-    const message = window.prompt("Describe the collection failure. This is saved with the session.");
+    const message = await askUserDialog("Describe the collection failure. This is saved with the session.", "");
     if (!message?.trim()) return;
     path = `/api/collection/sessions/${encodeURIComponent(id)}/error`;
     options.body = JSON.stringify({ code: "OPERATOR_REPORTED", message: message.trim(), details: {} });
@@ -9680,7 +9928,7 @@ const interactiveTutorialTours = {
   collection: {
     title: "Collection",
     steps: [
-      { id: "open-adapter", selector: "#add-collection-adapter", gate: "action", title: "Open a local adapter draft", instruction: "Click Add adapter. This opens the editor without writing to the database." },
+      { id: "open-adapter", selector: "#add-collection-adapter", gate: "action", title: "Open a local adapter draft", instruction: "Click New adapter. This opens the editor without writing to the database." },
       { id: "key", selector: "#collection-adapter-key", reveal: ["#collection-adapter-form"], gate: "field", title: "Set a unique adapter key", instruction: "The generated key is isolated to this tutorial session.", useValue: ({ token }) => `${token}-collection-adapter`, validate: tutorialNonEmpty },
       { id: "display-name", selector: "#collection-adapter-name", gate: "field", title: "Name the adapter", instruction: "Use a clear display name that carries the tutorial token.", useValue: ({ token }) => `${token} inert collection adapter`, validate: tutorialNonEmpty },
       { id: "version", selector: "#collection-adapter-version", gate: "field", title: "Set the first version", instruction: "Start the disposable adapter at a deliberate version.", useValue: () => "0.0.1", validate: tutorialNonEmpty },
@@ -9704,8 +9952,8 @@ const interactiveTutorialTours = {
     steps: [
       { id: "search", selector: "#run-search", gate: "field", title: "Search the real run ledger", instruction: "Type a real experiment, variant, run, or Slurm identifier. Filtering is local and does not alter a run." },
       { id: "status", selector: "#run-status-filter", gate: "field", title: "Change the status filter", instruction: "Choose a status that helps locate a real record." },
-      { id: "detail", selector: () => "#runs-body [data-run-action=\"view\"]", gate: "action", waitForTarget: true, title: "Read one real run", instruction: "Click View on a returned row. Advancement requires the matching run-detail GET and returned ID to match that selected row.", request: { method: "GET", path: ({ bindings }) => `/api/runs/${encodeURIComponent(bindings.runId)}`, bind: "runId", bindFromTarget: true, entity: "run" } },
-      { id: "limits", selector: "#run-detail-meta", reveal: ["#run-detail"], title: "Training Runs are operational records", instruction: "Training Runs originate from submitted experiments and cannot be CRUD-deleted. Start evaluation opens Evaluations with this run selected; Resume and rerun actions can contact Slurm and are never invoked by this standard tour." },
+      { id: "detail", selector: () => "#runs-body [data-run-action=\"view\"]", gate: "action", waitForTarget: true, title: "Read one real run", instruction: "Click View attempts on a returned row. Advancement requires the matching run-detail GET and returned ID to match that selected row.", request: { method: "GET", path: ({ bindings }) => `/api/runs/${encodeURIComponent(bindings.runId)}`, bind: "runId", bindFromTarget: true, entity: "run" } },
+      { id: "limits", selector: "#run-detail-meta", reveal: ["#run-detail"], title: "Training Runs are operational records", instruction: "Training Runs originate from submitted experiments and cannot be deleted. Start evaluation opens Evaluations with this run selected; Resume and rerun actions can contact Slurm and are never invoked by this standard tour." },
     ],
   },
   evaluations: {
@@ -9723,7 +9971,7 @@ const interactiveTutorialTours = {
   adapters: {
     title: "Adapters",
     steps: [
-      { id: "open", selector: "#add-adapter", gate: "action", title: "Open a local adapter draft", instruction: "Click Add adapter. No record exists until the save step succeeds." },
+      { id: "open", selector: "#add-adapter", gate: "action", title: "Open a local adapter draft", instruction: "Click New adapter. No record exists until the save step succeeds." },
       { id: "slug", selector: "#adapter-editor-slug", reveal: ["#adapter-editor"], gate: "field", title: "Set a unique slug", instruction: "The token isolates this adapter from production definitions.", useValue: ({ token }) => `${token}-adapter`, validate: tutorialNonEmpty },
       { id: "name", selector: "#adapter-editor-name", gate: "field", title: "Name the adapter", instruction: "Use a clear tutorial-only display name.", useValue: ({ token }) => `${token} experiment adapter`, validate: tutorialNonEmpty },
       { id: "manifest", selector: "#adapter-manifest", gate: "field", title: "Review the generated manifest", instruction: "The normal Add flow provides the valid minimal manifest. Use tutorial value only to acknowledge that exact local text; it does not invent commands.", useValue: (_context, target) => target.value, validate: tutorialJsonObject },
@@ -10463,6 +10711,7 @@ function resetDataResourceEditor(hide = true) {
   const form = document.querySelector("#data-resource-form");
   if (!form) return;
   form.reset();
+  form.querySelector("h2, h3").textContent = "Register a source resource";
   document.querySelector("#data-resource-id").value = "";
   for (const id of ["data-resource-provider", "data-resource-namespace", "data-resource-name", "data-resource-kind"]) document.querySelector(`#${id}`).disabled = false;
   document.querySelector("#create-data-resource").textContent = "Register resource";
@@ -10485,6 +10734,7 @@ async function openDataResourceEditor(id, launcher = null) {
     document.querySelector("#data-resource-description").value = resource.description || "";
     for (const fieldId of ["data-resource-provider", "data-resource-namespace", "data-resource-name", "data-resource-kind"]) document.querySelector(`#${fieldId}`).disabled = true;
     document.querySelector("#create-data-resource").textContent = "Save resource";
+    elements.dataResourceForm.querySelector("h2, h3").textContent = "Edit source resource";
     revealPanel(document.querySelector("#data-resource-form"), { focusTarget: document.querySelector("#data-resource-description"), launcher: revealLauncher });
   } catch (error) {
     if (!disclosureTokenIsCurrent(elements.dataResourceForm, requestToken)) return;
@@ -10506,7 +10756,7 @@ async function updateDataResource(id) {
 }
 
 async function archiveDataResource(id) {
-  if (!window.confirm("Archive this resource record? Payload files are not deleted.")) {
+  if (!(await askUserDialog("Archive this resource record? Payload files are not deleted."))) {
     resetTutorialAttempt("Archive cancelled; type the tutorial confirmation again before retrying");
     return;
   }
@@ -11467,7 +11717,7 @@ function renderTrackingNamePreview() {
 }
 
 function flattenSettings(value, prefix = "", depth = 0) {
-  if (!value || typeof value !== "object" || Array.isArray(value) || depth >= 3) {
+  if (!value || typeof value !== "object") {
     return [[prefix || "value", value]];
   }
   const entries = [];
@@ -11475,10 +11725,10 @@ function flattenSettings(value, prefix = "", depth = 0) {
     const path = prefix ? `${prefix}.${key}` : key;
     if (isSensitiveKey(path)) {
       entries.push([path, nested ? "configured" : "not configured"]);
-    } else if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+    } else if (nested && typeof nested === "object") {
       entries.push(...flattenSettings(nested, path, depth + 1));
     } else {
-      entries.push([path, Array.isArray(nested) ? nested.join(", ") : nested]);
+      entries.push([path, nested]);
     }
   }
   return entries;
@@ -11570,6 +11820,8 @@ function activateTab(tab, updateHash = true) {
   const allowed = ["cluster", "experiments", "collection", "datasets", "runs", "evaluations", "adapters", "settings"];
   const next = allowed.includes(tab) ? tab : "cluster";
   if (next !== activeTab) {
+    elements.toast.replaceChildren();
+    elements.toast.hidden = true;
     stopClusterAutoRefresh();
     closeActiveDisclosure({ restoreFocus: false });
     if (activeRunAttemptDisclosure) resetRunAttemptContext();
@@ -11594,7 +11846,7 @@ function activateTab(tab, updateHash = true) {
       else link.removeAttribute("aria-current");
     }
   });
-  if (updateHash) history.replaceState(null, "", `#${next}`);
+  if (updateHash && location.hash !== `#${next}`) history.pushState(null, "", `#${next}`);
   const loading = loadActiveTab(next);
   window.scrollTo({ top: 0, behavior: "instant" });
   return loading;
@@ -11637,9 +11889,13 @@ restoreSshGatewayPreference();
 
 elements.gateway.addEventListener("change", () => {
   persistSshGatewayPreference();
+  invalidateExperimentPreview();
+  if (activeTab === "evaluations") scheduleEvaluationTargetValidation();
   if (activeTab === "cluster") refreshCluster({ force: true, background: true });
   if (elements.experimentRevision.value) inspectRepositoryRuntime();
 });
+document.querySelector("#jobs-previous").addEventListener("click", () => { jobPage = Math.max(0, jobPage - 1); renderJobs(visibleQueueJobs, queueTotal); });
+document.querySelector("#jobs-next").addEventListener("click", () => { jobPage += 1; renderJobs(visibleQueueJobs, queueTotal); });
 elements.refreshButton.addEventListener("click", () => refreshCluster({ force: true }));
 elements.initWorkspace.addEventListener("click", initializeWorkspace);
 
@@ -11650,8 +11906,26 @@ elements.experimentForm.addEventListener("submit", (event) => {
   event.preventDefault();
   createExperiment(true);
 });
-elements.experimentForm.addEventListener("input", updateExperimentSubmitState);
-elements.experimentForm.addEventListener("change", updateExperimentSubmitState);
+function experimentFormChanged() {
+  invalidateExperimentPreview();
+  elements.toast.querySelectorAll(".is-error").forEach(dismissToast);
+  updateExperimentSubmitState();
+}
+elements.experimentForm.addEventListener("input", experimentFormChanged);
+elements.experimentForm.addEventListener("change", experimentFormChanged);
+document.querySelector("#experiment-preview-variant").addEventListener("change", renderSelectedExperimentScript);
+document.querySelector("#experiment-preview-full").addEventListener("change", renderSelectedExperimentScript);
+document.querySelector("#experiment-preview-download").addEventListener("click", () => {
+  const index = Number(document.querySelector("#experiment-preview-variant").value);
+  const script = experimentPreviewScripts[index];
+  if (!script) return;
+  const url = URL.createObjectURL(new Blob([script], { type: "text/plain" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `variant-${index + 1}.sbatch`;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
 elements.experimentAdapter.addEventListener("change", () => {
   const selectedId = elements.experimentAdapter.value;
   loadedExperimentCanonicalContext = null;
@@ -11719,6 +11993,7 @@ elements.adapterDeclaredFieldsGrid.addEventListener("change", (event) => {
 elements.experimentDataBundle.addEventListener("change", () => {
   elements.experimentDataBundle.setCustomValidity("");
   elements.experimentDataBundle.removeAttribute("aria-invalid");
+  populateExperimentDataBundles();
   renderAdapterDeclaredFields();
   validateAdapterDeclaredFields({ focus: false, notify: false });
 });
@@ -11875,6 +12150,7 @@ elements.closeDataImportForm.addEventListener("click", () => hideRevealedPanel(e
 elements.dataImportsBody.addEventListener("click", (event) => {
   const button = event.target.closest("[data-import-action]");
   if (button?.dataset.importAction === "detail") toggleDataImportDetail(button.dataset.id);
+  if (button?.dataset.importAction === "logs") loadDataImportLogs(button.dataset.id);
 });
 elements.closeDataVersionForm.addEventListener("click", () => {
   hideRevealedPanel(elements.dataVersionForm);
@@ -11891,12 +12167,28 @@ elements.dataBundlesBody.addEventListener("click", (event) => {
 });
 elements.dataBundlePreviewMediaSelect.addEventListener("change", updateDataBundlePreviewMediaSelection);
 elements.dataBundleForm.addEventListener("submit", createDataBundle);
+document.querySelector("#add-data-bundle-assignment").addEventListener("click", addDataBundleAssignment);
 if (elements.showDataBundleForm) {
   elements.showDataBundleForm.addEventListener("click", (event) => {
     revealPanel(elements.dataBundleForm, { focusTarget: elements.dataBundleName, launcher: event.currentTarget });
   });
 }
 
+document.querySelector("#show-collection-session-form").addEventListener("click", (event) => {
+  populateCollectionAdapterSelect();
+  updateCollectionCapabilityEvidence(true);
+  revealPanel(elements.collectionSessionForm, { focusTarget: elements.collectionSessionAdapter, launcher: event.currentTarget });
+});
+elements.evaluationForm.addEventListener("input", () => {
+  updateEvaluationSubmitState();
+  scheduleEvaluationTargetValidation();
+});
+elements.evaluationForm.addEventListener("change", () => {
+  updateEvaluationSubmitState();
+  scheduleEvaluationTargetValidation();
+});
+document.querySelector("#evaluation-search").addEventListener("input", () => renderEvaluations());
+document.querySelector("#evaluation-state-filter").addEventListener("change", () => renderEvaluations());
 elements.refreshCollection.addEventListener("click", () => loadCollection(true));
 elements.addCollectionAdapter.addEventListener("click", (event) => fillCollectionAdapterForm(null, event.currentTarget));
 elements.closeCollectionAdapter.addEventListener("click", () => {

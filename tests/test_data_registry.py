@@ -123,7 +123,7 @@ class DataRegistryTestCase(unittest.TestCase):
         self.assertEqual(bundle["assignment_count"], 2)
         self.assertNotIn("id", bundle["manifest"]["assignments"][0]["version"])
         service = PipelineService(self.database, _Cluster())
-        spec = service.normalize_spec({
+        data = service._normalize_data_input({
             "apiVersion": "skynet.rl2/v1",
             "identity": {"project": "tests", "experiment": "data-snapshot"},
             "source": {
@@ -147,10 +147,10 @@ class DataRegistryTestCase(unittest.TestCase):
             },
         })
 
-        self.assertEqual(spec.data.bundle.id, bundle["id"])
-        self.assertEqual(spec.data.bundle.manifest_sha256, bundle["manifest_sha256"])
-        self.assertEqual(len(spec.data.bundle.assignments), 2)
-        self.assertEqual(spec.data.datasets[0].name, "legacy")
+        self.assertEqual(data["bundle"]["id"], bundle["id"])
+        self.assertEqual(data["bundle"]["manifest_sha256"], bundle["manifest_sha256"])
+        self.assertEqual(len(data["bundle"]["assignments"]), 2)
+        self.assertEqual(data["datasets"][0]["name"], "legacy")
 
         self.database.archive_data_bundle(bundle["id"])
         with self.assertRaisesRegex(ValueError, "archived"):

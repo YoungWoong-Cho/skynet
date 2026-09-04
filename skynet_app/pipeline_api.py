@@ -42,6 +42,7 @@ from .cluster_runtime import (
     SLURM_BIN,
     SubmissionOutcomeUnknown,
     WORK_ROOT,
+    approved_operator_environment,
 )
 from .data_imports import build_huggingface_import_job
 from .data_preview import build_data_bundle_preview, resolve_data_bundle_preview_media
@@ -587,6 +588,11 @@ def _attach_run_progress_summaries(database: Database, runs: list[dict[str, Any]
     evidence = database.run_progress_evidence([str(run.get("id") or "") for run in runs])
     for run in runs:
         row = evidence.get(str(run.get("id") or ""), {})
+        attempts = row.get("attempts") or []
+        run["attempt_count"] = len(attempts)
+        run["latest_attempt"] = _latest_attempt(attempts)
+        spec = row.get("resolved_spec_json") or {}
+        run["resources"] = spec.get("resources") or {}
         run["progress_summary"] = training_progress_summary(
             run,
             attempts=row.get("attempts") or [],
@@ -722,6 +728,13 @@ def _training_stage_attempts(
             str(item.get("created_at") or ""),
         ),
     )
+
+
+def _evaluation_busy_reason(run: Mapping[str, Any]) -> str | None:
+    active_states = {"SUBMITTING", "SUBMITTED", "PENDING_SLURM", "RUNNING", "RETRY_PENDING", "CANCELLING"}
+    if any(str(stage.get("status", "")).upper() in active_states for stage in run.get("stages", [])):
+        return "This run already has active training or evaluation work. Wait for it to finish, or cancel that work before starting another evaluation."
+    return None
 
 
 def _resumable_checkpoint(run: Mapping[str, Any]) -> Mapping[str, Any] | None:
@@ -920,9 +933,11 @@ def manual_run_actions(
         resume = {
             "enabled": True,
             "reason": (
-                "No usable resumable checkpoint is available; Resume will create "
-                "a new attempt on this same Training Run by replaying its exact "
-                f"initial pinned execution with adapter {pinned_label}."
+                (f"Checkpoint resume is unsupported by pinned adapter {pinned_label}; "
+                 if checkpoint is not None and not resume_argv
+                 else "No usable resumable checkpoint is available; ")
+                + "this action restarts training from the beginning in a new attempt "
+                + f"using its exact initial pinned execution with adapter {pinned_label}."
             ),
         }
     return {"resume": resume, "rerun": rerun, "cancel": cancel}
@@ -1901,13 +1916,18 @@ class PipelineService:
         assignments = bundle.get("assignments") if isinstance(bundle, Mapping) else None
         if not isinstance(assignments, list):
             return canonical
+        if not any(field.data_binding for field in manifest.train.input_fields):
+            raise ValueError(
+                "Dataset bundle selection is unsupported by this adapter version: "
+                "it declares no training dataset binding. Remove the bundle and use "
+                "the repository's dataset configuration, or select an adapter with "
+                "a compatible training_data binding."
+            )
         for field in manifest.train.input_fields:
             binding = field.data_binding
             if binding is None:
                 continue
             present, value = cls._manifest_input_lookup(canonical, field.path)
-            if present and value is not None and value != "":
-                continue
             matching = [
                 item for item in assignments
                 if isinstance(item, Mapping) and str(item.get("role") or "") == binding.role
@@ -1941,6 +1961,21 @@ class PipelineService:
                 else assignment.get("mount_path")
             )
             if isinstance(bound_value, str) and bound_value:
+                if present and value not in (None, "", bound_value):
+                    raise ValueError(
+                        f"{field.path} conflicts with the selected dataset bundle. "
+                        "Clear the explicit dataset path to use the bundle, or "
+                        "remove the bundle to use the explicit path."
+                    )
+                if present and value in (None, ""):
+                    if field.path.startswith("native.overrides."):
+                        canonical["native"]["overrides"].pop(field.path.removeprefix("native.overrides."))
+                    else:
+                        parent = canonical
+                        parts = field.path.split(".")
+                        for part in parts[:-1]:
+                            parent = parent[part]
+                        parent.pop(parts[-1])
                 cls._set_missing_canonical_path(canonical, field.path, bound_value)
             else:
                 raise ValueError(
@@ -3540,6 +3575,7 @@ class PipelineService:
             experiment_revision_id=revision["id"] if revision else None,
             limit=10000,
         )
+        _attach_run_progress_summaries(self.database, runs)
         experiment["variants"] = variants
         experiment["runs"] = runs
         experiment["variant_count"] = len(variants)
@@ -4440,7 +4476,6 @@ class PipelineService:
             # Submit through the gateway that successfully parsed and validated this
             # exact script. Re-resolving here can select a login node whose Slurm
             # binaries respond while its shared-filesystem access is stalled.
-            from .cluster_runtime import approved_operator_environment
 
             submission_options: dict[str, Any] = {
                 "submission_key": attempt["id"]
@@ -8216,6 +8251,7 @@ class PipelineService:
             runtime_profile_id,
             str(gateway or "auto"),
             content_sha256(CLUSTER.runtime_profile_snapshot(runtime_profile_id)),
+            content_sha256(approved_operator_environment(operator_environment)),
             suite_contract_sha256(suite_config) if suite_config is not None else "",
         )
         cache = getattr(self, "_evaluator_runtime_readiness_cache", None)
@@ -8229,7 +8265,7 @@ class PipelineService:
         if not refresh:
             with cache_lock:
                 cached = cache.get(cache_key)
-            if cached is not None and now - cached[0] < 15.0:
+            if cached is not None and now - cached[0] < (60.0 if not cached[2] else 10.0):
                 return copy.deepcopy(cached[1]), list(cached[2])
         readiness = self._probe_runtime_profile(
             public_profile,
@@ -8614,6 +8650,10 @@ class PipelineService:
         validation, run, checkpoint = self._resolve_evaluation_target(
             run_id, checkpoint_path
         )
+        busy_reason = _evaluation_busy_reason(run) if run is not None else None
+        if busy_reason:
+            validation.update({"valid": False, "plan_valid": False, "plan_message": busy_reason, "plan_blockers": [busy_reason]})
+            return validation
         if not str(suite_id or "").strip():
             return validation
 
@@ -8662,7 +8702,7 @@ class PipelineService:
                 }
             )[:20]
             try:
-                _, plan, _, _, evaluator_adapter, plan_source = (
+                evaluator_spec, plan, _, _, evaluator_adapter, plan_source = (
                     self._resolve_evaluation_implementation(
                         run,
                         checkpoint,
@@ -8694,6 +8734,7 @@ class PipelineService:
                 blockers = list(plan.blockers)
                 validation.update(
                     {
+                        "resolved_resources": evaluator_spec.resources.model_dump(mode="json", by_alias=True) if evaluator_spec is not None else None,
                         "plan_valid": not blockers and bool(plan.argv),
                         "evaluator": public_evaluator,
                         "plan_blockers": blockers,
@@ -8725,12 +8766,9 @@ class PipelineService:
             raise ValueError(target["errors"]["checkpoint_path"])
         assert run is not None
         assert checkpoint is not None
-        active_stage_statuses = {
-            "SUBMITTING", "SUBMITTED", "PENDING_SLURM", "RUNNING",
-            "RETRY_PENDING", "CANCELLING",
-        }
-        if any(stage["status"] in active_stage_statuses for stage in run["stages"]):
-            raise ValueError("run already has an active training or evaluation stage")
+        busy_reason = _evaluation_busy_reason(run)
+        if busy_reason:
+            raise ValueError(busy_reason)
         suite, canonical_environment, tasks, suite_errors = (
             self._resolve_evaluation_suite_selection(
                 request.suite_id, request.environment, request.tasks
@@ -10622,6 +10660,7 @@ def get_run(run_id: str) -> dict[str, Any]:
         )
     run["latest_checkpoint"] = run["checkpoints"][-1]["path"] if run["checkpoints"] else None
     run["manual_actions"] = service.run_manual_actions(run)
+    run["evaluation_blocker"] = _evaluation_busy_reason(run)
     run["tracking_actions"] = service.run_tracking_actions(run)
     _attach_run_progress_summaries(service.database, [run])
     return {"run": run}

@@ -34,6 +34,40 @@ from skynet_app.tracking import WandBSettings
 COMMIT = "e17cf98fe4bc234c564b37abc9e155f25e76d566"
 
 
+def seed_repository_choices(service, slug):
+    """Provide the exact cached metadata that real users obtain via Inspect.
+
+    Pipeline behavior tests use a fake cluster; they must not depend on network
+    discovery, nor bypass production validation when building their fixtures.
+    """
+    manifest = next(m for m in builtin_adapter_manifests() if m.slug == slug)
+    source = {"revision": COMMIT, "project_subdirectory": manifest.defaults.effective_project_subdirectory}
+    options = {}
+    for field in manifest.train.input_fields:
+        if field.choice_source:
+            options[field.path] = {
+                "choices": [field.default] if field.default is not None else ["pi05_libero"],
+                "complete": True, "warnings": [], "metadata": {},
+                "source": {
+                    "commit": COMMIT,
+                    "rule_sha256": pipeline_api.canonical_sha256(field.choice_source.model_dump(mode="json")),
+                    "files": [{"path": getattr(field.choice_source, "entrypoint", "egomimic/hydra_configs/train_zarr_cartesian.yaml"), "sha256": hashlib.sha256(b"pipeline fixture catalog").hexdigest()}],
+                },
+            }
+    # Exercise the exact repository URL key, including its optional .git suffix.
+    for repository in (manifest.default_repository, manifest.default_repository + ".git"):
+        service.source_metadata.put("inspection", repository,
+            service._repository_inspection_cache_parameters(source, manifest),
+            {"commit": COMMIT, "input_options": options})
+
+
+def make_pipeline_service(database, cluster, **kwargs):
+    service = PipelineService(database, cluster, **kwargs)
+    seed_repository_choices(service, "egoverse")
+    seed_repository_choices(service, "openpi")
+    return service
+
+
 class FakeCluster:
     hosts = ("sky1", "sky2")
 
@@ -195,6 +229,7 @@ def canonical_spec():
         },
         "runtime": {"backend": "existing", "bootstrap_uv": False},
         "train": {
+            "learning_rate": 1e-4,
             "max_steps": 1,
             "checkpoint": {
                 "save_every_steps": 1000,
@@ -208,6 +243,7 @@ def canonical_spec():
             "queue_policy": "auto",
             "account": "rl2-lab",
             "partition": "rl2-lab",
+            "cpus_per_task": 12,
             "gpu": {"mode": "explicit", "count": 2, "type": "a40"},
             "time_limit": "00:10:00",
         },
@@ -240,6 +276,7 @@ def repository_validation_spec(database: Database, experiment: str) -> dict:
     }
     database.create_adapter(name="Repository validation fixture", manifest=manifest)
     payload = canonical_spec()
+    payload["train"].pop("learning_rate", None)
     payload["identity"]["experiment"] = experiment
     payload["source"] = {
         "repository": "https://example.test/repository-validation.git",
@@ -254,7 +291,7 @@ def test_historical_executable_validation_contract_is_inert():
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         payload = repository_validation_spec(database, "inert-validation-contract")
 
         preview = service.preview(payload)
@@ -274,7 +311,7 @@ def test_preview_never_discovers_source_or_runtime_implicitly():
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
 
         fixture = repository_validation_spec(database, "no-implicit-discovery")
         symbolic = json.loads(json.dumps(fixture))
@@ -296,7 +333,7 @@ def test_repository_argument_validation_success_is_cached_by_pinned_inputs():
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         payload = repository_validation_spec(database, "native-validation-cache")
 
         first = service.preview(payload)
@@ -329,7 +366,7 @@ def test_repository_argument_validation_blocks_preview_create_and_submit():
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         payload = repository_validation_spec(database, "native-validation-block")
         experiment = service.create_experiment(payload)
         assert cluster.argument_validation_calls == 0
@@ -375,7 +412,7 @@ def test_repository_argument_validation_blocks_preview_create_and_submit():
 def test_changed_same_name_creates_revision_without_reconcile_lock_deadlock():
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
-        service = PipelineService(database, FakeCluster())
+        service = make_pipeline_service(database, FakeCluster())
         original = service.create_experiment(canonical_spec())
         changed = canonical_spec()
         changed["resources"]["time_limit"] = "00:11:00"
@@ -389,7 +426,7 @@ def test_changed_same_name_creates_revision_without_reconcile_lock_deadlock():
 
 def test_native_wandb_first_sdk_attachment_allows_reserved_run_id(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
-        service = PipelineService(Database(Path(directory) / "skynet.db"), FakeCluster())
+        service = make_pipeline_service(Database(Path(directory) / "skynet.db"), FakeCluster())
         payload = canonical_spec()
         payload["tracking"] = {
             "providers": [
@@ -430,7 +467,7 @@ def test_retroactive_tracking_attachment_is_terminal_idempotent_and_preserves_sp
 ):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
-        service = PipelineService(database, FakeCluster())
+        service = make_pipeline_service(database, FakeCluster())
         experiment = service.create_experiment(canonical_spec())
         run_id = experiment["runs"][0]["id"]
         database.update_run(run_id, status="FAILED")
@@ -531,7 +568,7 @@ def test_failed_wandb_binding_reopens_exact_same_run(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         database = Database(root / "skynet.db")
-        service = PipelineService(database, FakeCluster())
+        service = make_pipeline_service(database, FakeCluster())
         experiment = service.create_experiment(canonical_spec())
         run_id = experiment["runs"][0]["id"]
         run = database.get_run(run_id)
@@ -615,7 +652,7 @@ def test_create_submit_auto_overcap_and_reconcile(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules")
 
         experiment = service.create_experiment(canonical_spec())
@@ -670,7 +707,7 @@ def test_create_preflights_live_auto_queue_before_persisting_experiment():
         database = Database(Path(directory) / "skynet.db")
         cluster = ToggleSubmissionFailureCluster()
         cluster.fail_quota = True
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
 
         with pytest.raises(ValueError, match="could not verify live GPU quota"):
             service.create_experiment(canonical_spec())
@@ -683,7 +720,7 @@ def test_create_preflights_live_auto_queue_before_persisting_experiment():
 def test_materialization_failure_rolls_back_new_experiment(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
-        service = PipelineService(database, FakeCluster())
+        service = make_pipeline_service(database, FakeCluster())
 
         def fail_stage(*args, **kwargs):
             raise RuntimeError("stage persistence failed")
@@ -699,7 +736,7 @@ def test_locked_preflight_failure_is_idempotently_resubmitted(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = ToggleSubmissionFailureCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr(
             "skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules"
         )
@@ -738,7 +775,7 @@ def test_locked_preflight_failure_is_idempotently_resubmitted(monkeypatch):
 def test_changed_same_name_creates_revision_after_repairing_zero_attempt_orphan():
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
-        service = PipelineService(database, FakeCluster())
+        service = make_pipeline_service(database, FakeCluster())
         experiment = service.create_experiment(canonical_spec())
         revision = experiment["latest_revision"]
         run = database.get_run(experiment["runs"][0]["id"])
@@ -777,7 +814,7 @@ def test_failed_submit_preflight_never_persists_pending_without_attempt():
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = ToggleSubmissionFailureCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         experiment = service.create_experiment(canonical_spec())
         run_id = experiment["runs"][0]["id"]
         cluster.fail_quota = True
@@ -796,7 +833,7 @@ def test_failed_submit_preflight_never_persists_pending_without_attempt():
 def test_changed_same_name_preserves_attempted_revision_and_creates_draft(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
-        service = PipelineService(database, FakeCluster())
+        service = make_pipeline_service(database, FakeCluster())
         monkeypatch.setattr(
             "skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules"
         )
@@ -821,7 +858,7 @@ def test_known_pre_slurm_attempt_failure_can_retry_without_duplicate_job(monkeyp
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = ToggleSubmissionFailureCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr(
             "skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules"
         )
@@ -848,7 +885,7 @@ def test_immediate_submission_recovery_uses_canonical_log_path_resolution(monkey
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = ImmediateRecoveryCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules")
 
         experiment = service.create_experiment(canonical_spec())
@@ -863,7 +900,7 @@ def test_delayed_submission_recovery_resolves_pre_recorded_log_templates(monkeyp
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = DelayedRecoveryCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules")
 
         experiment = service.create_experiment(canonical_spec())
@@ -885,7 +922,7 @@ def test_reconcile_repairs_legacy_log_paths_from_archived_sbatch(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules")
 
         experiment = service.create_experiment(canonical_spec())
@@ -913,7 +950,7 @@ def test_reconcile_fails_run_when_declared_checkpoint_marker_is_missing(monkeypa
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules")
         experiment = service.create_experiment(canonical_spec())
         service.submit_experiment(experiment["id"])
@@ -940,7 +977,7 @@ def test_reconcile_fails_run_when_required_checkpoint_registration_fails(monkeyp
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules")
         experiment = service.create_experiment(canonical_spec())
         service.submit_experiment(experiment["id"])
@@ -975,7 +1012,7 @@ def test_failed_evaluation_preserves_successful_training_run_and_checkpoint(monk
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr(
             "skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules"
         )
@@ -1040,7 +1077,7 @@ def test_reconcile_resolves_decorated_cancelled_accounting_state(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules")
         experiment = service.create_experiment(canonical_spec())
         service.submit_experiment(experiment["id"])
@@ -1093,12 +1130,11 @@ def test_reconcile_resolves_decorated_cancelled_accounting_state(monkeypatch):
 
 def test_frontend_payload_resolves_to_canonical(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
-        service = PipelineService(Database(Path(directory) / "skynet.db"), FakeCluster())
-        monkeypatch.setattr("skynet_app.pipeline_api._resolve_git_revision", lambda repo, revision: COMMIT)
+        service = make_pipeline_service(Database(Path(directory) / "skynet.db"), FakeCluster())
         spec = service.normalize_spec({
             "name": "frontend",
             "adapter": "egoverse",
-            "source": {"repository": "https://github.com/GaTech-RL2/EgoVerse", "revision": "main"},
+            "source": {"repository": "https://github.com/GaTech-RL2/EgoVerse", "revision": COMMIT},
             "runtime": {"type": "existing"},
             "hyperparameters": {
                 "batch_size": 16,
@@ -1125,7 +1161,7 @@ def test_frontend_payload_resolves_to_canonical(monkeypatch):
 
 def test_openpi_blank_frontend_parameters_preserve_repository_defaults(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
-        service = PipelineService(Database(Path(directory) / "skynet.db"), FakeCluster())
+        service = make_pipeline_service(Database(Path(directory) / "skynet.db"), FakeCluster())
         monkeypatch.setattr(
             service, "_validate_repository_input_choices", lambda *args: {}
         )
@@ -1178,7 +1214,7 @@ def test_openpi_blank_frontend_parameters_preserve_repository_defaults(monkeypat
 
 def test_openpi_frontend_global_batch_semantics_is_runnable_and_persisted(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
-        service = PipelineService(Database(Path(directory) / "skynet.db"), FakeCluster())
+        service = make_pipeline_service(Database(Path(directory) / "skynet.db"), FakeCluster())
         monkeypatch.setattr(
             service, "_validate_repository_input_choices", lambda *args: {}
         )
@@ -1226,7 +1262,7 @@ def test_openpi_frontend_global_batch_semantics_is_runnable_and_persisted(monkey
 
 def test_openpi_frontend_explicit_per_device_batch_blocks_multi_gpu(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
-        service = PipelineService(Database(Path(directory) / "skynet.db"), FakeCluster())
+        service = make_pipeline_service(Database(Path(directory) / "skynet.db"), FakeCluster())
         monkeypatch.setattr(
             service, "_validate_repository_input_choices", lambda *args: {}
         )
@@ -1264,7 +1300,7 @@ def test_concurrent_dispatch_claims_stage_once(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules")
         experiment = service.create_experiment(canonical_spec())
         run_id = experiment["runs"][0]["id"]
@@ -1306,7 +1342,7 @@ def _mark_training_run_cancelled(database, run_id):
 def test_manual_run_actions_require_terminal_failure_checkpoint_and_attempt_budget(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
-        service = PipelineService(database, FakeCluster())
+        service = make_pipeline_service(database, FakeCluster())
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules")
         spec = canonical_spec()
         spec["train"]["checkpoint"]["save_every_steps"] = 1000
@@ -1323,8 +1359,8 @@ def test_manual_run_actions_require_terminal_failure_checkpoint_and_attempt_budg
 
         failed, stage, attempt = _mark_training_run_failed(database, run_id)
         actions = manual_run_actions(failed)
-        assert not actions["resume"]["enabled"]
-        assert "checkpoint" in actions["resume"]["reason"].lower()
+        assert actions["resume"]["enabled"]
+        assert "initial pinned execution" in actions["resume"]["reason"].lower()
         assert actions["rerun"]["enabled"]
 
         database.create_checkpoint(
@@ -1355,7 +1391,7 @@ def test_rerun_is_checkpoint_free_new_run_with_pinned_variant(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules")
         spec = canonical_spec()
         spec["train"]["checkpoint"]["save_every_steps"] = 1000
@@ -1397,7 +1433,7 @@ def test_manual_resume_submits_the_registered_resumable_checkpoint(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules")
         spec = canonical_spec()
         spec["train"]["checkpoint"]["save_every_steps"] = 1000
@@ -1427,7 +1463,7 @@ def test_cancelled_run_resumes_from_valid_checkpoint_in_same_run(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         capsule_root = Path(directory) / "capsules"
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", capsule_root)
         spec = canonical_spec()
@@ -1475,7 +1511,7 @@ def test_cancelled_run_without_checkpoint_replays_immutable_initial_execution(mo
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         capsule_root = Path(directory) / "capsules"
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", capsule_root)
 
@@ -1507,6 +1543,7 @@ def test_cancelled_run_without_checkpoint_replays_immutable_initial_execution(mo
             name="Cancellation replay fixture", manifest=manifest
         )
         payload = canonical_spec()
+        payload["train"].pop("learning_rate", None)
         payload["identity"]["experiment"] = "cancel-replay"
         payload["source"] = {
             "repository": "https://example.test/cancel-replay.git",
@@ -1577,7 +1614,7 @@ def test_terminal_timeout_manual_resume_ignores_automatic_attempt_budget(
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         capsule_root = Path(directory) / "capsules"
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", capsule_root)
         spec = canonical_spec()
@@ -1667,7 +1704,7 @@ def test_active_attempt_blocks_manual_resume_despite_exhausted_automatic_budget(
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr(
             "skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules"
         )
@@ -1718,7 +1755,7 @@ def test_cancelled_run_without_checkpoint_blocks_invalid_pinned_evidence(
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr(
             "skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules"
         )
@@ -1779,7 +1816,7 @@ def test_manual_retry_mode_is_rejected_in_favor_of_rerun(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules")
         experiment = service.create_experiment(canonical_spec())
         run_id = experiment["runs"][0]["id"]
@@ -1797,7 +1834,7 @@ def test_new_revision_is_latest_scoped_and_can_submit_existing_draft(monkeypatch
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules")
         original_spec = canonical_spec()
         original_spec["train"]["checkpoint"]["save_every_steps"] = 1000
@@ -1842,7 +1879,7 @@ def _legacy_clean_retry_upgrade_scenario(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         capsule_root = Path(directory) / "capsules"
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", capsule_root)
 
@@ -2040,7 +2077,7 @@ def _create_active_evaluation(service: PipelineService, name: str) -> tuple[dict
 def test_evaluation_submission_forwards_only_explicit_operator_eula(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         cluster = FakeCluster()
-        service = PipelineService(Database(Path(directory) / "skynet.db"), cluster)
+        service = make_pipeline_service(Database(Path(directory) / "skynet.db"), cluster)
         monkeypatch.setenv("OMNI_KIT_ACCEPT_EULA", "YES")
 
         _create_active_evaluation(service, "operator-eula-forwarding")
@@ -2054,7 +2091,7 @@ def test_cancel_pending_training_stage_is_local_and_idempotent(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr(
             "skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules"
         )
@@ -2083,7 +2120,7 @@ def test_completed_training_wins_cancel_race(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr(
             "skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules"
         )
@@ -2116,7 +2153,7 @@ def test_run_and_evaluation_cancellation_are_stage_targeted(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr(
             "skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules"
         )
@@ -2173,7 +2210,7 @@ def test_cancel_routes_accept_empty_request_bodies(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr(
             "skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules"
         )
@@ -2204,7 +2241,7 @@ def test_cancel_routes_accept_empty_request_bodies(monkeypatch):
 def test_run_detail_attempts_expose_immutable_common_hyperparameters(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
-        service = PipelineService(database, FakeCluster())
+        service = make_pipeline_service(database, FakeCluster())
         run = _create_submitted_run(service, "attempt-common-hyperparameters")
         stage = run["stages"][0]
         snapshotted = database.create_job_attempt(
@@ -2273,6 +2310,7 @@ def test_run_detail_attempts_expose_immutable_common_hyperparameters(monkeypatch
             "gradient_accumulation",
             "num_workers",
             "max_steps",
+            "max_epochs",
             "precision",
         }
         assert attempts[snapshotted["id"]]["common_hyperparameters"] == {
@@ -2282,6 +2320,7 @@ def test_run_detail_attempts_expose_immutable_common_hyperparameters(monkeypatch
             "gradient_accumulation": 3,
             "num_workers": 7,
             "max_steps": 321,
+            "max_epochs": None,
             "precision": "fp16",
         }
         assert attempts[defaulted_snapshot["id"]]["common_hyperparameters"] == {
@@ -2377,6 +2416,7 @@ def test_effective_common_hyperparameters_prefer_explicit_then_pinned_repository
         "gradient_accumulation": 1,
         "num_workers": 2,
         "max_steps": 44,
+        "max_epochs": None,
         "precision": "bf16",
     }
     assert contract["provenance"]["batch_size"]["source"] == (
@@ -2389,7 +2429,7 @@ def test_effective_common_hyperparameters_prefer_explicit_then_pinned_repository
 def test_historical_attempt_enrichment_uses_exact_cache_and_write_once_receipt(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
-        service = PipelineService(database, FakeCluster())
+        service = make_pipeline_service(database, FakeCluster())
         run = _create_submitted_run(service, "historical-common-hyperparameters")
         stage = run["stages"][0]
         manifest = next(
@@ -2542,6 +2582,7 @@ def test_historical_attempt_enrichment_uses_exact_cache_and_write_once_receipt(m
             "gradient_accumulation": 1,
             "num_workers": 2,
             "max_steps": 30_000,
+            "max_epochs": None,
             "precision": "bf16",
         }
         assert result["common_hyperparameter_provenance"]["batch_size"]["source"] == (
@@ -2583,7 +2624,7 @@ def test_attempt_log_selects_requested_attempt_and_enforces_run_ownership(monkey
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = AttemptLogCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules")
 
         first_run = _create_submitted_run(service, "attempt-log-first")
@@ -2617,7 +2658,7 @@ def test_attempt_log_endpoint_validates_stream_and_line_bounds(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = AttemptLogCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules")
         run = _create_submitted_run(service, "attempt-log-api")
         attempt = run["attempts"][0]
@@ -2656,7 +2697,7 @@ def test_attempt_log_endpoint_distinguishes_content_from_retrieval_failure(monke
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = AttemptLogCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules")
         run = _create_submitted_run(service, "attempt-log-failure")
         attempt = run["attempts"][0]
@@ -2685,7 +2726,7 @@ def test_evaluation_ingests_canonical_episode_ledger(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
-        service = PipelineService(database, cluster)
+        service = make_pipeline_service(database, cluster)
         monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules")
         experiment = service.create_experiment(canonical_spec())
         service.submit_experiment(experiment["id"])

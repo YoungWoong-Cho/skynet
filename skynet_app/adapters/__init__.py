@@ -2604,6 +2604,7 @@ def _builtin_manifest(
     warnings: list[str] | None = None,
     input_fields: list[AdapterInputField] | None = None,
     argv: list[str] | None = None,
+    resume_argv: list[str] | None = None,
     parameter_flags: dict[str, ArgumentBinding] | None = None,
     retry_clean_argv: list[str] | None = None,
     preparation_steps: list[PreparationStepTemplate] | None = None,
@@ -2654,6 +2655,7 @@ def _builtin_manifest(
         prerequisites=prerequisites or [],
         train=CommandTemplate(
             argv=argv or [],
+            resume_argv=resume_argv or [],
             input_fields=input_fields or [],
             parameter_flags=parameter_flags or {},
             supported_canonical_fields=(
@@ -2708,6 +2710,7 @@ def builtin_adapter_manifests() -> list[AdapterManifest]:
                 "seed={{train.seed}}",
                 "paths.output_dir={{tokens.run_dir}}/artifacts",
             ],
+            resume_argv=["ckpt_path={{tokens.resume_checkpoint}}"],
             hyperparameter_defaults=AdapterHyperparameterDefaults(
                 batch_semantics="per_device",
                 gradient_accumulation_steps=1,
