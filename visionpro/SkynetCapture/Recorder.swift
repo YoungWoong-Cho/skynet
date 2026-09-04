@@ -121,8 +121,13 @@ final class Recorder {
     private func receive(_ anchor: HandAnchor, timestamp: Double, removed: Bool) {
         let side = anchor.chirality == .left ? "left" : "right"
         let tracked = anchor.isTracked && !removed
+        let wasReady = ready
         if tracked { visibleHands.insert(side) } else { visibleHands.remove(side) }
         ready = !visibleHands.isEmpty
+        if ready != wasReady && !recording {
+            message = ready ? "Tracking is ready. Start recording when you are ready."
+                : "No hands are tracked. Keep your hands visible before starting a recording."
+        }
         trackedHands = ["left", "right"].map { "\($0.capitalized): \(visibleHands.contains($0) ? "tracked" : "not tracked")" }.joined(separator: " · ")
         guard recording else { return }
         // Per-anchor timestamps may interleave across hands. Preserve the source time and use
