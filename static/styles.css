@@ -1641,3 +1641,10 @@ footer {
   .tab-nav { overflow-x: auto; justify-content: flex-start; width: 100%; }
   .connection-control { grid-column: 1 / -1; min-height: 38px; }
 }
+
+.local-capture-panel { padding: 1.25rem; }
+.local-capture-panel details { margin: 1rem 0; border-top: 1px solid var(--border-color, #35414a); padding-top: .8rem; }
+.local-capture-panel summary { cursor: pointer; font-weight: 650; }
+.local-capture-panel p, .local-capture-panel li { line-height: 1.6; overflow-wrap: anywhere; }
+.local-capture-panel li { margin-block: .5rem; }
+.local-capture-panel #local-capture-checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }

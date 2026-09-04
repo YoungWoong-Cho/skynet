@@ -13,3 +13,8 @@ htmlcov/
 
 # Local capsules, logs, databases and runtime receipts
 /data/
+
+# Xcode local interface state and build output
+xcuserdata/
+DerivedData/
+*.xcuserstate

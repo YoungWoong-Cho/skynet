@@ -7943,6 +7943,9 @@ async function createEvaluation(event) {
     const evaluation = entityFrom(result, "evaluation");
     const evaluationId = evaluation.id || evaluation.evaluation_id;
     if (!evaluationId) throw new Error("Evaluation was created but the API returned no evaluation ID.");
+    // Submission creates an active stage, so the previous readiness result is stale.
+    evaluationLastValidatedAt = 0;
+    scheduleEvaluationTargetValidation({ immediate: true });
     showToast(`Evaluation ${evaluationId} created.`);
     await activateTab("evaluations");
     await loadEvaluations(true);
@@ -9407,6 +9410,7 @@ function renderCollectionSessions() {
 }
 
 async function loadCollection(force = false) {
+  if (typeof loadLocalCollection === "function") loadLocalCollection(force);
   if (loadedTabs.has("collection") && !force) return;
   elements.refreshCollection.disabled = true;
   clearNotice(elements.collectionError);

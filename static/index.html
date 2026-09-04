@@ -7,6 +7,7 @@
     <title>Skynet / Experiment Console</title>
     <link rel="stylesheet" href="/static/styles.css?v=20260904-browser-fixes">
     <script src="/static/app.js?v=20260904-browser-fixes" defer></script>
+    <script src="/static/local-capture.js?v=20260904" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -886,11 +887,33 @@
           </div>
 
           <div id="collection-error" class="inline-alert" role="alert" hidden></div>
+<section class="panel local-capture-panel" aria-labelledby="local-capture-heading">
+ <div class="panel-heading"><div><h2 id="local-capture-heading">Record with Apple Vision Pro</h2><p>Record on the headset, transfer to this computer, then store or convert the data later.</p></div><button id="local-capture-refresh" class="button button-outline" type="button">Check setup</button></div>
+ <p><strong>Local tracking · no NVIDIA GPU needed · visionOS 2.0 or newer</strong></p>
+ <p>Records hand joints and head poses. Camera images, object states, and robot actions are not included. DexVerse simulation is a separate pipeline that requires a compatible NVIDIA GPU computer.</p>
+ <div id="local-capture-error" class="inline-alert" role="alert" hidden></div>
+ <details open><summary>1. Install the headset app</summary>
+  <div id="local-capture-checks" aria-live="polite">Checking this computer…</div>
+  <ol><li><a href="/api/collection/local/client-source" download>Download Skynet Capture for Xcode</a>, unzip it, then open <strong>SkynetCapture.xcodeproj</strong> on your Mac.</li><li>In Xcode, select SkynetCapture → Signing &amp; Capabilities, select your Apple team, and enter a unique bundle identifier such as <code>your.name.skynetcapture</code>.</li><li>On the headset, open Settings → General → Remote Devices and leave it open. On the Mac, pair it using Xcode → Window → Devices and Simulators. Enable Developer Mode on the headset, select it as the run destination, then click Run.</li></ol>
+  <p>The simulator cannot supply real hand tracking. Signing, pairing, and headset permissions must be checked on your devices.</p>
+ </details>
+ <details open><summary>2. Record and save on the headset</summary>
+  <ol><li>Open Skynet Capture, enter a task name, then choose <strong>Open tracking space</strong>. Allow hand tracking and keep your hands visible.</li><li>Choose <strong>Start recording</strong>, perform the movement, then choose <strong>Stop and save</strong>. Start with about 10 seconds.</li><li>Under Saved on this headset, share the JSONL file to this Mac using AirDrop or Files. The original stays on the headset.</li></ol>
+  <p>Closing the tracking space during recording marks it as interrupted. Stop and save first to create a completed recording.</p>
+ </details>
+ <details open><summary>3. Import and inspect the recording</summary>
+  <form id="local-capture-import" class="dense-form"><div class="field"><label for="local-capture-file">Saved tracking recording (.jsonl, up to 512 MB)</label><input id="local-capture-file" type="file" accept=".jsonl,application/x-ndjson" required></div><button id="local-capture-upload" class="button button-accent" type="submit">Import recording</button><p id="local-capture-import-status" role="status">The original file is preserved. No data is sent to the cluster during import.</p></form>
+  <p id="local-capture-storage"></p>
+  <div class="table-scroll"><table><thead><tr><th>Task / recorded</th><th>Frames / duration</th><th>Tracking quality</th><th>Location / use</th><th>Actions</th></tr></thead><tbody id="local-capture-body"><tr><td colspan="5">No recordings loaded.</td></tr></tbody></table></div>
+ </details>
+ <details><summary>DexVerse simulation setup</summary><p>DexVerse records robot actions and scene states inside Isaac Sim. It needs a compatible NVIDIA GPU host, Isaac Sim 5.1.0, Isaac Lab 2.3.2, robot assets, a working CloudXR stream, and a compatible client. This cannot run on the Mac’s GPU.</p><p>The CloudXR client documented for the pinned stack requires visionOS 26; that requirement does not apply to the local recorder above. Local human tracking requires validated retargeting and simulation before it becomes a robot demonstration.</p><p><a href="https://isaac-sim.github.io/IsaacLab/v2.3.2/source/how-to/cloudxr_teleoperation.html" target="_blank" rel="noreferrer">Official Isaac Lab CloudXR setup guide</a>. The adapter below lists the remaining host, stream, and calibration requirements.</p></details>
+</section>
+
 
           <section class="panel table-panel">
             <div class="panel-heading">
               <div>
-                <h2>Collection adapters</h2>
+                <h2>Cluster collection adapters</h2>
                 <p class="collection-section-help">An adapter declares native stream meaning, required setup, and the launch command. Archived adapters remain visible for existing sessions.</p>
               </div>
               <div>
@@ -958,7 +981,7 @@
           <section class="panel table-panel collection-sessions-panel">
             <div class="panel-heading">
               <div>
-                <h2>Collection sessions</h2>
+                <h2>Cluster collection sessions</h2>
                 <p class="collection-section-help">Sessions preserve the submitted manifest, sbatch, job identity, native output, and registration result.</p>
               </div>
               <div class="panel-heading-actions">

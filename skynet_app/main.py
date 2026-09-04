@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .cluster_config import CLUSTER
 from .collection_api import router as collection_router
+from .local_capture_api import router as local_capture_router
 from .pipeline_api import router as pipeline_router
 from .pipeline_api import service as pipeline_service
 
@@ -114,7 +115,7 @@ def _gateway_candidates(gateway: str) -> tuple[str, ...]:
         raise HTTPException(status_code=422, detail="Unknown SSH gateway")
     if gateway == "auto":
         return SSH_HOSTS
-    return (gateway, *(host for host in SSH_HOSTS if host != gateway))
+    return (gateway,)
 
 
 def _run_with_fallback(command: str, gateway: str, *, timeout: int = 20) -> tuple[str, str]:
@@ -465,4 +466,5 @@ def index() -> FileResponse:
 
 app.include_router(pipeline_router)
 app.include_router(collection_router)
+app.include_router(local_capture_router)
 app.mount("/static", StaticFiles(directory=STATIC_ROOT), name="static")
