@@ -39,7 +39,6 @@ function renderCaptureCycle(job) {
     ${job.refresh_error ? `<p role="alert">Status could not refresh: ${escapeHtml(job.refresh_error)}. Last known state is shown.</p>` : ''}
     <ul>${stages || '<li>Waiting for preparation and GPU availability.</li>'}</ul>
     ${job.result ? `<p>Dataset: ${escapeHtml(job.result.dataset.frames)} frames · ${job.result.dataset.capture_success ? 'successful task demonstration' : 'task not achieved in the source replay'}. Policy: state-based behavior cloning.</p><p>${links}</p><a href="#datasets">View derived dataset and original-recording lineage</a>` : ''}
-    ${job.state === 'SUCCEEDED' ? `<p><button type="button" class="button button-accent" data-tensor-cycle="${escapeHtml(job.id)}" data-tensor-name="${escapeHtml(job.name)}" data-tensor-frames="${Number(job.result?.dataset?.frames) || 0}">Inspect model tensors</button></p>` : ''}
     <p>${job.root ? `<a href="/api/collection/processing/jobs/${encodeURIComponent(job.id)}/logs" target="_blank" rel="noopener">Read job log</a>` : ''}
     ${active && job.job_id ? `<button type="button" class="button button-outline" data-cycle-action="cancel" data-cycle-id="${escapeHtml(job.id)}" ${job.cancellation_requested ? 'disabled' : ''}>${job.cancellation_requested ? 'Cancellation requested' : 'Cancel cycle'}</button>` : ''}
     ${['FAILED', 'SUBMISSION_UNKNOWN'].includes(job.state) && !job.job_id ? `<button type="button" class="button button-outline" data-cycle-action="recover" data-cycle-id="${escapeHtml(job.id)}">Recover submission / retry setup</button>` : ''}</p>

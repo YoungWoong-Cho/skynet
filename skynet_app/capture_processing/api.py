@@ -1,32 +1,15 @@
 from __future__ import annotations
 import re
 import shlex
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from skynet_app.local_capture_api import service as captures
 from skynet_app.cluster_runtime import ClusterError, SubmissionOutcomeUnknown
 from .service import ProcessingService
-from .tensor_trace import TensorTraceService, TraceError
 
 router = APIRouter(prefix="/api/collection/processing", tags=["collection"])
 service = ProcessingService(captures)
-traces = TensorTraceService(service)
-
-
-@router.get("/jobs/{identifier}/tensor-trace")
-def tensor_trace(identifier: str, frame: int = Query(default=0, ge=0)):
-    try:
-        return traces.get(identifier, frame)
-    except KeyError as error:
-        raise HTTPException(404, str(error)) from error
-    except TraceError as error:
-        raise HTTPException(error.status, str(error)) from error
-    except (ClusterError, TimeoutError) as error:
-        raise HTTPException(
-            503,
-            f"Tensor trace could not load: {error}. Check the cycle's cluster connection and retry.",
-        ) from error
 
 
 class CycleRequest(BaseModel):
