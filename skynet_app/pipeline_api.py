@@ -1923,6 +1923,16 @@ class PipelineService:
                 "the repository's dataset configuration, or select an adapter with "
                 "a compatible training_data binding."
             )
+        consumed = {(field.data_binding.role, field.data_binding.position)
+                    for field in manifest.train.input_fields if field.data_binding}
+        bound_roles = {role for role, _ in consumed}
+        identities = [(str(item.get("role") or ""), int(item.get("position") or 0))
+                      for item in assignments if isinstance(item, Mapping)]
+        if len(identities) != len(set(identities)):
+            raise ValueError("Dataset bundle contains duplicate role positions; choose an unambiguous bundle")
+        for role, position in identities:
+            if role in bound_roles and (role, position) not in consumed:
+                raise ValueError(f"This adapter cannot consume {role} at position {position}. Choose a bundle with only the declared dataset inputs.")
         for field in manifest.train.input_fields:
             binding = field.data_binding
             if binding is None:
@@ -1947,6 +1957,8 @@ class PipelineService:
                 raise ValueError(
                     f"{field.path}: selected data bundle role {binding.role} has no version snapshot"
                 )
+            if str(version.get("status") or "").upper() != "READY":
+                raise ValueError(f"Selected {binding.role} is {version.get('status') or 'unverified'}, not ready on the cluster. Complete its import or transfer before training.")
             if binding.formats and str(version.get("format") or "").casefold() not in {
                 item.casefold() for item in binding.formats
             }:

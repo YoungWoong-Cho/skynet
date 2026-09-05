@@ -13,6 +13,7 @@ from skynet_app.experiments import AdapterName, CanonicalModel, ExperimentSpec, 
 from .groot_isaaclab_bridge import GROOT_ISAACLAB_BRIDGE_SOURCE
 from .groot_robocasa_bridge import GROOT_ROBOCASA_BRIDGE_SOURCE
 from .openpi_libero_bridge import OPENPI_LIBERO_BRIDGE_SOURCE
+from .openpi_dataset_bridge import OPENPI_DATASET_BRIDGE_SOURCE
 
 
 RESUME_CHECKPOINT_TOKEN = "{{SKYNET_RESUME_CHECKPOINT}}"
@@ -1010,6 +1011,23 @@ class OpenPiAdapter(RepositoryAdapter):
             ]
             for key, value in sorted(spec.native.overrides.items()):
                 argv.extend([f"--{key.replace('_', '-')}", _serialize_override(value)])
+        dataset_path = spec.native.config.get("dataset_path")
+        norm_path = spec.native.config.get("dataset_norm_stats_path")
+        if dataset_path:
+            if spec.native.argv:
+                blockers.append("Selected OpenPI dataset input is unsupported with a custom training command; clear the custom command or remove the dataset selection")
+            if not norm_path:
+                blockers.append("Dataset normalization file is required when selecting OpenPI data. Enter an absolute path to norm_stats.json computed for this dataset and training config")
+            for label, path in (("Dataset", dataset_path), ("Normalization", norm_path)):
+                if path and not PurePosixPath(str(path)).is_absolute():
+                    blockers.append(f"{label} path must be an absolute compute-node path")
+            if any(str(key).replace("_", "-").startswith(("data.", "data-", "assets-base-dir")) for key in spec.native.overrides):
+                blockers.append("OpenPI data/asset overrides conflict with the selected dataset; use the dataset and normalization inputs instead")
+            if argv and not spec.native.argv:
+                argv = ["python", f"{RUN_DIR_TOKEN}/adapter-support/openpi-dataset.py",
+                        "--dataset-root", str(dataset_path), "--norm-stats", str(norm_path or ""), "--", *argv[2:]]
+        elif norm_path:
+            blockers.append("A normalization file requires an explicit OpenPI dataset path or bundle")
         warnings = ["openpi supports multiple GPUs on one node but not multi-node JAX training."]
         return self._base_plan(
             argv=argv,
@@ -2158,10 +2176,9 @@ def _resolve_preparation_steps(
     consumer_argv: list[str] = []
     for template in command.preparation_steps:
         enabled = all(
-            any(canonical_sha256(actual) == canonical_sha256(choice) for choice in choices)
+            any(canonical_sha256(_path_value(document, path)) == canonical_sha256(choice) for choice in choices)
             for path, choices in template.enabled_when.items()
-            if (actual := _path_value(document, path)) is not None
-        ) and all(_path_value(document, path) is not None for path in template.enabled_when)
+        )
         if not enabled:
             continue
         rendered = {
@@ -2516,6 +2533,10 @@ class ManifestAdapter(RepositoryAdapter):
             legacy.native_tracking = native_tracking
             legacy.native_config.update(document["native"]["config"])
             legacy.blockers.extend(compatibility_blockers)
+            if (self.manifest.legacy_handler == "openpi"
+                    and spec.native.config.get("dataset_path")
+                    and "adapter-support/openpi-dataset.py" not in command.capsule_files):
+                legacy.blockers.append("Selected dataset input is unsupported by this pinned OpenPI adapter. Choose the current adapter version to use the dataset bridge.")
             legacy.blockers = list(dict.fromkeys(legacy.blockers))
             legacy.todos = list(dict.fromkeys([*legacy.todos, *self.manifest.todos]))
             legacy.warnings = list(dict.fromkeys([*legacy.warnings, *self.manifest.warnings]))
@@ -3052,6 +3073,7 @@ def builtin_adapter_manifests() -> list[AdapterManifest]:
         ),
         _builtin_manifest(
             "openpi", "openpi", "https://github.com/Physical-Intelligence/openpi", [], "uv",
+            capsule_files={"adapter-support/openpi-dataset.py": OPENPI_DATASET_BRIDGE_SOURCE},
             progress=TrainingProgressContract(
                 source=TrainingProgressLogSource(
                     stream="stderr",
@@ -3110,7 +3132,7 @@ def builtin_adapter_manifests() -> list[AdapterManifest]:
                             "b3a44bb2810436fb62917decaea58bd4d9110255df527dea21e8fd40c960bd84"
                         )
                     },
-                    enabled_when={"native.config.config_name": ["pi05_libero"]},
+                    enabled_when={"native.config.config_name": ["pi05_libero"], "native.config.dataset_path": [None, ""]},
                     consumer_argv=[
                         "--assets-base-dir",
                         "{{tokens.run_dir}}/artifacts/preparation/openpi/pi05-libero/assets",
@@ -3160,6 +3182,15 @@ def builtin_adapter_manifests() -> list[AdapterManifest]:
                             ),
                         ],
                     ),
+                ),
+                AdapterInputField(
+                    path="native.config.dataset_path", label="OpenPI dataset path", kind="string",
+                    data_binding=DataBundleInputBinding(role="training_data", formats=["lerobot-v2.0", "lerobot-v2.1", "openpi-libero-lerobot-v2"]),
+                    help="Optional absolute compute-node path, or select a dataset bundle. Supports LeRobot LIBERO observations: image, wrist_image, state[8], actions[7]. Requires a matching normalization file; no download fallback is allowed.",
+                ),
+                AdapterInputField(
+                    path="native.config.dataset_norm_stats_path", label="Dataset normalization file", kind="string",
+                    help="Required when selecting a dataset: absolute compute-node path to norm_stats.json computed for those files and the chosen OpenPI config. Repository default statistics are not substituted. Leave both dataset inputs blank to use the repository configuration.",
                 ),
                 AdapterInputField(
                     path="native.config.ema_decay",

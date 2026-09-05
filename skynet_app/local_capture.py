@@ -172,19 +172,23 @@ class LocalCaptureService:
         size = path.stat().st_size
         if size > MAX_CAPTURE_BYTES:
             raise ValueError("Recording exceeds the 512 MB import limit. Record shorter sessions.")
-        summary = provider.inspect(path)
         with path.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        # An identical byte stream has already passed provider validation. Hash
+        # once, then reuse its stored summary instead of parsing every frame again.
         with self._lock:
+            existing = self._existing_capture(digest, provider_key, path)
+            if existing is not None:
+                return existing
+        summary = provider.inspect(path)
+        with self._lock:
+            # Another upload may have finished while this one was inspected.
+            existing = self._existing_capture(digest, provider_key, path)
+            if existing is not None:
+                return existing
             with self.database.connection() as connection:
-                existing = connection.execute("SELECT * FROM local_captures WHERE sha256 = ?", (digest,)).fetchone()
                 conflict = connection.execute("SELECT sha256 FROM local_captures WHERE provider = ? AND session_id = ?",
                                               (provider_key, summary["header"]["session_id"])).fetchone()
-            if existing:
-                saved_path = self.root / existing["filename"]
-                if not saved_path.is_file():
-                    shutil.copyfile(path, saved_path)
-                return {"capture": self._public(existing), "imported": False}
             if conflict:
                 raise ValueError("This session ID was already imported with different contents. The original capture is immutable.")
             destination = self.root / f"{digest}.jsonl"
@@ -208,6 +212,18 @@ class LocalCaptureService:
                     (digest, provider_key, resource_name, destination.name, size, canonical_json(summary), version["id"], utc_now()))
                 row = connection.execute("SELECT * FROM local_captures WHERE sha256 = ?", (digest,)).fetchone()
             return {"capture": self._public(row), "imported": True}
+
+    def _existing_capture(self, digest: str, provider_key: str, source: Path) -> dict[str, Any] | None:
+        with self.database.connection() as connection:
+            existing = connection.execute("SELECT * FROM local_captures WHERE sha256 = ?", (digest,)).fetchone()
+        if existing is None:
+            return None
+        if existing["provider"] != provider_key:
+            raise ValueError(f"This file was imported with provider {existing['provider']}; choose that collection provider")
+        saved_path = self.root / existing["filename"]
+        if not saved_path.is_file():
+            shutil.copyfile(source, saved_path)
+        return {"capture": self._public(existing), "imported": False}
 
     def file(self, digest: str) -> Path:
         with self.database.connection() as connection:

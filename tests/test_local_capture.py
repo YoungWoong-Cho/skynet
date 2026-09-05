@@ -115,3 +115,34 @@ def test_distinct_hand_and_head_clocks_are_preserved(tmp_path):
     data[1]['head_timestamp'] = float('nan')
     with pytest.raises(ValueError, match='Head timestamp must be a finite number'):
         VisionProTracking().inspect(save(tmp_path, data))
+
+
+def test_identical_recording_reuses_validation_and_restores_missing_file(tmp_path, monkeypatch):
+    service = LocalCaptureService(Database(tmp_path / 'test.db'))
+    path = save(tmp_path, records())
+    first = service.import_file('visionpro-local', path)
+    stored = service.file(first['capture']['sha256'])
+    stored.unlink()
+    def unexpected(*args):
+        pytest.fail('unchanged recording was reparsed')
+    monkeypatch.setattr(VisionProTracking, 'inspect', unexpected)
+    repeated = service.import_file('visionpro-local', path)
+    assert repeated['imported'] is False
+    assert stored.read_bytes() == path.read_bytes()
+    assert repeated['capture']['summary'] == first['capture']['summary']
+
+
+def test_import_disk_error_is_actionable_and_cleans_upload(tmp_path, monkeypatch):
+    import errno
+    from skynet_app import local_capture_api
+    service = LocalCaptureService(Database(tmp_path / 'test.db'))
+    monkeypatch.setattr(local_capture_api, 'service', service)
+    def full(*args):
+        raise OSError(errno.ENOSPC, 'No space left')
+    monkeypatch.setattr(service, 'import_file', full)
+    app = FastAPI(); app.include_router(local_capture_api.router)
+    with TestClient(app) as client:
+        response = client.post('/api/collection/local/captures/visionpro-local', content=b'upload')
+    assert response.status_code == 507
+    assert 'free disk space' in response.json()['detail']
+    assert not list(service.root.glob('*.upload'))

@@ -114,3 +114,12 @@ test('structured API errors retain their explanation and field location', () => 
   assert.equal(c.apiErrorMessage({ code: 'UNSUPPORTED', message: 'This model has no compatible evaluator' }), 'This model has no compatible evaluator');
   assert.ok(!c.apiErrorMessage({ code: 'MISSING_RUNTIME', errors: ['Install runtime'] }).includes('[object Object]'));
 });
+
+test('bundle compatibility rejects local files and extra unconsumed data', () => {
+  const c = load(['experimentBundleCompatibility'], { selectedAdapter: () => ({}), declaredAdapterInputFields: () => [{data_binding: {role:'training_data', position:0, formats:['lerobot-v2.0']}}] });
+  const assignment = {role:'training_data', position:0, version:{format:'lerobot-v2.0',path:'/cluster/data',status:'READY'}};
+  assert.equal(c.experimentBundleCompatibility({assignments:[assignment]}).compatible, true);
+  assert.equal(c.experimentBundleCompatibility({assignments:[{...assignment,version:{...assignment.version,status:'LOCAL'}}]}).compatible, false);
+  assert.match(c.experimentBundleCompatibility({assignments:[assignment,{...assignment,position:1}]}).message, /cannot consume/);
+  assert.match(c.experimentBundleCompatibility({assignments:[assignment,assignment]}).message, /duplicate/);
+});

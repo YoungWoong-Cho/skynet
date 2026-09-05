@@ -58,7 +58,7 @@ def test_bundle_selection_is_consumed_or_rejected_explicitly():
     def document(format='groot-lerobot-v2', path=''):
         return {
             'data': {'bundle': {'assignments': [{'role': 'training_data', 'position': 0,
-                'version': {'format': format, 'path': '/data/gr00t'}}]}},
+                'version': {'format': format, 'path': '/data/gr00t', 'status': 'READY'}}]}},
             'native': {'config': {'dataset_path': path}},
         }
     resolved = PipelineService._apply_manifest_data_bindings(document(), manifests['groot'])
@@ -68,8 +68,20 @@ def test_bundle_selection_is_consumed_or_rejected_explicitly():
         PipelineService._apply_manifest_data_bindings(document(path='/different'), manifests['groot'])
     with pytest.raises(ValueError, match='incompatible'):
         PipelineService._apply_manifest_data_bindings(document(format='isaac-usd'), manifests['groot'])
-    with pytest.raises(ValueError, match='unsupported'):
+    with pytest.raises(ValueError, match='incompatible'):
         PipelineService._apply_manifest_data_bindings(document(), manifests['openpi'])
+    assert PipelineService._apply_manifest_data_bindings(document(format='lerobot-v2.0'), manifests['openpi'])['native']['config']['dataset_path'] == '/data/gr00t'
+    unavailable = document()
+    unavailable['data']['bundle']['assignments'][0]['version']['status'] = 'LOCAL'
+    with pytest.raises(ValueError, match='not ready on the cluster'):
+        PipelineService._apply_manifest_data_bindings(unavailable, manifests['groot'])
+    extra = document()
+    import copy
+    another = copy.deepcopy(extra['data']['bundle']['assignments'][0]); another['position'] = 1
+    extra['data']['bundle']['assignments'].append(another)
+    with pytest.raises(ValueError, match='cannot consume'):
+        PipelineService._apply_manifest_data_bindings(extra, manifests['groot'])
+
 
 
 def test_evaluation_readiness_rejects_busy_run_before_expensive_probe(tmp_path):
@@ -86,3 +98,18 @@ def test_evaluation_readiness_rejects_busy_run_before_expensive_probe(tmp_path):
     assert not validation['valid']
     assert not validation['plan_valid']
     assert 'already has active' in validation['plan_message']
+
+
+def test_homepage_revalidates_and_versions_changed_assets(tmp_path, monkeypatch):
+    from skynet_app import main
+    monkeypatch.setattr(main, 'STATIC_ROOT', tmp_path)
+    (tmp_path / 'index.html').write_text('<script src="/static/app.js?v=old"></script><script src="/static/local-capture.js?v=old"></script><link href="/static/styles.css?v=old">')
+    for name in ('app.js', 'local-capture.js', 'styles.css'):
+        (tmp_path / name).write_text('first')
+    first = main.index()
+    assert first.headers['cache-control'] == 'no-cache'
+    assert b'?v=old' not in first.body
+    (tmp_path / 'app.js').write_text('updated interface')
+    second = main.index()
+    assert first.body != second.body
+    assert b'/static/local-capture.js?v=' in second.body

@@ -39,9 +39,7 @@ document.querySelector('#local-capture-import').addEventListener('submit', async
   button.disabled = true; input.disabled = true;
   status.textContent = 'Importing and validating every frame…';
   try {
-    const response = await fetch('/api/collection/local/captures/visionpro-local', {method: 'POST', headers: {'Content-Type': 'application/x-ndjson'}, body: file});
-    const result = await response.json();
-    if (!response.ok) throw new Error(apiErrorMessage(result.detail || result));
+    const result = await api('/api/collection/local/captures/visionpro-local', {method: 'POST', headers: {'Content-Type': 'application/x-ndjson'}, body: file});
     status.textContent = result.imported ? `Imported ${result.capture.summary.frames} ${result.capture.summary.frames === 1 ? 'frame' : 'frames'}. Saved locally and registered as raw tracking; conversion is required before robot training.` : 'This exact recording is already imported. No duplicate was created.';
     loadedTabs.delete('datasets');
     input.value = '';

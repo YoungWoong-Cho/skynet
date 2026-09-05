@@ -1406,3 +1406,36 @@ def test_eval_catalog_and_canonical_result():
     success = next(metric for metric in result.aggregate if metric.metric == "success_rate" and metric.task is None)
     assert success.mean == 0.5
     assert success.sample_count == 2
+
+
+def test_openpi_selected_dataset_bridge_and_normalization_are_explicit():
+    from skynet_app.adapters import ManifestAdapter, builtin_adapter_manifests
+    manifest = next(item for item in builtin_adapter_manifests() if item.slug == "openpi")
+    def selected(**config):
+        return ManifestAdapter(manifest).resolve(make_spec(
+            source={"repository": "https://github.com/Physical-Intelligence/openpi.git", "revision": COMMIT, "adapter": "openpi"},
+            native={"config": {"config_name": "pi05_libero", **config}},
+        ))
+    original = selected()
+    assert original.argv[1] == "scripts/train.py"
+    assert any(step.id == "openpi-pi05-libero-norm-stats" for step in original.preparation_steps)
+    missing = selected(dataset_path="/datasets/selected")
+    assert any("Dataset normalization file is required" in message for message in missing.blockers)
+    explicit = selected(dataset_path="/datasets/selected", dataset_norm_stats_path="/stats/selected/norm_stats.json")
+    assert explicit.argv[1].endswith("/adapter-support/openpi-dataset.py")
+    assert explicit.argv[explicit.argv.index("--dataset-root") + 1] == "/datasets/selected"
+    assert explicit.argv[explicit.argv.index("--norm-stats") + 1] == "/stats/selected/norm_stats.json"
+    assert not explicit.preparation_steps
+    assert "adapter-support/openpi-dataset.py" in explicit.capsule_files
+    assert not any("dataset" in message.lower() for message in explicit.blockers)
+
+
+def test_old_openpi_manifest_cannot_silently_inherit_dataset_bridge():
+    from skynet_app.adapters import ManifestAdapter, builtin_adapter_manifests
+    manifest = next(item for item in builtin_adapter_manifests() if item.slug == "openpi").model_copy(deep=True)
+    manifest.train.capsule_files.pop("adapter-support/openpi-dataset.py")
+    plan = ManifestAdapter(manifest).resolve(make_spec(
+        source={"repository":"https://github.com/Physical-Intelligence/openpi.git", "revision":COMMIT,"adapter":"openpi"},
+        native={"config":{"config_name":"pi05_libero","dataset_path":"/selected","dataset_norm_stats_path":"/stats/norm_stats.json"}},
+    ))
+    assert any("unsupported by this pinned OpenPI adapter" in message for message in plan.blockers)

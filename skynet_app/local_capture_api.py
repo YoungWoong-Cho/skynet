@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import platform
 import subprocess
 import tempfile
@@ -81,6 +82,9 @@ async def import_capture(provider: str, request: Request) -> dict:
         return await run_in_threadpool(service.import_file, provider, path)
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
+    except OSError as error:
+        raise HTTPException(507 if error.errno == errno.ENOSPC else 503,
+            "Cannot save the recording on this computer. Check free disk space and the collection folder's permissions, then retry.") from error
     finally:
         if path is not None:
             path.unlink(missing_ok=True)

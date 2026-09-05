@@ -524,6 +524,16 @@ export SKYNET_MLFLOW_AUTO_FLUSH=true
 
 The same values can be entered and tested under **Settings** instead of exporting them. Credentials are consumed only at runtime and are redacted from spool records, public settings, errors, and manifests. Each queued record is pinned to its validated provider endpoint; reconnecting to a different endpoint does not replay old records into the new service. When the original provider becomes available again, reconnecting triggers bounded delivery recovery and updates the stored remote IDs, links, and status.
 
+## Selecting an OpenPI dataset
+
+The current OpenPI adapter can use a registered `training_data` bundle or an explicit absolute dataset path. Select a LeRobot LIBERO training configuration such as `pi05_libero`, a READY bundle in `lerobot-v2.0`, `lerobot-v2.1`, or `openpi-libero-lerobot-v2` format, and a matching **Dataset normalization file** (`norm_stats.json`) on the compute node. The observation contract includes `image`, `wrist_image`, `state[8]` and `actions[7]`; matching a format label alone does not prove compatible observations or action semantics.
+
+The versioned dataset bridge checks metadata, episode/file presence and normalization dimensions, then passes the exact selected root to LeRobot. Dataset download/fallback is disabled. The chosen normalization data is copied into the run under its content hash while preserving the checkpoint asset identity used during evaluation. Statistics must have been computed for the selected data and OpenPI configuration; statistics from a different action transform are unsuitable even when dimensions match.
+
+Leave both dataset inputs blank to retain the pinned repository's own dataset configuration. Other embodiments or data-loader APIs require an explicit bridge; they fail with an unsupported message. Custom training commands cannot silently ignore a selected bundle. A bundle with additional unconsumed training inputs or LOCAL-only files is rejected by both the browser and backend.
+
+For a read-only metadata and file-presence check, run `python skynet_app/adapters/openpi_dataset_bridge.py --dataset-root /absolute/path/to/dataset --norm-stats /absolute/path/to/norm_stats.json --check-only` in the dataset's environment. This does not decode all observations or run training. Runtime data loading remains the final check for corrupt Parquet/images, broken symlinks and framework compatibility.
+
 ## Known environment requirements and limits
 
 - Exact repository commits and dataset/asset revisions must exist and be readable from compute nodes.

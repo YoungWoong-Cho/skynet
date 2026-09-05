@@ -8344,8 +8344,10 @@ function populateExperimentDataBundles() {
   );
   const previousIsMissing = Boolean(previous && !compatibility.has(String(previous)));
   const invalidPrevious = previousWasRemoved || previousIsMissing;
+  const previousBundle = dataBundleRows.find(bundle => String(bundle.id || bundle.bundle_id) === String(previous));
+  const previousLabel = previousBundle ? `${previousBundle.name}@${shortId(previousBundle.version, 14)}` : previous;
   const invalidPreviousMessage = previousWasRemoved
-    ? `Previously selected bundle "${previous}" is incompatible with this adapter. Choose a compatible bundle or explicitly choose the manual-input option.`
+    ? `Previously selected bundle "${previousLabel}" is incompatible with this adapter. Choose a compatible bundle or explicitly choose the manual-input option.`
     : previousIsMissing
       ? `Previously selected bundle "${previous}" is no longer registered. Choose an available bundle.`
       : "";
@@ -8383,12 +8385,27 @@ function experimentBundleCompatibility(bundle, adapter = selectedAdapter()) {
     .filter(Boolean);
   if (!bindings.length) return { compatible: false, message: "Unsupported: this adapter has no training dataset binding." };
   const assignments = Array.isArray(bundle?.assignments) ? bundle.assignments : [];
+  const positions = new Set();
+  for (const item of assignments) {
+    const role = String(item?.role || "");
+    const position = Number(item?.position || 0);
+    const identity = JSON.stringify([role, position]);
+    if (positions.has(identity)) return { compatible: false, message: `duplicate ${role} position ${position}` };
+    positions.add(identity);
+    if (bindings.some(binding => binding.role === role)
+        && !bindings.some(binding => binding.role === role && Number(binding.position || 0) === position)) {
+      return { compatible: false, message: `adapter cannot consume ${role} position ${position}` };
+    }
+  }
   for (const binding of bindings) {
     const assignment = assignments.find((item) => (
       String(item?.role || "") === String(binding.role || "")
       && Number(item?.position || 0) === Number(binding.position || 0)
     ));
     if (!assignment) return { compatible: false, message: `missing ${binding.role} role` };
+    if (String(assignment.version?.status || "").toUpperCase() !== "READY") {
+      return { compatible: false, message: `${binding.role} is ${assignment.version?.status || "unverified"}; complete import or transfer to the cluster` };
+    }
     const formats = Array.isArray(binding.formats) ? binding.formats.map((item) => String(item).toLowerCase()) : [];
     const format = String(assignment.version?.format || "");
     if (formats.length && !formats.includes(format.toLowerCase())) {
