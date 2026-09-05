@@ -900,8 +900,8 @@
   <p>The simulator cannot supply real hand tracking. Signing, pairing, and headset permissions must be checked on your devices.</p>
  </details>
  <details open><summary>2. Record and save on the headset</summary>
-  <ol><li>Open Skynet Capture, enter a task name, then choose <strong>Open tracking space</strong>. Allow hand tracking and keep your hands visible.</li><li>Choose <strong>Start recording</strong>, perform the movement, then choose <strong>Stop and save</strong>. Start with about 10 seconds.</li><li>Under Saved on this headset, share the JSONL file to this Mac using AirDrop or Files. The original stays on the headset.</li></ol>
-  <p>Closing the tracking space during recording marks it as interrupted. Stop and save first to create a completed recording.</p>
+  <ol><li>Open Skynet Capture, enter a task name, then choose <strong>Start recording</strong>. Allow hand tracking and keep your hands visible; recording starts automatically when a hand and your head are tracked.</li><li>Perform the movement, then choose <strong>Stop and save</strong>. Start with about 10 seconds. Tracking closes automatically after saving.</li><li>Under Saved on this headset, choose <strong>Share</strong> beside a recording, then AirDrop or Save to Files to transfer it to this Mac. The original stays on the headset.</li></ol>
+  <p>Leaving the app or interrupting tracking during recording marks it as interrupted. Stop and save first to create a completed recording.</p>
  </details>
  <details open><summary>3. Import and inspect the recording</summary>
   <form id="local-capture-import" class="dense-form"><div class="field"><label for="local-capture-file">Saved tracking recording (.jsonl, up to 512 MB)</label><input id="local-capture-file" type="file" accept=".jsonl,application/x-ndjson" required></div><button id="local-capture-upload" class="button button-accent" type="submit">Import recording</button><p id="local-capture-import-status" role="status">The original file is preserved. No data is sent to the cluster during import.</p></form>

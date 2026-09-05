@@ -36,7 +36,7 @@ def setup(force: bool = False) -> dict:
         checks.append({"name": "Xcode", "status": "needs_setup", "detail": "Install Xcode with its visionOS SDK on a Mac."})
     checks.extend([
         {"name": "Headset installation", "status": "needs_user", "detail": "visionOS 2.0 or newer. Pair the headset in Xcode, enable Developer Mode, select your Apple signing team and install Skynet Capture."},
-        {"name": "Tracking permission", "status": "needs_user", "detail": "On the headset, open tracking space and allow hand tracking. A physical headset is required; simulator input is unsupported."},
+        {"name": "Tracking permission", "status": "needs_user", "detail": "On the headset, choose Start recording and allow hand tracking. A physical headset is required; simulator input is unsupported."},
         {"name": "DexVerse simulation", "status": "needs_gpu", "detail": "Separate pipeline: requires a compatible NVIDIA GPU host, Isaac Sim 5.1 / Isaac Lab 2.3.2 and CloudXR. The local recorder does not run a simulated robot."},
     ])
     result = {"checks": checks, "checked_at": time.time(), "cache_seconds": 60,

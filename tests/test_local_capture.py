@@ -105,3 +105,13 @@ def test_pinned_dashboard_gateway_does_not_fallback():
     from skynet_app.main import _gateway_candidates
     assert _gateway_candidates('sky1') == ('sky1',)
     assert _gateway_candidates('sky2') == ('sky2',)
+
+
+def test_distinct_hand_and_head_clocks_are_preserved(tmp_path):
+    data = records()
+    data[1].update(timestamp=1324.0, source_timestamp=8120.0, head_timestamp=1324.0)
+    summary = VisionProTracking().inspect(save(tmp_path, data))
+    assert summary['head_tracked_frames'] == 1
+    data[1]['head_timestamp'] = float('nan')
+    with pytest.raises(ValueError, match='Head timestamp must be a finite number'):
+        VisionProTracking().inspect(save(tmp_path, data))

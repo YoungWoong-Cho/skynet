@@ -10,7 +10,7 @@ async function loadLocalCollection(force = false) {
       api('/api/collection/local/captures'),
     ]);
     document.querySelector('#local-capture-checks').innerHTML = setup.checks.map(check =>
-      `<p><strong>${escapeHtml(check.name)} — ${escapeHtml(({ready: 'Ready', unsupported: 'Unsupported', needs_setup: 'Setup required', needs_user: 'Finish on headset', needs_gpu: 'GPU host required'}[check.status] || check.status))}</strong><br>${escapeHtml(check.detail)}</p>`
+      `<p><strong>${escapeHtml(check.name)} — ${escapeHtml(({ready: 'Ready', unsupported: 'Unsupported', needs_setup: 'Setup required', needs_user: 'Check on headset', needs_gpu: 'GPU host required'}[check.status] || check.status))}</strong><br>${escapeHtml(check.detail)}</p>`
     ).join('');
     document.querySelector('#local-capture-storage').textContent = `Saved on this computer: ${setup.storage_path}`;
     document.querySelector('#local-capture-body').innerHTML = data.captures.length ? data.captures.map(capture => {

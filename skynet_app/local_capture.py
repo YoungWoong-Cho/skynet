@@ -88,6 +88,8 @@ class VisionProTracking:
                         raise ValueError(f"Missing or out-of-order frame at line {line_number}")
                     timestamp = _number(record.get("timestamp"), "Frame timestamp")
                     _number(record.get("source_timestamp"), "Source timestamp")
+                    if "head_timestamp" in record:
+                        _number(record["head_timestamp"], "Head timestamp")
                     if last_time is not None and timestamp < last_time:
                         raise ValueError(f"Receive timestamps go backwards at frame {frames}")
                     first_time = timestamp if first_time is None else first_time
