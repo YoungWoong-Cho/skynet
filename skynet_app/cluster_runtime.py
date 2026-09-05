@@ -594,6 +594,28 @@ done
             if cancelled_by:
                 record["CancelledBy"] = cancelled_by.group(1)
             statuses[job_id] = record
+        pending = [job_id for job_id, record in statuses.items() if record["State"] == "PENDING"]
+        if pending:
+            # Accounting often reports Reason=None for queued jobs. Ask the
+            # live scheduler once for the whole batch, on the same gateway.
+            queue_command = (
+                f"export PATH={SLURM_BIN}:$PATH; "
+                "LC_ALL=C timeout 10s squeue -h "
+                f"-j {shlex.quote(','.join(pending))} -o '%i|%T|%R'"
+            )
+            try:
+                queue_output = self.ssh(host, queue_command, timeout=15)
+            except ClusterError as error:
+                for job_id in pending:
+                    statuses[job_id]["Reason"] = f"Live queue reason unavailable: {error}"
+            else:
+                for line in queue_output.splitlines():
+                    fields = line.split("|", 2)
+                    if len(fields) != 3:
+                        continue
+                    job_id, state, reason = (value.strip() for value in fields)
+                    if job_id in pending and state.upper() == "PENDING" and reason:
+                        statuses[job_id]["Reason"] = reason.strip("()")
         return host, statuses
 
     def cancel(self, job_id: str, gateway: str = "auto") -> str:

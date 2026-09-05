@@ -160,3 +160,13 @@ test('Slurm placeholder exit codes are not reported as final while an attempt ru
   assert.equal(c.attemptExitCodeLabel({status: 'SUCCEEDED', exit_code: '0:0'}), '0:0');
   assert.equal(c.attemptExitCodeLabel({state: 'FAILED', exit_code: '1:0'}), '1:0');
 });
+
+
+test('queue waits are explained separately from failed attempts', () => {
+  const c = load(['runAttemptValue', 'queueReasonLabel', 'attemptFailureDetail']);
+  const pending = {status: 'PENDING', slurm_reason: 'QOSGrpGRES'};
+  assert.match(c.queueReasonLabel(pending), /GPU quota/);
+  assert.equal(c.attemptFailureDetail(pending), null);
+  assert.equal(c.attemptFailureDetail({status: 'FAILED', slurm_reason: 'OutOfMemory'}), 'OutOfMemory');
+  assert.equal(c.attemptFailureDetail({status: 'PENDING', error: 'Submission acknowledgement lost'}), 'Submission acknowledgement lost');
+});

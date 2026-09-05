@@ -6172,6 +6172,21 @@ function keyValueHtml(entries) {
     </div>`).join("");
 }
 
+function queueReasonLabel(attempt) {
+  const reason = String(attempt?.slurm_reason || "").trim();
+  const descriptions = {
+    QOSGrpGRES: "Waiting for the group's GPU quota",
+    Resources: "Waiting for matching resources to become available",
+    Priority: "Waiting behind higher-priority jobs",
+    Dependency: "Waiting for a prerequisite job",
+  };
+  if (descriptions[reason]) return `${descriptions[reason]} (${reason})`;
+  if (reason) return reason;
+  return String(attempt?.status || attempt?.state).toUpperCase() === "PENDING"
+    ? "The scheduler has not reported a reason yet."
+    : "-";
+}
+
 function attemptExitCodeLabel(attempt) {
   const status = String(attempt?.status || attempt?.state || "").toUpperCase();
   const terminal = ["SUCCEEDED", "COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT", "PREEMPTED"];
@@ -6499,7 +6514,7 @@ function renderCommonHyperparameterResolution(record) {
 
 function renderRunAttemptMetadata(record) {
   const attempt = record.attempt;
-  const error = runAttemptValue(attempt, "error", "failure_reason", "slurm_reason");
+  const error = attemptFailureDetail(attempt);
   const hyperparameters = attempt.common_hyperparameters && typeof attempt.common_hyperparameters === "object"
     ? attempt.common_hyperparameters
     : {};
@@ -6512,8 +6527,8 @@ function renderRunAttemptMetadata(record) {
     ["Attempt", record.attemptNumber],
     ["Attempt ID", runAttemptValue(attempt, "id", "attempt_id")],
     ["State", runAttemptValue(attempt, "status", "state")],
+    ["Scheduler reason", queueReasonLabel(attempt)],
     ["Slurm job", runAttemptValue(attempt, "slurm_job_id", "job_id")],
-    ["Slurm reason", runAttemptValue(attempt, "slurm_reason")],
     ["Gateway", runAttemptValue(attempt, "gateway")],
     ["Node(s)", runAttemptValue(attempt, "node", "node_list", "nodelist")],
     ["Account", runAttemptValue(attempt, "account") ?? runAttemptNestedValue(attempt, "resources", "account")],
@@ -8044,8 +8059,11 @@ function latestEvaluationAttempt(evaluation) {
   ))[0] || null;
 }
 
-function evaluationAttemptError(attempt) {
-  const value = runAttemptValue(attempt, "error", "failure_reason", "error_json", "slurm_reason");
+function attemptFailureDetail(attempt) {
+  const status = String(attempt?.status || attempt?.state || "").toUpperCase();
+  const failed = ["FAILED", "TIMED_OUT", "PREEMPTED", "CANCELLED"].includes(status);
+  const value = runAttemptValue(attempt, "error", "failure_reason", "error_json")
+    ?? (failed ? runAttemptValue(attempt, "slurm_reason") : null);
   if (value && typeof value === "object") return compactJson(value, 240);
   return value;
 }
@@ -8058,6 +8076,7 @@ function renderEvaluationAttempt(attempt) {
   elements.evaluationAttemptMeta.innerHTML = keyValueHtml([
     ["Attempt", runAttemptValue(attempt, "attempt_number")],
     ["State", runAttemptValue(attempt, "status", "state")],
+    ["Scheduler reason", queueReasonLabel(attempt)],
     ["Slurm job", runAttemptValue(attempt, "slurm_job_id", "job_id")],
     ["Gateway", runAttemptValue(attempt, "gateway")],
     ["Node(s)", runAttemptValue(attempt, "node", "node_list", "nodelist")],
@@ -8068,7 +8087,7 @@ function renderEvaluationAttempt(attempt) {
     ["Exit code", attemptExitCodeLabel(attempt)],
     ["Stdout file", runAttemptPath(attempt, "stdout_path", "output_path")],
     ["Stderr file", runAttemptPath(attempt, "stderr_path", "error_path")],
-    ["Failure detail", evaluationAttemptError(attempt)],
+    ["Failure detail", attemptFailureDetail(attempt)],
   ]);
 }
 

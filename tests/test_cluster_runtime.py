@@ -373,3 +373,35 @@ def test_validation_timeout_is_an_error_and_never_runs_the_job(tmp_path, monkeyp
     assert result.returncode == 124
     assert "No job was submitted" in result.stderr
     assert not marker.exists()
+
+
+def test_pending_reasons_use_one_live_query_on_the_accounting_gateway(monkeypatch):
+    client = AccountingClusterClient(
+        "11|PENDING|0:0|None|None assigned|00:00:00|Unknown|Unknown||overcap|overcap\n"
+        "12|PENDING|0:0|None|None assigned|00:00:00|Unknown|Unknown||overcap|overcap\n"
+    )
+    calls = []
+    def live_queue(host, command, **kwargs):
+        calls.append((host, command, kwargs))
+        return "11|PENDING|QOSGrpGRES\n12|PENDING|(Priority)\n99|PENDING|Resources\n"
+    monkeypatch.setattr(client, "ssh", live_queue)
+    _, records = client.job_statuses(["11", "12"])
+    assert len(calls) == 1
+    assert calls[0][0] == "sky2"
+    assert "-j 11,12" in calls[0][1]
+    assert records["11"]["Reason"] == "QOSGrpGRES"
+    assert records["12"]["Reason"] == "Priority"
+    assert "99" not in records
+
+
+def test_queue_reason_failure_is_visible_without_discarding_accounting(monkeypatch):
+    client = AccountingClusterClient(
+        "11|PENDING|0:0|None|None assigned|00:00:00|Unknown|Unknown||overcap|overcap\n"
+    )
+    def unavailable(*args, **kwargs):
+        raise ClusterError("sky2: SSH operation timed out")
+    monkeypatch.setattr(client, "ssh", unavailable)
+    _, records = client.job_statuses(["11"])
+    assert records["11"]["State"] == "PENDING"
+    assert "Live queue reason unavailable" in records["11"]["Reason"]
+    assert "timed out" in records["11"]["Reason"]
