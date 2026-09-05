@@ -218,3 +218,20 @@ def test_attempt_linked_progress_samples_exclude_previous_retry():
 
     assert summary["completed"] == 20
     assert summary["eta_state"] == "estimating"
+
+
+def test_openpi_progress_accepts_short_and_long_elapsed_clocks():
+    from skynet_app.adapters import builtin_adapter_manifests
+
+    contract = next(item for item in builtin_adapter_manifests() if item.slug == "openpi").train.progress
+    records = parse_declared_training_progress("\n".join([
+        "00:54:40 [I] Progress on: -/1 rate:- remaining:? elapsed:00:00 postfix:-",
+        "00:56:24 [I] Progress on: 1.00it/1.00it rate:103.5s/it remaining:00:00 elapsed:01:43 postfix:-",
+        "00:56:24 [I] Progress on: 1.00it/1.00it rate:103.5s/it remaining:00:00 elapsed:01:43 postfix:-",
+        "18:00:11 [I] Progress on: 2.61kit/10.0kit rate:1.8s/it elapsed:1:27:23",
+        "18:00:11 [I] Progress on: 2.61kit/10.0kit rate:1.8s/it elapsed:99:99",
+    ]), contract)
+    assert records == [
+        {"completed": 1, "total": 1, "elapsed_seconds": 103},
+        {"completed": 2610, "total": 10000, "elapsed_seconds": 5243},
+    ]

@@ -156,7 +156,7 @@ class TrainingProgressLogSource(CanonicalModel):
     stream: Literal["stdout", "stderr"] = "stderr"
     pattern: str = Field(min_length=1, max_length=1000)
     value_format: Literal["integer", "decimal_si"] = "integer"
-    elapsed_format: Literal["seconds", "hms"] | None = None
+    elapsed_format: Literal["seconds", "hms", "clock"] | None = None
     tail_lines: int = Field(default=500, ge=2, le=5000)
     poll_seconds: int = Field(default=5, ge=2, le=300)
 
@@ -3080,10 +3080,10 @@ def builtin_adapter_manifests() -> list[AdapterManifest]:
                     pattern=(
                         r"Progress on:\s*(?P<completed>[0-9]+(?:\.[0-9]+)?[kMGT]?)it/"
                         r"(?P<total>[0-9]+(?:\.[0-9]+)?[kMGT]?)it\b.*?"
-                        r"\belapsed:(?P<elapsed>[0-9]+:[0-5][0-9]:[0-5][0-9])\b"
+                        r"\belapsed:(?P<elapsed>(?:[0-9]+:)?[0-5][0-9]:[0-5][0-9])\b"
                     ),
                     value_format="decimal_si",
-                    elapsed_format="hms",
+                    elapsed_format="clock",
                 )
             ),
             batch_compatibility=_OPENPI_BATCH_COMPATIBILITY,

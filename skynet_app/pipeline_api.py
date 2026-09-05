@@ -271,6 +271,8 @@ def _declared_elapsed_seconds(value: str, elapsed_format: str | None) -> int | N
     if elapsed_format == "seconds":
         return _progress_integer(value)
     parts = value.split(":")
+    if elapsed_format == "clock" and len(parts) == 2:
+        parts.insert(0, "0")
     if len(parts) != 3:
         return None
     hours, minutes, seconds = (_progress_integer(part) for part in parts)
