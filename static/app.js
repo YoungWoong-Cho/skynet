@@ -5954,7 +5954,7 @@ function progressSummaryLabel(summary) {
   if (Number.isFinite(completed) && Number.isFinite(total)) {
     return `${completed}/${total} ${summary.unit || "items"}`;
   }
-  if (["complete", "not_applicable"].includes(summary.eta_state)) return "No progress recorded";
+  if (["complete", "not_applicable"].includes(summary.eta_state)) return "Recorded count unavailable";
   if (Number.isFinite(total)) return `Waiting for ${summary.unit || "progress"} data`;
   return "Progress unknown";
 }
@@ -6170,6 +6170,14 @@ function keyValueHtml(entries) {
       <span>${escapeHtml(key)}</span>
       <strong>${escapeHtml(value ?? "-")}</strong>
     </div>`).join("");
+}
+
+function attemptExitCodeLabel(attempt) {
+  const status = String(attempt?.status || attempt?.state || "").toUpperCase();
+  const terminal = ["SUCCEEDED", "COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT", "PREEMPTED"];
+  return terminal.includes(status)
+    ? runAttemptValue(attempt, "exit_code")
+    : "Available when the attempt ends";
 }
 
 function runAttemptValue(attempt, ...keys) {
@@ -6517,7 +6525,7 @@ function renderRunAttemptMetadata(record) {
     ["Started", formatDate(runAttemptValue(attempt, "started_at"))],
     ["Ended", formatDate(runAttemptValue(attempt, "ended_at", "finished_at"))],
     ["Duration", runAttemptDurationLabel(attempt)],
-    ["Exit code", runAttemptValue(attempt, "exit_code")],
+    ["Exit code", attemptExitCodeLabel(attempt)],
     ["Signal", runAttemptValue(attempt, "signal", "term_signal")],
     ["Checkpoint", runAttemptPath(attempt, "checkpoint_path", "resume_checkpoint_path")],
     ["Working directory", runAttemptPath(attempt, "working_directory", "workdir", "chdir")],
@@ -7773,6 +7781,17 @@ function patchEvaluationSummaryRow(evaluation) {
 }
 
 function renderEvaluations({ background = false } = {}) {
+  const stateFilter = document.querySelector("#evaluation-state-filter");
+  const knownStates = new Set([...stateFilter.options].map(option => option.value));
+  for (const row of evaluationRows) {
+    const status = String(row.status || row.state || "").toUpperCase();
+    if (!status || knownStates.has(status)) continue;
+    const option = document.createElement("option");
+    option.value = status;
+    option.textContent = status;
+    stateFilter.append(option);
+    knownStates.add(status);
+  }
   const query = document.querySelector("#evaluation-search").value.trim().toLowerCase();
   const filter = document.querySelector("#evaluation-state-filter").value;
   const filtered = evaluationRows.filter((row) => (!query || [row.id, row.run_id, row.suite_name, row.suite_id].join(" ").toLowerCase().includes(query))
@@ -8046,7 +8065,7 @@ function renderEvaluationAttempt(attempt) {
     ["Partition", runAttemptValue(attempt, "partition", "partition_name")],
     ["Started", formatDate(runAttemptValue(attempt, "started_at"))],
     ["Ended", formatDate(runAttemptValue(attempt, "ended_at", "finished_at"))],
-    ["Exit code", runAttemptValue(attempt, "exit_code")],
+    ["Exit code", attemptExitCodeLabel(attempt)],
     ["Stdout file", runAttemptPath(attempt, "stdout_path", "output_path")],
     ["Stderr file", runAttemptPath(attempt, "stderr_path", "error_path")],
     ["Failure detail", evaluationAttemptError(attempt)],

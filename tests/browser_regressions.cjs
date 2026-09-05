@@ -28,7 +28,7 @@ test('Completed includes SUCCEEDED without including failed runs; Slurm search w
 });
 test('terminal progress is not described as waiting', () => {
   const c = load(['progressSummaryLabel']);
-  assert.equal(c.progressSummaryLabel({ total: 100, unit: 'step', eta_state: 'complete' }), 'No progress recorded');
+  assert.equal(c.progressSummaryLabel({ total: 100, unit: 'step', eta_state: 'complete' }), 'Recorded count unavailable');
   assert.equal(c.progressSummaryLabel({ total: 100, completed: 0 }), '0/100 items');
 });
 test('nested settings remain readable and sensitive values stay redacted', () => {
@@ -151,4 +151,12 @@ test('a disconnected read expires with a useful error, while submission requests
   await assert.rejects(c.apiRequest('/read'), /timed out after 60 seconds/);
   assert.equal((await c.apiRequest('/submit', {method:'POST'})).submitted, true);
   assert.equal(calls,2);
+});
+
+
+test('Slurm placeholder exit codes are not reported as final while an attempt runs', () => {
+  const c = load(['runAttemptValue', 'attemptExitCodeLabel']);
+  assert.equal(c.attemptExitCodeLabel({status: 'RUNNING', exit_code: '0:0'}), 'Available when the attempt ends');
+  assert.equal(c.attemptExitCodeLabel({status: 'SUCCEEDED', exit_code: '0:0'}), '0:0');
+  assert.equal(c.attemptExitCodeLabel({state: 'FAILED', exit_code: '1:0'}), '1:0');
 });
