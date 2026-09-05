@@ -1,6 +1,5 @@
 import SwiftUI
 import RealityKit
-import UIKit
 
 @main
 struct SkynetCaptureApp: App {
@@ -20,19 +19,6 @@ struct SkynetCaptureApp: App {
     }
 }
 
-private struct SharedRecording: Identifiable {
-    let url: URL
-    var id: URL { url }
-}
-
-private struct RecordingShareSheet: UIViewControllerRepresentable {
-    let url: URL
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: [url], applicationActivities: nil)
-    }
-    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
-}
-
 struct CaptureView: View {
     @Bindable var recorder: Recorder
     @Environment(\.openImmersiveSpace) private var openSpace
@@ -40,7 +26,6 @@ struct CaptureView: View {
     @State private var preparing = false
     @State private var finishing = false
     @State private var preparation: Task<Void, Never>?
-    @State private var sharedRecording: SharedRecording?
 
     var body: some View {
         ScrollView {
@@ -61,7 +46,6 @@ struct CaptureView: View {
                 savedRecordings
             }.padding(32).textFieldStyle(.roundedBorder)
         }
-        .sheet(item: $sharedRecording) { RecordingShareSheet(url: $0.url) }
         .onChange(of: recorder.recording) { wasRecording, isRecording in
             if wasRecording && !isRecording && !finishing {
                 finishing = true
@@ -105,15 +89,16 @@ struct CaptureView: View {
                     Text(recorder.savedRecordingLabels[url] ?? url.lastPathComponent)
                         .font(.callout).lineLimit(2)
                     Spacer()
-                    Button {
-                        finishing = true
-                        Task {
-                            await endTracking()
-                            finishing = false
-                            sharedRecording = SharedRecording(url: url)
-                        }
-                    } label: { Label("Share", systemImage: "square.and.arrow.up") }
-                    .disabled(preparing || finishing || recorder.recording)
+                    ShareLink(
+                        item: url,
+                        preview: SharePreview(
+                            "Skynet recording · " + (recorder.savedRecordingLabels[url] ?? url.lastPathComponent),
+                            image: Image(systemName: "doc.text")
+                        )
+                    ) {
+                        Label("Share", systemImage: "square.and.arrow.up")
+                    }
+                    .disabled(preparing || finishing || recorder.recording || recorder.trackingSpaceOpen)
                 }
             }
         }
