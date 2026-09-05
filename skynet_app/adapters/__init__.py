@@ -3037,8 +3037,8 @@ def builtin_adapter_manifests() -> list[AdapterManifest]:
                 ),
                 AdapterInputField(
                     path="native.config.base_model_path", label="Base model path", kind="string",
-                    default="nvidia/GR00T-N1.7-3B",
-                    help="Pinned Hugging Face model ID or local model directory used as the fine-tuning base.",
+                    default="nvidia/GR00T-N1.6-3B",
+                    help="Hugging Face model ID or local model directory. The default matches the tested N1.6 training and evaluation bridge; other weights must match the selected repository and embodiment.",
                 ),
                 AdapterInputField(
                     path="native.config.embodiment_tag", label="Embodiment tag", kind="string",

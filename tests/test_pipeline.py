@@ -2787,3 +2787,85 @@ def test_evaluation_ingests_canonical_episode_ledger(monkeypatch):
         assert loaded["episodes"][0]["reward"] == 1.0
         artifacts = database.get_run(run_id)["artifacts"]
         assert any(item["artifact_type"] == "EVALUATION_RESULT" for item in artifacts)
+
+
+class GatewayRecoveryCluster(DelayedRecoveryCluster):
+    def candidates(self, gateway):
+        assert gateway == "sky2"
+        return (gateway,)
+
+    def submit_script(self, script, run_id, gateway="auto", *, submission_key=None):
+        self.keys = getattr(self, "keys", []) + [submission_key]
+        if self.submit_count == 0:
+            return super().submit_script(script, run_id, gateway, submission_key=submission_key)
+        assert gateway == "sky2"
+        assert script == self.script
+        self.submit_count += 1
+        if getattr(self, "on_recovery_submit", None):
+            self.on_recovery_submit()
+        return Submission("9004", "9004", gateway, f"/runs/{run_id}/attempts/9004/job.sbatch", f"/runs/{run_id}")
+
+
+def test_upload_recovery_reuses_exact_saved_script_and_attempt_on_selected_gateway(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline_api, "LOCAL_CAPSULE_ROOT", tmp_path / "capsules")
+    database = Database(tmp_path / "test.db")
+    cluster = GatewayRecoveryCluster()
+    service = make_pipeline_service(database, cluster)
+    experiment = service.create_experiment(canonical_spec())
+    service.submit_experiment(experiment["id"])
+    run_id = experiment["runs"][0]["id"]
+    assert service.run_manual_actions(database.get_run(run_id))["recover_submission"]["enabled"]
+    result = service.recover_run_submission(run_id, "sky2")
+    assert result["slurm_job_id"] == "9004"
+    assert cluster.keys[0] == cluster.keys[1]
+    attempts = database.get_run(run_id)["attempts"]
+    assert len(attempts) == 1
+    assert attempts[0]["gateway"] == "sky2"
+    assert attempts[0]["stdout_path"].endswith("pipeline-train-9004.out")
+    service.recover_run_submission(run_id, "sky2")
+    assert cluster.submit_count == 2  # A repeated click does not submit again.
+
+
+def test_upload_recovery_rejects_modified_saved_script(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline_api, "LOCAL_CAPSULE_ROOT", tmp_path / "capsules")
+    database = Database(tmp_path / "test.db")
+    cluster = GatewayRecoveryCluster()
+    service = make_pipeline_service(database, cluster)
+    experiment = service.create_experiment(canonical_spec())
+    service.submit_experiment(experiment["id"])
+    run_id = experiment["runs"][0]["id"]
+    artifact = database.list_artifacts(run_id, artifact_type="SUBMISSION_SCRIPT")[0]
+    Path(artifact["path"]).write_text("#!/bin/bash\necho changed\n")
+    with pytest.raises(ValueError, match="script changed"):
+        service.recover_run_submission(run_id, "sky2")
+    assert cluster.submit_count == 1
+
+
+def test_lost_acknowledgement_recovery_honors_cancellation_stage(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline_api, "LOCAL_CAPSULE_ROOT", tmp_path / "capsules")
+    database = Database(tmp_path / "test.db")
+    cluster = DelayedRecoveryCluster()
+    service = make_pipeline_service(database, cluster)
+    experiment = service.create_experiment(canonical_spec())
+    service.submit_experiment(experiment["id"])
+    run_id = experiment["runs"][0]["id"]
+    service.cancel_run(run_id)
+    cluster.recovery_ready = True
+    service.reconcile()
+    attempt = database.get_run(run_id)["attempts"][0]
+    assert attempt["slurm_job_id"] == "9003"
+    assert ("9003", "sky1") in cluster.cancel_calls
+
+
+def test_manual_submission_recovery_reports_concurrent_cancellation(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline_api, "LOCAL_CAPSULE_ROOT", tmp_path / "capsules")
+    database = Database(tmp_path / "test.db")
+    cluster = GatewayRecoveryCluster()
+    service = make_pipeline_service(database, cluster)
+    experiment = service.create_experiment(canonical_spec())
+    service.submit_experiment(experiment["id"])
+    run_id = experiment["runs"][0]["id"]
+    cluster.on_recovery_submit = lambda: service.cancel_run(run_id)
+    result = service.recover_run_submission(run_id, "sky2")
+    assert result["status"] == "CANCELLING"
+    assert ("9004", "sky2") in cluster.cancel_calls

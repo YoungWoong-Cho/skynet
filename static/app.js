@@ -937,6 +937,7 @@ let runtimeInspectionKey = "";
 let runtimeCandidates = [];
 let runtimeProfiles = [];
 let experimentBusy = false;
+const submissionRecoveryRequests = new Set();
 let loadedExperimentAdapterSnapshot = null;
 let loadedExperimentCanonicalContext = null;
 let experimentConfigurationLoadRequest = 0;
@@ -6795,7 +6796,9 @@ function renderRunDetailContent(payload, id, { preserveAttempt = false } = {}) {
       : [];
     const runActionButton = (action, label, className) => {
       const metadata = manualActions[action];
-    const enabled = metadata?.enabled === true;
+    const recovering = action === "recover_submission" && submissionRecoveryRequests.has(id);
+    if (recovering) label = "Recovering submission…";
+    const enabled = metadata?.enabled === true && !recovering;
     const reason = typeof metadata?.reason === "string" && metadata.reason.trim()
       ? metadata.reason.trim()
       : enabled
@@ -6813,6 +6816,7 @@ function renderRunDetailContent(payload, id, { preserveAttempt = false } = {}) {
       })
       .join("");
     setHtmlIfChanged(elements.runDetailActions, `
+      ${manualActions.recover_submission?.enabled ? runActionButton("recover_submission", "Recover unconfirmed submission", "button button-accent") : ""}
       ${runEvaluationActionButton(run, id)}
       ${trackingActionButtons}
       ${runActionButton("resume", /no usable|from scratch|from the beginning|initial pinned/i.test(manualActions.resume?.reason || "") ? "Restart training from beginning / new attempt" : "Resume Training Run / new attempt", "button button-outline")}
@@ -7539,6 +7543,26 @@ async function startEvaluationForRun(id) {
     elements.evaluationForm.scrollIntoView({ block: "nearest", inline: "nearest" });
     elements.evaluationRunId.focus({ preventScroll: true });
   });
+}
+
+async function recoverRunSubmission(id, button) {
+  if (submissionRecoveryRequests.has(id)) return;
+  if (!(await askUserDialog(`Recover this unconfirmed submission through ${elements.gateway.value}? The exact saved script and original submission identity will be reused.`))) return;
+  submissionRecoveryRequests.add(id);
+  button.disabled = true;
+  button.textContent = "Recovering submission…";
+  try {
+    const result = await api(`/api/runs/${encodeURIComponent(id)}/recover-submission`, {
+      method: "POST", body: JSON.stringify({gateway: elements.gateway.value}),
+    });
+    await loadRuns(true);
+    if (activeRunDetailId === id) startRunDetailPolling(id, null, {initialDelay: 0, includeList: false});
+    showToast(`Submission recovered: Slurm job ${result.slurm_job_id}.`);
+  } catch (error) { showNotice(elements.runsError, `Submission recovery failed: ${error.message}`); }
+  finally {
+    submissionRecoveryRequests.delete(id);
+    if (activeRunDetailId === id) startRunDetailPolling(id, null, {initialDelay: 0, includeList: false});
+  }
 }
 
 async function resumeRun(id, reason = "") {
@@ -12160,6 +12184,7 @@ elements.runDetailActions.addEventListener("click", (event) => {
     );
     return;
   }
+  if (button.dataset.runAction === "recover_submission") recoverRunSubmission(button.dataset.id, button);
   if (button.dataset.runAction === "resume") resumeRun(button.dataset.id, button.dataset.runActionReason || "");
   if (button.dataset.runAction === "rerun") rerunRun(button.dataset.id, button.dataset.runActionReason || "");
 });

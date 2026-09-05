@@ -886,7 +886,15 @@ def manual_run_actions(
         or has_active_attempt
     ):
         reason = "The run already has an active or queued attempt."
-        return {"resume": disabled(reason), "rerun": disabled(reason), "cancel": cancel}
+        actions = {"resume": disabled(reason), "rerun": disabled(reason), "cancel": cancel}
+        pending = stage_state == "SUBMITTING" and run_state != "CANCELLING" and any(
+            item.get("status") == "SUBMITTING" and not item.get("slurm_job_id")
+            and str(item.get("slurm_reason") or "").startswith("Submission outcome unknown")
+            for item in _training_stage_attempts(run, stage))
+        if pending:
+            actions["recover_submission"] = {"enabled": True,
+                "reason": "Check and finish the same submission through the selected SSH gateway. Its original identity prevents duplicate jobs."}
+        return actions
 
     resolved = stage.get("resolved_config_json") or {}
     stored_spec = resolved.get("spec") if isinstance(resolved, Mapping) else None
@@ -3973,6 +3981,64 @@ class PipelineService:
         (root / "job.sbatch").write_text(compiled.script, encoding="utf-8")
         return root
 
+    def _save_submission_script(self, run_id: str, attempt_id: str, script: str) -> dict[str, Any]:
+        """Keep the exact transport payload independently of later run capsules."""
+        path = LOCAL_CAPSULE_ROOT / run_id / "submissions" / f"{attempt_id}.sbatch"
+        content = script.encode("utf-8")
+        digest = hashlib.sha256(content).hexdigest()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with path.open("xb") as target:
+                target.write(content)
+        except FileExistsError:
+            if path.read_bytes() != content:
+                raise ValueError("The saved submission script differs from this attempt")
+        existing = next((item for item in self.database.list_artifacts(run_id, artifact_type="SUBMISSION_SCRIPT")
+                         if item.get("metadata_json", {}).get("attempt_id") == attempt_id), None)
+        if existing:
+            if existing.get("sha256") != digest:
+                raise ValueError("The saved submission checksum differs from this attempt")
+            return existing
+        return self.database.create_artifact(run_id, artifact_type="SUBMISSION_SCRIPT", path=str(path),
+            sha256=digest, size_bytes=len(content), retention_policy="preserve", metadata={"attempt_id": attempt_id, "location": "submission_host"})
+
+    def recover_run_submission(self, run_id: str, gateway: str) -> dict[str, Any]:
+        with self._reconcile_lock:
+            run = self.database.get_run(run_id)
+            if not run:
+                raise KeyError("Run not found")
+            stage = next((item for item in reversed(run["stages"]) if item["stage_type"] == "TRAIN"), None)
+            attempts = [item for item in run["attempts"] if stage and item["stage_id"] == stage["id"]]
+            attempt = max(attempts, key=lambda item: item["attempt_number"], default=None)
+            if attempt and attempt.get("slurm_job_id"):
+                return {"run_id": run_id, "status": run["status"], "slurm_job_id": attempt["slurm_job_id"]}
+            if not attempt or stage["status"] != "SUBMITTING" or attempt["status"] != "SUBMITTING" or not str(attempt.get("slurm_reason") or "").startswith("Submission outcome unknown"):
+                raise ValueError("Only an unconfirmed training submission can be recovered. Cancelled submissions cannot be restarted here.")
+            selected_gateway = self.cluster.resolve_gateway(gateway) if gateway == "auto" else self.cluster.candidates(gateway)[0]
+            self.database.update_job_attempt(attempt["id"], gateway=selected_gateway)
+            try:
+                submission = self.cluster.recover_submission(run_id, attempt["id"], selected_gateway)
+                if submission is None:
+                    artifact = next((item for item in self.database.list_artifacts(run_id, artifact_type="SUBMISSION_SCRIPT")
+                                     if item.get("metadata_json", {}).get("attempt_id") == attempt["id"]), None)
+                    if not artifact:
+                        raise ValueError("No accepted job was found and this older attempt has no saved submission script. Its original script must be restored before upload recovery.")
+                    path = Path(artifact["path"])
+                    expected = (LOCAL_CAPSULE_ROOT / run_id / "submissions" / f"{attempt['id']}.sbatch").resolve()
+                    if path.resolve() != expected:
+                        raise ValueError("Saved submission path does not match this attempt")
+                    content = path.read_bytes()
+                    if hashlib.sha256(content).hexdigest() != artifact["sha256"]:
+                        raise ValueError("Saved submission script changed; restore the original before recovery")
+                    submission = self.cluster.submit_script(content.decode("utf-8"), run_id, selected_gateway,
+                                                            submission_key=attempt["id"])
+            except (ClusterError, OSError, ValueError) as error:
+                self.database.update_job_attempt(attempt["id"], slurm_reason=f"Submission outcome unknown: recovery did not complete: {error}")
+                raise
+            self._record_recovered_submission({**attempt, "stage_id": stage["id"], "stage_type": "TRAIN",
+                "stage_status": stage["status"], "run_id": run_id, "run_started_at": run.get("started_at"), "evaluation_id": None}, submission)
+            return {"run_id": run_id, "status": self.database.get_run(run_id)["status"], "slurm_job_id": submission.job_id, "gateway": submission.gateway}
+
     def _preserve_cancelling_submission(
         self,
         *,
@@ -4471,6 +4537,7 @@ class PipelineService:
                 )
                 self._require_native_tracking_bindings(run_id, native_providers)
             capsule = self._local_capsule(run_id, compiled)
+            self._save_submission_script(run_id, attempt["id"], compiled.script)
             secret_gateway = selected_gateway
             for relative_path, content in native_tracking_runtime[
                 "secret_contents"
@@ -6415,6 +6482,100 @@ class PipelineService:
             repaired += len(missing)
         return repaired
 
+    def _record_recovered_submission(self, unknown: Mapping[str, Any], recovered: Any) -> None:
+        submitted_at = utc_now()
+        stdout_path = resolve_slurm_log_path(
+            unknown["stdout_path"], recovered.job_id
+        )
+        stderr_path = resolve_slurm_log_path(
+            unknown["stderr_path"], recovered.job_id
+        )
+        is_evaluation = unknown["stage_type"] == "EVALUATE"
+        transition = self.database.transition_workflow_state(
+            attempt_id=unknown["id"],
+            attempt_updates={
+                "status": "SUBMITTED",
+                "slurm_job_id": recovered.job_id,
+                "gateway": recovered.gateway,
+                "sbatch_path": recovered.script_path,
+                "stdout_path": stdout_path,
+                "stderr_path": stderr_path,
+                "submitted_at": submitted_at,
+                "slurm_reason": "Recovered after a lost SSH acknowledgement",
+            },
+            stage_id=unknown["stage_id"],
+            stage_updates={"status": "SUBMITTED", "started_at": submitted_at},
+            run_id=None if is_evaluation else unknown["run_id"],
+            run_updates=None if is_evaluation else {
+                "status": "SUBMITTED",
+                "started_at": unknown["run_started_at"] or submitted_at,
+                "completed_at": None,
+            },
+            evaluation_id=unknown["evaluation_id"] if is_evaluation else None,
+            evaluation_updates={
+                "status": "SUBMITTED",
+                "started_at": submitted_at,
+                "completed_at": None,
+            } if is_evaluation and unknown["evaluation_id"] else None,
+            event={
+                "entity_type": "evaluation" if is_evaluation else "run",
+                "entity_id": unknown["evaluation_id"] if is_evaluation else unknown["run_id"],
+                "event_type": "SUBMISSION_RECOVERED",
+                "new_status": "SUBMITTED",
+                "details": {
+                    "attempt_id": unknown["id"],
+                    "job_id": recovered.job_id,
+                    "gateway": recovered.gateway,
+                },
+            },
+            expected_stage_statuses=("SUBMITTING",),
+        )
+        cancellation_pending = (
+            str(unknown["stage_status"] or "").upper() == "CANCELLING"
+            or (
+                transition.get("applied") is False
+                and str(transition["stage"].get("status") or "").upper()
+                == "CANCELLING"
+            )
+        )
+        if cancellation_pending:
+            self._preserve_cancelling_submission(
+                run_id=str(unknown["run_id"]),
+                stage={"id": unknown["stage_id"], "stage_type": unknown["stage_type"]},
+                evaluation={"id": unknown["evaluation_id"]}
+                if is_evaluation and unknown["evaluation_id"]
+                else None,
+                attempt_id=str(unknown["id"]),
+                attempt_updates={
+                    "status": "CANCELLING",
+                    "slurm_job_id": recovered.job_id,
+                    "gateway": recovered.gateway,
+                    "sbatch_path": recovered.script_path,
+                    "stdout_path": stdout_path,
+                    "stderr_path": stderr_path,
+                    "submitted_at": submitted_at,
+                    "slurm_reason": "Recovered after cancellation was requested",
+                },
+                event_type="SUBMISSION_RECOVERED_AFTER_CANCEL_REQUEST",
+                details={
+                    "attempt_id": unknown["id"],
+                    "job_id": recovered.job_id,
+                    "gateway": recovered.gateway,
+                },
+            )
+            self._signal_stage_cancellation(
+                entity_type="evaluation" if is_evaluation else "run",
+                entity_id=str(unknown["evaluation_id"])
+                if is_evaluation
+                else str(unknown["run_id"]),
+                attempt={
+                    "id": unknown["id"],
+                    "slurm_job_id": recovered.job_id,
+                    "gateway": recovered.gateway,
+                },
+                record_event=True,
+            )
+
     def reconcile(self) -> dict[str, Any]:
         if not self._reconcile_lock.acquire(blocking=False):
             return {
@@ -6460,98 +6621,7 @@ class PipelineService:
                     continue
                 if recovered is None:
                     continue
-                submitted_at = utc_now()
-                stdout_path = resolve_slurm_log_path(
-                    unknown["stdout_path"], recovered.job_id
-                )
-                stderr_path = resolve_slurm_log_path(
-                    unknown["stderr_path"], recovered.job_id
-                )
-                is_evaluation = unknown["stage_type"] == "EVALUATE"
-                transition = self.database.transition_workflow_state(
-                    attempt_id=unknown["id"],
-                    attempt_updates={
-                        "status": "SUBMITTED",
-                        "slurm_job_id": recovered.job_id,
-                        "gateway": recovered.gateway,
-                        "sbatch_path": recovered.script_path,
-                        "stdout_path": stdout_path,
-                        "stderr_path": stderr_path,
-                        "submitted_at": submitted_at,
-                        "slurm_reason": "Recovered after a lost SSH acknowledgement",
-                    },
-                    stage_id=unknown["stage_id"],
-                    stage_updates={"status": "SUBMITTED", "started_at": submitted_at},
-                    run_id=None if is_evaluation else unknown["run_id"],
-                    run_updates=None if is_evaluation else {
-                        "status": "SUBMITTED",
-                        "started_at": unknown["run_started_at"] or submitted_at,
-                        "completed_at": None,
-                    },
-                    evaluation_id=unknown["evaluation_id"] if is_evaluation else None,
-                    evaluation_updates={
-                        "status": "SUBMITTED",
-                        "started_at": submitted_at,
-                        "completed_at": None,
-                    } if is_evaluation and unknown["evaluation_id"] else None,
-                    event={
-                        "entity_type": "evaluation" if is_evaluation else "run",
-                        "entity_id": unknown["evaluation_id"] if is_evaluation else unknown["run_id"],
-                        "event_type": "SUBMISSION_RECOVERED",
-                        "new_status": "SUBMITTED",
-                        "details": {
-                            "attempt_id": unknown["id"],
-                            "job_id": recovered.job_id,
-                            "gateway": recovered.gateway,
-                        },
-                    },
-                    expected_stage_statuses=("SUBMITTING",),
-                )
-                cancellation_pending = (
-                    str(unknown["stage_status"] or "").upper() == "CANCELLING"
-                    or (
-                        transition.get("applied") is False
-                        and str(transition["stage"].get("status") or "").upper()
-                        == "CANCELLING"
-                    )
-                )
-                if cancellation_pending:
-                    self._preserve_cancelling_submission(
-                        run_id=str(unknown["run_id"]),
-                        stage=unknown,
-                        evaluation={"id": unknown["evaluation_id"]}
-                        if is_evaluation and unknown["evaluation_id"]
-                        else None,
-                        attempt_id=str(unknown["id"]),
-                        attempt_updates={
-                            "status": "CANCELLING",
-                            "slurm_job_id": recovered.job_id,
-                            "gateway": recovered.gateway,
-                            "sbatch_path": recovered.script_path,
-                            "stdout_path": stdout_path,
-                            "stderr_path": stderr_path,
-                            "submitted_at": submitted_at,
-                            "slurm_reason": "Recovered after cancellation was requested",
-                        },
-                        event_type="SUBMISSION_RECOVERED_AFTER_CANCEL_REQUEST",
-                        details={
-                            "attempt_id": unknown["id"],
-                            "job_id": recovered.job_id,
-                            "gateway": recovered.gateway,
-                        },
-                    )
-                    self._signal_stage_cancellation(
-                        entity_type="evaluation" if is_evaluation else "run",
-                        entity_id=str(unknown["evaluation_id"])
-                        if is_evaluation
-                        else str(unknown["run_id"]),
-                        attempt={
-                            "id": unknown["id"],
-                            "slurm_job_id": recovered.job_id,
-                            "gateway": recovered.gateway,
-                        },
-                        record_event=True,
-                    )
+                self._record_recovered_submission(unknown, recovered)
                 recovered_submissions += 1
             self._repair_missing_attempt_log_paths()
             try:
@@ -10708,6 +10778,14 @@ def get_run_attempt_log(
 ) -> str:
     try:
         return service.run_attempt_log(run_id, attempt_id, stream, lines)
+    except Exception as error:
+        raise _http_error(error) from error
+
+
+@router.post("/runs/{run_id}/recover-submission")
+def recover_run_submission(run_id: str, request: GatewayRequest) -> dict[str, Any]:
+    try:
+        return service.recover_run_submission(run_id, request.gateway)
     except Exception as error:
         raise _http_error(error) from error
 
