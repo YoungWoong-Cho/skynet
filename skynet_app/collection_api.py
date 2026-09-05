@@ -53,7 +53,8 @@ def collection_capabilities() -> dict[str, Any]:
 def list_collection_adapters(
     include_archived: bool = Query(default=False),
 ) -> dict[str, Any]:
-    return {"adapters": service.store.list_adapters(include_archived=include_archived)}
+    return {"adapters": service.store.list_adapters(include_archived=include_archived),
+            "templates": service.store.bundled_templates()}
 
 
 @router.post("/adapters", status_code=201)

@@ -123,3 +123,32 @@ test('bundle compatibility rejects local files and extra unconsumed data', () =>
   assert.match(c.experimentBundleCompatibility({assignments:[assignment,{...assignment,position:1}]}).message, /cannot consume/);
   assert.match(c.experimentBundleCompatibility({assignments:[assignment,assignment]}).message, /duplicate/);
 });
+
+test('collection defaults preserve zero and false, respect gateway choice and require fresh evidence', () => {
+  const c = load(['collectionSessionDefaults']);
+  const manifest = {defaults: {config: {task: 'capture'}, capture: {timestamps_recorded: false, nominal_rate_hz: 90}, resources: {gateway: 'auto', gpu_count: 0}, capabilities: {stream: {status: 'verified'}}}, capabilities: [{id: 'stream', scope: 'network', default_status: 'UNKNOWN'}, {id: 'daemon', scope: 'compute_node', default_status: 'ADMIN_REQUIRED'}]};
+  const before = JSON.stringify(manifest);
+  const result = c.collectionSessionDefaults(manifest, 'sky1');
+  assert.equal(result.resources.gateway, 'sky1');
+  assert.equal(result.resources.gpu_count, 0);
+  assert.equal(result.capture.timestamps_recorded, false);
+  assert.equal(result.capabilities.stream.status, 'unknown');
+  assert.equal(result.capabilities.daemon.status, 'admin_required');
+  assert.equal(result.capabilities.stream.verified_by, null);
+  result.config.task = 'changed';
+  assert.equal(JSON.stringify(manifest), before);
+});
+
+test('a disconnected read expires with a useful error, while submission requests have no read timeout', async () => {
+  let calls = 0;
+  const c = load(['apiRequest'], {Headers, AbortController, setTimeout: cb => { queueMicrotask(cb); return 1; }, clearTimeout() {}, apiErrorMessage: String,
+    fetch: async (path, options) => {
+      calls++;
+      if (options.method === 'POST') { assert.equal(options.signal, undefined); return {ok:true, text:async()=>'{"submitted":true}'}; }
+      return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new Error('aborted'))));
+    },
+  });
+  await assert.rejects(c.apiRequest('/read'), /timed out after 60 seconds/);
+  assert.equal((await c.apiRequest('/submit', {method:'POST'})).submitted, true);
+  assert.equal(calls,2);
+});

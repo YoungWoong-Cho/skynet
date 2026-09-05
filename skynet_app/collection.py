@@ -713,6 +713,18 @@ class CollectionStore:
         assert result is not None
         return result
 
+    @staticmethod
+    def bundled_templates(root: Path = ADAPTER_SEED_ROOT) -> list[dict[str, Any]]:
+        """Expose shipped definitions for review without replacing operator edits."""
+        if not root.is_dir():
+            return []
+        templates = []
+        for path in sorted(root.glob("*.json")):
+            manifest = CollectionAdapterManifest.model_validate_json(path.read_text())
+            payload = manifest.model_dump(mode="json")
+            templates.append({"manifest": payload, "manifest_sha256": content_sha256(payload)})
+        return templates
+
     def seed_from_directory(self, root: Path = ADAPTER_SEED_ROOT) -> list[dict[str, Any]]:
         seeded: list[dict[str, Any]] = []
         if not root.is_dir():

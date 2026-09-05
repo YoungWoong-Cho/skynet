@@ -355,3 +355,21 @@ def test_cancel_rejects_invalid_slurm_job_ids_before_ssh() -> None:
             raise AssertionError(f"invalid Slurm job ID was accepted: {job_id!r}")
 
     assert client.commands == []
+
+
+def test_validation_timeout_is_an_error_and_never_runs_the_job(tmp_path, monkeypatch):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    timeout = fake_bin / "timeout"
+    timeout.write_text("#!/bin/sh\nexit 124\n")
+    timeout.chmod(0o755)
+    monkeypatch.setattr(cluster_runtime, "SLURM_BIN", str(fake_bin))
+    client = RecordingClusterClient()
+    marker = tmp_path / "job-must-not-run"
+    script = f"#!/bin/bash\ntouch {marker}\n"
+    client.test_script(script, "sky1")
+    _, command, _ = client.commands[-1]
+    result = subprocess.run(["bash", "-c", command], input=script, text=True, capture_output=True)
+    assert result.returncode == 124
+    assert "No job was submitted" in result.stderr
+    assert not marker.exists()

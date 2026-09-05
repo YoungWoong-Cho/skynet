@@ -906,6 +906,7 @@ let dataBundlesLoaded = false;
 const dataBundlePreviewCache = new Map();
 let dataBundlePreviewMediaItems = [];
 let collectionAdapterRows = [];
+let collectionAdapterTemplates = [];
 let collectionSessionRows = [];
 let activeCollectionSession = null;
 let evaluationSuites = [];
@@ -1061,24 +1062,44 @@ function apiErrorMessage(detail) {
 }
 
 async function apiRequest(path, options = {}) {
-  const headers = new Headers(options.headers || {});
-  if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  const response = await fetch(path, { ...options, headers });
-  const raw = await response.text();
-  let payload = {};
-  if (raw) {
-    try {
-      payload = JSON.parse(raw);
-    } catch {
-      payload = raw;
+  // A disconnected read must not leave the page's loading controls stuck.
+  // Mutations retain their response so a slow submission is not mistaken for failure.
+  const readOnly = ["GET", "HEAD"].includes(String(options.method || "GET").toUpperCase());
+  const { timeoutMs = readOnly ? 60000 : 0, ...request } = options;
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const forwardAbort = () => controller?.abort(request.signal?.reason);
+  if (request.signal?.aborted) forwardAbort();
+  else request.signal?.addEventListener("abort", forwardAbort, {once: true});
+  const signal = controller?.signal || request.signal;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const headers = new Headers(request.headers || {});
+    if (request.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+    const response = await fetch(path, { ...request, headers, signal });
+    const raw = await response.text();
+    let payload = {};
+    if (raw) {
+      try {
+        payload = JSON.parse(raw);
+      } catch {
+        payload = raw;
+      }
     }
+    if (!response.ok) {
+      const detail = typeof payload === "object" && payload !== null ? payload.detail || payload.message : payload;
+      const message = apiErrorMessage(detail);
+      throw new Error(message || `Request failed (${response.status})`);
+    }
+    return payload;
+  } catch (error) {
+    if (controller?.signal.aborted && !request.signal?.aborted) {
+      throw new Error(`Request timed out after ${Math.ceil(timeoutMs / 1000)} seconds. Check the connection and try again.`);
+    }
+    throw error;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+    request.signal?.removeEventListener("abort", forwardAbort);
   }
-  if (!response.ok) {
-    const detail = typeof payload === "object" && payload !== null ? payload.detail || payload.message : payload;
-    const message = apiErrorMessage(detail);
-    throw new Error(message || `Request failed (${response.status})`);
-  }
-  return payload;
 }
 
 async function api(path, options = {}) {
@@ -9318,7 +9339,12 @@ function populateCollectionAdapterSelect(selectedId = "") {
       return `<option value="${escapeHtml(id)}"${disabled}>${escapeHtml(collectionAdapterIdentity(adapter) + suffix)}</option>`;
     }).join("")}`
     : '<option value="">No active adapters</option>';
-  elements.collectionSessionAdapter.disabled = !active.some((adapter) => collectionAdapterManifest(adapter).runnable);
+  const hasRunnable = active.some((adapter) => collectionAdapterManifest(adapter).runnable);
+  elements.collectionSessionAdapter.disabled = !hasRunnable;
+  document.querySelector("#show-collection-session-form").disabled = !hasRunnable;
+  document.querySelector("#collection-new-session-help").textContent = hasRunnable
+    ? "Choose an adapter to fill its capture settings, then review and check setup."
+    : "Cluster collection is unavailable until an adapter has a working launcher and completed setup. Review the adapter requirements below. Local Vision Pro recording and import are available above.";
   const normalizedSelection = String(selectedId || "");
   if (normalizedSelection && active.some((adapter) => String(adapter.id || adapter.adapter_id) === normalizedSelection)) {
     elements.collectionSessionAdapter.value = normalizedSelection;
@@ -9331,6 +9357,63 @@ function populateCollectionAdapterSelect(selectedId = "") {
     elements.collectionSessionAdapter.setCustomValidity(message);
     elements.collectionSessionAdapter.setAttribute("aria-invalid", "true");
   }
+  updateCollectionCapabilityEvidence(false);
+}
+
+function collectionSessionDefaults(manifest, gateway) {
+  const defaults = JSON.parse(JSON.stringify(manifest.defaults || {}));
+  const evidence = {};
+  for (const item of manifest.capabilities || []) {
+    const status = String(item.default_status || "unknown").toLowerCase();
+    evidence[item.id] = {status: ["unavailable", "admin_required"].includes(status) ? status : "unknown",
+      scope: item.scope || "operator", verified_by: null, checked_at: null, details: {}};
+  }
+  // An adapter template cannot attest to a newly created session's setup.
+  return {...defaults, config: defaults.config || {}, capture: defaults.capture || {},
+    storage: defaults.storage || {}, resources: {...(defaults.resources || {}), gateway}, capabilities: evidence};
+}
+
+function applyCollectionAdapterDefaults() {
+  const adapter = collectionAdapterRows.find(item => String(item.id || item.adapter_id) === elements.collectionSessionAdapter.value);
+  if (!adapter) return;
+  const defaults = collectionSessionDefaults(collectionAdapterManifest(adapter), elements.gateway.value);
+  const setValue = (name, value) => { elements[name].value = value ?? elements[name].defaultValue ?? ""; };
+  const fields = {
+    collectionSessionTask: defaults.config.task,
+    collectionSessionEmbodiment: defaults.config.embodiment ?? defaults.config.robot_type,
+    collectionRuntimeProfile: defaults.runtime_profile,
+    collectionOutputPath: defaults.storage.output_path,
+    collectionNativeFormat: defaults.storage.native_format,
+    collectionRegisterProvider: defaults.storage.registration?.provider,
+    collectionRegisterNamespace: defaults.storage.registration?.namespace,
+    collectionRegisterName: defaults.storage.registration?.name,
+    collectionRegisterKind: defaults.storage.registration?.kind,
+    collectionCaptureSchemaName: defaults.capture.schema_name,
+    collectionCaptureSchemaVersion: defaults.capture.schema_version,
+    collectionClockSource: defaults.capture.clock_source,
+    collectionNominalRate: defaults.capture.nominal_rate_hz,
+    collectionTimestampUnit: defaults.capture.timestamp_unit,
+    collectionAlignment: defaults.capture.alignment ?? "adapter_defined",
+    collectionGateway: defaults.resources.gateway,
+    collectionAccount: defaults.resources.account,
+    collectionPartition: defaults.resources.partition,
+    collectionNode: defaults.resources.node,
+    collectionGpuCount: defaults.resources.gpu_count,
+    collectionGpuType: defaults.resources.gpu_type,
+    collectionCpuCount: defaults.resources.cpu_count,
+    collectionMemoryGb: defaults.resources.memory_gb,
+    collectionTimeLimit: defaults.resources.time_limit,
+  };
+  Object.entries(fields).forEach(([key, value]) => setValue(key, value));
+  const objects = {collectionConfig: defaults.config, collectionSoftware: defaults.software,
+    collectionStorageMetadata: defaults.storage.metadata, collectionCaptureMetadata: defaults.capture.metadata,
+    collectionCalibrationMetadata: defaults.calibration?.metadata, collectionCapabilities: defaults.capabilities};
+  Object.entries(objects).forEach(([key, value]) => setValue(key, collectionPretty(value || {})));
+  elements.collectionCalibrationIdentity.value = "";
+  elements.collectionCalibrationSha.value = "";
+  elements.collectionTimestampsRecorded.checked = defaults.capture.timestamps_recorded ?? true;
+  elements.collectionRegisterOutput.checked = defaults.storage.registration !== null;
+  updateCollectionRegistrationFields();
   updateCollectionCapabilityEvidence(false);
 }
 
@@ -9349,18 +9432,7 @@ function updateCollectionCapabilityEvidence(force = false) {
     ? `Declared by this adapter: ${declarations.map((item) => `${item.id} (${item.scope})`).join(", ")}. Unknown and admin-required evidence remains visible to preflight.`
     : "This adapter declares no capability evidence keys.";
   if (!force && elements.collectionCapabilities.value.trim() !== "{}" && elements.collectionCapabilities.value.trim()) return;
-  const evidence = {};
-  declarations.forEach((item) => {
-    const defaultStatus = ["unavailable", "unknown", "admin_required"].includes(item.default_status) ? item.default_status : "unknown";
-    evidence[item.id] = {
-      status: defaultStatus,
-      scope: item.scope || "operator",
-      verified_by: null,
-      checked_at: null,
-      details: {},
-    };
-  });
-  elements.collectionCapabilities.value = collectionPretty(evidence);
+  elements.collectionCapabilities.value = collectionPretty(collectionSessionDefaults(collectionAdapterManifest(adapter), elements.gateway.value).capabilities);
 }
 
 function renderCollectionAdapters() {
@@ -9374,13 +9446,17 @@ function renderCollectionAdapters() {
         : "No streams declared";
       const id = adapter.id || adapter.adapter_id;
       const archived = Boolean(adapter.archived_at);
+      const template = collectionAdapterTemplates.find(item => item.manifest?.key === manifest.key);
+      const canReviewTemplate = !archived && template && template.manifest_sha256 !== adapter.manifest_sha256;
+      const setup = !manifest.runnable ? `<details><summary>Setup required</summary><p>${escapeHtml(manifest.description || "This adapter has no verified collection launcher.")}</p><ul>${(manifest.todos || []).map(todo => `<li>${escapeHtml(todo)}</li>`).join("")}</ul></details>` : "";
       return `<tr>
         <td><span class="node-name">${escapeHtml(collectionAdapterIdentity(adapter))}</span><span class="secondary">${escapeHtml(manifest.key || adapter.adapter_key || id)} @ ${escapeHtml(manifest.version || "-")}</span></td>
         <td class="wrap-cell">${escapeHtml(streamSummary)}</td>
-        <td>${statusPill(manifest.__parse_error ? "INVALID" : archived ? "ARCHIVED" : (manifest.runnable ? "RUNNABLE" : "DRAFT"))}</td>
+        <td>${statusPill(manifest.__parse_error ? "INVALID" : archived ? "ARCHIVED" : (manifest.runnable ? "RUNNABLE" : "DRAFT"))}${setup}</td>
         <td>${escapeHtml(formatDate(adapter.updated_at || adapter.created_at))}</td>
         <td class="row-actions data-resource-row-actions">
           <button type="button" data-collection-adapter-action="edit" data-id="${escapeHtml(id)}">Edit</button>
+          ${canReviewTemplate ? `<button type="button" data-collection-adapter-action="template" data-id="${escapeHtml(id)}">Review bundled setup ${escapeHtml(template.manifest.version)}</button>` : ""}
           <button type="button" data-collection-adapter-action="session" data-id="${escapeHtml(id)}"${archived || !manifest.runnable ? " disabled" : ""}>Collect</button>
           <button type="button" data-collection-adapter-action="${archived ? "restore" : "archive"}" data-id="${escapeHtml(id)}">${archived ? "Restore" : "Archive"}</button>
         </td>
@@ -9437,6 +9513,7 @@ async function loadCollection(force = false) {
       api("/api/collection/sessions?limit=250"),
     ]);
     collectionAdapterRows = listFrom(adapterPayload, ["adapters"]);
+    collectionAdapterTemplates = listFrom(adapterPayload, ["templates"]);
     collectionSessionRows = listFrom(sessionPayload, ["sessions"]);
     renderCollectionAdapters();
     renderCollectionSessions();
@@ -9445,6 +9522,8 @@ async function loadCollection(force = false) {
     elements.collectionAdaptersBody.innerHTML = emptyRow(5, "Collection adapters could not be loaded.");
     elements.collectionSessionsBody.innerHTML = emptyRow(8, "Collection sessions could not be loaded.");
     showNotice(elements.collectionError, `Collection API unavailable: ${error.message}`);
+    document.querySelector("#collection-new-session-help").textContent = "Collection availability could not be checked. Refresh after the connection is restored.";
+    document.querySelector("#show-collection-session-form").disabled = true;
   } finally {
     elements.refreshCollection.disabled = false;
   }
@@ -9453,6 +9532,7 @@ async function loadCollection(force = false) {
 function fillCollectionAdapterForm(adapter = null, launcher = null) {
   const manifest = adapter ? collectionAdapterManifest(adapter) : collectionDefaultAdapterManifest();
   elements.collectionAdapterForm.reset();
+  document.querySelector("#collection-template-review-note").hidden = true;
   elements.collectionAdapterId.value = adapter?.id || adapter?.adapter_id || "";
   elements.collectionAdapterKey.value = manifest.key || adapter?.adapter_key || "";
   elements.collectionAdapterKey.disabled = Boolean(adapter);
@@ -9483,6 +9563,15 @@ async function openCollectionAdapter(id, launcher = null) {
     closeDisclosurePanel(elements.collectionAdapterForm, revealLauncher);
     showToast(`Adapter could not be opened: ${error.message}`, true);
   }
+}
+
+function reviewCollectionTemplate(id, launcher) {
+  const adapter = collectionAdapterRows.find(item => String(item.id || item.adapter_id) === id);
+  const template = collectionAdapterTemplates.find(item => item.manifest?.key === collectionAdapterManifest(adapter).key);
+  if (!adapter || !template) { showToast("Bundled setup is unavailable. Refresh collection and try again.", true); return; }
+  fillCollectionAdapterForm({...adapter, manifest: template.manifest}, launcher);
+  elements.collectionAdapterEditorTitle.textContent = `Review bundled ${template.manifest.display_name} setup`;
+  document.querySelector("#collection-template-review-note").hidden = false;
 }
 
 async function saveCollectionAdapter(event) {
@@ -9634,7 +9723,7 @@ async function createCollectionSession(event) {
   } catch (error) {
     showToast(`Session creation failed: ${error.message}`, true);
   } finally {
-    elements.createCollectionSession.disabled = false;
+    updateCollectionCapabilityEvidence(false);
   }
 }
 
@@ -12197,6 +12286,7 @@ if (elements.showDataBundleForm) {
 
 document.querySelector("#show-collection-session-form").addEventListener("click", (event) => {
   populateCollectionAdapterSelect();
+  elements.collectionGateway.value = elements.gateway.value;
   updateCollectionCapabilityEvidence(true);
   revealPanel(elements.collectionSessionForm, { focusTarget: elements.collectionSessionAdapter, launcher: event.currentTarget });
 });
@@ -12221,9 +12311,10 @@ elements.collectionAdaptersBody.addEventListener("click", (event) => {
   if (!button) return;
   const id = button.dataset.id;
   if (button.dataset.collectionAdapterAction === "edit") openCollectionAdapter(id, button);
+  if (button.dataset.collectionAdapterAction === "template") reviewCollectionTemplate(id, button);
   if (button.dataset.collectionAdapterAction === "session") {
     populateCollectionAdapterSelect(id);
-    updateCollectionCapabilityEvidence(true);
+    applyCollectionAdapterDefaults();
     revealPanel(elements.collectionSessionForm, { focusTarget: elements.collectionSessionName, launcher: button });
   }
   if (button.dataset.collectionAdapterAction === "archive") setCollectionAdapterArchived(id, true);
@@ -12233,7 +12324,7 @@ elements.collectionRegisterOutput.addEventListener("change", updateCollectionReg
 elements.collectionSessionAdapter.addEventListener("change", () => {
   elements.collectionSessionAdapter.setCustomValidity("");
   elements.collectionSessionAdapter.removeAttribute("aria-invalid");
-  updateCollectionCapabilityEvidence(true);
+  applyCollectionAdapterDefaults();
 });
 elements.collectionSessionForm.addEventListener("submit", createCollectionSession);
 elements.collectionSessionsBody.addEventListener("click", (event) => {

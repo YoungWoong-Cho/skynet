@@ -291,12 +291,11 @@ class ClusterClient:
     def test_script(self, script: str, gateway: str = "auto") -> tuple[str, str]:
         command = (
             f"set -eu; export PATH={SLURM_BIN}:$PATH; umask 077; "
-            f"mkdir -p {WORK_ROOT}/jobs/.validation; "
-            f"tmp=$(mktemp {WORK_ROOT}/jobs/.validation/skynet-test-XXXXXX.sbatch); "
+            "tmp=$(mktemp /tmp/skynet-test-XXXXXX.sbatch); "
             "trap 'rm -f \"$tmp\"' EXIT; cat > \"$tmp\"; bash -n \"$tmp\"; "
             "if command -v timeout >/dev/null 2>&1; then "
             "set +e; output=$(timeout 10s sbatch --test-only \"$tmp\" 2>&1); rc=$?; set -e; "
-            "if test $rc -eq 124; then printf '%s\\n' 'sbatch --test-only timed out after 10s; bash syntax passed'; "
+            "if test $rc -eq 124; then printf '%s\\n' 'Slurm validation timed out after 10s. No job was submitted; retry when the controller responds.' >&2; exit 124; "
             "elif test $rc -ne 0; then printf '%s\\n' \"$output\" >&2; exit $rc; "
             "else printf '%s\\n' \"$output\"; fi; "
             "else sbatch --test-only \"$tmp\"; fi"

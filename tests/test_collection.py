@@ -364,3 +364,20 @@ def test_dexverse_seed_has_pinned_native_layouts_and_manual_recorder_template():
             "operator-gui",
             "stream-endpoint",
         } <= capability_ids
+
+
+def test_bundled_templates_can_be_reviewed_without_overwriting_custom_setup(tmp_path):
+    service = CollectionService(Database(tmp_path / "test.db"), FakeCluster(), seed=False)
+    original = service.store.create_adapter(adapter_manifest(display_name="Operator setup"))
+    session = service.store.create_session(session_request(original["id"]))
+    template_root = tmp_path / "templates"
+    template_root.mkdir()
+    shipped = adapter_manifest(display_name="Updated bundled setup")
+    (template_root / "collector.json").write_text(shipped.model_dump_json())
+    template = service.store.bundled_templates(template_root)[0]
+    assert template["manifest"]["display_name"] == "Updated bundled setup"
+    assert template["manifest_sha256"] != original["manifest_sha256"]
+    service.store.seed_from_directory(template_root)
+    assert service.store.get_adapter(original["id"])["display_name"] == "Operator setup"
+    service.store.update_adapter(original["id"], CollectionAdapterManifest.model_validate(template["manifest"]))
+    assert service.store.get_session(session["id"])["adapter_snapshot"] == session["adapter_snapshot"]

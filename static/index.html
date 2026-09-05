@@ -941,6 +941,7 @@
             </div>
             <div class="row-disclosure-body">
               <input id="collection-adapter-id" type="hidden">
+              <p id="collection-template-review-note" role="status" hidden>Review the bundled settings below. Saving replaces this adapter’s current editable definition; existing session snapshots stay unchanged. Complete the listed host and headset setup before enabling collection.</p>
               <fieldset class="form-section">
                 <legend>Identity</legend>
                 <div class="form-grid">
@@ -988,7 +989,7 @@
               </div>
               <div class="panel-heading-actions">
                 <span id="collection-session-count" class="quiet-label">Not loaded</span>
-                <button id="show-collection-session-form" class="button button-accent disclosure-launcher" type="button" aria-controls="collection-session-form" aria-expanded="false">New session</button>
+                <button id="show-collection-session-form" disabled aria-describedby="collection-new-session-help" class="button button-accent disclosure-launcher" type="button" aria-controls="collection-session-form" aria-expanded="false">New session</button>
               </div>
             </div>
             <div class="table-scroll tall-table">
@@ -997,6 +998,7 @@
                 <tbody id="collection-sessions-body"><tr class="empty-row"><td colspan="8">Open this tab to load collection sessions.</td></tr></tbody>
               </table>
             </div>
+            <p id="collection-new-session-help" role="status" class="collection-section-help">Loading cluster collection availability…</p>
             <form id="collection-session-form" class="dense-form collection-session-form row-disclosure inline-drawer" hidden>
                         <div class="panel-heading row-disclosure-heading">
                           <div>
