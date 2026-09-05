@@ -1648,3 +1648,32 @@ footer {
 .local-capture-panel p, .local-capture-panel li { line-height: 1.6; overflow-wrap: anywhere; }
 .local-capture-panel li { margin-block: .5rem; }
 .local-capture-panel #local-capture-checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }
+
+/* Tensor inspection remains outside polling job cards so navigation stays put. */
+.tensor-inspector { margin: 24px 0; padding: 24px; border: 2px solid var(--green); border-radius: 10px; background: var(--surface); scroll-margin-top: 20px; }
+.tensor-inspector .panel-heading { align-items: flex-start; gap: 16px; }
+.tensor-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 16px 0; }
+.tensor-toolbar input { width: 100px; padding: 8px; border: 1px solid var(--line-strong); border-radius: 5px; }
+.tensor-steps { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; padding: 0; margin: 16px 0 24px; }
+.tensor-steps li { flex: 1 1 130px; }
+.tensor-steps button { width: 100%; height: 100%; min-height: 60px; padding: 8px; text-align: left; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 5px; cursor: pointer; color: var(--ink); }
+.tensor-steps button[aria-current="step"] { background: var(--green-soft); border: 2px solid var(--green); padding: 7px; font-weight: 700; }
+.tensor-steps small { display: block; font-family: var(--mono); margin-top: 4px; }
+.tensor-inspector button:focus-visible, .tensor-grid:focus-visible { outline: 3px solid var(--green); outline-offset: 3px; }
+.tensor-inspector button:disabled { opacity: 0.5; cursor: default; }
+.tensor-layer-title { font-size: 20px; margin: 16px 0 8px; }
+.tensor-formula { padding: 12px; background: var(--surface-soft); border-radius: 5px; overflow-wrap: anywhere; }
+.tensor-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 16px; }
+.tensor-values { min-width: 0; }
+.tensor-values h4 { font-size: 14px; margin: 8px 0; }
+.tensor-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 4px; max-height: 290px; overflow: auto; padding: 4px; border: 1px solid var(--line); border-radius: 5px; }
+.tensor-cell { display: flex; justify-content: space-between; gap: 6px; padding: 8px 5px; border-radius: 3px; }
+.tensor-cell span { font: 10px var(--mono); color: var(--muted); }
+.tensor-cell code { font-size: 11px; }
+.tensor-parameter-values { max-height: 100px; overflow: auto; overflow-wrap: anywhere; margin: 6px 0; }
+.tensor-inspector details { margin: 16px 0; }
+.tensor-inspector summary { cursor: pointer; }
+.tensor-checksums { overflow-wrap: anywhere; white-space: pre-line; font-family: var(--mono); }
+#tensor-status { padding: 10px 12px; background: var(--surface-soft); border-radius: 5px; }
+@media (max-width: 650px) { .tensor-inspector { padding: 12px; } .tensor-inspector .panel-heading { flex-wrap: wrap; } }
+.tensor-inspector nav.tensor-toolbar { position: sticky; top: var(--sticky-header-offset); z-index: 2; padding: 10px 0; background: var(--surface); border-bottom: 1px solid var(--line); }

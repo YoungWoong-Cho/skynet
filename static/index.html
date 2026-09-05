@@ -9,6 +9,7 @@
     <script src="/static/app.js?v=20260904-browser-fixes" defer></script>
     <script src="/static/local-capture.js?v=20260905-cycle" defer></script>
     <script src="/static/capture-processing.js?v=20260905-cycle" defer></script>
+    <script src="/static/tensor-trace.js?v=20260905-tensors" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -924,6 +925,22 @@
    <p id="capture-cycle-message" role="status"></p>
   </form>
   <div id="capture-cycle-jobs" aria-live="polite">No processing jobs loaded.</div>
+  <section id="tensor-inspector" class="tensor-inspector" aria-labelledby="tensor-title" hidden>
+   <div class="panel-heading"><div><h3 id="tensor-title" tabindex="-1">Model tensor walkthrough</h3><p id="tensor-source"></p></div><button id="tensor-close" type="button" class="button button-outline">Close inspector</button></div>
+   <p>Follow one input through the trained model. Choose a dataset frame, then use <strong>Previous step</strong> and <strong>Next step</strong> or jump to a layer below. This inspector supports the DexVerse state-BC v1 model; GR00T and pi0.5 layer tracing is not yet supported.</p>
+   <form id="tensor-frame-form" class="tensor-toolbar">
+    <label for="tensor-frame">Dataset frame (starts at 0)</label><input id="tensor-frame" type="number" min="0" step="1" value="0" required aria-describedby="tensor-frame-range">
+    <button id="tensor-load" type="submit" class="button button-outline">Load frame</button><span id="tensor-frame-range"></span>
+   </form>
+   <p id="tensor-status" role="status" aria-live="polite"></p>
+   <div id="tensor-content" hidden>
+    <p id="tensor-provenance"></p>
+    <nav class="tensor-toolbar" aria-label="Tensor step navigation"><button id="tensor-previous" type="button" class="button button-outline">← Previous step</button><strong id="tensor-position" aria-live="polite"></strong><span id="tensor-current-label"></span><button id="tensor-next" type="button" class="button button-accent">Next step →</button></nav>
+    <ol id="tensor-steps" class="tensor-steps" aria-label="Model layers"></ol>
+    <div id="tensor-step-detail"></div>
+    <details><summary>Trace source and full-precision data</summary><p id="tensor-checksums" class="tensor-checksums"></p><p>Each step is computed with PyTorch on CPU using the saved weights. Displayed cells use six significant digits; the JSON contains the original float32 values. Traces are cached by checkpoint, dataset, frame and tracer version.</p><button id="tensor-download" type="button" class="button button-outline">Download trace JSON</button></details>
+   </div>
+  </section>
   <div id="capture-cycle-preview" hidden><h3 id="capture-cycle-preview-title">Replay</h3><video id="capture-cycle-video" controls playsinline preload="metadata" style="width:100%;max-height:560px"></video></div>
  </details>
  <details><summary>DexVerse simulation setup</summary><p>DexVerse records robot actions and scene states inside Isaac Sim. Saved-recording replay needs a compatible NVIDIA GPU host, Isaac Sim 5.1.0, Isaac Lab 2.3.2 and robot assets. Live headset teleoperation additionally needs CloudXR and a compatible client. This cannot run on the Mac’s GPU.</p><p>The CloudXR client documented for the pinned stack requires visionOS 26; that requirement does not apply to the local recorder above. Local human tracking requires validated retargeting and simulation before it becomes a robot demonstration.</p><p><a href="https://isaac-sim.github.io/IsaacLab/v2.3.2/source/how-to/cloudxr_teleoperation.html" target="_blank" rel="noreferrer">Official Isaac Lab CloudXR setup guide</a>. The adapter below lists the remaining host, stream, and calibration requirements.</p></details>
