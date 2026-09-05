@@ -6,11 +6,12 @@ A native offline recorder for Apple Vision Pro. No NVIDIA GPU or CloudXR connect
 
 1. Open `SkynetCapture.xcodeproj` in Xcode on a Mac with the visionOS SDK.
 2. Select the app target, Signing & Capabilities, your Apple development team, and a unique bundle identifier. Keep automatic signing enabled.
-3. Pair the physical Vision Pro in Xcode's Devices and Simulators window. Enable Developer Mode on the headset, select it as the run destination, and run the app. Developer provisioning may require Apple account authentication and headset confirmation.
-4. Enter a task name, open tracking space, and allow hand tracking. Keep both hands visible. The Start button becomes available after tracking arrives.
-5. Record approximately 10 seconds, move both hands and your head, then Stop and save. Confirm the saved frame count is nonzero.
-6. Share the saved JSONL file to the Mac via AirDrop or Files. In the Skynet browser, Data → Collection → Import recording. Verify left/right/head counts, duration and warnings. Export the original and compare SHA-256 if checking data integrity.
-7. Repeat the same import: it should report the existing recording. Close the immersive space during a second recording: it must be labeled interrupted and rejected as a completed dataset.
+3. Wear and unlock the physical Vision Pro. Connect it and the Mac to the same private Wi-Fi network. Leave Settings → General → Remote Devices open on the headset, then select the headset in Xcode's Devices and Simulators window and click Pair. Enter the current code shown on the headset. If neither device appears, try another private Wi-Fi network; some networks prevent local device discovery.
+4. Enable Settings → Privacy & Security → Developer Mode on the headset after pairing. Complete any restart and confirmation, select the headset as Xcode's run destination, and run the app. Developer provisioning may require Apple account authentication and headset confirmation.
+5. Enter a task name, open tracking space, and allow hand tracking. Keep both hands visible. The Start button becomes available after tracking arrives.
+6. Record approximately 10 seconds, move both hands and your head, then Stop and save. Confirm the saved frame count is nonzero.
+7. Share the saved JSONL file to the Mac via AirDrop or Files. In the Skynet browser, Data → Collection → Import recording. Verify left/right/head counts, duration and warnings. Export the original and compare SHA-256 if checking data integrity.
+8. Repeat the same import: it should report the existing recording. Close the immersive space during a second recording: it must be labeled interrupted and rejected as a completed dataset.
 
 The visionOS simulator has no real hand-tracking provider. Its unsupported message is expected and does not verify headset capture. Recordings remain in the app's Documents/Skynet Recordings folder; sharing does not delete them. Uninstalling the app may remove its local data.
 
