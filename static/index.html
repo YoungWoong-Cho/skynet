@@ -7,7 +7,8 @@
     <title>Skynet / Experiment Console</title>
     <link rel="stylesheet" href="/static/styles.css?v=20260904-browser-fixes">
     <script src="/static/app.js?v=20260904-browser-fixes" defer></script>
-    <script src="/static/local-capture.js?v=20260904" defer></script>
+    <script src="/static/local-capture.js?v=20260905-cycle" defer></script>
+    <script src="/static/capture-processing.js?v=20260905-cycle" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -908,7 +909,24 @@
   <p id="local-capture-storage"></p>
   <div class="table-scroll"><table><thead><tr><th>Task / recorded</th><th>Frames / duration</th><th>Tracking quality</th><th>Location / use</th><th>Actions</th></tr></thead><tbody id="local-capture-body"><tr><td colspan="5">No recordings loaded.</td></tr></tbody></table></div>
  </details>
- <details><summary>DexVerse simulation setup</summary><p>DexVerse records robot actions and scene states inside Isaac Sim. It needs a compatible NVIDIA GPU host, Isaac Sim 5.1.0, Isaac Lab 2.3.2, robot assets, a working CloudXR stream, and a compatible client. This cannot run on the Mac’s GPU.</p><p>The CloudXR client documented for the pinned stack requires visionOS 26; that requirement does not apply to the local recorder above. Local human tracking requires validated retargeting and simulation before it becomes a robot demonstration.</p><p><a href="https://isaac-sim.github.io/IsaacLab/v2.3.2/source/how-to/cloudxr_teleoperation.html" target="_blank" rel="noreferrer">Official Isaac Lab CloudXR setup guide</a>. The adapter below lists the remaining host, stream, and calibration requirements.</p></details>
+ <details open><summary>4. Run a DexVerse cycle</summary>
+  <p>Choose an imported recording above, then run simulation → dataset → training → evaluation. This uses one cluster GPU. Your original recording is preserved.</p>
+  <p><strong>First supported combination:</strong> Vision Pro right hand → Shadow right hand → Pick up stick → state-based behavior cloning. Other robot/model combinations need a matching adapter. This is not a GR00T or pi0.5 policy.</p>
+  <p>Recordings made without seeing the simulator are motion tests. Replay and task success are shown separately; a completed cycle may have zero successful trials.</p>
+  <p><button id="capture-cycle-setup" type="button" class="button button-outline">Check / configure DexVerse</button> <span id="capture-cycle-setup-message" role="status">Uses the saved pipeline configuration on sky2; the dashboard gateway selector does not change this route.</span> <a href="/api/collection/processing/guide" target="_blank" rel="noopener">Setup and dataset guide</a></p>
+  <p>The scene seed makes object placement repeatable. Each training epoch is one pass through the recording.</p>
+  <form id="capture-cycle-form" class="dense-form">
+   <div class="field"><label for="capture-cycle-recording">Recording</label><select id="capture-cycle-recording" required></select></div>
+   <div class="field"><label for="capture-cycle-seed">Scene seed (change for a new cycle)</label><input id="capture-cycle-seed" type="number" value="0" min="0" max="2147483627" required></div>
+   <div class="field"><label for="capture-cycle-epochs">Training epochs</label><input id="capture-cycle-epochs" type="number" value="100" min="1" max="1000" required></div>
+   <div class="field"><label for="capture-cycle-episodes">Evaluation trials</label><input id="capture-cycle-episodes" type="number" value="1" min="1" max="20" required></div>
+   <button id="capture-cycle-start" type="submit" class="button button-accent">Run full cycle on cluster</button>
+   <p id="capture-cycle-message" role="status"></p>
+  </form>
+  <div id="capture-cycle-jobs" aria-live="polite">No processing jobs loaded.</div>
+  <div id="capture-cycle-preview" hidden><h3 id="capture-cycle-preview-title">Replay</h3><video id="capture-cycle-video" controls playsinline preload="metadata" style="width:100%;max-height:560px"></video></div>
+ </details>
+ <details><summary>DexVerse simulation setup</summary><p>DexVerse records robot actions and scene states inside Isaac Sim. Saved-recording replay needs a compatible NVIDIA GPU host, Isaac Sim 5.1.0, Isaac Lab 2.3.2 and robot assets. Live headset teleoperation additionally needs CloudXR and a compatible client. This cannot run on the Mac’s GPU.</p><p>The CloudXR client documented for the pinned stack requires visionOS 26; that requirement does not apply to the local recorder above. Local human tracking requires validated retargeting and simulation before it becomes a robot demonstration.</p><p><a href="https://isaac-sim.github.io/IsaacLab/v2.3.2/source/how-to/cloudxr_teleoperation.html" target="_blank" rel="noreferrer">Official Isaac Lab CloudXR setup guide</a>. The adapter below lists the remaining host, stream, and calibration requirements.</p></details>
 </section>
 
 

@@ -9406,7 +9406,7 @@ function populateCollectionAdapterSelect(selectedId = "") {
   document.querySelector("#show-collection-session-form").disabled = !hasRunnable;
   document.querySelector("#collection-new-session-help").textContent = hasRunnable
     ? "Choose an adapter to fill its capture settings, then review and check setup."
-    : "Cluster collection is unavailable until an adapter has a working launcher and completed setup. Review the adapter requirements below. Local Vision Pro recording and import are available above.";
+    : "Live cluster collection needs a configured collection adapter. Saved Vision Pro recordings use the separate DexVerse cycle controls above.";
   const normalizedSelection = String(selectedId || "");
   if (normalizedSelection && active.some((adapter) => String(adapter.id || adapter.adapter_id) === normalizedSelection)) {
     elements.collectionSessionAdapter.value = normalizedSelection;

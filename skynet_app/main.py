@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from .capture_processing.api import router as capture_processing_router
 from .cluster_config import CLUSTER
 from .collection_api import router as collection_router
 from .local_capture_api import router as local_capture_router
@@ -473,4 +474,5 @@ def index() -> HTMLResponse:
 app.include_router(pipeline_router)
 app.include_router(collection_router)
 app.include_router(local_capture_router)
+app.include_router(capture_processing_router)
 app.mount("/static", StaticFiles(directory=STATIC_ROOT), name="static")

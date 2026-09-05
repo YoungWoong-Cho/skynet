@@ -12,6 +12,7 @@ async function loadLocalCollection(force = false) {
     document.querySelector('#local-capture-checks').innerHTML = setup.checks.map(check =>
       `<p><strong>${escapeHtml(check.name)} — ${escapeHtml(({ready: 'Ready', unsupported: 'Unsupported', needs_setup: 'Setup required', needs_user: 'Check on headset', needs_gpu: 'GPU host required'}[check.status] || check.status))}</strong><br>${escapeHtml(check.detail)}</p>`
     ).join('');
+    if (typeof updateCaptureCycleRecordings === 'function') updateCaptureCycleRecordings(data.captures);
     document.querySelector('#local-capture-storage').textContent = `Saved on this computer: ${setup.storage_path}`;
     document.querySelector('#local-capture-body').innerHTML = data.captures.length ? data.captures.map(capture => {
       const summary = capture.summary;
@@ -44,6 +45,7 @@ document.querySelector('#local-capture-import').addEventListener('submit', async
     loadedTabs.delete('datasets');
     input.value = '';
     await loadLocalCollection();
+    if (typeof loadCaptureCycles === 'function') await loadCaptureCycles();
   } catch (error) { status.textContent = `Import failed: ${error.message}`; }
   finally { button.disabled = false; input.disabled = false; }
 });
