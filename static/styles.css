@@ -1671,6 +1671,9 @@ footer {
 #collection-import-drawer .form-actions { justify-content: flex-end; padding: 11px 15px; }
 #local-capture-import-status[data-state=error] { color: var(--danger); }
 #local-capture-import-status[data-state=success] { color: var(--green); }
+.collection-role-table { table-layout: fixed; white-space: normal; }
+.collection-role-table th:first-child { width: 25%; }
+.collection-role-table td { vertical-align: top; }
 #capture-cycle-form .field { margin-top: 10px; }
 .collection-selected-recording { padding: 9px; margin-top: 10px; background: var(--surface-soft); font-size: 11px; }
 .collection-inline-details { margin: 12px 0 0; }

@@ -934,6 +934,24 @@
             </section>
           </div>
           <div id="collection-view-cycles" data-collection-view="cycles" role="tabpanel" aria-labelledby="collection-tab-cycles" hidden>
+            <section class="panel table-panel" aria-labelledby="collection-roles-title">
+              <div class="panel-heading"><div>
+                <h2 id="collection-roles-title">How the parts work together</h2>
+                <p class="collection-section-help">Saved recording → Skynet → DexVerse simulation → dataset → training → evaluation.</p>
+              </div></div>
+              <div class="table-scroll">
+                <table class="collection-role-table" aria-labelledby="collection-roles-title">
+                  <thead><tr><th scope="col">Component</th><th scope="col">Role in this workflow</th></tr></thead>
+                  <tbody>
+                    <tr><td class="wrap-cell"><strong>Skynet Capture on Vision Pro</strong></td><td class="wrap-cell">Uses Apple ARKit to record hand and head tracking locally on the headset. You transfer the saved file to your Mac and import it into Skynet.</td></tr>
+                    <tr><td class="wrap-cell"><strong>Isaac Sim / Isaac Lab</strong></td><td class="wrap-cell">Provides physics, rendering and the simulator framework on the GPU server.</td></tr>
+                    <tr><td class="wrap-cell"><strong>DexVerse</strong></td><td class="wrap-cell">Defines simulated robot hands, objects, tasks and success conditions. Maps human hand movements to robot controls.</td></tr>
+                    <tr><td class="wrap-cell"><strong>Skynet</strong></td><td class="wrap-cell">Connects recording import, replay in DexVerse, dataset storage, training and evaluation through this web UI.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="collection-table-footer"><span class="collection-section-help">The headset records locally; a live connection to the DexVerse simulation is not integrated yet.</span></div>
+            </section>
             <section id="collection-cycle-composer" class="panel table-panel" aria-labelledby="collection-cycle-title">
               <div class="panel-heading"><div>
                 <h2 id="collection-cycle-title">Process a recording</h2>
