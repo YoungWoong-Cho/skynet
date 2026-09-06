@@ -1,0 +1,129 @@
+{
+  "schema": "skynet.hand-catalog/v1",
+  "hands": [
+    {
+      "key": "wuji-1",
+      "name": "WUJI Hand 1",
+      "repository": "wuji-technology/wuji-description",
+      "revision": "4c1073d0a3ad1daaf6546d219db751d8448d3888",
+      "sides": {
+        "left": "hand/body/urdf/left.urdf",
+        "right": "hand/body/urdf/right.urdf"
+      },
+      "packages": {},
+      "source_kind": "Official",
+      "notes": "",
+      "license_path": "LICENSE"
+    },
+    {
+      "key": "wuji-2",
+      "name": "WUJI Hand 2 (Beta 2)",
+      "repository": "wuji-technology/wuji-description",
+      "revision": "4c1073d0a3ad1daaf6546d219db751d8448d3888",
+      "sides": {
+        "left": "hand2/hand2_beta2/body/urdf/left.urdf",
+        "right": "hand2/hand2_beta2/body/urdf/right.urdf"
+      },
+      "packages": {},
+      "source_kind": "Official",
+      "notes": "Beta 2 model; kept separate from WUJI Hand 1.",
+      "license_path": "LICENSE",
+      "preview_rotation": [
+        3.141592653589793,
+        0,
+        0
+      ]
+    },
+    {
+      "key": "shadow",
+      "name": "Shadow Hand",
+      "repository": "shadow-robot/sr_common",
+      "revision": "172c3d9c3715ee75eb10dfe4ee57e26a342b4529",
+      "sides": {
+        "right": "sr_description/robots/sr_hand.urdf.xacro",
+        "left": "sr_description/robots/sr_hand.urdf.xacro"
+      },
+      "packages": {
+        "sr_description": "sr_description"
+      },
+      "source_kind": "Official",
+      "notes": "Official E3M5 hand with PST fingertips, expanded from the pinned Shadow Xacro for each side. DexVerse uses a separate floating-hand model; joint orders are not interchangeable.",
+      "license_path": "LICENSE",
+      "generated_urdfs": {
+        "right": {
+          "path": "config/hand_models/shadow/right.urdf",
+          "sha256": "9db0c89949bb6f294c10a69a43104203f95e9a194d6ada2680e48da550a80bc3"
+        },
+        "left": {
+          "path": "config/hand_models/shadow/left.urdf",
+          "sha256": "056fa528548c9abc6d40a0b7602c362c34e4fb2398f22cd067f3787555fcb2c2"
+        }
+      }
+    },
+    {
+      "key": "sharpa",
+      "name": "Sharpa Wave",
+      "repository": "sharpa-robotics/sharpa-urdf-usd-xml",
+      "revision": "6eea427eb24189519f32b9f21674cd534d3f973c",
+      "sides": {
+        "left": "wave_01/left_sharpa_wave/left_sharpa_wave.urdf",
+        "right": "wave_01/right_sharpa_wave/right_sharpa_wave.urdf"
+      },
+      "packages": {
+        "left_sharpa_wave": "wave_01/left_sharpa_wave",
+        "right_sharpa_wave": "wave_01/right_sharpa_wave"
+      },
+      "source_kind": "Official",
+      "notes": "",
+      "license_path": "LICENSE.txt"
+    },
+    {
+      "key": "allegro-v4",
+      "name": "Allegro Hand V4",
+      "repository": "simlabrobotics/allegro_hand_ros_v4",
+      "revision": "b19b18ea130c4fbe343f2c178eec6cb55186a4ac",
+      "sides": {
+        "left": "src/allegro_hand_description/allegro_hand_description_left.urdf",
+        "right": "src/allegro_hand_description/allegro_hand_description_right.urdf"
+      },
+      "packages": {
+        "allegro_hand_description": "src/allegro_hand_description"
+      },
+      "source_kind": "Official",
+      "notes": "Legacy ROS V4 model. The source\u2019s left URDF references a missing left thumb mesh; a complete left visual model is unavailable in this revision.",
+      "license_path": "LICENSE",
+      "unsupported_sides": {
+        "left": "The official V4 source references link_12.0_left.STL, which is absent from the pinned repository. The right model is available."
+      }
+    },
+    {
+      "key": "leap-v1",
+      "name": "LEAP Hand V1",
+      "repository": "leap-hand/LEAP_Hand_Sim",
+      "revision": "150bc3d4b61fd6619193ba5a8ef209f3609ced89",
+      "sides": {
+        "right": "assets/leap_hand/robot.urdf"
+      },
+      "packages": {},
+      "source_kind": "Official",
+      "notes": "The upstream source supplies one right-hand model; no mirrored left model is substituted.",
+      "license_path": "LICENSE.txt"
+    },
+    {
+      "key": "inspire-rh56",
+      "name": "Inspire RH56",
+      "repository": "renesas-rdk/inspire_rh56_hand_description",
+      "revision": "39bfca04a69912e6561628156d1c63e37698eb75",
+      "sides": {
+        "left": "urdf/reference/inspire_hand_left_ref.urdf",
+        "right": "urdf/reference/inspire_hand_right_ref.urdf"
+      },
+      "packages": {
+        "inspire_rh56_urdf": ""
+      },
+      "source_kind": "Third-party \u00b7 Renesas",
+      "notes": "Renesas models derived from manufacturer CAD. Linked finger joints follow the URDF mimic relationships.",
+      "license_path": "urdf/reference/LICENSE.txt"
+    }
+  ]
+}

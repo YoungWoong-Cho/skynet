@@ -18,3 +18,5 @@ htmlcov/
 xcuserdata/
 DerivedData/
 *.xcuserstate
+
+node_modules/

@@ -5,11 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Skynet Slurm experiment and evaluation console.">
     <title>Skynet / Experiment Console</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260904-browser-fixes">
-    <script src="/static/app.js?v=20260904-browser-fixes" defer></script>
+    <link rel="stylesheet" href="/static/styles.css?v=20260906-hands-xr">
+    <script src="/static/app.js?v=20260906-hands-xr" defer></script>
     <script src="/static/local-capture.js?v=20260905-cycle" defer></script>
     <script src="/static/capture-processing.js?v=20260905-cycle" defer></script>
     <script src="/static/collection-ui.js" defer></script>
+    <script src="/static/hands-ui.js?v=20260906-hands-xr" defer></script>
+    <script src="/static/live-xr.js?v=20260906-hands-xr" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -24,6 +26,7 @@
         <a href="#experiments" data-tab-target="experiments" role="tab" aria-selected="false" aria-controls="experiments">Experiments</a>
         <a href="#runs" data-tab-target="runs" role="tab" aria-selected="false" aria-controls="runs">Training Runs</a>
         <a href="#evaluations" data-tab-target="evaluations" role="tab" aria-selected="false" aria-controls="evaluations">Evaluations</a>
+        <a href="#hands" data-tab-target="hands" role="tab" aria-selected="false" aria-controls="hands">Hands</a>
         <a href="#adapters" data-tab-target="adapters" role="tab" aria-selected="false" aria-controls="adapters">Adapters</a>
         <a href="#settings" data-tab-target="settings" role="tab" aria-selected="false" aria-controls="settings">Settings</a>
       </nav>
@@ -122,6 +125,35 @@
             </div>
             <div class="form-actions"><button id="jobs-previous" type="button" class="button button-outline">Previous jobs</button><span id="jobs-page" role="status"></span><button id="jobs-next" type="button" class="button button-outline">Next jobs</button></div>
           </section>
+        </div>
+      </section>
+
+      <section id="hands" class="tab-panel" data-tab-panel="hands" role="tabpanel" hidden>
+        <div class="section-shell workspace-page">
+          <div class="page-heading"><div><h1>Hands</h1><p class="secondary">Explore robot hand models, adjust their joints, and save poses.</p></div><button id="hands-refresh" class="button button-outline" type="button">Refresh</button></div>
+          <div id="hands-error" class="inline-alert" role="alert" hidden></div>
+          <dialog id="hand-export-dialog" class="collection-video-dialog" aria-labelledby="hand-export-title">
+            <div class="panel-heading"><h2 id="hand-export-title">Export hand pose</h2><button id="hand-export-close" class="button button-outline" type="button">Close export</button></div>
+            <p>Save the joint values with this model’s exact source version. Angles use radians; sliding joints use meters.</p>
+            <label for="hand-export-json">Pose JSON</label><textarea id="hand-export-json" rows="14" readonly></textarea>
+            <div class="form-actions"><button id="hand-export-copy" class="button button-outline" type="button">Copy JSON</button><a id="hand-export-download" class="button button-accent" download>Download JSON</a></div>
+            <p id="hand-export-message" role="status">If your browser restricts file downloads, use Copy JSON.</p>
+          </dialog>
+          <div class="hand-layout">
+            <section class="panel table-panel"><div class="panel-heading"><h2>Hand library</h2><span id="hands-count" class="quiet-label">Loading…</span></div><div class="table-scroll"><table class="registry-table"><thead><tr><th>Model</th><th>View</th></tr></thead><tbody id="hands-catalog"><tr class="empty-row"><td colspan="2">Loading hand library…</td></tr></tbody></table></div><div class="collection-table-footer"><span class="secondary">Models are saved locally at a fixed source version.</span></div></section>
+            <section class="panel table-panel" aria-labelledby="hand-title">
+              <div class="panel-heading panel-heading-tools"><div><h2 id="hand-title">Choose a hand</h2><p id="hand-source-label" class="secondary"></p></div><div class="section-tools"><label for="hand-side">Side</label><select id="hand-side" disabled></select></div></div>
+              <div class="hand-toolbar"><span id="hand-status" role="status">Select a model from the library.</span><button id="hand-install" type="button" class="button" hidden>Download model</button><button id="hand-fit" type="button" class="button button-outline" disabled>Reset view</button></div>
+              <div id="hand-canvas" class="hand-canvas" hidden></div>
+              <div id="hand-view-help" class="hand-view-help" hidden>Drag to rotate · scroll or pinch to zoom · right-drag to pan</div>
+              <div id="hand-controls" class="hand-controls" hidden>
+                <div class="form-grid"><div class="field span-2"><label for="hand-joint">Joint</label><select id="hand-joint"></select></div><div class="field"><label id="hand-value-label" for="hand-value">Angle (degrees)</label><input id="hand-value" type="number" step="0.1"></div><div class="field"><label for="hand-angle">Adjust joint</label><input id="hand-angle" type="range" step="0.1"></div></div>
+                <div class="hand-control-footer"><span id="hand-joint-note" class="secondary"></span><button id="hand-reset" type="button" class="button button-outline">Reset pose</button></div>
+                <details class="hand-pose-details"><summary>Saved poses</summary><form id="hand-pose-form" class="form-grid"><div class="field span-2"><label for="hand-pose-name">Pose name</label><input id="hand-pose-name" maxlength="80" required placeholder="e.g. Relaxed grip"></div><div class="field"><label>&nbsp;</label><button class="button" type="submit">Save pose</button></div></form><div class="form-grid"><div class="field span-2"><label for="hand-pose-list">Saved for this model and side</label><select id="hand-pose-list"><option value="">No saved poses</option></select></div><div class="field"><label>&nbsp;</label><button id="hand-pose-load" class="button button-outline" type="button" disabled>Load pose</button></div><div class="field"><label>&nbsp;</label><button id="hand-pose-export" class="button button-outline" type="button">Export current pose</button></div></div><p id="hand-pose-message" class="secondary" role="status"></p></details>
+              </div>
+              <div class="hand-model-info"><p id="hand-model-notes"></p><p class="secondary">This viewer shows joint motion and geometry. It does not simulate contact or send commands to a robot. DexVerse control is currently integrated only for its Shadow right-hand pipeline; the other models need their own control and retargeting adapters.</p><div class="form-actions"><a id="hand-source-link" target="_blank" rel="noreferrer">Source description ↗</a><a id="hand-license-link" target="_blank" rel="noreferrer" hidden>Model license ↗</a><span id="hand-revision" class="secondary"></span></div></div>
+            </section>
+          </div>
         </div>
       </section>
 
@@ -892,6 +924,7 @@
           <div id="collection-error" class="inline-alert" role="alert" hidden></div>
           <nav class="data-subnav collection-view-nav" role="tablist" aria-label="Collection views">
             <button id="collection-tab-recordings" type="button" role="tab" aria-selected="true" aria-controls="collection-view-recordings" data-collection-tab="recordings">Recordings <span id="collection-library-total"></span></button>
+            <button id="collection-tab-live" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="collection-view-live" data-collection-tab="live">Live teleoperation</button>
             <button id="collection-tab-cycles" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="collection-view-cycles" data-collection-tab="cycles">DexVerse cycles <span id="collection-cycle-total"></span></button>
             <button id="collection-tab-setup" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="collection-view-setup" data-collection-tab="setup">Setup &amp; integrations</button>
           </nav>
@@ -933,6 +966,36 @@
               </div>
             </section>
           </div>
+          <div id="collection-view-live" data-collection-view="live" role="tabpanel" aria-labelledby="collection-tab-live" hidden>
+            <section class="panel table-panel">
+              <div class="panel-heading"><div><h2>Manipulate in DexVerse</h2><p class="collection-section-help">See the task on Vision Pro and control the simulated Shadow right hand.</p></div><button id="live-xr-refresh" class="button button-outline" type="button">Refresh session</button></div>
+              <div class="live-xr-intro">
+                <p>Pick up stick · Shadow right hand · CloudXR 5.0.1. Other hands and tasks need compatible live adapters.</p>
+                <p>The server runs on one cluster GPU for up to 30 minutes. The headset must be able to reach its streaming ports; an SSH connection from this Mac does not establish headset access.</p>
+                <form id="live-xr-start-form">
+                  <label id="live-xr-consent-field" class="check-field"><input id="live-xr-consent" type="checkbox">I accept the <a id="live-xr-eula" href="https://developer.download.nvidia.com/cloudxr/EULA/NVIDIA_CloudXR_GA_License_without_Data_Collection_25Feb2025.pdf" target="_blank" rel="noreferrer">NVIDIA CloudXR license</a>.</label>
+                  <p id="live-xr-consent-status" class="secondary"></p>
+                  <div class="form-actions"><button id="live-xr-start" class="button button-accent" type="submit">Start live session</button><a href="/api/collection/live/guide" target="_blank" rel="noreferrer">Setup and troubleshooting ↗</a></div>
+                </form>
+                <p id="live-xr-message" role="status">Loading live sessions…</p>
+                <p id="live-xr-error" class="inline-alert" role="alert" hidden></p>
+              </div>
+            </section>
+            <section class="panel table-panel">
+              <div class="panel-heading"><h2>Live sessions</h2></div>
+              <div class="table-scroll"><table><thead><tr><th>Session</th><th>Status</th><th>Server address</th><th>Actions</th></tr></thead><tbody id="live-xr-sessions"><tr class="empty-row"><td colspan="4">Loading…</td></tr></tbody></table></div>
+              <div class="collection-table-footer"><span class="collection-section-help">Saved native demonstrations stay on the GPU workspace. Automatic conversion of a live demonstration into a training/evaluation cycle is not supported yet.</span></div>
+            </section>
+            <section class="panel collection-setup-card">
+              <div class="panel-heading"><h2>In the headset</h2></div>
+              <ol class="collection-disclosure-body live-xr-steps">
+                <li>Open Isaac XR Teleop. Use Enable local network if needed, then enter the active address above and choose Test server connection.</li>
+                <li>Choose Connect. When the scene opens, use START to calibrate and begin recording.</li>
+                <li>Manipulate the stick with your right hand. STOP pauses; RESET resets the task and discards the active attempt.</li>
+                <li>DexVerse saves a demonstration after its task-success condition holds for ten simulation steps. The session then closes; saved files remain available in its output folder.</li>
+              </ol>
+            </section>
+          </div>
           <div id="collection-view-cycles" data-collection-view="cycles" role="tabpanel" aria-labelledby="collection-tab-cycles" hidden>
             <section class="panel table-panel" aria-labelledby="collection-roles-title">
               <div class="panel-heading"><div>
@@ -950,7 +1013,7 @@
                   </tbody>
                 </table>
               </div>
-              <div class="collection-table-footer"><span class="collection-section-help">The headset records locally; a live connection to the DexVerse simulation is not integrated yet.</span></div>
+              <div class="collection-table-footer"><span class="collection-section-help">This cycle uses a saved local recording. For immersive control inside the task, open Live teleoperation.</span></div>
             </section>
             <section id="collection-cycle-composer" class="panel table-panel" aria-labelledby="collection-cycle-title">
               <div class="panel-heading"><div>
@@ -1064,7 +1127,7 @@
               <button id="capture-cycle-setup" type="button" class="button button-outline">Check / configure DexVerse</button>
               <p id="capture-cycle-setup-message" class="collection-section-help" role="status">Uses the saved pipeline on sky2. The dashboard gateway selector does not change this route.</p>
               <p><a href="/api/collection/processing/guide" target="_blank" rel="noopener">Setup and dataset guide</a></p>
-              <details><summary>DexVerse simulation setup</summary><p>DexVerse records robot actions and scene states inside Isaac Sim. Saved-recording replay needs a compatible NVIDIA GPU host, Isaac Sim 5.1.0, Isaac Lab 2.3.2 and robot assets. Live headset teleoperation additionally needs CloudXR and a compatible client. This cannot run on the Mac’s GPU.</p><p>The CloudXR client documented for the pinned stack requires visionOS 26; that requirement does not apply to the local recorder above. Local human tracking requires validated retargeting and simulation before it becomes a robot demonstration.</p><p><a href="https://isaac-sim.github.io/IsaacLab/v2.3.2/source/how-to/cloudxr_teleoperation.html" target="_blank" rel="noreferrer">Official Isaac Lab CloudXR setup guide</a>. The adapter below lists the remaining host, stream, and calibration requirements.</p></details>
+              <details><summary>DexVerse simulation setup</summary><p>DexVerse records robot actions and scene states inside Isaac Sim. Saved-recording replay needs a compatible NVIDIA GPU host, Isaac Sim 5.1.0, Isaac Lab 2.3.2 and robot assets. Live headset teleoperation additionally needs CloudXR and a compatible client. This cannot run on the Mac’s GPU.</p><p>The patched CloudXR 5.0.1 client builds and runs on the tested visionOS 2.5 headset. Streaming additionally requires a reachable GPU server; headset installation alone does not verify this connection. Local human tracking requires validated retargeting and simulation before it becomes a robot demonstration.</p><p><a href="https://isaac-sim.github.io/IsaacLab/v2.3.2/source/how-to/cloudxr_teleoperation.html" target="_blank" rel="noreferrer">Official Isaac Lab CloudXR setup guide</a>. The adapter below lists the remaining host, stream, and calibration requirements.</p></details>
             </section>
 <details id="collection-advanced" class="collection-disclosure">
  <summary>Live collection &amp; adapters <span class="collection-summary-note">Advanced · <span id="collection-adapter-count">Loading…</span> · <span id="collection-session-count">Loading…</span></span></summary>

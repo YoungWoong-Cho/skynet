@@ -1,6 +1,6 @@
 /* Collection views share their forms and data; switching views never submits work. */
 function setCollectionView(view, {persist = true, focus = false} = {}) {
-  if (!['recordings', 'cycles', 'setup'].includes(view)) view = 'recordings';
+  if (!['recordings', 'live', 'cycles', 'setup'].includes(view)) view = 'recordings';
   document.querySelectorAll('[data-collection-view]').forEach(panel => { panel.hidden = panel.dataset.collectionView !== view; });
   document.querySelectorAll('[data-collection-tab]').forEach(button => {
     const selected = button.dataset.collectionTab === view;
@@ -14,6 +14,7 @@ function setCollectionView(view, {persist = true, focus = false} = {}) {
       history.pushState(null, '', url);
     }
   }
+  if (view === "live") window.loadLiveXR?.();
   if (focus) document.querySelector(`[data-collection-tab="${view}"]`).focus({preventScroll: true});
 }
 function chooseCollectionRecording(digest) {

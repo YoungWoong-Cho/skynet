@@ -1,0 +1,3 @@
+# Preserve upstream diff context and whitespace inside bundled shader strings.
+ops/xr/headset-client-errors.patch -whitespace
+static/hands-viewer.js -whitespace

@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+import {JSDOM} from 'jsdom';
+import * as THREE from 'three';
+import {applyUrdfMaterials} from '../frontend/hand-materials.js';
+const dom=new JSDOM();globalThis.DOMParser=dom.window.DOMParser;
+const source='<robot><material name="opaque"><color rgba="0.3 0.4 0.5 1"/></material><link><visual><material name="opaque"/></visual></link></robot>';
+const xml=new DOMParser().parseFromString(source,'application/xml');
+const robot=new THREE.Group(),visual=new THREE.Group();visual.isURDFVisual=true;visual.urdfNode=xml.querySelector('visual');
+const nested=new THREE.Group(),mesh=new THREE.Mesh(new THREE.BoxGeometry(),new THREE.MeshPhongMaterial({opacity:0,transparent:true}));nested.add(mesh);visual.add(nested);robot.add(visual);
+applyUrdfMaterials(robot,source);
+assert.equal(mesh.material.opacity,1);assert.equal(mesh.material.transparent,false);
+assert.ok(mesh.material.color.equals(new THREE.Color().setRGB(.3,.4,.5,THREE.SRGBColorSpace)));
+mesh.geometry.dispose();mesh.material.dispose();
+console.log('URDF material regression passed: nested CAD geometry is visible and uses the declared color.');

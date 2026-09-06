@@ -14,6 +14,8 @@ from .capture_processing.api import router as capture_processing_router
 from .cluster_config import CLUSTER
 from .collection_api import router as collection_router
 from .local_capture_api import router as local_capture_router
+from .hands_api import router as hands_router
+from .live_xr_api import router as live_xr_router
 from .pipeline_api import router as pipeline_router
 from .pipeline_api import service as pipeline_service
 
@@ -474,5 +476,7 @@ def index() -> HTMLResponse:
 app.include_router(pipeline_router)
 app.include_router(collection_router)
 app.include_router(local_capture_router)
+app.include_router(hands_router)
+app.include_router(live_xr_router)
 app.include_router(capture_processing_router)
 app.mount("/static", StaticFiles(directory=STATIC_ROOT), name="static")

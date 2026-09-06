@@ -1534,12 +1534,15 @@ footer {
 .empty-row td { height: 70px; color: var(--muted); font: 9px var(--mono); text-align: center; }
 @keyframes pulse { to { opacity: 0.35; } }
 
-@media (max-width: 1120px) {
+@media (max-width: 1320px) {
   .topbar { grid-template-columns: auto 1fr; gap: 16px; }
   .connection-control { display: flex; grid-column: 1 / -1; justify-content: flex-end; }
   .tab-nav { justify-content: flex-end; }
   .tab-nav a { min-width: 82px; }
   .tab-nav a[data-tab-target="runs"] { min-width: 112px; }
+}
+
+@media (max-width: 1120px) {
   .workspace-grid-composer { grid-template-columns: 1fr; }
   .preview-panel { position: static; max-height: none; }
   .preview-panel pre { max-height: 520px; }
@@ -1637,7 +1640,7 @@ footer {
 .action-dialog::backdrop { background: rgb(0 0 0 / 45%); }
 .action-dialog label { display: block; white-space: pre-wrap; line-height: 1.6; }
 .action-dialog input { display: block; width: 100%; margin-top: 12px; }
-@media (max-width: 1120px) { :root { --topbar-height: 96px; } }
+@media (max-width: 1320px) { :root { --topbar-height: 96px; } }
 @media (max-width: 820px) {
   .topbar { display: grid; grid-template-columns: 36px minmax(0, 1fr); overflow: visible; gap: 0 8px; }
   .brand { position: static; padding: 0; }
@@ -1734,3 +1737,38 @@ footer {
  .collection-summary-note { display: block; margin: 6px 0 0 16px; }
  .collection-video-dialog .panel-heading { flex-wrap: wrap; }
 }
+
+/* Hand catalog: the same table, panel, form and button primitives as the console. */
+.hand-layout { display:grid; grid-template-columns:300px minmax(0,1fr); gap:20px; align-items:start; }
+.hand-layout > * { min-width:0; }
+.hand-layout .registry-table td { vertical-align:middle; }
+.hand-layout .registry-table tr.is-selected { background:var(--accent-soft,#edf5f4); }
+.hand-model-name { display:block; font-weight:600; margin-bottom:5px; }
+.hand-toolbar { display:flex; align-items:center; gap:12px; padding:12px 18px; border-bottom:1px solid var(--line,#dce1e6); flex-wrap:wrap; }
+.hand-toolbar [role="status"] { flex:1; min-width:160px; }
+.hand-canvas { height:430px; width:100%; background:#f1f3f4; position:relative; touch-action:none; }
+.hand-canvas:empty::after { content:'3D model preview'; position:absolute; inset:0; display:grid; place-items:center; color:#737d89; }
+.hand-canvas canvas { display:block; width:100%; height:100%; }
+.hand-view-help { padding:9px 18px; color:var(--muted,#647181); font-size:12px; border-bottom:1px solid var(--line,#dce1e6); }
+.hand-controls, .hand-model-info { padding:18px; }
+.hand-control-footer { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:12px; }
+.hand-pose-details { margin-top:18px; border-top:1px solid var(--line,#dce1e6); padding-top:14px; }
+.hand-pose-details summary { cursor:pointer; font-weight:600; }
+.hand-pose-details .form-grid { margin-top:14px; }
+.hand-model-info { border-top:1px solid var(--line,#dce1e6); font-size:13px; line-height:1.6; }
+.hand-model-info p { margin:0 0 10px; }
+.hand-model-info .form-actions { flex-wrap:wrap; gap:16px; }
+#hand-angle { padding:0; width:100%; accent-color:var(--accent,#16665c); }
+@media(max-width:1100px) { .hand-layout { grid-template-columns:240px minmax(0,1fr); } }
+@media(max-width:800px) { .hand-layout { grid-template-columns:1fr; } .hand-canvas { height:360px; } .hand-layout .registry-table td { padding-top:8px; padding-bottom:8px; } }
+
+/* Live capture uses the Collection panels, with consistent body/action spacing. */
+.live-xr-intro { padding: 16px; }
+.live-xr-intro > p:first-child { margin-top: 0; }
+#live-xr-start-form .form-actions { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+#live-xr-sessions td:last-child { white-space: nowrap; }
+#live-xr-sessions td:last-child .button { margin-left: 12px; }
+.live-xr-steps li + li { margin-top: 8px; }
+
+#hand-export-json { width: 100%; margin: 8px 0 16px; font: 11px/1.5 var(--mono); resize: vertical; }
+#hand-export-dialog .form-actions { display: flex; gap: 12px; justify-content: flex-end; }

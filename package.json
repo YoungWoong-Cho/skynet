@@ -1,0 +1,19 @@
+{
+  "name": "skynet-ui",
+  "private": true,
+  "scripts": {
+    "build:hands": "esbuild frontend/hands-viewer.js --bundle --format=esm --minify --legal-comments=linked --outfile=static/hands-viewer.js",
+    "test:hands": "node tests/hand_materials.mjs",
+    "test:live": "node tests/live_xr_ui.mjs"
+  },
+  "dependencies": {
+    "three": "0.180.0",
+    "urdf-loader": "0.12.6"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.9",
+    "jsdom": "26.1.0",
+    "prettier": "3.6.2"
+  },
+  "type": "module"
+}

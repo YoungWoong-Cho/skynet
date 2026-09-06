@@ -1,0 +1,7 @@
+{
+  "schema": "skynet.live-xr-profile/v1",
+  "pipeline_key": "dexverse-shadow-right",
+  "cloudxr_runtime": "/coc/flash7/ycho420/tools/skynet-xr/native-5.0.1",
+  "gpu_type": "rtx_6000",
+  "duration_minutes": 30
+}

@@ -11987,17 +11987,21 @@ function updateExperimentFields() {
 function loadActiveTab(tab, force = false) {
   if (tab === "cluster") return refreshCluster({ force });
   if (tab === "experiments") return loadExperiments(force);
-  if (tab === "collection") return loadCollection(force);
+  if (tab === "collection") {
+    if (!document.getElementById("collection-view-live").hidden) window.loadLiveXR?.();
+    return loadCollection(force);
+  }
   if (tab === "datasets") return loadDataRegistry(force);
   if (tab === "runs") return loadRuns(force);
   if (tab === "evaluations") return loadEvaluations(force);
   if (tab === "adapters") return loadAdapters(force);
   if (tab === "settings") return loadSettings(force);
+  if (tab === "hands") return window.loadHands?.(force);
   return Promise.resolve();
 }
 
 function activateTab(tab, updateHash = true) {
-  const allowed = ["cluster", "experiments", "collection", "datasets", "runs", "evaluations", "adapters", "settings"];
+  const allowed = ["cluster", "experiments", "collection", "datasets", "runs", "evaluations", "adapters", "settings", "hands"];
   const next = allowed.includes(tab) ? tab : "cluster";
   if (next !== activeTab) {
     elements.toast.replaceChildren();
@@ -12457,4 +12461,4 @@ updateCollectionRegistrationFields();
 updateCollectionCapabilityEvidence(true);
 resetRuntimeInspection();
 const initialHash = location.hash.slice(1);
-activateTab(["cluster", "experiments", "collection", "datasets", "runs", "evaluations", "adapters", "settings"].includes(initialHash) ? initialHash : "cluster", false);
+activateTab(["cluster", "experiments", "collection", "datasets", "runs", "evaluations", "adapters", "settings", "hands"].includes(initialHash) ? initialHash : "cluster", false);
