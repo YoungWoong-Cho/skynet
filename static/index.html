@@ -888,48 +888,84 @@
           </div>
 
           <div id="collection-error" class="inline-alert" role="alert" hidden></div>
-<section class="panel local-capture-panel" aria-labelledby="local-capture-heading">
- <div class="panel-heading"><div><h2 id="local-capture-heading">Record with Apple Vision Pro</h2><p>Record on the headset, transfer to this computer, then store or convert the data later.</p></div><button id="local-capture-refresh" class="button button-outline" type="button">Check setup</button></div>
- <p><strong>Local tracking · no NVIDIA GPU needed · visionOS 2.0 or newer</strong></p>
- <p>Records hand joints and head poses. Camera images, object states, and robot actions are not included. DexVerse simulation is a separate pipeline that requires a compatible NVIDIA GPU computer.</p>
- <div id="local-capture-error" class="inline-alert" role="alert" hidden></div>
- <details open><summary>1. Install the headset app</summary>
-  <div id="local-capture-checks" aria-live="polite">Checking this computer…</div>
+<section class="collection-overview" aria-labelledby="local-capture-heading">
+ <div><h2 id="local-capture-heading">Collect with Apple Vision Pro</h2><p>Record on your headset, import the file, then run a DexVerse cycle when you’re ready.</p></div>
+ <span class="collection-note">Hand and head tracking · no GPU needed to record</span>
+</section>
+<div id="local-capture-error" class="inline-alert" role="alert" hidden></div>
+<details id="collection-headset-guide" class="collection-disclosure">
+ <summary>Headset setup &amp; recording guide <span class="collection-summary-note">Start here if this is your first recording</span></summary>
+ <div class="collection-disclosure-body collection-guide">
+  <p>Requires visionOS 2.0 or newer and a Mac with Xcode. Captures hand joints and head poses; camera images, object states and robot actions are not recorded.</p>
+  <details><summary>Install and pair the headset</summary>
+   <button id="local-capture-refresh" class="button button-outline" type="button">Check setup</button>
+   <div id="local-capture-checks" aria-live="polite">Checking this computer…</div>
   <ol><li><a href="/api/collection/local/client-source" download>Download Skynet Capture for Xcode</a>, unzip it, then open <strong>SkynetCapture.xcodeproj</strong> on your Mac.</li><li>In Xcode, select SkynetCapture → Signing &amp; Capabilities, select your Apple team, and enter a unique bundle identifier such as <code>your.name.skynetcapture</code>.</li><li>Wear and unlock the headset. Connect it and the Mac to the same private Wi-Fi network. On the headset, open Settings → General → Remote Devices and leave it open. On the Mac, pair it using Xcode → Window → Devices and Simulators. Enter the pairing code shown on the headset, then enable Settings → Privacy &amp; Security → Developer Mode there. Complete any restart and confirmation, select the headset as the run destination, then click Run.</li></ol>
   <p>If the headset does not appear in Xcode, keep Remote Devices open and try another private Wi-Fi network. Some networks prevent local device discovery.</p>
   <p>The first Xcode connection may take several minutes to prepare the headset. Keep it worn, unlocked, and connected. If Xcode reports an untrusted developer certificate, open Settings → General → VPN &amp; Device Management on the headset, select your Developer App certificate, and tap Trust. Then click Run again in Xcode.</p>
   <p>The simulator cannot supply real hand tracking. Signing, pairing, and headset permissions must be checked on your devices.</p>
- </details>
- <details open><summary>2. Record and save on the headset</summary>
+
+  </details>
+  <details><summary>Record, save and transfer a file</summary>
   <ol><li>Open Skynet Capture, enter a task name, then choose <strong>Start recording</strong>. Allow hand tracking and keep your hands visible; recording starts automatically when a hand and your head are tracked.</li><li>Perform the movement, then choose <strong>Stop and save</strong>. Start with about 10 seconds. Tracking closes automatically after saving.</li><li>Under Saved on this headset, choose <strong>Share</strong> beside a recording, then AirDrop or Save to Files to transfer it to this Mac. The original stays on the headset.</li></ol>
   <p>Leaving the app or interrupting tracking during recording marks it as interrupted. Stop and save first to create a completed recording.</p>
- </details>
- <details open><summary>3. Import and inspect the recording</summary>
-  <form id="local-capture-import" class="dense-form"><div class="field"><label for="local-capture-file">Saved tracking recording (.jsonl, up to 512 MB)</label><input id="local-capture-file" type="file" accept=".jsonl,application/x-ndjson" required></div><button id="local-capture-upload" class="button button-accent" type="submit">Import recording</button><p id="local-capture-import-status" role="status">The original file is preserved. No data is sent to the cluster during import.</p></form>
-  <p id="local-capture-storage"></p>
-  <div class="table-scroll"><table><thead><tr><th>Task / recorded</th><th>Frames / duration</th><th>Tracking quality</th><th>Location / use</th><th>Actions</th></tr></thead><tbody id="local-capture-body"><tr><td colspan="5">No recordings loaded.</td></tr></tbody></table></div>
- </details>
- <details open><summary>4. Run a DexVerse cycle</summary>
-  <p>Choose an imported recording above, then run simulation → dataset → training → evaluation. This uses one cluster GPU. Your original recording is preserved.</p>
-  <p><strong>First supported combination:</strong> Vision Pro right hand → Shadow right hand → Pick up stick → state-based behavior cloning. Other robot/model combinations need a matching adapter. This is not a GR00T or pi0.5 policy.</p>
-  <p>Recordings made without seeing the simulator are motion tests. Replay and task success are shown separately; a completed cycle may have zero successful trials.</p>
-  <p><button id="capture-cycle-setup" type="button" class="button button-outline">Check / configure DexVerse</button> <span id="capture-cycle-setup-message" role="status">Uses the saved pipeline configuration on sky2; the dashboard gateway selector does not change this route.</span> <a href="/api/collection/processing/guide" target="_blank" rel="noopener">Setup and dataset guide</a></p>
-  <p>The scene seed makes object placement repeatable. Each training epoch is one pass through the recording.</p>
-  <form id="capture-cycle-form" class="dense-form">
-   <div class="field"><label for="capture-cycle-recording">Recording</label><select id="capture-cycle-recording" required></select></div>
-   <div class="field"><label for="capture-cycle-seed">Scene seed (change for a new cycle)</label><input id="capture-cycle-seed" type="number" value="0" min="0" max="2147483627" required></div>
-   <div class="field"><label for="capture-cycle-epochs">Training epochs</label><input id="capture-cycle-epochs" type="number" value="100" min="1" max="1000" required></div>
-   <div class="field"><label for="capture-cycle-episodes">Evaluation trials</label><input id="capture-cycle-episodes" type="number" value="1" min="1" max="20" required></div>
-   <button id="capture-cycle-start" type="submit" class="button button-accent">Run full cycle on cluster</button>
-   <p id="capture-cycle-message" role="status"></p>
+
+  </details>
+ </div>
+</details>
+<div class="collection-action-grid">
+ <section class="panel collection-action-card" aria-labelledby="collection-import-title">
+  <div class="collection-card-title"><span class="collection-step-number" aria-hidden="true">1</span><h3 id="collection-import-title">Import a recording</h3></div>
+  <p>AirDrop a saved recording from Skynet Capture to this Mac, then choose the file below.</p>
+  <form id="local-capture-import" class="dense-form">
+   <div class="field"><label for="local-capture-file">Tracking file (.jsonl, up to 512 MB)</label><input id="local-capture-file" type="file" accept=".jsonl,application/x-ndjson" required></div>
+   <button id="local-capture-upload" class="button button-accent" type="submit">Import recording</button>
+   <p id="local-capture-import-status" class="collection-form-help" role="status">Saved locally. Your original file is preserved.</p>
   </form>
-  <div id="capture-cycle-jobs" aria-live="polite">No processing jobs loaded.</div>
-  <div id="capture-cycle-preview" hidden><h3 id="capture-cycle-preview-title">Replay</h3><video id="capture-cycle-video" controls playsinline preload="metadata" style="width:100%;max-height:560px"></video></div>
- </details>
- <details><summary>DexVerse simulation setup</summary><p>DexVerse records robot actions and scene states inside Isaac Sim. Saved-recording replay needs a compatible NVIDIA GPU host, Isaac Sim 5.1.0, Isaac Lab 2.3.2 and robot assets. Live headset teleoperation additionally needs CloudXR and a compatible client. This cannot run on the Mac’s GPU.</p><p>The CloudXR client documented for the pinned stack requires visionOS 26; that requirement does not apply to the local recorder above. Local human tracking requires validated retargeting and simulation before it becomes a robot demonstration.</p><p><a href="https://isaac-sim.github.io/IsaacLab/v2.3.2/source/how-to/cloudxr_teleoperation.html" target="_blank" rel="noreferrer">Official Isaac Lab CloudXR setup guide</a>. The adapter below lists the remaining host, stream, and calibration requirements.</p></details>
+ </section>
+ <section class="panel collection-action-card" aria-labelledby="collection-cycle-title">
+  <div class="collection-card-title"><span class="collection-step-number" aria-hidden="true">2</span><h3 id="collection-cycle-title">Run a DexVerse cycle</h3></div>
+  <p>Simulation → dataset → training → evaluation.</p>
+  <p class="collection-form-help">Shadow right hand · Pick up stick · state-based behavior cloning. Other robot/model combinations, including GR00T and pi0.5, are unsupported here.</p>
+  <form id="capture-cycle-form" class="dense-form">
+   <div class="field"><label for="capture-cycle-recording">Imported recording</label><select id="capture-cycle-recording" required></select></div>
+   <details class="collection-inline-details"><summary>Cycle settings <span id="capture-cycle-settings-summary" class="collection-summary-note">100 epochs · 1 trial · seed 0</span></summary>
+    <div class="collection-settings-grid">
+     <div class="field"><label for="capture-cycle-epochs">Training epochs</label><input id="capture-cycle-epochs" type="number" value="100" min="1" max="1000" required></div>
+     <div class="field"><label for="capture-cycle-episodes">Evaluation trials</label><input id="capture-cycle-episodes" type="number" value="1" min="1" max="20" required></div>
+     <div class="field"><label for="capture-cycle-seed">Scene seed</label><input id="capture-cycle-seed" type="number" value="0" min="0" max="2147483627" required></div>
+    </div>
+    <p class="collection-form-help">An epoch is one training pass. The seed controls object placement; change it to start a new cycle. Identical settings reopen the existing cycle.</p>
+   </details>
+   <button id="capture-cycle-start" type="submit" class="button button-accent" disabled>Run full cycle on cluster</button>
+   <span class="collection-form-help collection-run-cost">Uses 1 GPU on sky2</span>
+   <p id="capture-cycle-message" class="collection-form-help" role="status"></p>
+  </form>
+  <details class="collection-inline-details"><summary>DexVerse setup &amp; requirements</summary>
+   <p class="collection-form-help">Offline recordings are motion tests: completing a cycle does not mean the robot achieved the task.</p>
+   <button id="capture-cycle-setup" type="button" class="button button-outline">Check / configure DexVerse</button>
+   <p id="capture-cycle-setup-message" class="collection-form-help" role="status">Uses the saved pipeline on sky2. The dashboard gateway selector does not change this route.</p>
+   <p><a href="/api/collection/processing/guide" target="_blank" rel="noopener">Setup and dataset guide</a></p>
+<details><summary>DexVerse simulation setup</summary><p>DexVerse records robot actions and scene states inside Isaac Sim. Saved-recording replay needs a compatible NVIDIA GPU host, Isaac Sim 5.1.0, Isaac Lab 2.3.2 and robot assets. Live headset teleoperation additionally needs CloudXR and a compatible client. This cannot run on the Mac’s GPU.</p><p>The CloudXR client documented for the pinned stack requires visionOS 26; that requirement does not apply to the local recorder above. Local human tracking requires validated retargeting and simulation before it becomes a robot demonstration.</p><p><a href="https://isaac-sim.github.io/IsaacLab/v2.3.2/source/how-to/cloudxr_teleoperation.html" target="_blank" rel="noreferrer">Official Isaac Lab CloudXR setup guide</a>. The adapter below lists the remaining host, stream, and calibration requirements.</p></details>
+  </details>
+ </section>
+</div>
+<details id="collection-recordings" class="collection-disclosure">
+ <summary>Imported recordings <span id="local-capture-count" class="collection-summary-note">Loading…</span></summary>
+ <div class="collection-disclosure-body">
+  <p class="collection-form-help">Raw tracking needs conversion before robot training. <a href="#datasets">Open dataset registry</a></p>
+  <div class="table-scroll"><table><thead><tr><th>Recording</th><th>Length</th><th>Tracking quality</th><th>File</th></tr></thead><tbody id="local-capture-body"><tr><td colspan="4">No recordings loaded.</td></tr></tbody></table></div>
+  <details class="collection-inline-details"><summary>Storage location</summary><p id="local-capture-storage" class="collection-form-help"></p></details>
+ </div>
+</details>
+<section class="collection-history" aria-labelledby="capture-history-heading">
+ <div class="collection-history-heading"><h3 id="capture-history-heading">Cycle history</h3><p>Completed means the pipeline ran. Task success is reported separately.</p></div>
+ <div id="capture-cycle-jobs" aria-live="polite">Loading cycles…</div>
+ <div id="capture-cycle-preview" class="panel" hidden><div class="panel-heading"><h3 id="capture-cycle-preview-title">Replay</h3><button id="capture-cycle-close-preview" class="button button-outline" type="button">Close video</button></div><video id="capture-cycle-video" controls playsinline preload="metadata" style="width:100%;max-height:560px"></video></div>
 </section>
-
-
+<details id="collection-advanced" class="collection-disclosure">
+ <summary>Live collection &amp; adapters <span class="collection-summary-note">Advanced · <span id="collection-adapter-count">Loading…</span> · <span id="collection-session-count">Loading…</span></span></summary>
+ <div class="collection-disclosure-body">
           <section class="panel table-panel">
             <div class="panel-heading">
               <div>
@@ -937,7 +973,6 @@
                 <p class="collection-section-help">An adapter declares native stream meaning, required setup, and the launch command. Archived adapters remain visible for existing sessions.</p>
               </div>
               <div>
-                <span id="collection-adapter-count" class="quiet-label">Not loaded</span>
                 <button id="add-collection-adapter" class="button button-accent disclosure-launcher" type="button" aria-controls="collection-adapter-form" aria-expanded="false">New adapter</button>
               </div>
             </div>
@@ -1006,7 +1041,6 @@
                 <p class="collection-section-help">Sessions preserve the submitted manifest, sbatch, job identity, native output, and registration result.</p>
               </div>
               <div class="panel-heading-actions">
-                <span id="collection-session-count" class="quiet-label">Not loaded</span>
                 <button id="show-collection-session-form" disabled aria-describedby="collection-new-session-help" class="button button-accent disclosure-launcher" type="button" aria-controls="collection-session-form" aria-expanded="false">New session</button>
               </div>
             </div>
@@ -1150,6 +1184,9 @@
                         </div>
                       </section>
           </section>
+
+ </div>
+</details>
 
         </div>
       </section>
