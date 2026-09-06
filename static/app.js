@@ -306,6 +306,7 @@ const elements = {
   adapterVersionSection: document.querySelector("#adapter-version-section"),
   adapterVersionsBody: document.querySelector("#adapter-versions-body"),
   collectionError: document.querySelector("#collection-error"),
+  collectionImportDrawer: document.querySelector("#collection-import-drawer"),
   refreshCollection: document.querySelector("#refresh-collection"),
   addCollectionAdapter: document.querySelector("#add-collection-adapter"),
   collectionAdapterCount: document.querySelector("#collection-adapter-count"),
@@ -3444,6 +3445,7 @@ function disclosureRowId(launcher) {
 function disclosureIntentForLauncher(launcher) {
   if (!launcher) return null;
   const fixed = {
+    "show-collection-import": [elements.collectionImportDrawer, "collection-import:new"],
     "show-collection-session-form": [elements.collectionSessionForm, "collection-session:new"],
     "show-data-resource-form": [elements.dataResourceForm, "data-resource:new"],
     "show-data-derivation-form": [elements.dataDerivationForm, "data-derivation:new"],
@@ -3540,6 +3542,7 @@ function installDisclosureBehavior() {
     "close-experiment-detail": elements.experimentDetail,
     "close-run-detail": elements.runDetail,
     "close-evaluation-detail": elements.evaluationDetail,
+    "close-collection-import": elements.collectionImportDrawer,
     "close-collection-session-detail": elements.collectionSessionDetail,
     "close-collection-session-form": elements.collectionSessionForm,
     "close-data-resource-form": elements.dataResourceForm,

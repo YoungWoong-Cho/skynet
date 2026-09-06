@@ -35,9 +35,9 @@ function captureCycleStatus(state) {
 }
 function renderCaptureCycle(job, expanded = false) {
   const active = !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(job.state);
-  const stageLabels = {simulation: 'Simulation & dataset', training: 'Training', evaluation: 'Evaluation'};
-  const stages = ['simulation', 'training', 'evaluation'].filter(name => job.stages?.[name]).map(name => {
-    const stage = job.stages[name];
+  const stages = ['simulation', 'training', 'evaluation'].map(name => {
+    const stage = job.stages?.[name];
+    if (!stage) return '<td><span class="secondary">Not started</span></td>';
     const details = [];
     if (stage.frames) details.push(`${stage.frames} frames`);
     if (stage.epoch) details.push(`Epoch ${stage.epoch}/${stage.total_epochs}`);
@@ -45,32 +45,42 @@ function renderCaptureCycle(job, expanded = false) {
     if (stage.task_success !== undefined) details.push(stage.task_success ? 'Task achieved' : 'Task not achieved');
     if (stage.successes !== undefined) details.push(`${stage.successes}/${stage.episodes} successful trials`);
     if (stage.detail) details.push(stage.detail);
-    return `<li><span>${escapeHtml(stageLabels[name])}</span><strong>${escapeHtml(details.join(' · ') || captureCycleStatus(stage.status))}</strong>${stage.status !== 'SUCCEEDED' && details.length ? `<small>${escapeHtml(captureCycleStatus(stage.status))}</small>` : ''}</li>`;
+    return `<td class="wrap-cell">${escapeHtml(details.join(' · ') || captureCycleStatus(stage.status))}${stage.status !== 'SUCCEEDED' && details.length ? `<span class="secondary">${escapeHtml(captureCycleStatus(stage.status))}</span>` : ''}</td>`;
   }).join('');
   const artifacts = job.result?.artifacts || {};
   const files = Object.keys(artifacts).filter(name => !name.endsWith('.mp4')).map(name => `<a href="${captureArtifact(job, name)}" download>${escapeHtml({'dataset-manifest.json': 'Dataset manifest', 'dataset.hdf5': 'Dataset (HDF5)', 'state-bc.pt': 'Policy checkpoint'}[name] || name)}</a>`).join('');
   const videos = Object.keys(artifacts).filter(name => name.endsWith('.mp4')).map(name => {
-    const title = name === 'replay.mp4' ? 'Recording replay' : `Policy evaluation${Object.keys(artifacts).filter(key => key.startsWith('evaluation-')).length > 1 ? ` · trial ${Number(name.match(/evaluation-(\d+)/)?.[1]) + 1}` : ''}`;
-    return `<button type="button" class="button button-outline" data-cycle-video="${escapeHtml(captureArtifact(job, name))}" data-video-title="${escapeHtml(title)}" data-video-context="${escapeHtml(job.name)} · ${escapeHtml(formatDate(job.created_at))} · Cycle ${escapeHtml(job.id.slice(0, 8))}">Watch ${escapeHtml(title.toLowerCase())}</button>`;
+    const multiple = Object.keys(artifacts).filter(key => key.startsWith('evaluation-')).length > 1;
+    const trial = Number(name.match(/evaluation-(\d+)/)?.[1]) + 1;
+    const title = name === 'replay.mp4' ? 'Recording replay' : `Policy evaluation${multiple ? ` · trial ${trial}` : ''}`;
+    const label = name === 'replay.mp4' ? 'Replay' : multiple ? `Trial ${trial} video` : 'Evaluation video';
+    return `<button type="button" data-cycle-video="${escapeHtml(captureArtifact(job, name))}" data-video-title="${escapeHtml(title)}" data-video-context="${escapeHtml(job.name)} · ${escapeHtml(formatDate(job.created_at))} · Cycle ${escapeHtml(job.id.slice(0, 8))}" aria-label="Watch ${escapeHtml(title.toLowerCase())}">${escapeHtml(label)}</button>`;
   }).join('');
   const reason = job.state === 'PENDING' && job.scheduler?.Reason ? queueReasonLabel({slurm_reason: job.scheduler.Reason, status: job.state}) : '';
   const tone = ['FAILED', 'SUBMISSION_UNKNOWN'].includes(job.state) ? 'is-failed' : active ? 'is-running' : '';
-  return `<article class="panel collection-cycle-card">
-    <div class="collection-cycle-heading"><div><h4>${escapeHtml(job.name)}</h4><p>${escapeHtml(formatDate(job.created_at))} · Cycle ${escapeHtml(job.id.slice(0, 8))} · Seed ${escapeHtml(job.config.seed)}</p></div><span class="state-pill collection-cycle-status ${tone}">${escapeHtml(captureCycleStatus(job.state))}</span></div>
-    ${reason ? `<p>${escapeHtml(reason)}</p>` : ''}
-    ${job.preparation ? `<p>${escapeHtml(job.preparation)}</p>` : ''}
-    ${job.error ? `<p class="inline-alert" role="alert">${escapeHtml(job.error)}</p>` : ''}
-    ${job.refresh_error ? `<p class="inline-alert" role="alert">Status could not refresh: ${escapeHtml(job.refresh_error)}. Last known state is shown.</p>` : ''}
-    <ul class="collection-cycle-stages">${stages || '<li>Waiting for preparation and GPU availability.</li>'}</ul>
-    ${videos ? `<div class="collection-artifact-actions">${videos}</div>` : ''}
-    <details class="collection-inline-details" data-cycle-details="${escapeHtml(job.id)}" ${expanded ? 'open' : ''}><summary>Files and job details</summary>
-      <p class="collection-form-help">Cycle ${escapeHtml(job.id)}${job.job_id ? ` · Cluster job ${escapeHtml(job.job_id)}` : ''}</p>
-      ${job.result ? `<p class="collection-form-help">Dataset: ${escapeHtml(job.result.dataset.frames)} frames. Source replay: ${job.result.dataset.capture_success ? 'task achieved' : 'task not achieved'}. Policy: state-based behavior cloning.</p><div class="collection-file-links">${files}<a href="#datasets">Open dataset registry</a></div>` : ''}
-      ${job.root ? `<p><a href="/api/collection/processing/jobs/${encodeURIComponent(job.id)}/logs" target="_blank" rel="noopener">Read job log</a></p>` : ''}
-    </details>
-    ${active && job.job_id ? `<button type="button" class="button button-outline" data-cycle-action="cancel" data-cycle-id="${escapeHtml(job.id)}" ${job.cancellation_requested ? 'disabled' : ''}>${job.cancellation_requested ? 'Cancellation requested' : 'Cancel cycle'}</button>` : ''}
-    ${['FAILED', 'SUBMISSION_UNKNOWN'].includes(job.state) && !job.job_id ? `<button type="button" class="button button-outline" data-cycle-action="recover" data-cycle-id="${escapeHtml(job.id)}">Recover submission / retry setup</button>` : ''}
-    ${job.state === 'FAILED' && job.job_id ? '<p>This attempt is preserved. After resolving the error, change the scene seed to start a new cycle.</p>' : ''}</article>`;
+  const notices = [
+    {text: reason}, {text: job.preparation}, {text: job.error, error: true},
+    {text: job.refresh_error ? `Status could not refresh: ${job.refresh_error}. Last known state is shown.` : '', error: true},
+  ].filter(notice => notice.text);
+  const detailId = `capture-cycle-detail-${job.id}`;
+  return `<tr data-cycle-row="${escapeHtml(job.id)}">
+    <td class="wrap-cell"><strong class="job-id">${escapeHtml(job.name)}</strong><span class="secondary">${escapeHtml(formatDate(job.created_at))} · ${escapeHtml(job.id.slice(0, 8))}</span></td>
+    <td><span class="state-pill ${tone}">${escapeHtml(captureCycleStatus(job.state))}</span></td>
+    ${stages}
+    <td class="row-actions">${videos}<button type="button" class="disclosure-launcher" data-cycle-details-toggle="${escapeHtml(job.id)}" aria-controls="${escapeHtml(detailId)}" aria-expanded="${expanded}">${expanded ? 'Close' : 'Details'}</button>
+      ${active && job.job_id ? `<button type="button" data-cycle-action="cancel" data-cycle-id="${escapeHtml(job.id)}" ${job.cancellation_requested ? 'disabled' : ''}>${job.cancellation_requested ? 'Cancellation requested' : 'Cancel cycle'}</button>` : ''}
+      ${['FAILED', 'SUBMISSION_UNKNOWN'].includes(job.state) && !job.job_id ? `<button type="button" data-cycle-action="recover" data-cycle-id="${escapeHtml(job.id)}">Recover submission / retry setup</button>` : ''}
+    </td></tr>
+    ${notices.length ? `<tr class="collection-cycle-notices"><td colspan="6">${notices.map(notice => `<p class="${notice.error ? 'inline-alert' : 'secondary'}" role="${notice.error ? 'alert' : 'status'}">${escapeHtml(notice.text)}</p>`).join('')}</td></tr>` : ''}
+    <tr id="${escapeHtml(detailId)}" class="row-disclosure-row" data-cycle-details="${escapeHtml(job.id)}" ${expanded ? '' : 'hidden'}><td colspan="6" class="row-disclosure-cell"><div class="row-disclosure">
+      <div class="panel-heading row-disclosure-heading"><h2>Files and job details</h2><button type="button" class="text-button" data-cycle-details-close="${escapeHtml(job.id)}">Close</button></div>
+      <div class="row-disclosure-body">
+        <p class="secondary">Cycle ${escapeHtml(job.id)} · Seed ${escapeHtml(job.config.seed)}${job.job_id ? ` · Cluster job ${escapeHtml(job.job_id)}` : ''}</p>
+        ${job.result ? `<p class="collection-section-help">Dataset: ${escapeHtml(job.result.dataset.frames)} frames. Source replay: ${job.result.dataset.capture_success ? 'task achieved' : 'task not achieved'}. Policy: state-based behavior cloning.</p><div class="collection-file-links">${files}<a href="#datasets">Open dataset registry</a></div>` : ''}
+        ${job.root ? `<p><a href="/api/collection/processing/jobs/${encodeURIComponent(job.id)}/logs" target="_blank" rel="noopener">Read job log</a></p>` : ''}
+        ${job.state === 'FAILED' && job.job_id ? '<p>This attempt is preserved. After resolving the error, change the scene seed to start a new cycle.</p>' : ''}
+      </div>
+    </div></td></tr>`;
 }
 async function loadCaptureCycles() {
   if (captureCycleLoading) return;
@@ -90,8 +100,8 @@ async function loadCaptureCycles() {
     const latest = jobs.find(job => job.id === latestCaptureCycleId);
     if (latest) document.querySelector('#capture-cycle-message').textContent = `Cycle ${latest.id.slice(0, 8)}: ${captureCycleStatus(latest.state)}. This cycle is shown below.`;
     const container = document.querySelector('#capture-cycle-jobs');
-    const expanded = new Set([...container.querySelectorAll('details[open][data-cycle-details]')].map(node => node.dataset.cycleDetails));
-    container.innerHTML = jobs.map(job => renderCaptureCycle(job, expanded.has(job.id))).join('') || '<p class="collection-empty">No cycles yet. Import a recording, then run your first cycle above.</p>';
+    const expanded = new Set([...container.querySelectorAll('[data-cycle-details]:not([hidden])')].map(node => node.dataset.cycleDetails));
+    container.innerHTML = jobs.map(job => renderCaptureCycle(job, expanded.has(job.id))).join('') || '<tr class="empty-row"><td colspan="6">No cycles yet. Import a recording, then run your first cycle above.</td></tr>';
     if (jobs.some(job => !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(job.state))) {
       captureCycleTimer = setTimeout(() => { if (!document.hidden && !document.querySelector('#collection').hidden) loadCaptureCycles(); }, 10000);
     }
@@ -100,7 +110,7 @@ async function loadCaptureCycles() {
     errorBox.textContent = `Cycle history could not refresh: ${error.message}. Refresh data to retry.`;
     errorBox.hidden = false;
     document.querySelector('#collection-cycle-total').textContent = 'Refresh needed';
-    if (!document.querySelector('#capture-cycle-jobs article')) document.querySelector('#capture-cycle-jobs').textContent = 'Cycle history is unavailable.';
+    if (!document.querySelector('#capture-cycle-jobs [data-cycle-row]')) document.querySelector('#capture-cycle-jobs').innerHTML = '<tr class="empty-row"><td colspan="6">Cycle history is unavailable.</td></tr>';
     captureCycleTimer = setTimeout(() => { if (!document.hidden && !document.querySelector('#collection').hidden) loadCaptureCycles(); }, 15000);
   } finally { captureCycleLoading = false; }
 }
@@ -125,6 +135,21 @@ document.querySelector('#capture-cycle-form').addEventListener('submit', async e
   finally { captureCycleSubmitting = false; updateCaptureCycleSelection(); }
 });
 document.querySelector('#capture-cycle-jobs').addEventListener('click', async event => {
+  const detailsButton = event.target.closest('[data-cycle-details-toggle], [data-cycle-details-close]');
+  if (detailsButton) {
+    const id = detailsButton.dataset.cycleDetailsToggle || detailsButton.dataset.cycleDetailsClose;
+    const row = document.getElementById(`capture-cycle-detail-${id}`);
+    const opening = Boolean(detailsButton.dataset.cycleDetailsToggle) && row.hidden;
+    row.hidden = !opening;
+    const launcher = document.querySelector(`[data-cycle-details-toggle="${CSS.escape(id)}"]`);
+    launcher.setAttribute('aria-expanded', String(opening));
+    launcher.textContent = opening ? 'Close' : 'Details';
+    if (opening) {
+      row.querySelector('[data-cycle-details-close]').focus({preventScroll: true});
+      row.scrollIntoView({block: 'nearest'});
+    } else launcher.focus({preventScroll: true});
+    return;
+  }
   const video = event.target.closest('[data-cycle-video]');
   if (video) {
     captureCyclePreviewSource = video.dataset.cycleVideo;
@@ -195,3 +220,12 @@ document.querySelector('#capture-cycle-video-retry').addEventListener('click', (
   document.querySelector('#capture-cycle-video').load();
 });
 document.querySelector('#capture-cycle-recording').addEventListener('change', updateCaptureCycleSelection);
+
+document.querySelector('#capture-cycle-jobs').addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  const details = event.target.closest('[data-cycle-details]');
+  if (details && !details.hidden) {
+    event.preventDefault();
+    details.querySelector('[data-cycle-details-close]').click();
+  }
+});

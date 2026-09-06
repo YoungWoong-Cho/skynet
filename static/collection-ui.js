@@ -53,3 +53,9 @@ if (collectionTutorial) {
 }
 window.addEventListener('popstate', () => setCollectionView(new URLSearchParams(location.search).get('collection_view'), {persist: false}));
 setCollectionView(new URLSearchParams(location.search).get('collection_view'), {persist: false});
+
+document.querySelector('#show-collection-import').addEventListener('click', event => {
+  revealPanel(document.querySelector('#collection-import-drawer'), {
+    launcher: event.currentTarget, focusTarget: document.querySelector('#local-capture-file'),
+  });
+});

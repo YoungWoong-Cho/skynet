@@ -21,13 +21,13 @@ function renderLocalCaptureRows() {
     const hands = summary.tracked_hand_frames;
     const canReplay = captureCanReplay(capture);
     return `<tr data-capture-digest="${escapeHtml(capture.sha256)}">
-      <td data-label="Recording"><strong>${escapeHtml(summary.header.task)}</strong><span class="secondary">${escapeHtml(formatDate(summary.header.created_at))}</span></td>
+      <td data-label="Recording" class="wrap-cell"><strong class="job-id">${escapeHtml(summary.header.task)}</strong><span class="secondary">${escapeHtml(formatDate(summary.header.created_at))}</span></td>
       <td data-label="Length">${Number(summary.duration_seconds).toFixed(1)} seconds<span class="secondary">${escapeHtml(summary.frames)} tracking update${summary.frames === 1 ? '' : 's'}</span></td>
-      <td data-label="Tracking"><span class="state-pill ${summary.warnings.length ? 'is-mixed' : 'is-idle'}">${summary.warnings.length ? 'Review tracking' : 'Both hands and head recorded'}</span>${summary.warnings.map(warning => `<p class="collection-quality-warning">${escapeHtml(warning)}</p>`).join('')}
+      <td data-label="Tracking" class="wrap-cell"><span class="state-pill ${summary.warnings.length ? 'is-mixed' : 'is-idle'}">${summary.warnings.length ? 'Review tracking' : 'Both hands and head recorded'}</span>${summary.warnings.map(warning => `<p class="collection-quality-warning">${escapeHtml(warning)}</p>`).join('')}
         ${!canReplay ? '<p class="collection-quality-warning">DexVerse needs at least 2 right-hand updates.</p>' : ''}
-        <details><summary>Tracking details</summary><p>Left hand: ${escapeHtml(hands.left)} updates<br>Right hand: ${escapeHtml(hands.right)} updates<br>Head tracked: ${escapeHtml(summary.head_tracked_frames)} updates</p><p class="collection-form-help">Recording ID: ${escapeHtml(capture.sha256.slice(0, 12))}</p></details></td>
-      <td data-label="Actions"><div class="collection-record-actions"><button type="button" class="button button-outline" data-use-capture="${escapeHtml(capture.sha256)}" ${!canReplay || !localCapturesAvailable ? 'disabled' : ''}>Use in DexVerse</button><a href="/api/collection/local/captures/${encodeURIComponent(capture.sha256)}/download" download>Export original</a></div></td></tr>`;
-  }).join('') : `<tr><td colspan="4" class="collection-empty">${localCaptureRows.length ? 'No recordings match these filters. Clear the search or turn off “Needs review only”.' : 'No recordings yet. Open “How to record” to make one, or import an existing .jsonl file above.'}</td></tr>`;
+        <details><summary>Tracking details</summary><p>Left hand: ${escapeHtml(hands.left)} updates<br>Right hand: ${escapeHtml(hands.right)} updates<br>Head tracked: ${escapeHtml(summary.head_tracked_frames)} updates</p><p class="secondary">Recording ID: ${escapeHtml(capture.sha256.slice(0, 12))}</p></details></td>
+      <td data-label="Actions" class="row-actions"><div class="collection-record-actions"><button type="button" data-use-capture="${escapeHtml(capture.sha256)}" ${!canReplay || !localCapturesAvailable ? 'disabled' : ''}>Use in DexVerse</button><a class="row-action-link" href="/api/collection/local/captures/${encodeURIComponent(capture.sha256)}/download" download>Export original</a></div></td></tr>`;
+  }).join('') : `<tr class="empty-row"><td colspan="4">${localCaptureRows.length ? 'No recordings match these filters. Clear the search or turn off “Needs review only”.' : 'No recordings yet. Open “How to record” to make one, or import an existing .jsonl file above.'}</td></tr>`;
 }
 async function loadLocalCollection(force = false, preferredDigest = null) {
   const request = ++localCaptureRequest;
