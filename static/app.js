@@ -9406,7 +9406,7 @@ function populateCollectionAdapterSelect(selectedId = "") {
   document.querySelector("#show-collection-session-form").disabled = !hasRunnable;
   document.querySelector("#collection-new-session-help").textContent = hasRunnable
     ? "Choose an adapter to fill its capture settings, then review and check setup."
-    : "Live cluster collection needs a configured collection adapter. Saved Vision Pro recordings use the separate DexVerse cycle controls above.";
+    : "Live cluster collection needs a configured collection adapter. For saved Vision Pro recordings, open the DexVerse cycles view.";
   const normalizedSelection = String(selectedId || "");
   if (normalizedSelection && active.some((adapter) => String(adapter.id || adapter.adapter_id) === normalizedSelection)) {
     elements.collectionSessionAdapter.value = normalizedSelection;
@@ -9566,6 +9566,7 @@ function renderCollectionSessions() {
 
 async function loadCollection(force = false) {
   if (typeof loadLocalCollection === "function") loadLocalCollection(force);
+  if (typeof loadCaptureCycles === "function") loadCaptureCycles();
   if (loadedTabs.has("collection") && !force) return;
   elements.refreshCollection.disabled = true;
   clearNotice(elements.collectionError);
@@ -11085,6 +11086,8 @@ function prepareTutorialTarget(step) {
   let target = null;
   try { target = document.querySelector(selector); } catch { target = null; }
   if (!target) return null;
+  const collectionView = target.closest("[data-collection-view]");
+  if (collectionView && typeof setCollectionView === "function") setCollectionView(collectionView.dataset.collectionView, {persist: false});
   let ancestor = target.parentElement;
   while (ancestor) {
     if (ancestor.tagName === "DETAILS" && !ancestor.open) {
@@ -11448,6 +11451,7 @@ function startTutorial(page, launcher) {
   tutorialState.launcher = launcher;
   tutorialState.originalFocus = document.activeElement;
   tutorialState.originalTab = activeTab;
+  tutorialState.originalCollectionView = document.querySelector("[data-collection-tab][aria-selected=true]")?.dataset.collectionTab;
   tutorialState.scrollX = window.scrollX;
   tutorialState.scrollY = window.scrollY;
   tutorialState.openedDetails = new Map();
@@ -11516,6 +11520,7 @@ function endTutorial(completed = false) {
     }
     updateTutorialLaunchStatus(page);
   }
+  if (tutorialState.originalCollectionView && typeof setCollectionView === "function") setCollectionView(tutorialState.originalCollectionView, {persist: false});
   if (activeTab !== originalTab) activateTab(originalTab);
   window.scrollTo({ left: scrollX, top: scrollY, behavior: "auto" });
   window.requestAnimationFrame(() => {

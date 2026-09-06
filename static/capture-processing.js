@@ -1,26 +1,37 @@
 /* The server owns job state and immutable request deduplication. */
 let captureCycleTimer = null;
 let captureCycleLoading = false;
+let captureCycleSubmitting = false;
+let captureCycleRecordings = [];
 let latestCaptureCycleId = null;
 let captureCyclePreviewSource = null;
 const completedCaptureCycles = new Set();
-function updateCaptureCycleRecordings(captures) {
+function updateCaptureCycleRecordings(captures, preferredDigest = null) {
+  captureCycleRecordings = captures;
   const select = document.querySelector('#capture-cycle-recording');
-  const selected = select.value;
-  const compatible = captures.filter(c => c.provider === 'visionpro-local' && c.summary.tracked_hand_frames.right > 1);
-  select.innerHTML = compatible.map(c => `<option value="${escapeHtml(c.sha256)}">${escapeHtml(c.summary.header.task)} · ${escapeHtml(formatDate(c.summary.header.created_at))}</option>`).join('');
-  if (compatible.some(c => c.sha256 === selected)) select.value = selected;
-  document.querySelector('#capture-cycle-start').disabled = !compatible.length;
-  const message = document.querySelector('#capture-cycle-message');
-  const emptyMessage = 'Import a recording with right-hand tracking to begin.';
-  if (!compatible.length) message.textContent = emptyMessage;
-  else if (message.textContent === emptyMessage) message.textContent = '';
+  const selected = preferredDigest || select.value;
+  const compatible = captures.filter(captureCanReplay);
+  select.innerHTML = '<option value="">Choose a recording…</option>' + captures.map(c => `<option value="${escapeHtml(c.sha256)}" ${captureCanReplay(c) ? '' : 'disabled'}>${escapeHtml(c.summary.header.task)} · ${escapeHtml(formatDate(c.summary.header.created_at))}${captureCanReplay(c) ? '' : ' · insufficient right-hand data'}</option>`).join('');
+  select.value = compatible.some(c => c.sha256 === selected) ? selected : preferredDigest ? '' : compatible[0]?.sha256 || '';
+  updateCaptureCycleSelection();
 }
+function updateCaptureCycleSelection() {
+  const capture = captureCycleRecordings.find(c => c.sha256 === document.querySelector('#capture-cycle-recording').value);
+  const summary = document.querySelector('#capture-cycle-selection');
+  document.querySelector('#capture-cycle-start').disabled = captureCycleSubmitting || !capture || !captureCanReplay(capture) || !localCapturesAvailable;
+  if (!capture) {
+    summary.textContent = captureCycleRecordings.length ? 'Choose a recording with right-hand tracking. Unsupported recordings are listed but cannot be selected.' : 'Import a Vision Pro recording from the Recordings view to begin.';
+    return;
+  }
+  const data = capture.summary;
+  summary.innerHTML = `<strong>${Number(data.duration_seconds).toFixed(1)} seconds · ${escapeHtml(data.tracked_hand_frames.right)} right-hand updates</strong><span class="secondary">Recorded ${escapeHtml(formatDate(data.header.created_at))} · ID ${escapeHtml(capture.sha256.slice(0, 8))}</span>${data.warnings.length ? `<p class="collection-quality-warning">${data.warnings.map(escapeHtml).join(' ')} Right-hand replay is available; review the result before using it as a demonstration.</p>` : '<span class="secondary">Both hands and head were tracked.</span>'}`;
+}
+
 function captureArtifact(job, name) {
   return `/api/collection/processing/jobs/${encodeURIComponent(job.id)}/artifacts/${encodeURIComponent(name)}`;
 }
 function captureCycleStatus(state) {
-  return {SUCCEEDED: 'Completed', FAILED: 'Failed', CANCELLED: 'Cancelled', RUNNING: 'Running', PENDING: 'Queued', PREPARING: 'Preparing', SUBMITTING: 'Submitting', SUBMISSION_UNKNOWN: 'Submission needs review'}[state] || state;
+  return {SUCCEEDED: 'Pipeline finished', FAILED: 'Failed', CANCELLED: 'Cancelled', RUNNING: 'Running', PENDING: 'Queued', PREPARING: 'Preparing', SUBMITTING: 'Submitting', SUBMISSION_UNKNOWN: 'Submission needs review'}[state] || state;
 }
 function renderCaptureCycle(job, expanded = false) {
   const active = !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(job.state);
@@ -40,20 +51,21 @@ function renderCaptureCycle(job, expanded = false) {
   const files = Object.keys(artifacts).filter(name => !name.endsWith('.mp4')).map(name => `<a href="${captureArtifact(job, name)}" download>${escapeHtml({'dataset-manifest.json': 'Dataset manifest', 'dataset.hdf5': 'Dataset (HDF5)', 'state-bc.pt': 'Policy checkpoint'}[name] || name)}</a>`).join('');
   const videos = Object.keys(artifacts).filter(name => name.endsWith('.mp4')).map(name => {
     const title = name === 'replay.mp4' ? 'Recording replay' : `Policy evaluation${Object.keys(artifacts).filter(key => key.startsWith('evaluation-')).length > 1 ? ` · trial ${Number(name.match(/evaluation-(\d+)/)?.[1]) + 1}` : ''}`;
-    return `<button type="button" class="button button-outline" data-cycle-video="${escapeHtml(captureArtifact(job, name))}" data-video-title="${escapeHtml(title)}">Watch ${escapeHtml(title.toLowerCase())}</button>`;
+    return `<button type="button" class="button button-outline" data-cycle-video="${escapeHtml(captureArtifact(job, name))}" data-video-title="${escapeHtml(title)}" data-video-context="${escapeHtml(job.name)} · ${escapeHtml(formatDate(job.created_at))} · Cycle ${escapeHtml(job.id.slice(0, 8))}">Watch ${escapeHtml(title.toLowerCase())}</button>`;
   }).join('');
   const reason = job.state === 'PENDING' && job.scheduler?.Reason ? queueReasonLabel({slurm_reason: job.scheduler.Reason, status: job.state}) : '';
-  const tone = job.state === 'SUCCEEDED' ? 'complete' : ['FAILED', 'SUBMISSION_UNKNOWN'].includes(job.state) ? 'error' : 'active';
-  return `<article class="collection-cycle-card">
-    <div class="collection-cycle-heading"><div><h4>${escapeHtml(job.name)}</h4><p>${escapeHtml(formatDate(job.created_at))} · Seed ${escapeHtml(job.config.seed)}</p></div><span class="collection-cycle-status ${tone}">${escapeHtml(captureCycleStatus(job.state))}</span></div>
+  const tone = ['FAILED', 'SUBMISSION_UNKNOWN'].includes(job.state) ? 'is-failed' : active ? 'is-running' : '';
+  return `<article class="panel collection-cycle-card">
+    <div class="collection-cycle-heading"><div><h4>${escapeHtml(job.name)}</h4><p>${escapeHtml(formatDate(job.created_at))} · Cycle ${escapeHtml(job.id.slice(0, 8))} · Seed ${escapeHtml(job.config.seed)}</p></div><span class="state-pill collection-cycle-status ${tone}">${escapeHtml(captureCycleStatus(job.state))}</span></div>
     ${reason ? `<p>${escapeHtml(reason)}</p>` : ''}
     ${job.preparation ? `<p>${escapeHtml(job.preparation)}</p>` : ''}
     ${job.error ? `<p class="inline-alert" role="alert">${escapeHtml(job.error)}</p>` : ''}
     ${job.refresh_error ? `<p class="inline-alert" role="alert">Status could not refresh: ${escapeHtml(job.refresh_error)}. Last known state is shown.</p>` : ''}
     <ul class="collection-cycle-stages">${stages || '<li>Waiting for preparation and GPU availability.</li>'}</ul>
-    <details class="collection-inline-details" data-cycle-details="${escapeHtml(job.id)}" ${expanded ? 'open' : ''}><summary>Results, videos &amp; job details</summary>
+    ${videos ? `<div class="collection-artifact-actions">${videos}</div>` : ''}
+    <details class="collection-inline-details" data-cycle-details="${escapeHtml(job.id)}" ${expanded ? 'open' : ''}><summary>Files and job details</summary>
       <p class="collection-form-help">Cycle ${escapeHtml(job.id)}${job.job_id ? ` · Cluster job ${escapeHtml(job.job_id)}` : ''}</p>
-      ${job.result ? `<p class="collection-form-help">Dataset: ${escapeHtml(job.result.dataset.frames)} frames. Source replay: ${job.result.dataset.capture_success ? 'task achieved' : 'task not achieved'}. Policy: state-based behavior cloning.</p><div class="collection-artifact-actions">${videos}</div><div class="collection-file-links">${files}<a href="#datasets">Dataset &amp; recording lineage</a></div>` : ''}
+      ${job.result ? `<p class="collection-form-help">Dataset: ${escapeHtml(job.result.dataset.frames)} frames. Source replay: ${job.result.dataset.capture_success ? 'task achieved' : 'task not achieved'}. Policy: state-based behavior cloning.</p><div class="collection-file-links">${files}<a href="#datasets">Open dataset registry</a></div>` : ''}
       ${job.root ? `<p><a href="/api/collection/processing/jobs/${encodeURIComponent(job.id)}/logs" target="_blank" rel="noopener">Read job log</a></p>` : ''}
     </details>
     ${active && job.job_id ? `<button type="button" class="button button-outline" data-cycle-action="cancel" data-cycle-id="${escapeHtml(job.id)}" ${job.cancellation_requested ? 'disabled' : ''}>${job.cancellation_requested ? 'Cancellation requested' : 'Cancel cycle'}</button>` : ''}
@@ -67,6 +79,8 @@ async function loadCaptureCycles() {
   try {
     const response = await api('/api/collection/processing/jobs');
     const jobs = await Promise.all(response.jobs.map(job => ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(job.state) ? job : api(`/api/collection/processing/jobs/${encodeURIComponent(job.id)}`)));
+    document.querySelector('#collection-cycle-total').textContent = `${jobs.length}${jobs.some(job => !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(job.state)) ? ' · active' : ''}`;
+    document.querySelector('#capture-cycle-history-error').hidden = true;
     for (const job of jobs) {
       if (job.state === 'SUCCEEDED' && !completedCaptureCycles.has(job.id)) {
         completedCaptureCycles.add(job.id);
@@ -74,7 +88,7 @@ async function loadCaptureCycles() {
       }
     }
     const latest = jobs.find(job => job.id === latestCaptureCycleId);
-    if (latest) document.querySelector('#capture-cycle-message').textContent = `Cycle ${latest.id.slice(0, 8)}: ${latest.state}. The same recording, settings and pipeline version reopen this cycle without a duplicate.`;
+    if (latest) document.querySelector('#capture-cycle-message').textContent = `Cycle ${latest.id.slice(0, 8)}: ${captureCycleStatus(latest.state)}. This cycle is shown below.`;
     const container = document.querySelector('#capture-cycle-jobs');
     const expanded = new Set([...container.querySelectorAll('details[open][data-cycle-details]')].map(node => node.dataset.cycleDetails));
     container.innerHTML = jobs.map(job => renderCaptureCycle(job, expanded.has(job.id))).join('') || '<p class="collection-empty">No cycles yet. Import a recording, then run your first cycle above.</p>';
@@ -82,12 +96,18 @@ async function loadCaptureCycles() {
       captureCycleTimer = setTimeout(() => { if (!document.hidden && !document.querySelector('#collection').hidden) loadCaptureCycles(); }, 10000);
     }
   } catch (error) {
-    document.querySelector('#capture-cycle-message').textContent = `Could not refresh processing jobs: ${error.message}`;
+    const errorBox = document.querySelector('#capture-cycle-history-error');
+    errorBox.textContent = `Cycle history could not refresh: ${error.message}. Refresh data to retry.`;
+    errorBox.hidden = false;
+    document.querySelector('#collection-cycle-total').textContent = 'Refresh needed';
+    if (!document.querySelector('#capture-cycle-jobs article')) document.querySelector('#capture-cycle-jobs').textContent = 'Cycle history is unavailable.';
     captureCycleTimer = setTimeout(() => { if (!document.hidden && !document.querySelector('#collection').hidden) loadCaptureCycles(); }, 15000);
   } finally { captureCycleLoading = false; }
 }
 document.querySelector('#capture-cycle-form').addEventListener('submit', async event => {
   event.preventDefault();
+  if (captureCycleSubmitting) return;
+  captureCycleSubmitting = true;
   const button = document.querySelector('#capture-cycle-start');
   const message = document.querySelector('#capture-cycle-message');
   button.disabled = true; message.textContent = 'Preparing your cycle…';
@@ -102,16 +122,20 @@ document.querySelector('#capture-cycle-form').addEventListener('submit', async e
     await loadCaptureCycles();
     document.querySelector('#capture-cycle-jobs').scrollIntoView({block: 'center'});
   } catch (error) { message.textContent = `Could not start the cycle: ${error.message}`; }
-  finally { button.disabled = false; }
+  finally { captureCycleSubmitting = false; updateCaptureCycleSelection(); }
 });
 document.querySelector('#capture-cycle-jobs').addEventListener('click', async event => {
   const video = event.target.closest('[data-cycle-video]');
   if (video) {
     captureCyclePreviewSource = video.dataset.cycleVideo;
-    document.querySelector('#capture-cycle-preview').hidden = false;
+    const dialog = document.querySelector('#capture-cycle-preview');
+    document.querySelector('#capture-cycle-preview-context').textContent = video.dataset.videoContext;
+    document.querySelector('#capture-cycle-video-status').textContent = 'Loading video from the cluster…';
+    document.querySelector('#capture-cycle-video-retry').hidden = true;
     document.querySelector('#capture-cycle-preview-title').textContent = video.dataset.videoTitle;
+    if (!dialog.open) dialog.showModal();
     document.querySelector('#capture-cycle-video').src = video.dataset.cycleVideo;
-    document.querySelector('#capture-cycle-preview').scrollIntoView({block: 'center'});
+    document.querySelector('#capture-cycle-close-preview').focus();
     return;
   }
   const button = event.target.closest('[data-cycle-action]');
@@ -123,9 +147,9 @@ document.querySelector('#capture-cycle-jobs').addEventListener('click', async ev
   } catch (error) { document.querySelector('#capture-cycle-message').textContent = error.message; button.disabled = false; }
 });
 document.querySelector('#capture-cycle-video').addEventListener('error', () => {
-  document.querySelector('#capture-cycle-preview-title').textContent = 'Video could not load. Check the cluster connection and open the replay again.';
+  document.querySelector('#capture-cycle-video-status').textContent = 'Video could not load. Check the cluster connection, then choose Retry video.';
+  document.querySelector('#capture-cycle-video-retry').hidden = false;
 });
-window.addEventListener('hashchange', () => { if (location.hash === '#collection') loadCaptureCycles(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden && location.hash === '#collection') loadCaptureCycles(); });
 if (location.hash === '#collection') loadCaptureCycles();
 
@@ -151,12 +175,23 @@ document.querySelector('#capture-cycle-form').addEventListener('invalid', event 
   const details = event.target.closest('details');
   if (details) details.open = true;
 }, true);
-document.querySelector('#capture-cycle-close-preview').addEventListener('click', () => {
+function closeCaptureCycleVideo() {
+  document.querySelector('#capture-cycle-preview').close();
+}
+document.querySelector('#capture-cycle-close-preview').addEventListener('click', closeCaptureCycleVideo);
+document.querySelector('#capture-cycle-preview').addEventListener('close', () => {
   const video = document.querySelector('#capture-cycle-video');
-  video.pause();
-  video.removeAttribute('src');
-  video.load();
-  document.querySelector('#capture-cycle-preview').hidden = true;
-  [...document.querySelectorAll('[data-cycle-video]')].find(button => button.dataset.cycleVideo === captureCyclePreviewSource)?.focus();
+  video.pause(); video.removeAttribute('src'); video.load();
+  [...document.querySelectorAll('[data-cycle-video]')].find(button => button.dataset.cycleVideo === captureCyclePreviewSource)?.focus({preventScroll: true});
 });
-document.querySelector('#refresh-collection').addEventListener('click', loadCaptureCycles);
+document.querySelector('#capture-cycle-video').addEventListener('loadedmetadata', event => {
+  document.querySelector('#capture-cycle-video-status').textContent = `${event.target.duration.toFixed(1)} seconds · Use the play button to watch.`;
+  document.querySelector('#capture-cycle-video-retry').hidden = true;
+});
+document.querySelector('#capture-cycle-video-retry').addEventListener('click', () => {
+  document.querySelector('#capture-cycle-video-status').textContent = 'Retrying video from the cluster…';
+  document.querySelector('#capture-cycle-video-retry').hidden = true;
+  document.querySelector('#capture-cycle-video').src = captureCyclePreviewSource;
+  document.querySelector('#capture-cycle-video').load();
+});
+document.querySelector('#capture-cycle-recording').addEventListener('change', updateCaptureCycleSelection);

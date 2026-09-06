@@ -77,7 +77,8 @@ def test_bundle_selection_is_consumed_or_rejected_explicitly():
         PipelineService._apply_manifest_data_bindings(unavailable, manifests['groot'])
     extra = document()
     import copy
-    another = copy.deepcopy(extra['data']['bundle']['assignments'][0]); another['position'] = 1
+    another = copy.deepcopy(extra['data']['bundle']['assignments'][0])
+    another['position'] = 1
     extra['data']['bundle']['assignments'].append(another)
     with pytest.raises(ValueError, match='cannot consume'):
         PipelineService._apply_manifest_data_bindings(extra, manifests['groot'])
@@ -103,13 +104,16 @@ def test_evaluation_readiness_rejects_busy_run_before_expensive_probe(tmp_path):
 def test_homepage_revalidates_and_versions_changed_assets(tmp_path, monkeypatch):
     from skynet_app import main
     monkeypatch.setattr(main, 'STATIC_ROOT', tmp_path)
-    (tmp_path / 'index.html').write_text('<script src="/static/app.js?v=old"></script><script src="/static/local-capture.js?v=old"></script><link href="/static/styles.css?v=old">')
-    for name in ('app.js', 'local-capture.js', 'styles.css'):
+    assets = ('app.js', 'local-capture.js', 'capture-processing.js', 'collection-ui.js', 'styles.css')
+    (tmp_path / 'index.html').write_text(''.join(f'<script src="/static/{name}?v=old"></script>' for name in assets))
+    for name in assets:
         (tmp_path / name).write_text('first')
     first = main.index()
     assert first.headers['cache-control'] == 'no-cache'
     assert b'?v=old' not in first.body
-    (tmp_path / 'app.js').write_text('updated interface')
-    second = main.index()
-    assert first.body != second.body
-    assert b'/static/local-capture.js?v=' in second.body
+    for name in assets:
+        (tmp_path / name).write_text('updated interface')
+        second = main.index()
+        assert first.body != second.body, name
+        assert f'/static/{name}?v='.encode() in second.body
+        first = second

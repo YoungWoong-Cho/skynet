@@ -463,7 +463,7 @@ def initialize_workspace(gateway: str = Query(default="auto")) -> dict[str, obje
 @app.get("/", include_in_schema=False)
 def index() -> HTMLResponse:
     html = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
-    for name in ("styles.css", "app.js", "local-capture.js"):
+    for name in set(re.findall(r"/static/([A-Za-z0-9_.-]+\.(?:css|js))", html)):
         stat = (STATIC_ROOT / name).stat()
         version = f"{stat.st_mtime_ns:x}-{stat.st_size:x}"
         html = re.sub(rf'/static/{re.escape(name)}(?:\?[^"\s]*)?',

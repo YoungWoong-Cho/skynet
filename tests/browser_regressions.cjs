@@ -170,3 +170,14 @@ test('queue waits are explained separately from failed attempts', () => {
   assert.equal(c.attemptFailureDetail({status: 'FAILED', slurm_reason: 'OutOfMemory'}), 'OutOfMemory');
   assert.equal(c.attemptFailureDetail({status: 'PENDING', error: 'Submission acknowledgement lost'}), 'Submission acknowledgement lost');
 });
+
+
+test('entering Collection refreshes recordings and cycle history even when adapter data is cached', async () => {
+  const calls = [];
+  const c = load(['loadCollection'], {loadedTabs: new Set(['collection']),
+    loadLocalCollection: force => calls.push(['recordings', force]),
+    loadCaptureCycles: () => calls.push(['cycles']),
+  });
+  await c.loadCollection();
+  assert.deepEqual(calls, [['recordings', false], ['cycles']]);
+});
