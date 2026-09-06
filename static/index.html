@@ -974,15 +974,68 @@
               <div class="panel-heading"><div><h2>Apple Vision Pro</h2><p class="collection-section-help">Local hand and head tracking. No NVIDIA GPU is needed to record.</p></div></div>
               <div class="collection-disclosure-body collection-guide">
                 <p>Requires visionOS 2.0 or newer and a Mac with Xcode. Captures hand joints and head poses; camera images, object states and robot actions are not recorded.</p>
-                <details id="collection-install-instructions"><summary>Install and pair the headset</summary>
-                  <button id="local-capture-refresh" class="button button-outline" type="button">Check setup</button>
-                  <div id="local-capture-checks" aria-live="polite">Checking this computer…</div>
-                  <ol><li><a href="/api/collection/local/client-source" download>Download Skynet Capture for Xcode</a>, unzip it, then open <strong>SkynetCapture.xcodeproj</strong> on your Mac.</li><li>In Xcode, select SkynetCapture → Signing &amp; Capabilities, select your Apple team, and enter a unique bundle identifier such as <code>your.name.skynetcapture</code>.</li><li>Wear and unlock the headset. Connect it and the Mac to the same private Wi-Fi network. On the headset, open Settings → General → Remote Devices and leave it open. On the Mac, pair it using Xcode → Window → Devices and Simulators. Enter the pairing code shown on the headset, then enable Settings → Privacy &amp; Security → Developer Mode there. Complete any restart and confirmation, select the headset as the run destination, then click Run.</li></ol>
-                  <p>If the headset does not appear in Xcode, keep Remote Devices open and try another private Wi-Fi network. Some networks prevent local device discovery.</p>
-                  <p>The first Xcode connection may take several minutes to prepare the headset. Keep it worn, unlocked, and connected. If Xcode reports an untrusted developer certificate, open Settings → General → VPN &amp; Device Management on the headset, select your Developer App certificate, and tap Trust. Then click Run again in Xcode.</p>
-                  <p>The simulator cannot supply real hand tracking. Signing, pairing, and headset permissions must be checked on your devices.</p>
+                <details id="collection-install-instructions" name="vision-pro-guide">
+                  <summary>Install and pair the headset</summary>
+                  <div class="headset-install-guide">
+                    <p class="collection-section-help">One-time setup. Follow the steps in order, switching devices where indicated. Use a physical Vision Pro; the simulator cannot provide real hand tracking.</p>
+                    <ol class="headset-setup-steps">
+                      <li>
+                        <div class="headset-step-heading"><h3>Open the recorder project</h3><span class="quiet-label">On your Mac</span></div>
+                        <p><a href="/api/collection/local/client-source" download>Download Skynet Capture for Xcode</a> and unzip it.</p>
+                        <p>Open <strong>SkynetCapture.xcodeproj</strong> from the extracted folder.</p>
+                      </li>
+                      <li>
+                        <div class="headset-step-heading"><h3>Set up app signing</h3><span class="quiet-label">On your Mac</span></div>
+                        <p>In Xcode, select <strong>SkynetCapture → Signing &amp; Capabilities</strong>.</p>
+                        <p>Choose your Apple team. Enter a unique <strong>Bundle Identifier</strong>, such as <code>your.name.skynetcapture</code>.</p>
+                      </li>
+                      <li>
+                        <div class="headset-step-heading"><h3>Make the headset discoverable</h3><span class="quiet-label">On Vision Pro</span></div>
+                        <p>Wear and unlock the headset. Connect it and your Mac to the <strong>same private Wi-Fi network</strong>.</p>
+                        <p>Open <strong>Settings → General → Remote Devices</strong> and leave that screen open.</p>
+                      </li>
+                      <li>
+                        <div class="headset-step-heading"><h3>Pair it with Xcode</h3><span class="quiet-label">On your Mac</span></div>
+                        <p>Open <strong>Xcode → Window → Devices and Simulators</strong>.</p>
+                        <p>Select your Vision Pro and pair it. Enter the verification code displayed on the headset.</p>
+                      </li>
+                      <li>
+                        <div class="headset-step-heading"><h3>Enable Developer Mode</h3><span class="quiet-label">On Vision Pro</span></div>
+                        <p>Open <strong>Settings → Privacy &amp; Security → Developer Mode</strong> and turn it on.</p>
+                        <p>Accept the restart. After restarting, confirm <strong>Turn On</strong>, then unlock the headset.</p>
+                      </li>
+                      <li>
+                        <div class="headset-step-heading"><h3>Install and open Skynet Capture</h3><span class="quiet-label">On your Mac</span></div>
+                        <p>In Xcode, select your Vision Pro as the run destination, then click <strong>Run</strong>.</p>
+                        <p>Keep the headset worn, unlocked, and connected while Xcode prepares it. The first connection can take several minutes.</p>
+                        <p class="secondary">Ready when: Skynet Capture opens on your Vision Pro.</p>
+                      </li>
+                    </ol>
+                    <div class="headset-setup-support">
+                      <h3>Need help?</h3>
+                      <details>
+                        <summary>The headset does not appear in Xcode</summary>
+                        <p>Keep <strong>Remote Devices</strong> open on the unlocked headset. Check that both devices are on the same private Wi-Fi network.</p>
+                        <p>If it still does not appear, try another private network. Some networks block local device discovery.</p>
+                      </details>
+                      <details>
+                        <summary>Xcode reports an untrusted developer certificate</summary>
+                        <p>On Vision Pro, open <strong>Settings → General → VPN &amp; Device Management</strong>.</p>
+                        <p>Select the Developer App certificate for your Apple account and tap <strong>Trust</strong>. Return to Xcode on your Mac and click <strong>Run</strong> again.</p>
+                      </details>
+                      <details id="collection-setup-check-results">
+                        <summary>Check setup requirements</summary>
+                        <p>This check detects the Mac and Xcode. Signing, pairing, and tracking permissions still need to be confirmed on your devices.</p>
+                        <button id="local-capture-refresh" class="button button-outline" type="button">Check setup</button>
+                        <div id="local-capture-checks" aria-live="polite">Checking this computer…</div>
+                      </details>
+                    </div>
+                    <div class="headset-setup-next">
+                      <button class="button button-outline" type="button" data-collection-go="setup" data-collection-guide="record">Next: record and transfer a file</button>
+                    </div>
+                  </div>
                 </details>
-                <details id="collection-record-instructions" open><summary>Record, save and transfer a file</summary>
+                <details id="collection-record-instructions" name="vision-pro-guide" open><summary>Record, save and transfer a file</summary>
                   <ol><li>Open Skynet Capture, enter a task name, then choose <strong>Start recording</strong>. Allow hand tracking and keep your hands visible; recording starts automatically when a hand and your head are tracked.</li><li>Perform the movement, then choose <strong>Stop and save</strong>. Start with about 10 seconds. Tracking closes automatically after saving.</li><li>Under Saved on this headset, choose <strong>Share</strong> beside a recording, then AirDrop or Save to Files to transfer it to this Mac. The original stays on the headset.</li></ol>
                   <p>Leaving the app or interrupting tracking during recording marks it as interrupted. Stop and save first to create a completed recording.</p>
                 </details>

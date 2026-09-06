@@ -1704,7 +1704,20 @@ footer {
 .collection-disclosure-body { min-width: 0; }
 #collection-advanced > .collection-disclosure-body { padding: 14px 14px 0; }
 #collection-adapter-tools { display: flex; flex-wrap: wrap; gap: 7px; }
-#local-capture-checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0 20px; }
+.headset-install-guide { max-width: 760px; padding: 10px 0 0; }
+.headset-setup-steps { margin: 8px 0 0; padding-left: 24px; }
+.collection-guide .headset-setup-steps > li { margin: 0; padding: 14px 0 14px 6px; border-bottom: 1px solid var(--line); }
+.headset-setup-steps > li::marker { color: var(--green); font: 700 12px var(--mono); }
+.headset-step-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 6px 16px; margin-bottom: 8px; }
+.headset-step-heading h3 { margin: 0; }
+.headset-step-heading .quiet-label { flex-shrink: 0; }
+.headset-install-guide p { margin: 6px 0 0; }
+.headset-setup-support { padding-top: 4px; }
+.headset-setup-support > details { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.headset-setup-support #local-capture-refresh { margin-top: 10px; }
+#local-capture-checks > p { padding: 10px 0; border-bottom: 1px solid var(--line); }
+#local-capture-checks > p:last-child { border: 0; }
+.headset-setup-next { padding: 4px 0 8px; }
 .collection-video-dialog { width: min(940px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); padding: 15px; border: 1px solid var(--line); border-radius: 3px; background: var(--surface); color: var(--ink); overflow: auto; }
 .collection-video-dialog::backdrop { background: rgba(20, 28, 22, .65); }
 .collection-video-dialog h3 { margin: 0; }

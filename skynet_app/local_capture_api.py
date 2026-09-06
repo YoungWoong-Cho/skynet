@@ -38,7 +38,7 @@ def setup(force: bool = False) -> dict:
     checks.extend([
         {"name": "Headset installation", "status": "needs_user", "detail": "visionOS 2.0 or newer. Pair the headset in Xcode, enable Developer Mode, select your Apple signing team and install Skynet Capture."},
         {"name": "Tracking permission", "status": "needs_user", "detail": "On the headset, choose Start recording and allow hand tracking. A physical headset is required; simulator input is unsupported."},
-        {"name": "DexVerse simulation", "status": "needs_gpu", "detail": "Saved-recording replay runs on the cluster using Isaac Sim 5.1 and Isaac Lab 2.3.2. CloudXR is needed only for live simulator teleoperation. Use the full-cycle controls below for local recordings."},
+        {"name": "DexVerse simulation", "status": "needs_gpu", "detail": "Recording on the headset does not need a GPU. Saved-recording replay runs on the cluster using Isaac Sim 5.1 and Isaac Lab 2.3.2; open the DexVerse cycles view to use it. CloudXR is needed only for live simulator teleoperation."},
     ])
     result = {"checks": checks, "checked_at": time.time(), "cache_seconds": 60,
               "native_minimum_visionos": "2.0", "source_project": str(APP_ROOT / "visionpro/SkynetCapture.xcodeproj"),
