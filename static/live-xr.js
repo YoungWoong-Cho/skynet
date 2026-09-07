@@ -322,6 +322,7 @@
     if (persist) selectionWarning = null;
     const robot = el("live-xr-hand").value,
       task = el("live-xr-task").value;
+    const imported = catalog.hands.find((h) => h.key === robot)?.imported;
     const verified = catalog.verified_pairs.some(
       (pair) => pair.robot === robot && pair.task === task,
     );
@@ -329,7 +330,9 @@
       selectionWarning ||
       (verified
         ? "Verified with a successful Vision Pro demonstration. One successful demonstration is saved per session."
-        : "Available in this DexVerse release; this combination has not yet been tested on the headset. Startup failures are shown in the session row. One successful demonstration is saved per session.");
+        : imported
+          ? "Uses the stored URDF and meshes. First startup prepares the simulator model and checks its joints. This adapter still needs GPU/headset validation; preparation errors appear in the session row."
+          : "Available in this DexVerse release; this combination has not yet been tested on the headset. Startup failures are shown in the session row. One successful demonstration is saved per session.");
     el("live-xr-task-instructions").textContent = catalog.tasks.find(
       (t) => t.key === task,
     ).instructions;

@@ -19,6 +19,7 @@ from .cluster_runtime import (
 from .database import canonical_json, utc_now
 from .capture_processing.dexverse_runner import TASK, ROBOT, REVISION
 from .live_xr_catalog import selection
+from .simulation_hands import build as build_hand, upload as upload_hand
 from .live_xr_workstation import LaunchRejected, WorkstationClient, validate_profile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -80,7 +81,11 @@ class LiveXRService:
 
     @staticmethod
     def public(job):
-        return {k: v for k, v in job.items() if k not in {"worker", "script"}}
+        return {
+            k: v
+            for k, v in job.items()
+            if k not in {"worker", "script", "hand_bundle_path"}
+        }
 
     def get(self, identifier):
         with self.database.connection() as c:
@@ -198,12 +203,28 @@ class LiveXRService:
                             "A different live session is already running. Stop it before changing the hand or task."
                         )
                     return job
+            hand_bundle_path = None
+            if hand.get("imported"):
+                path, manifest = build_hand(hand["key"])
+                hand_bundle_path = str(path)
+                profile["hand_bundle"] = {
+                    key: manifest[key]
+                    for key in (
+                        "digest",
+                        "robot",
+                        "source_revision",
+                        "name",
+                        "action_dimension",
+                        "retargeting_scheme",
+                    )
+                }
             identifier = str(uuid4())
             job = dict(
                 id=identifier,
                 state="PREPARING",
                 profile=profile,
                 worker=worker,
+                hand_bundle_path=hand_bundle_path,
                 worker_sha256=hashlib.sha256(worker.encode()).hexdigest(),
                 root=f"{profile['work_root']}/sessions/{identifier}"
                 if profile["execution"] == "workstation"
@@ -253,6 +274,19 @@ class LiveXRService:
                     "Live runtime is unavailable. Follow the live setup guide; no GPU job was submitted. "
                     + str(exc)
                 ) from exc
+            if job.get("hand_bundle_path"):
+                self.update(
+                    identifier,
+                    detail="Preparing the selected hand's pinned URDF and meshes",
+                )
+                remote = upload_hand(
+                    job["hand_bundle_path"],
+                    p.get("work_root", WORK_ROOT),
+                    transport,
+                    job["gateway"],
+                )
+                p["hand_bundle"]["root"] = remote
+                self.update(identifier, profile=p)
             transport.write_capsule_file(
                 identifier, "runner.py", job["worker"], job["gateway"]
             )

@@ -7,9 +7,40 @@ Collection → Live teleoperation starts a bounded GPU session on the configured
 - DexVerse `30cc673e27684b9f10186fa6bea731aed246bc9f`, Isaac Sim 5.1.0, Isaac Lab 2.3.2.
 - CloudXR 5.0.1 extracted unmodified from `nvcr.io/nvidia/cloudxr-runtime:5.0.1` and run as ordinary user processes. Server startup was tested on Ubuntu 24.04.4 / Quadro RTX 6000 and Ubuntu 22.04.5 / RTX 4090 (driver 580.173.02).
 - NVIDIA's Apple client at `045bbbc3f960d301173b712c6ead4617f3f94eb0`, with CloudXRKit 5.0.1, builds and runs on the tested visionOS 2.5 headset. This is an observed installation result, not a claim of vendor certification or completed streaming validation.
-- Headset-tested combination: `Dexverse-PickUpStick-v0` + `floating_shadow_right`, with relative DexPilot retargeting. The live selector also offers Shadow left and bimanual variants with Pick up stick, Pick up cube, Stack cubes and Relocate sphere from the same release. These additional combinations are source-supported but have not yet passed a headset test on this workstation. The UI states this explicitly. WUJI, Sharpa, Allegro, LEAP and Inspire models remain available in the hand library, but the pinned public DexVerse release does not ship their live simulation/retargeting adapters; their live choices are disabled with an explanation.
+- Headset-tested combination: `Dexverse-PickUpStick-v0` + `floating_shadow_right`, with relative DexPilot retargeting. The live selector also offers Shadow left and bimanual variants with Pick up stick, Pick up cube, Stack cubes and Relocate sphere from the same release. These additional combinations are source-supported but have not yet passed a headset test on this workstation. The UI states this explicitly. Skynet now adds ten imported hand variants using the pinned models in the Hands library, as described below. These adapters have passed CPU kinematics checks; their Isaac/PhysX startup and headset capture tests are still pending. The UI keeps that distinction visible.
 - Previous cluster and `rl2-ws11` tests timed out on TCP 48010 from the headset, although the port responded from the cluster. On `rl2-bonjour`, both the Mac and the headset reached TCP 48010. The headset then established a streaming session, and the operator confirmed seeing the task and controlling the robot hand. Server logs also confirmed the Play command and right-wrist calibration.
 - On September 6, 2026, session `6a335a76-3fc9-4e0a-a644-b5254be0d4a3` completed the task and saved one successful demonstration. Validation confirmed 233 actions of dimension 28, 234 scene states, and finite numeric values. The native file is 315,340 bytes, SHA-256 `b1d1de5a9eb8091e913a2ff3fcb683fa128e919f894e1df5d6e5c9dad4b2fcdc`. It remains in that session's `output/recordings/live/Dexverse-PickUpStick-v0/` folder, with a validated copy on the Mac. The service completed cleanly, TCP 48010 closed, and GPU use returned to idle. This verifies live capture; it does not establish native-demo training/evaluation support.
+
+## Imported hand adapters
+
+Open a stored model in **Hands**, choose its side, then choose **Use in simulation**. This opens Live teleoperation with that exact hand selected. Choose one of the four tasks and start a session. Imported hands use their actual URDF visuals, collisions, masses, inertias, joint limits and mimic relationships; they do not load a Shadow model in their place.
+
+| Model | Imported sides | Independent finger joints | Actions, including six wrist joints |
+| --- | --- | ---: | ---: |
+| WUJI Hand 1 | Right, left | 20 | 26 |
+| WUJI Hand 2 (Beta 2) | Right, left | 20 | 26 |
+| Sharpa Wave | Right, left | 22 | 28 |
+| Allegro Hand V4 | Right | 16 | 22 |
+| LEAP Hand V1 | Right | 16 | 22 |
+| Inspire RH56 | Right, left | 6 | 12 |
+
+Allegro left remains explicitly unsupported because its pinned source references a missing thumb mesh. LEAP's pinned repository supplies only a right hand. Imported bimanual combinations are not configured. The native Shadow right, left and bimanual choices remain available.
+
+`config/simulation_hands.json` records each family's palm, ordered fingertips, side-specific alignment and retargeting method. `skynet_app/simulation_hands.py` validates the stored tree and asset checksums, preserves independent/mimic joint relationships, normalizes link/joint names for USD, adds a six-joint floating wrist, and produces an immutable bundle. The wrist uses intrinsic XYZ rotation order to match the pinned DexVerse relative retargeter. Finger actions use absolute joint positions without adding a neutral offset twice. Retargeting results are constrained to the source joint limits, including the small optimization tolerance allowed by dex-retargeting.
+
+WUJI Hand 1 uses explicit palm-to-fingertip vector retargeting; its reachable-target checks showed substantially larger errors with DexPilot. The other imported models use DexPilot. Four-finger models map human thumb/index/middle/ring to their four fingertips. Inspire retains all six mimic constraints. Every mapping is by joint name, and an incomplete mapping is an error.
+
+The bundle contains the URDFs, source meshes and license assets, retargeting configuration, source-name mapping, source revision, and hashes. Its identity includes the recipe, source model/assets and runtime adapter code. The first session uploads the bundle through the existing SSH transport and converts it to USD on the GPU workstation with Isaac Lab's URDF converter. Later sessions reuse the bundle and conversion cache. A small remote READY marker avoids repeated transfer; startup verifies bundle contents before loading. The runtime adds the selected robot to the pinned DexVerse process without modifying the upstream checkout. It checks simulator joints, bodies, action dimension and finite initial positions before enabling collection. Conversion, mapping or transport failures appear in session errors/logs; they never trigger another robot or backend.
+
+Imported recordings include `skynet_hand` metadata with the exact source revision, bundle digest and ordered action joint names. The six wrist controls precede independent finger controls; mimic joints are not separate actions. Live collection continues to stop at capture and review. No training or evaluation is started.
+
+### Validation status
+
+The [CPU validation receipt](validation/imported-hands-cpu.json) records all ten model identities and results. `ops/xr/hands/check_kinematics.py` uses the real dex-retargeting and Pinocchio libraries to check 42 gradually changing, reachable finger targets per hand (420 total), joint bounds and mimic relationships. Maximum fingertip-vector error was below 3.4 mm on this synthetic test. Four combined wrist poses per hand check the floating URDF's rotation/translation convention. These are kinematic checks against reachable model targets, not tests of human tracking, collision stability or successful grasping.
+
+Run that check in an isolated environment with the dependency versions recorded in the receipt, passing one or more paths from `data/simulation-hands/<robot>/<digest>/`. Unit tests also exercise source/bundle corruption, atomic upload/cache reuse, incomplete preparation, exact session selection and the hand-library link. Browser checks cover the real model view, **Use in simulation**, selection persistence, task changes and unsupported-side explanation.
+
+Isaac conversion, physics tuning, visual palm orientation and a complete headset capture must still be tested for each imported model. On the current attempt, SSH to the configured workstation `10.88.3.52` timed out, so no imported-hand GPU session was launched. Initial finger gains (stiffness 10, damping 0.2, effort 2) are simulation tuning values, not manufacturer hardware ratings. The live UI explicitly labels these adapters as awaiting GPU/headset validation.
 
 ## Review saved demonstrations
 

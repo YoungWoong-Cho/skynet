@@ -10,9 +10,9 @@
     <script src="/static/local-capture.js?v=20260905-cycle" defer></script>
     <script src="/static/capture-processing.js?v=20260905-cycle" defer></script>
     <script src="/static/collection-ui.js" defer></script>
-    <script src="/static/hands-ui.js?v=20260906-hands-xr" defer></script>
+    <script src="/static/hands-ui.js?v=20260907-imported-hands-2" defer></script>
     <script src="/static/live-review.js?v=20260907-collection-review" defer></script>
-    <script src="/static/live-xr.js?v=20260907-collection-review" defer></script>
+    <script src="/static/live-xr.js?v=20260907-imported-hands" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -144,7 +144,7 @@
             <section class="panel table-panel"><div class="panel-heading"><h2>Hand library</h2><span id="hands-count" class="quiet-label">Loading…</span></div><div class="table-scroll"><table class="registry-table"><thead><tr><th>Model</th><th>View</th></tr></thead><tbody id="hands-catalog"><tr class="empty-row"><td colspan="2">Loading hand library…</td></tr></tbody></table></div><div class="collection-table-footer"><span class="secondary">Models are saved locally at a fixed source version.</span></div></section>
             <section class="panel table-panel" aria-labelledby="hand-title">
               <div class="panel-heading panel-heading-tools"><div><h2 id="hand-title">Choose a hand</h2><p id="hand-source-label" class="secondary"></p></div><div class="section-tools"><label for="hand-side">Side</label><select id="hand-side" disabled></select></div></div>
-              <div class="hand-toolbar"><span id="hand-status" role="status">Select a model from the library.</span><button id="hand-install" type="button" class="button" hidden>Download model</button><button id="hand-fit" type="button" class="button button-outline" disabled>Reset view</button></div>
+              <div class="hand-toolbar"><span id="hand-status" role="status">Select a model from the library.</span><button id="hand-install" type="button" class="button" hidden>Download model</button><a id="hand-use-simulation" class="button button-outline" hidden>Use in simulation</a><button id="hand-fit" type="button" class="button button-outline" disabled>Reset view</button></div>
               <div id="hand-canvas" class="hand-canvas" hidden></div>
               <div id="hand-view-help" class="hand-view-help" hidden>Drag to rotate · scroll or pinch to zoom · right-drag to pan</div>
               <div id="hand-controls" class="hand-controls" hidden>

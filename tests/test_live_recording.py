@@ -62,3 +62,24 @@ def test_nonfinite_native_actions_are_rejected(recording):
 def test_unsuccessful_native_episode_is_not_successful_capture(recording):
     with pytest.raises(ValueError, match="success condition"):
         recording(lambda p: p["episodes"][0].update(success=False))
+
+
+def test_simulation_failure_reports_the_imported_hand_error(tmp_path):
+    log = tmp_path / "simulation.log"
+    log.write_text(
+        "older output\n" * 5000
+        + "SKYNET_HAND_ERROR: Hand asset checksum mismatch: hand.stl\nRuntimeError: generic cleanup error\n"
+    )
+    assert (
+        worker.simulation_failure(log, "DexVerse exited with code 1")
+        == "DexVerse exited with code 1: Hand asset checksum mismatch: hand.stl"
+    )
+    log.write_text("\x1b[31mValueError: Missing palm body\x1b[0m\n")
+    assert (
+        worker.simulation_failure(log, "Failed")
+        == "Failed: ValueError: Missing palm body"
+    )
+    log.unlink()
+    assert (
+        worker.simulation_failure(log, "Failed") == "Failed; inspect the simulation log"
+    )

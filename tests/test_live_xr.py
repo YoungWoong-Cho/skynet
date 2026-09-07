@@ -162,3 +162,73 @@ def test_unsupported_selection_does_not_start_or_fall_back(service):
         service.create(True, task="")
     assert not service.list()
     assert service.cluster.calls == 0
+
+
+@pytest.fixture
+def imported_hand(monkeypatch, tmp_path):
+    manifest = dict(
+        digest="c" * 64,
+        robot="skynet_wuji_1_right",
+        source_revision="a" * 40,
+        name="WUJI Hand 1 right",
+        action_dimension=26,
+        retargeting_scheme="vector",
+    )
+    directory = tmp_path / "immutable-hand"
+    monkeypatch.setattr(
+        "skynet_app.live_xr.build_hand", lambda robot: (directory, manifest)
+    )
+    return directory, manifest
+
+
+def test_imported_hand_bundle_and_scheme_are_frozen_without_default_robot(
+    service, imported_hand, monkeypatch
+):
+    directory, manifest = imported_hand
+    uploaded = []
+    remote = "/coc/flash7/ycho420/skynet-work/hands/wuji/digest"
+
+    def upload(*args):
+        uploaded.append(args)
+        return remote
+
+    monkeypatch.setattr("skynet_app.live_xr.upload_hand", upload)
+    job = service.create(True, "Dexverse-PickCube-v0", manifest["robot"])
+    assert job["profile"]["hand_bundle"] == manifest
+    assert "hand_bundle_path" not in job
+    assert service.get(job["id"])["hand_bundle_path"] == str(directory)
+    # A repeated request returns the existing session even if library access later fails.
+    monkeypatch.setattr(
+        "skynet_app.live_xr.build_hand",
+        lambda _: pytest.fail("Duplicate rebuilt its model"),
+    )
+    assert (
+        service.create(robot=manifest["robot"], task="Dexverse-PickCube-v0")["id"]
+        == job["id"]
+    )
+    service.prepare(job["id"])
+    request = json.loads(
+        next(w[2] for w in service.cluster.writes if w[1] == "request.json")
+    )
+    assert request["robot"] == manifest["robot"]
+    assert request["hand_bundle"]["retargeting_scheme"] == "vector"
+    assert request["hand_bundle"]["root"] == remote
+    assert uploaded[0][0] == str(directory)
+    assert service.cluster.calls == 1
+
+
+def test_imported_hand_preparation_failure_does_not_launch_shadow(
+    service, imported_hand, monkeypatch
+):
+    def fail(*args):
+        raise ValueError("Hand asset checksum mismatch")
+
+    monkeypatch.setattr("skynet_app.live_xr.upload_hand", fail)
+    job = service.create(True, robot=imported_hand[1]["robot"])
+    service.prepare(job["id"])
+    result = service.get(job["id"])
+    assert result["state"] == "FAILED"
+    assert "checksum mismatch" in result["error"]
+    assert result["profile"]["robot"] == imported_hand[1]["robot"]
+    assert service.cluster.calls == 0
+    assert not service.cluster.writes

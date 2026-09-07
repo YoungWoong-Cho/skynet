@@ -72,6 +72,35 @@ def inspect_recording(
     return {"episodes": len(episodes), "steps": steps, "success": True}
 
 
+def simulation_failure(path, fallback):
+    """Surface a bounded, actionable setup error rather than only an exit code."""
+    try:
+        with path.open("rb") as stream:
+            stream.seek(max(0, path.stat().st_size - 16000))
+            tail = stream.read().decode(errors="replace")
+    except OSError:
+        return fallback + "; inspect the simulation log"
+    lines = [re.sub(r"\x1b\[[0-9;]*m", "", line).strip() for line in tail.splitlines()]
+    hand_errors = [
+        line.partition("SKYNET_HAND_ERROR: ")[2]
+        for line in lines
+        if "SKYNET_HAND_ERROR: " in line
+    ]
+    errors = hand_errors or [
+        line
+        for line in lines
+        if re.search(
+            r"(?:\b[A-Za-z]+(?:Error|Exception):|Failed to create (?:environment|teleop device):)",
+            line,
+        )
+    ]
+    return (
+        fallback + ": " + errors[-1][:1000]
+        if errors
+        else fallback + "; inspect the simulation log"
+    )
+
+
 def server_address():
     """Select the node's actual default-route address, never a previous job's IP."""
     result = subprocess.run(
@@ -218,9 +247,16 @@ def main():
             DEXVERSE_DATA_DIR=str(root / "recordings"),
             PATH=str(runtime / "bin") + ":" + os.environ["PATH"],
         )
+        recorder = repo / "scripts/record_demos.py"
+        if cfg.get("hand_bundle"):
+            bundle = cfg["hand_bundle"]
+            if bundle["robot"] != cfg["robot"]:
+                raise ValueError("Selected robot differs from the prepared hand")
+            recorder = Path(bundle["root"]) / "record.py"
+            env["SKYNET_DEXVERSE_RECORDER"] = str(repo / "scripts/record_demos.py")
         argv = [
             str(runtime / "bin/python"),
-            str(repo / "scripts/record_demos.py"),
+            str(recorder),
             "--task",
             cfg["task"],
             "--robot_type",
@@ -237,7 +273,7 @@ def main():
             "--teleop_retargeter",
             "relative",
             "--retargeting_scheme",
-            "dexpilot",
+            cfg.get("hand_bundle", {}).get("retargeting_scheme", "dexpilot"),
         ]
         with (root / "simulation.log").open("w") as stream:
             sim = subprocess.Popen(
@@ -264,20 +300,18 @@ def main():
             if sim.poll() is not None:
                 if sim.returncode:
                     raise RuntimeError(
-                        f"DexVerse exited with code {sim.returncode}; inspect the simulation log"
+                        simulation_failure(
+                            root / "simulation.log",
+                            f"DexVerse exited with code {sim.returncode}",
+                        )
                     )
                 files = list((root / "recordings").rglob("*.pkl"))
                 if not files:
-                    text = (root / "simulation.log").read_text(errors="replace")
-                    errors = [
-                        line
-                        for line in text.splitlines()
-                        if "Failed to create environment:" in line
-                    ]
                     raise RuntimeError(
-                        errors[-1]
-                        if errors
-                        else "DexVerse exited without a demonstration file"
+                        simulation_failure(
+                            root / "simulation.log",
+                            "DexVerse exited without a demonstration file",
+                        )
                     )
                 summaries = []
                 for path in files:

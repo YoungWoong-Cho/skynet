@@ -94,6 +94,7 @@
     clearTimeout(polling);
     error(null);
     metadata = null;
+    el("hand-use-simulation").hidden = true;
     values = {};
     viewer?.clear();
     el("hand-canvas").hidden = true;
@@ -162,6 +163,14 @@
         return;
       el("hand-view-help").hidden = false;
       metadata = model;
+      if (model.simulation_robot) {
+        const url = new URL(location.href);
+        url.hash = "collection";
+        url.searchParams.set("collection_view", "live");
+        url.searchParams.set("live_hand", model.simulation_robot);
+        el("hand-use-simulation").href = url.href;
+        el("hand-use-simulation").hidden = false;
+      }
       values = Object.fromEntries(
         model.joints
           .filter((j) => !j.mimic)

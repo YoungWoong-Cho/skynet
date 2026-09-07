@@ -30,10 +30,16 @@ const catalog = {
     { key: "floating_shadow_right", name: "Right", available: true },
     { key: "floating_shadow_left", name: "Left", available: true },
     {
-      key: "wuji-1",
-      name: "WUJI",
+      key: "skynet_allegro_v4_left",
+      name: "Allegro left",
       available: false,
-      reason: "Adapter missing",
+      reason: "Missing thumb mesh",
+    },
+    {
+      key: "skynet_wuji_1_right",
+      name: "WUJI right",
+      available: true,
+      imported: true,
     },
   ],
   tasks: [
@@ -67,9 +73,18 @@ try {
   requests[0].resolve({ sessions: [], license: { accepted: true }, catalog });
   await flush();
   assert.equal(
-    get("live-xr-hand").querySelector('option[value="wuji-1"]').disabled,
+    get("live-xr-hand").querySelector('option[value="skynet_allegro_v4_left"]')
+      .disabled,
     true,
   );
+  get("live-xr-hand").value = "skynet_wuji_1_right";
+  get("live-xr-hand").dispatchEvent(new window.Event("change"));
+  assert.match(get("live-xr-selection-note").textContent, /stored URDF/);
+  assert.match(
+    get("live-xr-selection-note").textContent,
+    /needs GPU\/headset validation/,
+  );
+  assert.equal(get("live-xr-start").disabled, false);
   get("live-xr-hand").value = "floating_shadow_left";
   get("live-xr-task").value = "Dexverse-PickCube-v0";
   get("live-xr-task").dispatchEvent(new window.Event("change"));

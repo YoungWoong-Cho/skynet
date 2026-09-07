@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from .capture_processing.dexverse_runner import REVISION, TASK, ROBOT
+from .simulation_hands import definitions
 
 HANDS = [
     {
@@ -23,22 +24,28 @@ HANDS = [
         "available": True,
     },
 ]
-for key, name in (
-    ("wuji-1", "WUJI Hand 1"),
-    ("wuji-2", "WUJI Hand 2 (Beta 2)"),
-    ("sharpa", "Sharpa Wave"),
-    ("allegro-v4", "Allegro Hand V4"),
-    ("leap-v1", "LEAP Hand V1"),
-    ("inspire-rh56", "Inspire RH56"),
-):
+# These adapters use the pinned mesh/physics descriptions from the Hands library.
+
+for hand in definitions():
     HANDS.append(
         {
-            "key": key,
-            "name": name,
-            "available": False,
-            "reason": "A viewable hand model is stored in the Hands library, but this DexVerse release does not ship its simulation and live retargeting adapter.",
+            "key": hand["robot"],
+            "name": hand["name"],
+            "side": hand["side"],
+            "available": True,
+            "imported": True,
+            "hand_key": hand["key"],
+            "source_revision": hand["revision"],
         }
     )
+HANDS.append(
+    {
+        "key": "skynet_allegro_v4_left",
+        "name": "Allegro Hand V4 · left hand",
+        "available": False,
+        "reason": "The pinned Allegro-left URDF references a missing thumb mesh. The right hand is available; no mirrored model is substituted.",
+    }
+)
 
 TASKS = [
     {
@@ -73,7 +80,7 @@ def catalog():
             "default_robot": ROBOT,
             "default_task": TASK,
             "verified_pairs": [{"robot": ROBOT, "task": TASK}],
-            "note": "Shadow right hand + Pick up stick has passed a real headset capture. Other listed Shadow combinations are provided by this release and await a headset test. Additional DexVerse tasks are not yet configured here.",
+            "note": "Shadow right hand + Pick up stick has passed a real headset capture. Other Shadow combinations and imported hand adapters await a headset test. Imported hands reuse the stored URDFs and meshes; first startup converts them to simulator assets and checks their joint/body mappings. Additional DexVerse tasks are not yet configured here.",
         }
     )
 
@@ -88,6 +95,10 @@ def selection(task, robot):
     if not hand or not hand["available"]:
         raise ValueError(
             "Unsupported live hand. "
-            + (hand["reason"] if hand else "Choose a listed Shadow hand.")
+            + (
+                hand["reason"]
+                if hand
+                else "Choose a hand listed in Live teleoperation."
+            )
         )
     return deepcopy(task_info), deepcopy(hand)

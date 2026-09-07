@@ -185,3 +185,24 @@ def test_pose_export_validates_without_creating_saved_pose(library):
     assert library.poses("test", "right") == []
     with pytest.raises(ValueError, match="limits"):
         library.export_pose("test", "right", {"bend": 2}, "a" * 40)
+
+
+@pytest.mark.parametrize(
+    "key,side,expected",
+    [
+        ("leap-v1", "right", "skynet_leap_v1_right"),
+        ("wuji-1", "left", "skynet_wuji_1_left"),
+        ("inspire-rh56", "right", "skynet_inspire_rh56_right"),
+        ("shadow", "left", "floating_shadow_left"),
+        ("leap-v1", "left", None),
+    ],
+)
+def test_model_api_links_to_its_exact_simulation_variant(
+    monkeypatch, key, side, expected
+):
+    from skynet_app import hands_api
+
+    monkeypatch.setattr(
+        hands_api.library, "model", lambda *args: {"files": {}, "revision": "test"}
+    )
+    assert hands_api.model(key, side)["simulation_robot"] == expected
