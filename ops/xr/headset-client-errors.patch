@@ -25,11 +25,39 @@ index dd1c889..0cde537 100644
  	<key>NSHandsTrackingUsageDescription</key>
  	<string>This app streams hand tracking data to a remote server.</string>
  	<key>NSMicrophoneUsageDescription</key>
+diff --git a/IsaacXRTeleopClient/IsaacXRTeleopClientApp.swift b/IsaacXRTeleopClient/IsaacXRTeleopClientApp.swift
+index 002b7b9..2526e6b 100644
+--- a/IsaacXRTeleopClient/IsaacXRTeleopClientApp.swift
++++ b/IsaacXRTeleopClient/IsaacXRTeleopClientApp.swift
+@@ -24,6 +24,10 @@ struct IsaacXRTeleopClientApp: App {
+     // Window size
+     static let launchSize = CGSize(width: 500, height: 550)
+ 
++    private var controlsWidth: CGFloat {
++        appModel.cxrSession.state == .connected ? 1000 : Self.launchSize.width
++    }
++
+     var body: some Scene {
+         FetchHmdPropertiesImmersiveSpace(hmdProperties: appModel.hmdProperties)
+ 
+@@ -38,9 +42,9 @@ struct IsaacXRTeleopClientApp: App {
+                         )
+                 }
+                 .frame(
+-                    // Fixed-size window
+-                    minWidth: Self.launchSize.width,
+-                    maxWidth: Self.launchSize.width,
++                    // Make room for the HUD beside the controls while connected.
++                    minWidth: controlsWidth,
++                    maxWidth: controlsWidth,
+                     minHeight: Self.launchSize.height,
+                     maxHeight: Self.launchSize.height,
+                     alignment: .top
 diff --git a/IsaacXRTeleopClient/StreamingControlsView.swift b/IsaacXRTeleopClient/StreamingControlsView.swift
-index 9c472c8..75547fc 100644
+index 9c472c8..a3c7e41 100644
 --- a/IsaacXRTeleopClient/StreamingControlsView.swift
 +++ b/IsaacXRTeleopClient/StreamingControlsView.swift
-@@ -11,6 +11,7 @@
+@@ -11,23 +11,22 @@
  import SwiftUI
  import CloudXRKit
  import os.log
@@ -37,7 +65,10 @@ index 9c472c8..75547fc 100644
  
  struct StreamingControlsView: View {
      @State var viewModel: ViewModel
-@@ -20,7 +21,7 @@ struct StreamingControlsView: View {
+ 
+     var body: some View {
+-        Section(header: HStack {
++        VStack(alignment: .leading, spacing: 16) {
              VStack(alignment: .leading) {
                  Text("Session Controls").font(.title2)
                  if viewModel.showConnectionStatus {
@@ -46,7 +77,14 @@ index 9c472c8..75547fc 100644
                  } else {
                      // Blank line to keep UI height consistent when the connecting text appears
                      Text(" ").font(.callout)
-@@ -56,6 +57,25 @@ struct StreamingControlsView: View {
+                 }
+             }
+-            Spacer()
+-        }) {
+             HStack {
+                 TextField("0.0.0.0", text: $viewModel.ipAddress)
+                     .autocorrectionDisabled(true)
+@@ -56,6 +55,25 @@ struct StreamingControlsView: View {
              viewModel.connectionStateChanged(oldValue: oldValue, newValue: newValue)
          }
          .padding()
@@ -72,7 +110,7 @@ index 9c472c8..75547fc 100644
      }
  }
  
-@@ -64,6 +84,49 @@ extension StreamingControlsView {
+@@ -64,6 +82,49 @@ extension StreamingControlsView {
      class ViewModel {
          @ObservationIgnored static let logger = Logger()
          let appModel: AppModel
@@ -122,7 +160,7 @@ index 9c472c8..75547fc 100644
  
          init(appModel: AppModel) {
              self.appModel = appModel
-@@ -99,24 +162,31 @@ extension StreamingControlsView {
+@@ -99,24 +160,31 @@ extension StreamingControlsView {
              }
          }
  
@@ -160,7 +198,7 @@ index 9c472c8..75547fc 100644
                  if newValue == .connected {
                      if !appModel.immersiveSpaceIsOpen {
                          await appModel.openImmersiveSpace(id: streamingSpaceTitle)
-@@ -145,7 +215,10 @@ extension StreamingControlsView {
+@@ -145,7 +213,10 @@ extension StreamingControlsView {
          }
  
          private func connect() {
@@ -171,7 +209,7 @@ index 9c472c8..75547fc 100644
                  switch connectionState {
                  case .initialized, .disconnected:
                      var config = CloudXRKit.Config()
-@@ -154,7 +227,14 @@ extension StreamingControlsView {
+@@ -154,7 +225,14 @@ extension StreamingControlsView {
                      config.resolutionPreset = .standardPreset
                      config.handTrackingMode = .legacy
                      appModel.cxrSession.configure(config: config)
@@ -187,7 +225,7 @@ index 9c472c8..75547fc 100644
                  default:
                      let errorMessage = "Connect button pressed when state was \(self.connectionState)"
                      Self.logger.error("Streaming controls state machine error: \(errorMessage)")
-@@ -172,22 +252,24 @@ extension StreamingControlsView {
+@@ -172,22 +250,24 @@ extension StreamingControlsView {
          }
  
          var ipFieldDisabled: Bool {
@@ -218,58 +256,140 @@ index 9c472c8..75547fc 100644
          }
      }
 diff --git a/IsaacXRTeleopClient/TeleopControlView.swift b/IsaacXRTeleopClient/TeleopControlView.swift
-index 702ea6d..0cb7479 100644
+index 702ea6d..79361ec 100644
 --- a/IsaacXRTeleopClient/TeleopControlView.swift
 +++ b/IsaacXRTeleopClient/TeleopControlView.swift
-@@ -64,6 +64,14 @@ struct TeleopControlView: View {
-             .frame(height: 100, alignment: .top)
-         }
-         .padding()
-+        .safeAreaInset(edge: .bottom) {
-+            HStack(spacing: 20) {
+@@ -16,10 +16,8 @@ struct TeleopControlView: View {
+     @State var viewModel: ViewModel
+ 
+     var body: some View {
+-        Section(header: HStack {
++        VStack(alignment: .leading, spacing: 16) {
+             Text("Teleoperation Controls").font(.title2)
+-            Spacer()
+-        }) {
+             VStack {
+                 HStack {
+                     Button {
+@@ -61,7 +59,12 @@ struct TeleopControlView: View {
+                 .font(.title3)
+                 .buttonStyle(.bordered)
+             }
+-            .frame(height: 100, alignment: .top)
++            .frame(maxWidth: .infinity, alignment: .top)
++            VStack(alignment: .leading, spacing: 8) {
 +                Label { Text("Tracked hand") } icon: { Circle().fill(.red).frame(width: 8, height: 8) }
 +                Label { Text("Hand points for robot control") } icon: { Circle().fill(.cyan).frame(width: 8, height: 8) }
 +            }
 +            .font(.caption)
-+            .padding(.top, 8)
-+        }
+         }
+         .padding()
      }
- }
- 
 diff --git a/IsaacXRTeleopClient/TopConfigView.swift b/IsaacXRTeleopClient/TopConfigView.swift
-index 5284c39..88f17b9 100644
+index 5284c39..d8e6e7f 100644
 --- a/IsaacXRTeleopClient/TopConfigView.swift
 +++ b/IsaacXRTeleopClient/TopConfigView.swift
-@@ -44,6 +44,7 @@ struct TopConfigView: View {
-     }
+@@ -19,73 +19,40 @@ struct TopConfigView: View {
+     @State var viewModel: ViewModel
  
-     private var mainPage: some View {
-+        ScrollView {
-         VStack {
-             HStack {
-                 Spacer()
-@@ -64,17 +65,11 @@ struct TopConfigView: View {
-                 StreamingControlsView(viewModel: StreamingControlsView.ViewModel(appModel: viewModel.appModel))
-                     .frame(alignment: .top)
+     var body: some View {
+-        VStack {
+-                VStack {
+-                    switch viewModel.uiPage {
+-                    case .main: mainPage
+-                    case .hud:
+-                            List {
+-                                HUDView(session: viewModel.cxrSession, hudConfig: viewModel.hudConfig)
+-                            }
++        HStack(alignment: .top, spacing: 0) {
++            ScrollView {
++                VStack(alignment: .leading, spacing: 24) {
++                    if viewModel.showTeleopView {
++                        TeleopControlView(viewModel: TeleopControlView.ViewModel(appModel: viewModel.appModel))
+                     }
+-                }.ornament(
+-                    visibility: viewModel.showOrnaments ? .visible : .hidden,
+-                    attachmentAnchor: .scene(.bottom)
+-                ) {
+-                    HStack {
+-                        Button("Main") { viewModel.uiPage = .main }
+-                        Button("HUD") { viewModel.uiPage = .hud }
+-                    }
+-                }
+-                .onChange(of: scenePhase) {
+-                    viewModel.scenePhaseChanged(to: scenePhase)
++                    StreamingControlsView(viewModel: StreamingControlsView.ViewModel(appModel: viewModel.appModel))
+                 }
+-        }
+-    }
+-
+-    private var mainPage: some View {
+-        VStack {
+-            HStack {
+-                Spacer()
+-                Text("Main").font(.extraLargeTitle2)
+-                Spacer()
++                .padding(.vertical, 16)
              }
--            .frame(height: 150, alignment: .top)
-+            .frame(minHeight: 150, alignment: .top)
+-            .frame(height: 50, alignment: .top).padding()
++            .frame(width: 500)
  
+             if viewModel.showTeleopView {
+-                VStack {
+-                    TeleopControlView(viewModel: TeleopControlView.ViewModel(appModel: viewModel.appModel))
+-                        .frame(alignment: .top)
+-                }
+-                .frame(height: 200, alignment: .top)
+-            }
+-
+-            VStack {
+-                StreamingControlsView(viewModel: StreamingControlsView.ViewModel(appModel: viewModel.appModel))
+-                    .frame(alignment: .top)
+-            }
+-            .frame(height: 150, alignment: .top)
+-
 -            VStack {
 -                if viewModel.showEyePositionView {
 -                    SettingsView(viewModel: SettingsView.ViewModel(appModel: viewModel.appModel))
 -                        .frame(maxHeight: .infinity, alignment: .top)
--                }
--            }
++                Divider()
++                VStack(alignment: .leading, spacing: 0) {
++                    Text("HUD")
++                        .font(.title2)
++                        .padding(32)
++                    List {
++                        HUDView(session: viewModel.cxrSession, hudConfig: viewModel.hudConfig)
++                    }
+                 }
++                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+             }
 -            .frame(height: 100, alignment: .top)
          }
-         .frame(alignment: .top)
+-        .frame(alignment: .top)
++        .onChange(of: scenePhase) {
++            viewModel.scenePhaseChanged(to: scenePhase)
 +        }
      }
  }
  
-@@ -106,15 +101,6 @@ extension TopConfigView {
+ extension TopConfigView {
+     @Observable
+     class ViewModel {
+-        enum UiPage: String, CaseIterable {
+-            case main = "Main"
+-            case hud = "Heads-Up Display"
+-        }
+-
+         // Defined for convenience for the HUD.
+         let cxrSession: CloudXRSession
  
+@@ -101,24 +68,8 @@ extension TopConfigView {
+             appModel.windowScenePhaseChanged(to: newValue)
+         }
+ 
+-        // View-local state.
+-        var uiPage: UiPage = .main
+-
          let hudConfig = HUDConfig()
  
 -        var showEyePositionView: Bool {
@@ -281,6 +401,10 @@ index 5284c39..88f17b9 100644
 -            }
 -        }
 -
-         var showOrnaments: Bool {
+-        var showOrnaments: Bool {
+-            return cxrSession.state == .connected
+-        }
+-
+         var showTeleopView: Bool {
              return cxrSession.state == .connected
          }
