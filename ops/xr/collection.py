@@ -101,30 +101,6 @@ class AlignmentGate:
         return min(1.0, max(0.0, (now - self.since) / self.duration))
 
 
-class FingerNeutralCalibration:
-    """Calibrate human/robot palm-proportion bias in WUJI 2 spread joints only."""
-
-    def __init__(self, manifest):
-        self.names = manifest["wrist_joints"] + manifest["finger_joints"]
-        self.joints = [n for n in self.names if n.endswith("_mcp_abd")]
-        if manifest["hand_key"] != "wuji-2" or len(self.joints) != 4:
-            raise ValueError("WUJI 2 calibration requires four MCP abduction joints")
-        self.indices = [self.names.index(n) for n in self.joints]
-        self.neutral = np.asarray([manifest["neutral"][n] for n in self.joints])
-        self.limits = np.asarray([manifest["finger_limits"][n] for n in self.joints])
-        self.offset = np.zeros(len(self.names), dtype=np.float32)
-
-    def capture(self, action):
-        action = np.asarray(action)
-        if action.shape != self.offset.shape or not np.isfinite(action).all():
-            raise ValueError("Cannot calibrate invalid finger commands")
-        self.offset[self.indices] = action[self.indices] - self.neutral
-        return dict(
-            method="relative_mcp_abduction",
-            joint_offsets=dict(zip(self.joints, self.offset[self.indices].tolist())),
-        )
-
-
 def alignment_feedback(points, side, target):
     from anatomy import palm_frame
 
@@ -169,50 +145,24 @@ def aligned_hand(points, side, target):
     return alignment_feedback(points, side, target)[0]
 
 
-def control_points(local_points, rotation, wrist, base_wrist, robot_wrist):
-    """Place normalized finger targets at the robot's calibrated control pose."""
-    return np.asarray(local_points) @ np.asarray(rotation).T + (
-        np.asarray(robot_wrist) + np.asarray(wrist) - np.asarray(base_wrist)
-    )
+def install_robot_point_display(retargeter, read_points, is_recording):
+    """Blue markers show actual robot joint locations, in the same world frame."""
+    marker = retargeter._canonical_markers
+    visible = False
+    marker.set_visibility(False)
 
-
-def install_control_point_display(retargeter, targets, is_recording):
-    """Draw finger targets in the commanded wrist frame, never in normalized axes."""
-
-    def visualize(hand_data_by_target):
-        marker = retargeter._canonical_markers
-        marker.set_visibility(False)
-        if not is_recording():
-            return  # The stationary robot mesh is the alignment reference.
-        result = []
-        for hand, hand_data in hand_data_by_target.items():
-            side = "right" if hand.name == "HAND_RIGHT" else "left"
-            wrist = retargeter.latest_wrist_poses.get(hand)
-            base = retargeter.retarget_base_wrist_poses.get(hand)
-            if wrist is None or base is None or side not in targets:
-                continue
-            canonical = retargeter._convert_hand_to_canonical_joint_positions(
-                hand_data, hand
-            )
-            if canonical is None:
-                continue
-            rotation = (
-                retargeter._get_normalized_wrist_rotation(wrist[3:])
-                * retargeter._get_normalized_wrist_rotation(base[3:]).inv()
-            )
-            result.append(
-                control_points(
-                    canonical, rotation.as_matrix(), wrist[:3], base[:3], targets[side]
-                )
-            )
-        if result:
-            marker.visualize(translations=np.concatenate(result).astype(np.float32))
-            marker.set_visibility(True)
+    def visualize(_hand_data):
+        nonlocal visible
+        show = bool(is_recording())
+        if show:
+            marker.visualize(translations=read_points())
+        if show != visible:
+            marker.set_visibility(show)
+            visible = show
 
     retargeter._visualize_canonical_hand_keypoints = visualize
     retargeter._visualize_wrist_poses = lambda: None
     retargeter._wrist_markers.set_visibility(False)
-    retargeter._canonical_markers.set_visibility(False)
 
 
 def run_loop(
@@ -254,20 +204,43 @@ def run_loop(
     tracked_sides = ["left", "right"] if cfg["hand"] == "both" else [cfg["hand"]]
     targets = {}
     alignment_details = {}
-    for retargeter in teleop._retargeters:
-        install_control_point_display(retargeter, targets, lambda: phase == "recording")
     raw_data = {}
     get_raw = teleop._get_raw_data
     manifest = cfg.get("hand_manifest", {})
-    finger_calibration = (
-        FingerNeutralCalibration(manifest)
-        if manifest.get("hand_key") == "wuji-2"
-        else None
-    )
-    finger_offset = None
-    finger_limits = None
-    if finger_calibration:
-        finger_indices = finger_calibration.indices
+    anatomical_wrist = manifest.get("retargeting_mode") == "finger_segments"
+    robot = env.scene["robot"]
+    if manifest:
+        marker_names = [
+            manifest["palm"],
+            *manifest["joint_child_links"].values(),
+            *manifest["tips"],
+        ]
+    else:
+        marker_names = env.cfg.robot_config.hand_tips_body_names
+    marker_indices = [robot.body_names.index(n) for n in dict.fromkeys(marker_names)]
+
+    def robot_points():
+        return robot.data.body_pos_w[0, marker_indices].detach().cpu().numpy()
+
+    for retargeter in teleop._retargeters:
+        install_robot_point_display(
+            retargeter, robot_points, lambda: phase == "recording"
+        )
+    if anatomical_wrist:
+        from anatomy import palm_frame
+        from scipy.spatial.transform import Rotation
+
+        if manifest["wrist_joints"] != [
+            "skynet_x",
+            "skynet_y",
+            "skynet_z",
+            "skynet_roll",
+            "skynet_pitch",
+            "skynet_yaw",
+        ]:
+            raise ValueError(
+                "Anatomical wrist control requires the imported six-axis wrist layout"
+            )
 
     def capture_raw():
         nonlocal raw_data
@@ -335,7 +308,6 @@ def run_loop(
     )
 
     def reset():
-        nonlocal finger_offset
         nonlocal \
             phase, \
             instruction, \
@@ -348,7 +320,6 @@ def run_loop(
         teleop.reset()
         success_count, progress, previous_positions = 0, 0.0, {}
         alignment_details = {}
-        finger_offset = None
         gate.update(False, time.monotonic())
         robot = env.scene["robot"]
         for side in tracked_sides:
@@ -518,31 +489,27 @@ def run_loop(
                         recorder._active_episode["skynet_alignment"] = {
                             s: p.tolist() for s, p in points.items()
                         }
-                        if finger_calibration:
-                            recorder._active_episode["skynet_finger_calibration"] = (
-                                finger_calibration.capture(
-                                    action.detach().cpu().numpy()
-                                )
-                            )
-                            finger_offset = torch.as_tensor(
-                                finger_calibration.offset.copy(),
-                                device=action.device,
-                                dtype=action.dtype,
-                            )
-                            finger_limits = torch.as_tensor(
-                                finger_calibration.limits,
-                                device=action.device,
-                                dtype=action.dtype,
-                            )
+                        recorder._active_episode["skynet_retargeting"] = dict(
+                            mode=manifest.get("retargeting_mode", "fingertips"),
+                            wrist="absolute_anatomical"
+                            if anatomical_wrist
+                            else "relative_calibrated",
+                        )
                         phase, instruction = "recording", goal
                         publish(True)
                         continue  # Recompute actions after wrist calibration before stepping physics.
                     env.sim.render()
                 elif phase == "recording":
-                    if finger_offset is not None:
-                        action = action - finger_offset
-                        action[finger_indices] = action[finger_indices].clamp(
-                            finger_limits[:, 0], finger_limits[:, 1]
+                    if anatomical_wrist:
+                        p = points[manifest["side"]]
+                        pose = np.r_[
+                            p[0] - targets[manifest["side"]],
+                            Rotation.from_matrix(
+                                palm_frame(p, manifest["side"])
+                            ).as_euler("XYZ"),
+                        ]
+                        action[:6] = torch.as_tensor(
+                            pose, device=action.device, dtype=action.dtype
                         )
                     if not torch.isfinite(action).all():
                         raise ValueError(

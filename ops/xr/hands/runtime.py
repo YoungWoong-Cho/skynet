@@ -230,6 +230,43 @@ def install(directory):
         canonical
     )
 
+    original_reference = retargeting.SimpleRelativeRetargeter._compute_dex_ref_value
+
+    def reference(self, solver, points):
+        if (
+            self.cfg.robot_type != m["robot"]
+            or m.get("retargeting_mode") != "finger_segments"
+        ):
+            return original_reference(self, solver, points)
+        import numpy as np
+        from anatomy import segment_targets
+
+        if not hasattr(solver, "_skynet_segment_lengths"):
+            optimizer = solver.optimizer
+            robot = optimizer.robot
+            neutral = np.array(
+                [m["neutral"].get(name, 0.0) for name in robot.dof_joint_names]
+            )
+            robot.compute_forward_kinematics(neutral)
+            solver._skynet_segment_lengths = np.array(
+                [
+                    np.linalg.norm(
+                        robot.get_link_pose(robot.get_link_index(end))[:3, 3]
+                        - robot.get_link_pose(robot.get_link_index(start))[:3, 3]
+                    )
+                    for start, end in zip(
+                        optimizer.origin_link_names, optimizer.task_link_names
+                    )
+                ]
+            )
+        return segment_targets(
+            points,
+            solver.optimizer.target_link_human_indices,
+            solver._skynet_segment_lengths,
+        )
+
+    retargeting.SimpleRelativeRetargeter._compute_dex_ref_value = reference
+
     original_assign = retargeting.SimpleRelativeRetargeter._assign_hand_fingers
 
     def assign(self, action, hand, finger_values):

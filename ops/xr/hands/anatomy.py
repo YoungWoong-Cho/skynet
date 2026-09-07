@@ -28,3 +28,20 @@ def palm_frame(points, side):
 def canonical_points(points, side):
     p = np.asarray(points, dtype=np.float64)
     return ((p - p[0]) @ palm_frame(p, side)).astype(np.float32)
+
+
+def segment_targets(points, indices, lengths):
+    """Match finger-bone directions using the robot's own bone lengths."""
+    p = np.asarray(points)
+    indices = np.asarray(indices)
+    lengths = np.asarray(lengths)
+    vectors = p[indices[1]] - p[indices[0]]
+    human_lengths = np.linalg.norm(vectors, axis=1)
+    if (
+        not np.isfinite(vectors).all()
+        or not np.isfinite(lengths).all()
+        or np.any(human_lengths < 0.001)
+        or np.any(lengths < 0.001)
+    ):
+        raise ValueError("Finger tracking or robot bone lengths are invalid")
+    return (vectors / human_lengths[:, None] * lengths[:, None]).astype(np.float32)

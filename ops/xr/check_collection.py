@@ -111,6 +111,20 @@ try:
     retargeter._canonical_markers.visualize = observe_points
     wrist_motion = Rotation.from_euler("XYZ", [0.2, -0.15, 0.25])
     displacement = np.array([0.03, -0.02, 0.05])
+    alignment_offset = np.array([0.03, 0.02, 0.01])
+    alignment_rotation = Rotation.from_euler("z", 10, degrees=True)
+    marker_indices = [
+        robot.body_names.index(n)
+        for n in dict.fromkeys(
+            [
+                manifest["palm"],
+                *manifest["joint_child_links"].values(),
+                *manifest["tips"],
+            ]
+        )
+    ]
+    episode_steps = 60
+    wrist_position_errors = []
     rotated_overlay_checked = False
 
     class Bus:
@@ -174,11 +188,13 @@ try:
             last_phase = status["phase"]
             fingers = human.copy()
             if moving and steps - attempt_start_step > 3:
-                fingers[6:9, 1] += (
-                    0.015  # Deliberate index spread must survive neutral calibration.
-                )
-            rotation = wrist_motion if moving else Rotation.identity()
-            position = neutral_wrist + (displacement if moving else 0)
+                fingers[6:9, 1] += 0.015  # Deliberate index spread must remain visible.
+            rotation = (
+                wrist_motion if moving else Rotation.identity()
+            ) * alignment_rotation
+            position = (
+                neutral_wrist + alignment_offset + (displacement if moving else 0)
+            )
             current_quat = (
                 rotation * Rotation.from_quat(quat[[1, 2, 3, 0]])
             ).as_quat()[[3, 0, 1, 2]]
@@ -187,7 +203,9 @@ try:
             action = retargeter.retarget(self._get_raw_data())
             if moving:
                 np.testing.assert_allclose(
-                    drawn_points, wrist_motion.apply(fingers) + position, atol=1e-5
+                    drawn_points,
+                    robot.data.body_pos_w[0, marker_indices].cpu().numpy(),
+                    atol=1e-6,
                 )
                 np.testing.assert_allclose(
                     action[:3].cpu().numpy(), displacement, atol=1e-5
@@ -209,7 +227,20 @@ try:
     def synthetic_success(env, term, count):
         global steps
         steps += 1
-        return count + 1, count >= 19
+        if count >= episode_steps - 1:
+            position = (
+                robot.data.body_pos_w[0, robot.body_names.index(manifest["palm"])]
+                .cpu()
+                .numpy()
+            )
+            error = float(
+                np.linalg.norm(
+                    position - neutral_wrist - alignment_offset - displacement
+                )
+            )
+            wrist_position_errors.append(error)
+            assert error < 0.025, f"Wrist keeps a position offset: {error} m"
+        return count + 1, count >= episode_steps - 1
 
     ns["check_success"] = synthetic_success
     recorder = ns["TrajectoryPickleRecorder"](
@@ -239,17 +270,25 @@ try:
     )
     assert brief_once, "Brief tracking dropout was not exercised"
     receipts = json.loads((output / "episodes.json").read_text())
-    assert len(receipts) == 2 and all(r["steps"] == 20 for r in receipts)
-    calibration = collection_runtime.FingerNeutralCalibration(manifest)
+    assert len(receipts) == 2 and all(r["steps"] == episode_steps for r in receipts)
     for receipt in receipts:
         episode = pickle.loads((output / receipt["path"]).read_bytes())["episodes"][0]
         np.testing.assert_allclose(
-            episode["actions"][0, calibration.indices], calibration.neutral, atol=0.015
+            episode["actions"][:, :3],
+            np.broadcast_to(alignment_offset + displacement, (episode_steps, 3)),
+            atol=1e-5,
         )
-        assert "skynet_finger_calibration" in episode
+        np.testing.assert_allclose(
+            episode["actions"][:, 3:6],
+            np.broadcast_to(
+                (wrist_motion * alignment_rotation).as_euler("XYZ"), (episode_steps, 3)
+            ),
+            atol=1e-5,
+        )
+        assert episode["skynet_retargeting"]["wrist"] == "absolute_anatomical"
     first = pickle.loads((output / receipts[0]["path"]).read_bytes())["episodes"][0]
-    assert np.max(np.abs(first["actions"][:, calibration.indices])) > 0.03, (
-        "Finger spread was frozen instead of calibrated"
+    assert np.max(np.ptp(first["actions"][:, 6:], axis=0)) > 0.03, (
+        "Finger movement was frozen"
     )
     assert (
         json.loads((output / "collection-status.json").read_text())["phase"] == "ended"
@@ -268,7 +307,8 @@ try:
                 phases=phase_history,
                 wrist_axis_bias_degrees=25,
                 rotated_control_points_checked=rotated_overlay_checked,
-                neutral_abduction_checked=True,
+                absolute_wrist_position_checked=True,
+                wrist_position_errors_m=wrist_position_errors,
                 recorded_alignment_input=bool(alignment_file),
                 bundle_digest=manifest["digest"],
             )

@@ -3,7 +3,10 @@
   "hands": [
     {
       "key": "wuji-1",
-      "sides": ["right", "left"],
+      "sides": [
+        "right",
+        "left"
+      ],
       "palm": "{side}_palm_link",
       "tips": [
         "{side}_finger1_tip_link",
@@ -20,7 +23,10 @@
     },
     {
       "key": "wuji-2",
-      "sides": ["right", "left"],
+      "sides": [
+        "right",
+        "left"
+      ],
       "palm": "{s}_wrist",
       "tips": [
         "{s}_thumb_tip",
@@ -33,11 +39,47 @@
         "right": [-1.5707963267948966, 0.0, 1.5707963267948966],
         "left": [1.5707963267948966, 0.0, -1.5707963267948966]
       },
-      "retargeting_scheme": "dexpilot"
+      "retargeting_scheme": "vector",
+      "retargeting_mode": "finger_segments",
+      "finger_chains": [
+        [
+          "{s}_thumb_proximal_abd",
+          "{s}_thumb_middle",
+          "{s}_thumb_distal",
+          "{s}_thumb_tip"
+        ],
+        [
+          "{s}_index_finger_proximal_abd",
+          "{s}_index_finger_middle",
+          "{s}_index_finger_distal",
+          "{s}_index_finger_tip"
+        ],
+        [
+          "{s}_middle_finger_proximal_abd",
+          "{s}_middle_finger_middle",
+          "{s}_middle_finger_distal",
+          "{s}_middle_finger_tip"
+        ],
+        [
+          "{s}_ring_finger_proximal_abd",
+          "{s}_ring_finger_middle",
+          "{s}_ring_finger_distal",
+          "{s}_ring_finger_tip"
+        ],
+        [
+          "{s}_pinky_proximal_abd",
+          "{s}_pinky_middle",
+          "{s}_pinky_distal",
+          "{s}_pinky_tip"
+        ]
+      ]
     },
     {
       "key": "sharpa",
-      "sides": ["right", "left"],
+      "sides": [
+        "right",
+        "left"
+      ],
       "palm": "{side}_hand_C_MC",
       "tips": [
         "{side}_thumb_fingertip",
@@ -54,7 +96,9 @@
     },
     {
       "key": "allegro-v4",
-      "sides": ["right"],
+      "sides": [
+        "right"
+      ],
       "palm": "palm_link",
       "tips": [
         "link_15.0_tip",
@@ -69,20 +113,40 @@
     },
     {
       "key": "leap-v1",
-      "sides": ["right"],
+      "sides": [
+        "right"
+      ],
       "palm": "palm_lower",
-      "tips": ["thumb_fingertip", "fingertip", "fingertip_2", "fingertip_3"],
+      "tips": [
+        "thumb_fingertip",
+        "fingertip",
+        "fingertip_2",
+        "fingertip_3"
+      ],
       "alignment_rpy": {
-        "right": [2.220446049250313e-16, 0.0, 2.220446049250313e-16]
+        "right": [
+          2.220446049250313e-16,
+          0.0,
+          2.220446049250313e-16
+        ]
       },
       "retargeting_scheme": "dexpilot",
       "collision_neighbor_depth": 3
     },
     {
       "key": "inspire-rh56",
-      "sides": ["right", "left"],
+      "sides": [
+        "right",
+        "left"
+      ],
       "palm": "base",
-      "tips": ["thumb_tip", "index_tip", "middle_tip", "ring_tip", "pinky_tip"],
+      "tips": [
+        "thumb_tip",
+        "index_tip",
+        "middle_tip",
+        "ring_tip",
+        "pinky_tip"
+      ],
       "alignment_rpy": {
         "right": [-0.0, 1.5707963267948966, 0.0],
         "left": [-0.0, 1.5707963267948966, 0.0]

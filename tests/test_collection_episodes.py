@@ -4,7 +4,6 @@ from pathlib import Path
 import pickle
 import sys
 from types import SimpleNamespace
-from enum import Enum
 
 import numpy as np
 import pytest
@@ -68,44 +67,6 @@ def test_alignment_must_remain_continuous_before_auto_start():
     assert gate.update(True, 1.5) == 1
 
 
-def test_finger_calibration_removes_only_spread_bias_and_recalibrates():
-    names = [
-        "wrist",
-        "index_flex",
-        "index_mcp_abd",
-        "middle_mcp_abd",
-        "ring_mcp_abd",
-        "pinky_mcp_abd",
-        "thumb_flex",
-    ]
-    calibration = collection.FingerNeutralCalibration(
-        dict(
-            hand_key="wuji-2",
-            wrist_joints=names[:1],
-            finger_joints=names[1:],
-            neutral={n: 0 for n in names},
-            finger_limits={n: [-0.7, 0.7] for n in names},
-        )
-    )
-    initial = np.array([0.0, 0.4, 0.27, 0.24, 0.10, 0.19, 0.6])
-    receipt = calibration.capture(initial)
-    corrected = initial - calibration.offset
-    np.testing.assert_allclose(corrected, [0, 0.4, 0, 0, 0, 0, 0.6], atol=1e-7)
-    assert len(receipt["joint_offsets"]) == 4
-    moved = initial.copy()
-    moved[2] += 0.1
-    moved[1] += 0.2
-    np.testing.assert_allclose(
-        (moved - calibration.offset)[[1, 2]], [0.6, 0.1], atol=1e-7
-    )
-    calibration.capture(moved)
-    np.testing.assert_allclose(
-        (moved - calibration.offset)[calibration.indices], 0, atol=1e-7
-    )
-    with pytest.raises(ValueError, match="invalid"):
-        calibration.capture([np.nan] * len(names))
-
-
 def test_alignment_explains_the_unmatched_pose_and_allows_size_differences():
     p = human()
     matches, hint, details = collection.alignment_feedback(
@@ -122,70 +83,48 @@ def test_alignment_explains_the_unmatched_pose_and_allows_size_differences():
     )
 
 
-def test_control_points_rotate_and_translate_in_the_robot_control_frame():
-    p = human()
-    rotation = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
-    result = collection.control_points(
-        p, rotation, [1, 2, 3], [0.9, 2.2, 3.3], [0, 0, 0.8]
-    )
-    np.testing.assert_allclose(result[0], [0.1, -0.2, 0.5])
-    np.testing.assert_allclose(result[12] - result[0], rotation @ p[12])
-
-
-def test_blue_overlay_is_hidden_until_recording_and_uses_relative_wrist_rotation():
-    class Rotation:
-        def __init__(self, matrix):
-            self.matrix = matrix
-
-        def inv(self):
-            return Rotation(self.matrix.T)
-
-        def __mul__(self, other):
-            return Rotation(self.matrix @ other.matrix)
-
-        def as_matrix(self):
-            return self.matrix
-
-    class Hand(Enum):
-        HAND_RIGHT = 1
-
+def test_blue_points_show_actual_robot_joints_and_hide_outside_recording():
     class Marker:
         def set_visibility(self, visible):
             self.visible = visible
 
         def visualize(self, translations):
-            self.points = translations
+            self.points = translations.copy()
 
-    hand = Hand.HAND_RIGHT
-    turn = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
-    base = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
-    r = SimpleNamespace(
-        _canonical_markers=Marker(),
-        _wrist_markers=Marker(),
-        latest_wrist_poses={hand: np.r_[[0.2, 0.3, 0.4], [0, 0, 0, 1]]},
-        retarget_base_wrist_poses={hand: np.r_[[0.1, 0.2, 0.3], [1, 0, 0, 0]]},
-        _convert_hand_to_canonical_joint_positions=lambda data, hand: human(),
-        _get_normalized_wrist_rotation=lambda q: Rotation(
-            base if q[0] == 1 else turn @ base
-        ),
-    )
+    r = SimpleNamespace(_canonical_markers=Marker(), _wrist_markers=Marker())
+    positions = np.array([[0.2, 0.3, 0.8], [0.4, 0.2, 0.85]])
     recording = False
-    collection.install_control_point_display(
-        r, {"right": np.array([0, 0, 0.8])}, lambda: recording
-    )
-    r._visualize_canonical_hand_keypoints({hand: {}})
+    collection.install_robot_point_display(r, lambda: positions, lambda: recording)
+    r._visualize_canonical_hand_keypoints({})
     assert not r._canonical_markers.visible and not r._wrist_markers.visible
     recording = True
-    r._visualize_canonical_hand_keypoints({hand: {}})
-    assert r._canonical_markers.visible
-    np.testing.assert_allclose(
-        r._canonical_markers.points,
-        human() @ turn.T + [0.1, 0.1, 0.9],
-        atol=1e-6,
-    )
+    r._visualize_canonical_hand_keypoints({})
+    np.testing.assert_array_equal(r._canonical_markers.points, positions)
+    positions[1] += [0.02, 0.03, -0.01]
+    r._visualize_canonical_hand_keypoints({})
+    np.testing.assert_array_equal(r._canonical_markers.points, positions)
     recording = False
-    r._visualize_canonical_hand_keypoints({hand: {}})
+    r._visualize_canonical_hand_keypoints({})
     assert not r._canonical_markers.visible
+
+
+def test_segment_targets_preserve_direction_without_matching_human_bone_lengths():
+    from anatomy import segment_targets
+
+    p = human()
+    indices = np.array([[5, 6, 7], [6, 7, 8]])
+    lengths = np.array([0.04, 0.03, 0.02])
+    a = segment_targets(p, indices, lengths)
+    b = segment_targets(p * 1.7, indices, lengths)
+    np.testing.assert_allclose(a, b)
+    np.testing.assert_allclose(np.linalg.norm(a, axis=1), lengths)
+    p[7] = p[6] + [0.02, 0, -0.02]
+    p[8] = p[7] + [0, 0, -0.02]
+    c = segment_targets(p, indices, lengths)
+    np.testing.assert_allclose(c[2], [0, 0, -0.02])
+    p[8] = p[7]
+    with pytest.raises(ValueError, match="invalid"):
+        segment_targets(p, indices, lengths)
 
 
 def test_multiple_episodes_are_saved_independently_and_never_overwritten(tmp_path):

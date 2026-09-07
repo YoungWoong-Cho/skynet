@@ -445,7 +445,7 @@ index 9c472c8..df9c10a 100644
          }
      }
 diff --git a/IsaacXRTeleopClient/TeleopControlView.swift b/IsaacXRTeleopClient/TeleopControlView.swift
-index 702ea6d..ea0efdc 100644
+index 702ea6d..52d457f 100644
 --- a/IsaacXRTeleopClient/TeleopControlView.swift
 +++ b/IsaacXRTeleopClient/TeleopControlView.swift
 @@ -8,148 +8,52 @@
@@ -526,7 +526,7 @@ index 702ea6d..ea0efdc 100644
 -                    }
 -                    .frame(width: viewModel.teleopButtonWidth)
 +                Label {
-+                    Text("Hand points for robot control")
++                    Text("Robot hand joints")
 +                } icon: {
 +                    Circle().fill(.cyan).frame(width: 8, height: 8)
                  }

@@ -262,6 +262,33 @@ def build(robot, library=None, output_root=None):
                 low_pass_alpha=0.8,
                 ignore_mimic_joint=False,
             )
+        if spec.get("retargeting_mode") == "finger_segments":
+            chains = [
+                [name.format(side=spec["side"], s=spec["side"][0]) for name in chain]
+                for chain in spec["finger_chains"]
+            ]
+            if len(chains) != 5 or any(
+                len(chain) != 4
+                or any(n not in source_links for n in chain)
+                or chain[-1] != spec["tips"][i]
+                for i, chain in enumerate(chains)
+            ):
+                raise ValueError(
+                    "Finger-segment mapping does not match the stored hand links"
+                )
+            retarget.update(
+                normal_delta=0.0001,
+                target_origin_link_names=[
+                    mapping[n] for chain in chains for n in chain[:-1]
+                ],
+                target_task_link_names=[
+                    mapping[n] for chain in chains for n in chain[1:]
+                ],
+                target_link_human_indices=[
+                    [1 + 4 * f + j for f in range(5) for j in range(3)],
+                    [2 + 4 * f + j for f in range(5) for j in range(3)],
+                ],
+            )
         neutral = {
             mapping[j["name"]]: min(j["upper"], max(j["lower"], 0.0))
             for j in original_joints
@@ -327,11 +354,17 @@ def build(robot, library=None, output_root=None):
                 side=spec["side"],
                 collision_neighbor_depth=spec.get("collision_neighbor_depth", 2),
                 retargeting_scheme=spec["retargeting_scheme"],
+                retargeting_mode=spec.get("retargeting_mode", "fingertips"),
                 source_revision=spec["revision"],
                 name=spec["name"],
                 palm=mapping[original_root],
                 tips=[mapping[n] for n in spec["tips"]],
                 finger_joints=finger_names,
+                joint_child_links={
+                    j.get("name"): j.find("child").get("link")
+                    for j in xml.findall("joint")
+                    if j.get("name") in finger_names
+                },
                 wrist_joints=WRIST_JOINTS,
                 neutral=neutral,
                 action_dimension=6 + len(finger_names),
