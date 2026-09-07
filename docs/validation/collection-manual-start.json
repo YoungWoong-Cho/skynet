@@ -1,6 +1,19 @@
 {
   "date": "2026-09-07",
-  "headset_visual_confirmation": false,
+  "headset_visual_confirmation": true,
+  "headset_feedback": "User confirmed manual Start and head-following instructions work; requested the label closer to the center.",
+  "real_session": {
+    "id": "7826a25c-2bdd-4d77-92c7-30793972c6cf",
+    "episodes_saved": 2,
+    "steps": 325,
+    "ended_cleanly": true
+  },
+  "lowered_instruction_update": {
+    "position_m": [0, 0.12, -0.9],
+    "build": "passed",
+    "installed_at": "2026-09-07T16:12:26-04:00",
+    "headset_position_confirmation": false
+  },
   "scope": "Manual Start, visible human/robot markers before recording, repeated episodes, and a head-following native instruction label",
   "checks": {
     "python_tests_passed": 371,
