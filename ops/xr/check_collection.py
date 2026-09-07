@@ -92,6 +92,18 @@ try:
         human,
         atol=1e-6,
     )
+    drawn_points = None
+    draw = retargeter._canonical_markers.visualize
+
+    def observe_points(**kwargs):
+        global drawn_points
+        drawn_points = kwargs["translations"].copy()
+        draw(**kwargs)
+
+    retargeter._canonical_markers.visualize = observe_points
+    wrist_motion = Rotation.from_euler("XYZ", [0.2, -0.15, 0.25])
+    displacement = np.array([0.03, -0.02, 0.05])
+    rotated_overlay_checked = False
 
     class Bus:
         def create_subscription_to_pop_by_type(self, event, callback):
@@ -122,6 +134,7 @@ try:
 
         def advance(self):
             global dropout, dropped_once, dropout_since, brief_once, dropout_duration
+            global rotated_overlay_checked
             status = json.loads((output / "collection-status.json").read_text())
             if steps == 5 and not dropped_once:
                 dropout, dropped_once, dropout_since = True, True, time.monotonic()
@@ -145,7 +158,27 @@ try:
                 raise TimeoutError(
                     "Automatic collection failed to complete two synthetic episodes"
                 )
-            return retargeter.retarget(self._get_raw_data())
+            moving = status["phase"] == "recording"
+            rotation = wrist_motion if moving else Rotation.identity()
+            position = neutral_wrist + (displacement if moving else 0)
+            current_quat = (
+                rotation * Rotation.from_quat(quat[[1, 2, 3, 0]])
+            ).as_quat()[[3, 0, 1, 2]]
+            for i, name in enumerate(DEX_RETARGETING_HAND_JOINT_NAMES):
+                raw[name] = np.r_[rotation.apply(human[i]) + position, current_quat]
+            action = retargeter.retarget(self._get_raw_data())
+            if moving:
+                np.testing.assert_allclose(
+                    drawn_points, wrist_motion.apply(human) + position, atol=1e-5
+                )
+                np.testing.assert_allclose(
+                    action[:3].cpu().numpy(), displacement, atol=1e-5
+                )
+                np.testing.assert_allclose(
+                    action[3:6].cpu().numpy(), [0.2, -0.15, 0.25], atol=1e-5
+                )
+                rotated_overlay_checked = True
+            return action
 
         def reset(self):
             pass
@@ -183,6 +216,9 @@ try:
         pose_validity=SimpleNamespace(POSITION_VALID=2, POSITION_TRACKED=8),
     )
     assert result == 2
+    assert rotated_overlay_checked, (
+        "Wrist rotation and displayed control points were not exercised"
+    )
     assert brief_once, "Brief tracking dropout was not exercised"
     receipts = json.loads((output / "episodes.json").read_text())
     assert len(receipts) == 2 and all(r["steps"] == 20 for r in receipts)
@@ -202,6 +238,7 @@ try:
                 steps=steps,
                 phases=phase_history,
                 wrist_axis_bias_degrees=25,
+                rotated_control_points_checked=rotated_overlay_checked,
                 bundle_digest=manifest["digest"],
             )
         ),

@@ -101,17 +101,35 @@ class AlignmentGate:
         return min(1.0, max(0.0, (now - self.since) / self.duration))
 
 
-def aligned_hand(points, side, target):
+def alignment_feedback(points, side, target):
     from anatomy import palm_frame
 
     p = np.asarray(points)
     frame = palm_frame(p, side)
-    if np.linalg.norm(p[0] - target) > 0.08:
-        return False
-    if frame[0, 0] < math.cos(math.radians(20)) or frame[2, 2] < math.cos(
-        math.radians(25)
-    ):
-        return False
+    distance = float(np.linalg.norm(p[0] - target))
+    forward = math.degrees(math.acos(float(np.clip(frame[0, 0], -1, 1))))
+    palm = math.degrees(math.acos(float(np.clip(frame[2, 2], -1, 1))))
+    details = dict(
+        distance_cm=round(distance * 100),
+        forward_degrees=round(forward),
+        palm_degrees=round(palm),
+    )
+    # Calibration handles small anatomical and robot-size differences; do not
+    # require every human point to overlap the robot's differently sized hand.
+    if distance > 0.12:
+        return (
+            False,
+            f"Move your wrist closer to the robot wrist ({round(distance * 100)} cm away)",
+            details,
+        )
+    if palm > 40:
+        return False, "Turn your palm down to match the robot hand", details
+    if forward > 35:
+        return (
+            False,
+            "Point your fingers in the same direction as the robot fingers",
+            details,
+        )
     # Check extension without requiring the human to match robot finger lengths.
     for base, tip in ((5, 8), (9, 12), (13, 16), (17, 20)):
         vector = p[tip] - p[base]
@@ -119,8 +137,58 @@ def aligned_hand(points, side, target):
             np.linalg.norm(vector) < 0.025
             or np.dot(vector, frame[:, 0]) / np.linalg.norm(vector) < 0.75
         ):
-            return False
-    return True
+            return False, "Open your fingers to match the robot hand", details
+    return True, "Hold still…", details
+
+
+def aligned_hand(points, side, target):
+    return alignment_feedback(points, side, target)[0]
+
+
+def control_points(local_points, rotation, wrist, base_wrist, robot_wrist):
+    """Place normalized finger targets at the robot's calibrated control pose."""
+    return np.asarray(local_points) @ np.asarray(rotation).T + (
+        np.asarray(robot_wrist) + np.asarray(wrist) - np.asarray(base_wrist)
+    )
+
+
+def install_control_point_display(retargeter, targets, is_recording):
+    """Draw finger targets in the commanded wrist frame, never in normalized axes."""
+
+    def visualize(hand_data_by_target):
+        marker = retargeter._canonical_markers
+        marker.set_visibility(False)
+        if not is_recording():
+            return  # The stationary robot mesh is the alignment reference.
+        result = []
+        for hand, hand_data in hand_data_by_target.items():
+            side = "right" if hand.name == "HAND_RIGHT" else "left"
+            wrist = retargeter.latest_wrist_poses.get(hand)
+            base = retargeter.retarget_base_wrist_poses.get(hand)
+            if wrist is None or base is None or side not in targets:
+                continue
+            canonical = retargeter._convert_hand_to_canonical_joint_positions(
+                hand_data, hand
+            )
+            if canonical is None:
+                continue
+            rotation = (
+                retargeter._get_normalized_wrist_rotation(wrist[3:])
+                * retargeter._get_normalized_wrist_rotation(base[3:]).inv()
+            )
+            result.append(
+                control_points(
+                    canonical, rotation.as_matrix(), wrist[:3], base[:3], targets[side]
+                )
+            )
+        if result:
+            marker.visualize(translations=np.concatenate(result).astype(np.float32))
+            marker.set_visibility(True)
+
+    retargeter._visualize_canonical_hand_keypoints = visualize
+    retargeter._visualize_wrist_poses = lambda: None
+    retargeter._wrist_markers.set_visibility(False)
+    retargeter._canonical_markers.set_visibility(False)
 
 
 def run_loop(
@@ -161,6 +229,9 @@ def run_loop(
     previous_positions, previous_sample = {}, 0.0
     tracked_sides = ["left", "right"] if cfg["hand"] == "both" else [cfg["hand"]]
     targets = {}
+    alignment_details = {}
+    for retargeter in teleop._retargeters:
+        install_control_point_display(retargeter, targets, lambda: phase == "recording")
     raw_data = {}
     get_raw = teleop._get_raw_data
 
@@ -187,6 +258,7 @@ def run_loop(
                 saved=len(store.receipts),
                 episode=len(store.receipts) + 1,
                 alignment=progress,
+                alignment_check=alignment_details,
                 control_alive=now - heartbeat < 2.0,
                 updated_at=time.time(),
                 session_id=os.environ.get("SKYNET_LIVE_SESSION_ID", ""),
@@ -229,11 +301,18 @@ def run_loop(
     )
 
     def reset():
-        nonlocal phase, instruction, success_count, progress, previous_positions
+        nonlocal \
+            phase, \
+            instruction, \
+            success_count, \
+            progress, \
+            previous_positions, \
+            alignment_details
         recorder.discard_episode()
         ns["handle_reset"](env)
         teleop.reset()
         success_count, progress, previous_positions = 0, 0.0, {}
+        alignment_details = {}
         gate.update(False, time.monotonic())
         robot = env.scene["robot"]
         for side in tracked_sides:
@@ -351,24 +430,29 @@ def run_loop(
                         )
                 if phase == "aligning":
                     aligned = tracking
+                    hint = "Align your red hand points with the robot hand"
                     if points:
                         try:
                             for side, p in points.items():
-                                aligned = aligned and aligned_hand(
+                                matches, hand_hint, details = alignment_feedback(
                                     p, side, targets[side]
                                 )
+                                alignment_details[side] = details
+                                if not matches:
+                                    hint = hand_hint
+                                aligned = aligned and matches
                                 if side in previous_positions and now > previous_sample:
-                                    aligned = (
-                                        aligned
-                                        and np.linalg.norm(
-                                            p[0] - previous_positions[side]
-                                        )
-                                        / (now - previous_sample)
-                                        < 0.08
-                                    )
+                                    speed = np.linalg.norm(
+                                        p[0] - previous_positions[side]
+                                    ) / (now - previous_sample)
+                                    details["speed_cm_s"] = round(float(speed) * 100)
+                                    if matches and speed >= 0.12:
+                                        hint = "Hold your hand still to start"
+                                    aligned = aligned and speed < 0.12
                                 previous_positions[side] = p[0].copy()
-                        except ValueError:
+                        except ValueError as exc:
                             aligned = False
+                            hint = str(exc)
                     previous_sample = now
                     progress = gate.update(aligned, now)
                     if not connected_once:
@@ -378,7 +462,7 @@ def run_loop(
                     elif progress > 0:
                         instruction = "Hold still…"
                     else:
-                        instruction = "Align the hand with the robot hand"
+                        instruction = hint
                     if progress >= 1:
                         for retargeter in teleop._retargeters:
                             retargeter.calibrate_wrist_pose()

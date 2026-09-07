@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 import pickle
 import sys
+from types import SimpleNamespace
+from enum import Enum
 
 import numpy as np
 import pytest
@@ -64,6 +66,88 @@ def test_alignment_must_remain_continuous_before_auto_start():
     assert gate.update(False, 0.5) == 0
     assert gate.update(True, 0.6) == 0
     assert gate.update(True, 1.5) == 1
+
+
+def test_alignment_explains_the_unmatched_pose_and_allows_size_differences():
+    p = human()
+    matches, hint, details = collection.alignment_feedback(
+        p + [0.25, 0, 0], "right", np.zeros(3)
+    )
+    assert not matches and "25 cm away" in hint and details["distance_cm"] == 25
+    assert collection.aligned_hand(p + [0.10, 0, 0], "right", np.zeros(3))
+    tilted = p @ np.diag([1, -1, -1])
+    assert "palm down" in collection.alignment_feedback(tilted, "right", np.zeros(3))[1]
+    sideways = p @ np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
+    assert (
+        "same direction"
+        in collection.alignment_feedback(sideways, "right", np.zeros(3))[1]
+    )
+
+
+def test_control_points_rotate_and_translate_in_the_robot_control_frame():
+    p = human()
+    rotation = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
+    result = collection.control_points(
+        p, rotation, [1, 2, 3], [0.9, 2.2, 3.3], [0, 0, 0.8]
+    )
+    np.testing.assert_allclose(result[0], [0.1, -0.2, 0.5])
+    np.testing.assert_allclose(result[12] - result[0], rotation @ p[12])
+
+
+def test_blue_overlay_is_hidden_until_recording_and_uses_relative_wrist_rotation():
+    class Rotation:
+        def __init__(self, matrix):
+            self.matrix = matrix
+
+        def inv(self):
+            return Rotation(self.matrix.T)
+
+        def __mul__(self, other):
+            return Rotation(self.matrix @ other.matrix)
+
+        def as_matrix(self):
+            return self.matrix
+
+    class Hand(Enum):
+        HAND_RIGHT = 1
+
+    class Marker:
+        def set_visibility(self, visible):
+            self.visible = visible
+
+        def visualize(self, translations):
+            self.points = translations
+
+    hand = Hand.HAND_RIGHT
+    turn = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
+    base = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
+    r = SimpleNamespace(
+        _canonical_markers=Marker(),
+        _wrist_markers=Marker(),
+        latest_wrist_poses={hand: np.r_[[0.2, 0.3, 0.4], [0, 0, 0, 1]]},
+        retarget_base_wrist_poses={hand: np.r_[[0.1, 0.2, 0.3], [1, 0, 0, 0]]},
+        _convert_hand_to_canonical_joint_positions=lambda data, hand: human(),
+        _get_normalized_wrist_rotation=lambda q: Rotation(
+            base if q[0] == 1 else turn @ base
+        ),
+    )
+    recording = False
+    collection.install_control_point_display(
+        r, {"right": np.array([0, 0, 0.8])}, lambda: recording
+    )
+    r._visualize_canonical_hand_keypoints({hand: {}})
+    assert not r._canonical_markers.visible and not r._wrist_markers.visible
+    recording = True
+    r._visualize_canonical_hand_keypoints({hand: {}})
+    assert r._canonical_markers.visible
+    np.testing.assert_allclose(
+        r._canonical_markers.points,
+        human() @ turn.T + [0.1, 0.1, 0.9],
+        atol=1e-6,
+    )
+    recording = False
+    r._visualize_canonical_hand_keypoints({hand: {}})
+    assert not r._canonical_markers.visible
 
 
 def test_multiple_episodes_are_saved_independently_and_never_overwritten(tmp_path):
