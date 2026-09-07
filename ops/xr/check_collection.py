@@ -2,6 +2,7 @@
 
 import json
 import os
+import pickle
 from pathlib import Path
 import runpy
 import sys
@@ -9,6 +10,7 @@ import time
 from types import SimpleNamespace
 
 bundle, output = map(Path, sys.argv[1:3])
+alignment_file = Path(sys.argv[3]) if len(sys.argv) > 3 else None
 manifest = json.loads((bundle / "manifest.json").read_text())
 sys.path.insert(0, str(bundle))
 sys.argv = [
@@ -70,6 +72,12 @@ try:
     for f, y in enumerate([0.075, 0.03, 0, -0.025, -0.05]):
         for j in range(4):
             human[1 + 4 * f + j] = [0.065 + j * 0.03, y, 0]
+    if alignment_file:
+        from anatomy import canonical_points
+
+        human = canonical_points(
+            json.loads(alignment_file.read_text()), manifest["side"]
+        )
     normalization = Rotation.from_euler("y", 90, degrees=True) * Rotation.from_euler(
         "x", -90, degrees=True
     )
@@ -124,6 +132,7 @@ try:
     started = time.monotonic()
     dropout, dropped_once, dropout_since = False, False, 0.0
     brief_once, dropout_duration = False, 1.0
+    last_phase, attempt_start_step = None, 0
 
     class Teleop:
         _xr_core = XR()
@@ -135,6 +144,7 @@ try:
         def advance(self):
             global dropout, dropped_once, dropout_since, brief_once, dropout_duration
             global rotated_overlay_checked
+            global last_phase, attempt_start_step
             status = json.loads((output / "collection-status.json").read_text())
             if steps == 5 and not dropped_once:
                 dropout, dropped_once, dropout_since = True, True, time.monotonic()
@@ -159,17 +169,25 @@ try:
                     "Automatic collection failed to complete two synthetic episodes"
                 )
             moving = status["phase"] == "recording"
+            if moving and last_phase != "recording":
+                attempt_start_step = steps
+            last_phase = status["phase"]
+            fingers = human.copy()
+            if moving and steps - attempt_start_step > 3:
+                fingers[6:9, 1] += (
+                    0.015  # Deliberate index spread must survive neutral calibration.
+                )
             rotation = wrist_motion if moving else Rotation.identity()
             position = neutral_wrist + (displacement if moving else 0)
             current_quat = (
                 rotation * Rotation.from_quat(quat[[1, 2, 3, 0]])
             ).as_quat()[[3, 0, 1, 2]]
             for i, name in enumerate(DEX_RETARGETING_HAND_JOINT_NAMES):
-                raw[name] = np.r_[rotation.apply(human[i]) + position, current_quat]
+                raw[name] = np.r_[rotation.apply(fingers[i]) + position, current_quat]
             action = retargeter.retarget(self._get_raw_data())
             if moving:
                 np.testing.assert_allclose(
-                    drawn_points, wrist_motion.apply(human) + position, atol=1e-5
+                    drawn_points, wrist_motion.apply(fingers) + position, atol=1e-5
                 )
                 np.testing.assert_allclose(
                     action[:3].cpu().numpy(), displacement, atol=1e-5
@@ -222,6 +240,17 @@ try:
     assert brief_once, "Brief tracking dropout was not exercised"
     receipts = json.loads((output / "episodes.json").read_text())
     assert len(receipts) == 2 and all(r["steps"] == 20 for r in receipts)
+    calibration = collection_runtime.FingerNeutralCalibration(manifest)
+    for receipt in receipts:
+        episode = pickle.loads((output / receipt["path"]).read_bytes())["episodes"][0]
+        np.testing.assert_allclose(
+            episode["actions"][0, calibration.indices], calibration.neutral, atol=0.015
+        )
+        assert "skynet_finger_calibration" in episode
+    first = pickle.loads((output / receipts[0]["path"]).read_bytes())["episodes"][0]
+    assert np.max(np.abs(first["actions"][:, calibration.indices])) > 0.03, (
+        "Finger spread was frozen instead of calibrated"
+    )
     assert (
         json.loads((output / "collection-status.json").read_text())["phase"] == "ended"
     )
@@ -239,6 +268,8 @@ try:
                 phases=phase_history,
                 wrist_axis_bias_degrees=25,
                 rotated_control_points_checked=rotated_overlay_checked,
+                neutral_abduction_checked=True,
+                recorded_alignment_input=bool(alignment_file),
                 bundle_digest=manifest["digest"],
             )
         ),

@@ -68,6 +68,44 @@ def test_alignment_must_remain_continuous_before_auto_start():
     assert gate.update(True, 1.5) == 1
 
 
+def test_finger_calibration_removes_only_spread_bias_and_recalibrates():
+    names = [
+        "wrist",
+        "index_flex",
+        "index_mcp_abd",
+        "middle_mcp_abd",
+        "ring_mcp_abd",
+        "pinky_mcp_abd",
+        "thumb_flex",
+    ]
+    calibration = collection.FingerNeutralCalibration(
+        dict(
+            hand_key="wuji-2",
+            wrist_joints=names[:1],
+            finger_joints=names[1:],
+            neutral={n: 0 for n in names},
+            finger_limits={n: [-0.7, 0.7] for n in names},
+        )
+    )
+    initial = np.array([0.0, 0.4, 0.27, 0.24, 0.10, 0.19, 0.6])
+    receipt = calibration.capture(initial)
+    corrected = initial - calibration.offset
+    np.testing.assert_allclose(corrected, [0, 0.4, 0, 0, 0, 0, 0.6], atol=1e-7)
+    assert len(receipt["joint_offsets"]) == 4
+    moved = initial.copy()
+    moved[2] += 0.1
+    moved[1] += 0.2
+    np.testing.assert_allclose(
+        (moved - calibration.offset)[[1, 2]], [0.6, 0.1], atol=1e-7
+    )
+    calibration.capture(moved)
+    np.testing.assert_allclose(
+        (moved - calibration.offset)[calibration.indices], 0, atol=1e-7
+    )
+    with pytest.raises(ValueError, match="invalid"):
+        calibration.capture([np.nan] * len(names))
+
+
 def test_alignment_explains_the_unmatched_pose_and_allows_size_differences():
     p = human()
     matches, hint, details = collection.alignment_feedback(

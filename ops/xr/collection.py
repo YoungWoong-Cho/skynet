@@ -101,6 +101,30 @@ class AlignmentGate:
         return min(1.0, max(0.0, (now - self.since) / self.duration))
 
 
+class FingerNeutralCalibration:
+    """Calibrate human/robot palm-proportion bias in WUJI 2 spread joints only."""
+
+    def __init__(self, manifest):
+        self.names = manifest["wrist_joints"] + manifest["finger_joints"]
+        self.joints = [n for n in self.names if n.endswith("_mcp_abd")]
+        if manifest["hand_key"] != "wuji-2" or len(self.joints) != 4:
+            raise ValueError("WUJI 2 calibration requires four MCP abduction joints")
+        self.indices = [self.names.index(n) for n in self.joints]
+        self.neutral = np.asarray([manifest["neutral"][n] for n in self.joints])
+        self.limits = np.asarray([manifest["finger_limits"][n] for n in self.joints])
+        self.offset = np.zeros(len(self.names), dtype=np.float32)
+
+    def capture(self, action):
+        action = np.asarray(action)
+        if action.shape != self.offset.shape or not np.isfinite(action).all():
+            raise ValueError("Cannot calibrate invalid finger commands")
+        self.offset[self.indices] = action[self.indices] - self.neutral
+        return dict(
+            method="relative_mcp_abduction",
+            joint_offsets=dict(zip(self.joints, self.offset[self.indices].tolist())),
+        )
+
+
 def alignment_feedback(points, side, target):
     from anatomy import palm_frame
 
@@ -234,6 +258,16 @@ def run_loop(
         install_control_point_display(retargeter, targets, lambda: phase == "recording")
     raw_data = {}
     get_raw = teleop._get_raw_data
+    manifest = cfg.get("hand_manifest", {})
+    finger_calibration = (
+        FingerNeutralCalibration(manifest)
+        if manifest.get("hand_key") == "wuji-2"
+        else None
+    )
+    finger_offset = None
+    finger_limits = None
+    if finger_calibration:
+        finger_indices = finger_calibration.indices
 
     def capture_raw():
         nonlocal raw_data
@@ -301,6 +335,7 @@ def run_loop(
     )
 
     def reset():
+        nonlocal finger_offset
         nonlocal \
             phase, \
             instruction, \
@@ -313,6 +348,7 @@ def run_loop(
         teleop.reset()
         success_count, progress, previous_positions = 0, 0.0, {}
         alignment_details = {}
+        finger_offset = None
         gate.update(False, time.monotonic())
         robot = env.scene["robot"]
         for side in tracked_sides:
@@ -482,11 +518,32 @@ def run_loop(
                         recorder._active_episode["skynet_alignment"] = {
                             s: p.tolist() for s, p in points.items()
                         }
+                        if finger_calibration:
+                            recorder._active_episode["skynet_finger_calibration"] = (
+                                finger_calibration.capture(
+                                    action.detach().cpu().numpy()
+                                )
+                            )
+                            finger_offset = torch.as_tensor(
+                                finger_calibration.offset.copy(),
+                                device=action.device,
+                                dtype=action.dtype,
+                            )
+                            finger_limits = torch.as_tensor(
+                                finger_calibration.limits,
+                                device=action.device,
+                                dtype=action.dtype,
+                            )
                         phase, instruction = "recording", goal
                         publish(True)
                         continue  # Recompute actions after wrist calibration before stepping physics.
                     env.sim.render()
                 elif phase == "recording":
+                    if finger_offset is not None:
+                        action = action - finger_offset
+                        action[finger_indices] = action[finger_indices].clamp(
+                            finger_limits[:, 0], finger_limits[:, 1]
+                        )
                     if not torch.isfinite(action).all():
                         raise ValueError(
                             "Hand tracking produced an invalid robot action"
