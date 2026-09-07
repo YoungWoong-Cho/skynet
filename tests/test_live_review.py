@@ -121,8 +121,15 @@ def test_interrupted_and_failed_downloads_can_retry(review):
     service.publish(directory, state="DOWNLOADING")
     assert service.status("session")["state"] == "FAILED"
     job["state"] = "AWAITING_HEADSET"
+    job["recordings"] = []
     with pytest.raises(ValueError, match="after a successful"):
         service.create("session")
+
+
+def test_saved_episode_can_be_reviewed_while_collection_continues(review):
+    service, job, _ = review
+    job["state"] = "COLLECTING"
+    assert service.source("session", 0)[0]["state"] == "COLLECTING"
 
 
 def test_checksum_mismatch_does_not_publish_download(review):

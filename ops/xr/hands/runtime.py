@@ -205,16 +205,26 @@ def install(directory):
             ),
         )
 
-    # Shadow's ±15° fingertip correction is not a calibration for imported URDFs.
-    # Keep all imported human references in the same palm-down frame as the model.
+    # A headset's wrist axes need not follow the middle finger. Derive the
+    # imported hand's finger frame from the knuckles to avoid a shared yaw bias.
     original_canonical = (
         retargeting.SimpleRelativeRetargeter._convert_hand_to_canonical_joint_positions
     )
 
     def canonical(self, hand_data, hand=None):
-        return original_canonical(
-            self, hand_data, None if self.cfg.robot_type == m["robot"] else hand
-        )
+        if self.cfg.robot_type != m["robot"]:
+            return original_canonical(self, hand_data, hand)
+        import numpy as np
+        from anatomy import canonical_points
+
+        names = retargeting.DEX_RETARGETING_HAND_JOINT_NAMES
+        if not isinstance(hand_data, dict) or any(n not in hand_data for n in names):
+            return None
+        points = np.asarray([hand_data[n][:3] for n in names])
+        try:
+            return canonical_points(points, m["side"])
+        except ValueError:
+            return None  # The collection alignment gate prevents invalid tracking from recording.
 
     retargeting.SimpleRelativeRetargeter._convert_hand_to_canonical_joint_positions = (
         canonical

@@ -159,7 +159,7 @@ def build(robot, library=None, output_root=None):
     raw = (directory / "model.urdf").read_bytes()
     runtime_files = {
         name: (ROOT / "ops/xr/hands" / name).read_bytes()
-        for name in ("runtime.py", "record.py")
+        for name in ("runtime.py", "record.py", "anatomy.py")
     }
     recipe = dict(
         spec=spec,

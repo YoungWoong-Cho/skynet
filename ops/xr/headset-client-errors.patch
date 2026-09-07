@@ -1,20 +1,160 @@
 diff --git a/IsaacXRTeleopClient/AppModel.swift b/IsaacXRTeleopClient/AppModel.swift
-index 6f14fa0..d6cf323 100644
+index 6f14fa0..01eb853 100644
 --- a/IsaacXRTeleopClient/AppModel.swift
 +++ b/IsaacXRTeleopClient/AppModel.swift
-@@ -50,6 +50,7 @@ class AppModel {
+@@ -8,11 +8,24 @@
+ // without an express license agreement from NVIDIA CORPORATION or
+ // its affiliates is strictly prohibited.
+ 
+-import RealityKit
+-import Foundation
++import ARKit
+ import CloudXRKit
++import Foundation
++import RealityKit
+ import SwiftUI
+-import ARKit
++
++struct CollectionStatus: Decodable {
++    let schema: String
++    let phase: String
++    let instruction: String
++    let goal: String
++    let saved: Int
++    let episode: Int
++    let alignment: Double
++    let updated_at: Double
++    let session_id: String
++    let control_alive: Bool?
++}
+ 
+ @Observable
+ class AppModel {
+@@ -49,7 +62,109 @@ class AppModel {
+ 
      var immersiveSpaceIsOpen: Bool = false
  
-     var teleopRunning: Bool = false
+-    var teleopRunning: Bool = false
 +    var connectionError: String?
++    var collection: CollectionStatus?
++    var endingCollection = false
++
++    var collectionInstruction: String {
++        if endingCollection { return "Ending collection…" }
++        return collection?.instruction ?? "Waiting for collection instructions…"
++    }
++
++    func sendCollectionCommand(_ command: String) {
++        let message = ClientToServerCommand(
++            type: "skynet_collection_command", message: ["command": command])
++        do {
++            cxrSession.sendServerMessage(try JSONEncoder().encode(message))
++            if command == "end" { endingCollection = true }
++        } catch {
++            connectionError = "Could not send collection command: \(error.localizedDescription)"
++        }
++    }
++
++    @MainActor
++    func watchCollection() async {
++        guard cxrSession.state == .connected else { return }
++        var endpoint = URLComponents()
++        endpoint.scheme = "http"
++        endpoint.host = ipAddress
++        endpoint.port = 48011
++        endpoint.path = "/collection"
++        guard let url = endpoint.url else {
++            connectionError = "Invalid collection server address."
++            return
++        }
++        var failures = 0
++        var unacknowledged = 0
++        while !Task.isCancelled && cxrSession.state == .connected {
++            do {
++                var request = URLRequest(
++                    url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 2)
++                request.httpMethod = "GET"
++                let (data, response) = try await URLSession.shared.data(for: request)
++                guard !Task.isCancelled else { return }
++                guard let response = response as? HTTPURLResponse, response.statusCode == 200,
++                    data.count <= 8192
++                else {
++                    throw NSError(
++                        domain: "Collection", code: 1,
++                        userInfo: [
++                            NSLocalizedDescriptionKey:
++                                "The server did not provide collection status."
++                        ])
++                }
++                let status = try JSONDecoder().decode(CollectionStatus.self, from: data)
++                guard status.schema == "skynet.collection/v1",
++                    ["aligning", "recording", "saving", "interrupted", "ended", "error"].contains(
++                        status.phase),
++                    abs(Date().timeIntervalSince1970 - status.updated_at) < 8
++                else {
++                    throw NSError(
++                        domain: "Collection", code: 2,
++                        userInfo: [
++                            NSLocalizedDescriptionKey:
++                                "The simulator stopped updating collection status."
++                        ])
++                }
++                collection = status
++                failures = 0
++                unacknowledged = status.control_alive == true ? 0 : unacknowledged + 1
++                if status.phase == "ended" {
++                    endingCollection = false
++                    return
++                }
++                if status.phase == "error" {
++                    await reportCollectionError(status.instruction)
++                    return
++                }
++                if unacknowledged >= 12 && status.phase != "ended" {
++                    await reportCollectionError(
++                        "Headset controls are not reaching the simulator. Reconnect to the current live session."
++                    )
++                    return
++                }
++                sendCollectionCommand("heartbeat")
++                if endingCollection { sendCollectionCommand("end") }
++            } catch {
++                if Task.isCancelled { return }
++                failures += 1
++                if failures >= 3 {
++                    await reportCollectionError(
++                        "Collection status is unavailable from \(ipAddress):48011. \(error.localizedDescription)"
++                    )
++                    return
++                }
++            }
++            try? await Task.sleep(for: .milliseconds(250))
++        }
++    }
++
++    @MainActor
++    private func reportCollectionError(_ message: String) async {
++        if immersiveSpaceIsOpen { await dismissImmersiveSpace() }
++        cxrSession.disconnect()
++        connectionError = message
++    }
  
      var ipAddress = savedSettings.ipAddress {
          didSet {
 diff --git a/IsaacXRTeleopClient/Info.plist b/IsaacXRTeleopClient/Info.plist
-index dd1c889..0cde537 100644
+index dd1c889..a7aaeed 100644
 --- a/IsaacXRTeleopClient/Info.plist
 +++ b/IsaacXRTeleopClient/Info.plist
-@@ -6,6 +6,10 @@
+@@ -2,10 +2,19 @@
+ <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+ <plist version="1.0">
+ <dict>
++    <key>NSAppTransportSecurity</key>
++    <dict>
++        <key>NSAllowsLocalNetworking</key>
++        <true/>
++    </dict>
+ 	<key>CFBundleIconName</key>
  	<string>AppIcon</string>
  	<key>ITSAppUsesNonExemptEncryption</key>
  	<false/>
@@ -26,10 +166,20 @@ index dd1c889..0cde537 100644
  	<string>This app streams hand tracking data to a remote server.</string>
  	<key>NSMicrophoneUsageDescription</key>
 diff --git a/IsaacXRTeleopClient/IsaacXRTeleopClientApp.swift b/IsaacXRTeleopClient/IsaacXRTeleopClientApp.swift
-index 002b7b9..2526e6b 100644
+index 002b7b9..244ade3 100644
 --- a/IsaacXRTeleopClient/IsaacXRTeleopClientApp.swift
 +++ b/IsaacXRTeleopClient/IsaacXRTeleopClientApp.swift
-@@ -24,6 +24,10 @@ struct IsaacXRTeleopClientApp: App {
+@@ -8,8 +8,8 @@
+ // without an express license agreement from NVIDIA CORPORATION or
+ // its affiliates is strictly prohibited.
+ 
+-import SwiftUI
+ import CloudXRKit
++import SwiftUI
+ 
+ @main
+ struct IsaacXRTeleopClientApp: App {
+@@ -24,6 +24,14 @@ struct IsaacXRTeleopClientApp: App {
      // Window size
      static let launchSize = CGSize(width: 500, height: 550)
  
@@ -37,31 +187,43 @@ index 002b7b9..2526e6b 100644
 +        appModel.cxrSession.state == .connected ? 1000 : Self.launchSize.width
 +    }
 +
++    private var controlsHeight: CGFloat {
++        appModel.cxrSession.state == .connected ? 740 : Self.launchSize.height
++    }
++
      var body: some Scene {
          FetchHmdPropertiesImmersiveSpace(hmdProperties: appModel.hmdProperties)
  
-@@ -38,9 +42,9 @@ struct IsaacXRTeleopClientApp: App {
+@@ -38,11 +46,11 @@ struct IsaacXRTeleopClientApp: App {
                          )
                  }
                  .frame(
 -                    // Fixed-size window
 -                    minWidth: Self.launchSize.width,
 -                    maxWidth: Self.launchSize.width,
+-                    minHeight: Self.launchSize.height,
+-                    maxHeight: Self.launchSize.height,
 +                    // Make room for the HUD beside the controls while connected.
 +                    minWidth: controlsWidth,
 +                    maxWidth: controlsWidth,
-                     minHeight: Self.launchSize.height,
-                     maxHeight: Self.launchSize.height,
++                    minHeight: controlsHeight,
++                    maxHeight: controlsHeight,
                      alignment: .top
+                 )
+         }
 diff --git a/IsaacXRTeleopClient/StreamingControlsView.swift b/IsaacXRTeleopClient/StreamingControlsView.swift
-index 9c472c8..a3c7e41 100644
+index 9c472c8..df9c10a 100644
 --- a/IsaacXRTeleopClient/StreamingControlsView.swift
 +++ b/IsaacXRTeleopClient/StreamingControlsView.swift
-@@ -11,23 +11,22 @@
- import SwiftUI
+@@ -8,26 +8,25 @@
+ // without an express license agreement from NVIDIA CORPORATION or
+ // its affiliates is strictly prohibited.
+ 
+-import SwiftUI
  import CloudXRKit
- import os.log
 +import Network
++import SwiftUI
+ import os.log
  
  struct StreamingControlsView: View {
      @State var viewModel: ViewModel
@@ -84,14 +246,16 @@ index 9c472c8..a3c7e41 100644
              HStack {
                  TextField("0.0.0.0", text: $viewModel.ipAddress)
                      .autocorrectionDisabled(true)
-@@ -56,6 +55,25 @@ struct StreamingControlsView: View {
+@@ -56,6 +55,27 @@ struct StreamingControlsView: View {
              viewModel.connectionStateChanged(oldValue: oldValue, newValue: newValue)
          }
          .padding()
-+        .sheet(isPresented: Binding(
-+            get: { viewModel.appModel.connectionError != nil },
-+            set: { if !$0 { viewModel.appModel.connectionError = nil } }
-+        )) {
++        .sheet(
++            isPresented: Binding(
++                get: { viewModel.appModel.connectionError != nil },
++                set: { if !$0 { viewModel.appModel.connectionError = nil } }
++            )
++        ) {
 +            VStack(alignment: .leading, spacing: 20) {
 +                Text("Connection failed").font(.title2)
 +                ScrollView {
@@ -110,7 +274,7 @@ index 9c472c8..a3c7e41 100644
      }
  }
  
-@@ -64,6 +82,49 @@ extension StreamingControlsView {
+@@ -64,6 +84,63 @@ extension StreamingControlsView {
      class ViewModel {
          @ObservationIgnored static let logger = Logger()
          let appModel: AppModel
@@ -119,8 +283,10 @@ index 9c472c8..a3c7e41 100644
 +
 +        // Request permission as part of Connect; no separate setup controls.
 +        private func requestLocalNetwork() async throws {
-+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-+                let browser = NWBrowser(for: .bonjour(type: "_cloudxr._tcp", domain: "local."), using: .tcp)
++            try await withCheckedThrowingContinuation {
++                (continuation: CheckedContinuation<Void, Error>) in
++                let browser = NWBrowser(
++                    for: .bonjour(type: "_cloudxr._tcp", domain: "local."), using: .tcp)
 +                var finished = false
 +                var timeout: DispatchWorkItem?
 +                func finish(_ result: Result<Void, Error>) {
@@ -135,14 +301,26 @@ index 9c472c8..a3c7e41 100644
 +                    switch state {
 +                    case .ready: finish(.success(()))
 +                    case .failed(let error), .waiting(let error):
-+                        finish(.failure(NSError(domain: "LocalNetwork", code: Int(error.errorCode), userInfo: [
-+                            NSLocalizedDescriptionKey: "Local network access is unavailable. Allow Local Network in Settings → Privacy & Security, then reconnect. \(error.localizedDescription)"
-+                        ])))
++                        finish(
++                            .failure(
++                                NSError(
++                                    domain: "LocalNetwork", code: Int(error.errorCode),
++                                    userInfo: [
++                                        NSLocalizedDescriptionKey:
++                                            "Local network access is unavailable. Allow Local Network in Settings → Privacy & Security, then reconnect. \(error.localizedDescription)"
++                                    ])))
 +                    default: break
 +                    }
 +                }
 +                let deadline = DispatchWorkItem {
-+                    finish(.failure(NSError(domain: "LocalNetwork", code: 1, userInfo: [NSLocalizedDescriptionKey: "Local network permission timed out. Allow access when prompted, then reconnect."])))
++                    finish(
++                        .failure(
++                            NSError(
++                                domain: "LocalNetwork", code: 1,
++                                userInfo: [
++                                    NSLocalizedDescriptionKey:
++                                        "Local network permission timed out. Allow access when prompted, then reconnect."
++                                ])))
 +                }
 +                timeout = deadline
 +                DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: deadline)
@@ -160,7 +338,7 @@ index 9c472c8..a3c7e41 100644
  
          init(appModel: AppModel) {
              self.appModel = appModel
-@@ -99,24 +160,31 @@ extension StreamingControlsView {
+@@ -99,24 +176,36 @@ extension StreamingControlsView {
              }
          }
  
@@ -183,7 +361,8 @@ index 9c472c8..a3c7e41 100644
 +        private static func describe(_ error: Error) -> String {
 +            let nsError = error as NSError
 +            let category = (error as? StreamingError)?.kind ?? "Connection error"
-+            return "\(category)\n\(error.localizedDescription)\nDomain: \(nsError.domain)\nCode: \(nsError.code)"
++            return
++                "\(category)\n\(error.localizedDescription)\nDomain: \(nsError.domain)\nCode: \(nsError.code)"
 +        }
 +
          func connectionStateChanged(
@@ -192,13 +371,17 @@ index 9c472c8..a3c7e41 100644
          ) {
              Task { @MainActor in
 +                if case .disconnected(.failure(let error)) = newValue {
++                    if appModel.collection?.phase == "ended" {
++                        if appModel.immersiveSpaceIsOpen { await appModel.dismissImmersiveSpace() }
++                        return
++                    }
 +                    await reportFailure(error)
 +                    return
 +                }
                  if newValue == .connected {
                      if !appModel.immersiveSpaceIsOpen {
                          await appModel.openImmersiveSpace(id: streamingSpaceTitle)
-@@ -145,7 +213,10 @@ extension StreamingControlsView {
+@@ -145,7 +234,10 @@ extension StreamingControlsView {
          }
  
          private func connect() {
@@ -209,12 +392,14 @@ index 9c472c8..a3c7e41 100644
                  switch connectionState {
                  case .initialized, .disconnected:
                      var config = CloudXRKit.Config()
-@@ -154,7 +225,14 @@ extension StreamingControlsView {
+@@ -154,9 +246,19 @@ extension StreamingControlsView {
                      config.resolutionPreset = .standardPreset
                      config.handTrackingMode = .legacy
                      appModel.cxrSession.configure(config: config)
 -                    try await appModel.cxrSession.connect()
 +                    appModel.connectionError = nil
++                    appModel.collection = nil
++                    appModel.endingCollection = false
 +                    reportedFailure = false
 +                    do {
 +                        try await requestLocalNetwork()
@@ -223,9 +408,13 @@ index 9c472c8..a3c7e41 100644
 +                        await reportFailure(error)
 +                    }
                  default:
-                     let errorMessage = "Connect button pressed when state was \(self.connectionState)"
+-                    let errorMessage = "Connect button pressed when state was \(self.connectionState)"
++                    let errorMessage =
++                        "Connect button pressed when state was \(self.connectionState)"
                      Self.logger.error("Streaming controls state machine error: \(errorMessage)")
-@@ -172,22 +250,24 @@ extension StreamingControlsView {
+                 }
+             }
+@@ -172,22 +274,24 @@ extension StreamingControlsView {
          }
  
          var ipFieldDisabled: Bool {
@@ -256,10 +445,19 @@ index 9c472c8..a3c7e41 100644
          }
      }
 diff --git a/IsaacXRTeleopClient/TeleopControlView.swift b/IsaacXRTeleopClient/TeleopControlView.swift
-index 702ea6d..79361ec 100644
+index 702ea6d..ea0efdc 100644
 --- a/IsaacXRTeleopClient/TeleopControlView.swift
 +++ b/IsaacXRTeleopClient/TeleopControlView.swift
-@@ -16,10 +16,8 @@ struct TeleopControlView: View {
+@@ -8,148 +8,52 @@
+ // without an express license agreement from NVIDIA CORPORATION or
+ // its affiliates is strictly prohibited.
+ 
+-import SwiftUI
+ import CloudXRKit
+-import os.log
++import SwiftUI
+ 
+ struct TeleopControlView: View {
      @State var viewModel: ViewModel
  
      var body: some View {
@@ -268,28 +466,185 @@ index 702ea6d..79361ec 100644
              Text("Teleoperation Controls").font(.title2)
 -            Spacer()
 -        }) {
-             VStack {
-                 HStack {
-                     Button {
-@@ -61,7 +59,12 @@ struct TeleopControlView: View {
-                 .font(.title3)
-                 .buttonStyle(.bordered)
+-            VStack {
+-                HStack {
+-                    Button {
+-                        viewModel.teleopStartButtonPressed()
+-                    } label: {
+-                        HStack {
+-                            Image(systemName: viewModel.teleopStartButtonImage)
+-                            Text(viewModel.teleopStartButtonText)
+-                        }
+-                        .frame(width: viewModel.teleopButtonWidth)
+-                    }
+-                    .font(.title3)
+-                    .buttonStyle(.bordered)
+-                    .disabled(viewModel.teleopStartButtonDisabled)
+-
+-                    Button {
+-                        viewModel.teleopStopButtonPressed()
+-                    } label: {
+-                        HStack {
+-                            Image(systemName: viewModel.teleopStopButtonImage)
+-                            Text(viewModel.teleopStopButtonText)
+-                        }
+-                        .frame(width: viewModel.teleopButtonWidth)
+-                    }
+-                    .font(.title3)
+-                    .buttonStyle(.bordered)
+-                    .disabled(viewModel.teleopStopButtonDisabled)
++            HStack {
++                Button("Restart episode", systemImage: "arrow.counterclockwise") {
++                    viewModel.appModel.sendCollectionCommand("restart")
++                }
++                .disabled(
++                    viewModel.appModel.collection == nil
++                        || viewModel.appModel.collection?.phase == "saving"
++                        || viewModel.appModel.endingCollection
++                        || viewModel.appModel.collection?.phase == "ended")
++                Button("End collection", systemImage: "stop.circle") {
++                    viewModel.appModel.sendCollectionCommand("end")
++                }
++                .disabled(
++                    viewModel.appModel.collection == nil || viewModel.appModel.endingCollection
++                        || viewModel.appModel.collection?.phase == "ended")
++            }
++            .buttonStyle(.bordered)
++            VStack(alignment: .leading, spacing: 8) {
++                Label {
++                    Text("Tracked hand")
++                } icon: {
++                    Circle().fill(.red).frame(width: 8, height: 8)
+                 }
+-                Divider()
+-                Button {
+-                    viewModel.teleopResetButtonPressed()
+-                } label: {
+-                    HStack {
+-                        Image(systemName: viewModel.teleopResetButtonImage)
+-                        Text(viewModel.teleopResetButtonText)
+-                    }
+-                    .frame(width: viewModel.teleopButtonWidth)
++                Label {
++                    Text("Hand points for robot control")
++                } icon: {
++                    Circle().fill(.cyan).frame(width: 8, height: 8)
+                 }
+-                .font(.title3)
+-                .buttonStyle(.bordered)
              }
 -            .frame(height: 100, alignment: .top)
-+            .frame(maxWidth: .infinity, alignment: .top)
-+            VStack(alignment: .leading, spacing: 8) {
-+                Label { Text("Tracked hand") } icon: { Circle().fill(.red).frame(width: 8, height: 8) }
-+                Label { Text("Hand points for robot control") } icon: { Circle().fill(.cyan).frame(width: 8, height: 8) }
-+            }
 +            .font(.caption)
          }
          .padding()
      }
+-}
+ 
+-extension TeleopControlView {
+     @Observable
+     class ViewModel {
+-        @ObservationIgnored static let logger = Logger()
+-        private let appModel: AppModel
+-
+-        private let startTeleopCommand = "start teleop"
+-        private let stopTeleopCommand = "stop teleop"
+-        private let resetTeleopCommand = "reset teleop"
+-
+-        var teleopRunning: Bool {
+-            get { appModel.teleopRunning }
+-            set { appModel.teleopRunning = newValue }
+-        }
+-
+-        init(appModel: AppModel) {
+-            self.appModel = appModel
+-        }
+-
+-        func sendTeleopCommandToServer(command: String) {
+-            let teleopCommand = ClientToServerCommand(
+-                type: "teleop_command",
+-                message: [
+-                    "command": command
+-                ]
+-            )
+-            let jsonEncoder = JSONEncoder()
+-            if let jsonCommand = try? jsonEncoder.encode(teleopCommand) {
+-                appModel.cxrSession.sendServerMessage(jsonCommand)
+-                Self.logger.info("Teleop command sent: \(command)")
+-            } else {
+-                Self.logger.error("JSON encoding failed.")
+-            }
+-        }
+-
+-        func teleopStartButtonPressed() {
+-            teleopRunning = true
+-            sendTeleopCommandToServer(command: startTeleopCommand)
+-        }
+-
+-        func teleopStopButtonPressed() {
+-            teleopRunning = false
+-            sendTeleopCommandToServer(command: stopTeleopCommand)
+-        }
+-
+-        func teleopResetButtonPressed() {
+-            sendTeleopCommandToServer(command: resetTeleopCommand)
+-        }
+-
+-        var teleopStartButtonText: String {
+-            "Play"
+-        }
+-
+-        var teleopButtonWidth: CGFloat {
+-            190
+-        }
+-
+-        var teleopStartButtonImage: String {
+-            "play.circle"
+-        }
+-
+-        var teleopStopButtonImage: String {
+-            "stop.circle"
+-        }
+-
+-        var teleopResetButtonImage: String {
+-            "arrow.counterclockwise.circle"
+-        }
+-
+-        var teleopResetButtonText: String {
+-            "Reset"
+-        }
+-
+-        var teleopStopButtonText: String {
+-            "Stop"
+-        }
+-
+-        var teleopStartButtonDisabled: Bool {
+-            teleopRunning
+-        }
+-
+-        var teleopStopButtonDisabled: Bool {
+-            !teleopRunning
+-        }
++        let appModel: AppModel
++        init(appModel: AppModel) { self.appModel = appModel }
+     }
+ }
 diff --git a/IsaacXRTeleopClient/TopConfigView.swift b/IsaacXRTeleopClient/TopConfigView.swift
-index 5284c39..d8e6e7f 100644
+index 5284c39..d28fa39 100644
 --- a/IsaacXRTeleopClient/TopConfigView.swift
 +++ b/IsaacXRTeleopClient/TopConfigView.swift
-@@ -19,73 +19,40 @@ struct TopConfigView: View {
+@@ -8,9 +8,9 @@
+ // without an express license agreement from NVIDIA CORPORATION or
+ // its affiliates is strictly prohibited.
+ 
+-import SwiftUI
+-import RealityKit
+ import CloudXRKit
++import RealityKit
++import SwiftUI
+ 
+ let configViewTitle = "IsaacSimTeleopConfigViewWindowGroup"
+ 
+@@ -19,73 +19,67 @@ struct TopConfigView: View {
      @State var viewModel: ViewModel
  
      var body: some View {
@@ -301,11 +656,21 @@ index 5284c39..d8e6e7f 100644
 -                            List {
 -                                HUDView(session: viewModel.cxrSession, hudConfig: viewModel.hudConfig)
 -                            }
-+        HStack(alignment: .top, spacing: 0) {
-+            ScrollView {
-+                VStack(alignment: .leading, spacing: 24) {
-+                    if viewModel.showTeleopView {
-+                        TeleopControlView(viewModel: TeleopControlView.ViewModel(appModel: viewModel.appModel))
++        VStack(alignment: .leading, spacing: 0) {
++            if viewModel.showTeleopView || viewModel.appModel.collection?.phase == "ended" {
++                VStack(alignment: .leading, spacing: 12) {
++                    Text(viewModel.appModel.collectionInstruction)
++                        .font(.system(size: 40, weight: .semibold))
++                        .fixedSize(horizontal: false, vertical: true)
++                    if let status = viewModel.appModel.collection {
++                        if status.phase == "aligning" {
++                            ProgressView(value: status.alignment)
++                            Text(status.goal).font(.title3)
++                        }
++                        if status.phase != "ended" {
++                            Text("Episode \(status.episode) · \(status.saved) saved")
++                                .font(.callout).foregroundStyle(.secondary)
++                        }
                      }
 -                }.ornament(
 -                    visibility: viewModel.showOrnaments ? .visible : .hidden,
@@ -318,7 +683,6 @@ index 5284c39..d8e6e7f 100644
 -                }
 -                .onChange(of: scenePhase) {
 -                    viewModel.scenePhaseChanged(to: scenePhase)
-+                    StreamingControlsView(viewModel: StreamingControlsView.ViewModel(appModel: viewModel.appModel))
                  }
 -        }
 -    }
@@ -329,16 +693,28 @@ index 5284c39..d8e6e7f 100644
 -                Spacer()
 -                Text("Main").font(.extraLargeTitle2)
 -                Spacer()
-+                .padding(.vertical, 16)
++                .padding(28)
              }
 -            .frame(height: 50, alignment: .top).padding()
-+            .frame(width: 500)
- 
-             if viewModel.showTeleopView {
+-
+-            if viewModel.showTeleopView {
 -                VStack {
 -                    TeleopControlView(viewModel: TeleopControlView.ViewModel(appModel: viewModel.appModel))
 -                        .frame(alignment: .top)
--                }
++            HStack(alignment: .top, spacing: 0) {
++                ScrollView {
++                    VStack(alignment: .leading, spacing: 24) {
++                        if viewModel.showTeleopView {
++                            TeleopControlView(
++                                viewModel: TeleopControlView.ViewModel(appModel: viewModel.appModel)
++                            )
++                        }
++                        StreamingControlsView(
++                            viewModel: StreamingControlsView.ViewModel(appModel: viewModel.appModel)
++                        )
++                    }
++                    .padding(.vertical, 16)
+                 }
 -                .frame(height: 200, alignment: .top)
 -            }
 -
@@ -352,20 +728,27 @@ index 5284c39..d8e6e7f 100644
 -                if viewModel.showEyePositionView {
 -                    SettingsView(viewModel: SettingsView.ViewModel(appModel: viewModel.appModel))
 -                        .frame(maxHeight: .infinity, alignment: .top)
-+                Divider()
-+                VStack(alignment: .leading, spacing: 0) {
-+                    Text("HUD")
-+                        .font(.title2)
-+                        .padding(32)
-+                    List {
-+                        HUDView(session: viewModel.cxrSession, hudConfig: viewModel.hudConfig)
++                .frame(width: 500)
++
++                if viewModel.showTeleopView {
++                    Divider()
++                    VStack(alignment: .leading, spacing: 0) {
++                        Text("HUD")
++                            .font(.title2)
++                            .padding(32)
++                        List {
++                            HUDView(session: viewModel.cxrSession, hudConfig: viewModel.hudConfig)
++                        }
 +                    }
++                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                  }
-+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
              }
 -            .frame(height: 100, alignment: .top)
          }
 -        .frame(alignment: .top)
++        .task(id: viewModel.showTeleopView) {
++            await viewModel.appModel.watchCollection()
++        }
 +        .onChange(of: scenePhase) {
 +            viewModel.scenePhaseChanged(to: scenePhase)
 +        }
@@ -383,7 +766,7 @@ index 5284c39..d8e6e7f 100644
          // Defined for convenience for the HUD.
          let cxrSession: CloudXRSession
  
-@@ -101,24 +68,8 @@ extension TopConfigView {
+@@ -101,24 +95,8 @@ extension TopConfigView {
              appModel.windowScenePhaseChanged(to: newValue)
          }
  

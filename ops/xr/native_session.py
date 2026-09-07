@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import argparse
+import hashlib
 import json
 import ipaddress
 import os
@@ -12,6 +13,47 @@ import signal
 import socket
 import subprocess
 import time
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+# Populated from the repository when the immutable session capsule is created.
+COLLECTION_FILES = {}
+
+
+def collection_http(root, address, port=48011):
+    """Expose only the small collection-state document; never serve recordings or paths."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path != "/collection":
+                self.send_error(404)
+                return
+            path = root / "collection-status.json"
+            if not path.is_file():
+                self.send_error(503, "Simulation is still loading")
+                return
+            raw = path.read_bytes()
+            if len(raw) > 8192:
+                self.send_error(500, "Invalid collection status")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            try:
+                self.wfile.write(raw)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, *_):
+            pass
+
+    server = ThreadingHTTPServer((address, port), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 
 def inspect_recording(
@@ -163,6 +205,8 @@ def main():
     run.mkdir(mode=0o700)
     started = time.time()
     children = []
+    http = None
+    validated = {}
     stopping = False
     status = {
         "schema": "skynet.live-xr/v1",
@@ -203,6 +247,54 @@ def main():
             )
         else:
             publish(state, **details)
+
+    def refresh_saved():
+        receipt_path = root / "episodes.json"
+        if not receipt_path.exists():
+            return
+        if receipt_path.stat().st_size > 1_000_000:
+            raise ValueError("Episode receipt exceeds its size limit")
+        receipts = json.loads(receipt_path.read_text())
+        for receipt in receipts:
+            relative = receipt["path"]
+            path = (root / relative).resolve()
+            if not path.is_relative_to(root / "recordings") or path.suffix != ".pkl":
+                raise ValueError("Invalid episode receipt path")
+            if relative in validated:
+                if validated[relative]["sha256"] != receipt["sha256"]:
+                    raise ValueError("A saved episode was unexpectedly replaced")
+                continue
+            if not 0 < path.stat().st_size <= 100_000_000:
+                raise ValueError("Saved episode exceeds its review limit")
+            if hashlib.sha256(path.read_bytes()).hexdigest() != receipt["sha256"]:
+                raise ValueError("Saved episode checksum differs from its receipt")
+            result = subprocess.run(
+                [
+                    str(runtime / "bin/python"),
+                    str(Path(__file__).resolve()),
+                    "--inspect-recording",
+                    str(path),
+                    "--task",
+                    cfg["task"],
+                    "--robot",
+                    cfg["robot"],
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode:
+                raise ValueError(
+                    "Episode validation failed: " + result.stderr.strip()[-1500:]
+                )
+            summary = json.loads(result.stdout)
+            validated[relative] = dict(receipt, **summary)
+        status["recordings"] = list(validated)
+        status["recording_checksums"] = {k: v["sha256"] for k, v in validated.items()}
+        status["recording_summary"] = {
+            "episodes": sum(v["episodes"] for v in validated.values()),
+            "steps": sum(v["steps"] for v in validated.values()),
+        }
 
     def stop(_signum, _frame):
         nonlocal stopping
@@ -256,13 +348,18 @@ def main():
             DEXVERSE_DATA_DIR=str(root / "recordings"),
             PATH=str(runtime / "bin") + ":" + os.environ["PATH"],
         )
-        recorder = repo / "scripts/record_demos.py"
-        if cfg.get("hand_bundle"):
-            bundle = cfg["hand_bundle"]
-            if bundle["robot"] != cfg["robot"]:
-                raise ValueError("Selected robot differs from the prepared hand")
-            recorder = Path(bundle["root"]) / "record.py"
-            env["SKYNET_DEXVERSE_RECORDER"] = str(repo / "scripts/record_demos.py")
+        if set(COLLECTION_FILES) != {"collection.py", "anatomy.py"}:
+            raise ValueError(
+                "Automatic collection runtime is missing from this session"
+            )
+        source_root = root / "collector"
+        source_root.mkdir()
+        for name, source in COLLECTION_FILES.items():
+            (source_root / name).write_text(source)
+        recorder = source_root / "collection.py"
+        env["SKYNET_LIVE_CONFIG"] = str(args.config.resolve())
+        env["SKYNET_COLLECTION_ROOT"] = str(root)
+        http = collection_http(root, status["address"])
         argv = [
             str(runtime / "bin/python"),
             str(recorder),
@@ -276,7 +373,7 @@ def main():
             "--device",
             "cuda:0",
             "--num_demos",
-            "1",
+            "0",
             "--dataset_dir",
             "live",
             "--teleop_retargeter",
@@ -309,6 +406,12 @@ def main():
             if server.poll() is not None:
                 raise RuntimeError("CloudXR stopped during the live session")
             if sim.poll() is not None:
+                if (root / "collection-error.json").exists():
+                    raise RuntimeError(
+                        json.loads((root / "collection-error.json").read_text())[
+                            "error"
+                        ]
+                    )
                 if sim.returncode:
                     raise RuntimeError(
                         simulation_failure(
@@ -316,49 +419,37 @@ def main():
                             f"DexVerse exited with code {sim.returncode}",
                         )
                     )
-                files = list((root / "recordings").rglob("*.pkl"))
-                if not files:
+                refresh_saved()
+                last_collection = (
+                    json.loads((root / "collection-status.json").read_text())
+                    if (root / "collection-status.json").exists()
+                    else {}
+                )
+                if last_collection.get("phase") != "ended":
                     raise RuntimeError(
                         simulation_failure(
-                            root / "simulation.log",
-                            "DexVerse exited without a demonstration file",
+                            root / "simulation.log", "Simulator ended unexpectedly"
                         )
                     )
-                summaries = []
-                for path in files:
-                    result = subprocess.run(
-                        [
-                            str(runtime / "bin/python"),
-                            str(Path(__file__).resolve()),
-                            "--inspect-recording",
-                            str(path),
-                            "--task",
-                            cfg["task"],
-                            "--robot",
-                            cfg["robot"],
-                        ],
-                        capture_output=True,
-                        text=True,
-                        timeout=60,
-                    )
-                    if result.returncode:
-                        raise ValueError(
-                            "Native demonstration validation failed: "
-                            + result.stderr.strip()[-2000:]
-                        )
-                    summaries.append(json.loads(result.stdout))
                 update(
-                    "CAPTURED",
-                    startup_stage="ready",
-                    scene_ready_at=status.get("scene_ready_at", time.time()),
-                    detail="A successful demonstration was saved and validated. Open Review recording to inspect and download it.",
-                    recordings=[str(p.relative_to(root)) for p in files],
-                    recording_summary={
-                        "episodes": sum(s["episodes"] for s in summaries),
-                        "steps": sum(s["steps"] for s in summaries),
-                    },
+                    "CAPTURED" if validated else "STOPPED",
+                    detail=f"Collection ended. {len(validated)} episodes saved.",
                 )
                 return
+            refresh_saved()
+            collection_path = root / "collection-status.json"
+            if collection_path.exists():
+                if collection_path.stat().st_size > 8192:
+                    raise ValueError("Invalid collection status size")
+                collection = json.loads(collection_path.read_text())
+                update(
+                    "COLLECTING",
+                    startup_stage="ready",
+                    scene_ready_at=status.get("scene_ready_at", time.time()),
+                    detail=collection["instruction"],
+                    episode_phase=collection["phase"],
+                    task_goal=collection["goal"],
+                )
             with (root / "simulation.log").open("rb") as log:
                 log.seek(max(0, (root / "simulation.log").stat().st_size - 16000))
                 tail = log.read().decode(errors="replace")
@@ -367,7 +458,7 @@ def main():
                     "AWAITING_HEADSET",
                     startup_stage="ready",
                     scene_ready_at=time.time(),
-                    detail="Scene loaded. Connect the headset, then choose Play to calibrate and record.",
+                    detail="Scene loaded. Connect the headset and align your hand to begin.",
                 )
             time.sleep(1)
         update(
@@ -391,6 +482,10 @@ def main():
                         child.wait(timeout=5)
                 if child.stdin:
                     child.stdin.close()
+            refresh_saved()
+            if http is not None:
+                http.shutdown()
+                http.server_close()
             for log in Path("/tmp").glob("cxr_*.log"):
                 if log.stat().st_uid == os.getuid() and log.stat().st_mtime >= started:
                     (root / log.name).write_bytes(log.read_bytes())

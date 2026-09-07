@@ -9,6 +9,7 @@
     STARTING_SERVER: "Starting stream…",
     STARTING_SIMULATION: "Loading scene…",
     AWAITING_HEADSET: "Scene ready",
+    COLLECTING: "Session in progress",
     STOPPING: "Stopping…",
   };
   const startingStates = new Set([
@@ -90,6 +91,7 @@
     if (session.stop_requested || session.state === "STOPPING")
       return "Stopping…";
     if (session.state === "PENDING") return "Waiting for GPU…";
+    if (session.state === "COLLECTING") return session.detail || "Collecting episodes";
     return (
       stageLabels[session.startup_stage] ||
       sessionLabels[session.state] ||
@@ -227,7 +229,17 @@
             : ""),
         "secondary",
       );
-      text(status, "strong", session.state.replaceAll("_", " "));
+      const phaseLabel = {
+        aligning: "WAITING FOR ALIGNMENT",
+        recording: "RECORDING",
+        saving: "SAVING",
+        interrupted: "INTERRUPTED",
+        ended: "ENDING",
+        error: "FAILED",
+      };
+      text(status, "strong", session.state === "COLLECTING"
+        ? phaseLabel[session.episode_phase] || "SESSION IN PROGRESS"
+        : session.state.replaceAll("_", " "));
       const detail =
         session.error ||
         (!terminal.has(session.state) || session.state === "FAILED"
@@ -296,7 +308,7 @@
           }
         };
       } else text(address, "span", "—");
-      if (session.state === "CAPTURED") {
+      if (session.recordings?.length) {
         (session.recordings || []).forEach((file, index) => {
           const review = text(
             actions,

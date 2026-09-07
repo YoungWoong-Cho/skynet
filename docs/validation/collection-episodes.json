@@ -1,0 +1,28 @@
+{
+  "synthetic": true,
+  "episodes": 2,
+  "steps": 45,
+  "phases": [
+    "aligning",
+    "recording",
+    "aligning",
+    "interrupted",
+    "aligning",
+    "recording",
+    "saving",
+    "aligning",
+    "recording",
+    "saving",
+    "aligning",
+    "ended"
+  ],
+  "wrist_axis_bias_degrees": 25,
+  "bundle_digest": "1e624baaaa94d54aae3e5b6701c55626256445948c05c770c8bbdee2c6c167b5",
+  "date": "2026-09-07",
+  "host": "rl2-bonjour",
+  "headset_tested": false,
+  "scope": "Synthetic tracking and success signal; real WUJI 2/Isaac physics, retargeter, episode recorder, and reset loop. An interrupted five-step attempt is discarded; two 20-step episodes are saved.",
+  "brief_dropout_resumes": true,
+  "sustained_loss_discards": true,
+  "source_log": "validation/20260907-hands/episodes-check-f.log"
+}

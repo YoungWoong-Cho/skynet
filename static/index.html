@@ -12,7 +12,7 @@
     <script src="/static/collection-ui.js?v=20260907-simple" defer></script>
     <script src="/static/hands-ui.js?v=20260907-imported-hands-2" defer></script>
     <script src="/static/live-review.js?v=20260907-collection-review" defer></script>
-    <script src="/static/live-xr.js?v=20260907-session-controls" defer></script>
+    <script src="/static/live-xr.js?v=20260907-episodes" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -999,11 +999,11 @@
               <div class="live-xr-help-body">
                 <ol class="live-xr-steps">
                   <li>Open <strong>Isaac XR Teleop</strong>. Enter the session’s server address, then choose <strong>Connect</strong>.</li>
-                  <li>Hold the selected hand(s) in view. Tap <strong>Play</strong> to calibrate and record.</li>
+                  <li>Align your open hand(s) with the robot hand(s) and hold still. Recording starts automatically.</li>
                   <li><span id="live-xr-task-instructions">Choose a task to see its goal.</span></li>
-                  <li>Success saves one demonstration and ends the session. Click <strong>Review recording</strong> to inspect it.</li>
+                  <li>Success saves the episode and resets the scene. Align again for the next episode. Use <strong>Review recording</strong> to inspect saved data.</li>
                 </ol>
-                <p><strong>Stop</strong> pauses. <strong>Reset</strong> discards the attempt. <strong>Stop session</strong> ends without saving an unfinished attempt.</p>
+                <p><strong>Restart episode</strong> discards the unfinished attempt. <strong>End collection</strong> or <strong>Stop session</strong> ends collection and keeps saved episodes.</p>
                 <ul id="live-xr-unavailable"></ul>
                 <a href="/api/collection/live/guide" target="_blank" rel="noreferrer">Setup and troubleshooting ↗</a>
               </div>

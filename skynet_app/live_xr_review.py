@@ -160,7 +160,7 @@ class LiveReviewService:
 
     def source(self, identifier, index):
         job = self.live.get(identifier)
-        if job["state"] != "CAPTURED":
+        if not job.get("recordings"):
             raise ValueError(
                 "Review is available after a successful demonstration has been saved"
             )
@@ -227,8 +227,10 @@ class LiveReviewService:
         """Validate before atomically publishing the local review and original."""
         job, _ = self.source(identifier, index)
         result = inspect(path, job["profile"])
-        expected = (job.get("recording_summary") or {}).get("sha256")
-        if len(job["recordings"]) == 1 and expected and result["sha256"] != expected:
+        expected = job.get("recording_checksums", {}).get(job["recordings"][index])
+        if not expected and len(job["recordings"]) == 1:
+            expected = (job.get("recording_summary") or {}).get("sha256")
+        if expected and result["sha256"] != expected:
             raise ValueError(
                 "The recording checksum differs from its saved validation report"
             )

@@ -21,6 +21,9 @@ def service(tmp_path, monkeypatch):
     (tmp_path / "ops/xr").mkdir(parents=True)
     for name in ("config/capture_pipelines.json", "ops/xr/native_session.py"):
         (tmp_path / name).write_text((source / name).read_text())
+    (tmp_path / "ops/xr/hands").mkdir()
+    for name in ("collection.py", "hands/anatomy.py"):
+        (tmp_path / "ops/xr" / name).write_text((source / "ops/xr" / name).read_text())
     (tmp_path / "config/live_xr.json").write_text(
         json.dumps(
             {

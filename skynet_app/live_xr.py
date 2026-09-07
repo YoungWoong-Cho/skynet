@@ -29,6 +29,7 @@ WORKER_STATES = TERMINAL | {
     "STARTING_SERVER",
     "STARTING_SIMULATION",
     "AWAITING_HEADSET",
+    "COLLECTING",
     "STOPPING",
 }
 
@@ -194,6 +195,13 @@ class LiveXRService:
             instructions=task_info["instructions"],
         )
         worker = (self.root / "ops/xr/native_session.py").read_text()
+        sources = {
+            "collection.py": (self.root / "ops/xr/collection.py").read_text(),
+            "anatomy.py": (self.root / "ops/xr/hands/anatomy.py").read_text(),
+        }
+        worker = worker.replace(
+            "COLLECTION_FILES = {}", "COLLECTION_FILES = " + repr(sources), 1
+        )
         with self.lock, self.database.transaction() as c:
             for job in self.list():
                 if job["state"] not in TERMINAL:
@@ -495,6 +503,9 @@ print(json.dumps(value))
                             "server_ready",
                             "recordings",
                             "recording_summary",
+                            "recording_checksums",
+                            "episode_phase",
+                            "task_goal",
                             "startup_stage",
                             "failed_stage",
                             "stream_ready_at",

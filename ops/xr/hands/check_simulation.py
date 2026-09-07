@@ -112,7 +112,10 @@ try:
         for i, name in enumerate(DEX_RETARGETING_HAND_JOINT_NAMES)
     }
     canonical = retargeter._convert_hand_to_canonical_joint_positions(data, hand)
-    assert np.allclose(canonical, human, atol=1e-6), (
+    from anatomy import canonical_points
+
+    expected_canonical = canonical_points(human, manifest["side"])
+    assert np.allclose(canonical, expected_canonical, atol=1e-6), (
         "Human points rotated relative to the model"
     )
     # Exercise actual per-hand optimizer/name mapping with gradual open/close input.
@@ -122,6 +125,7 @@ try:
             for j in range(4):
                 points[1 + 4 * f + j, 0] *= 1 - 0.45 * fraction * (j / 3)
                 points[1 + 4 * f + j, 2] -= 0.07 * fraction * (j / 3)
+        points = canonical_points(points, manifest["side"])
         dex = retargeter._dex_retgt[hand]
         fingers = dex.retarget(retargeter._compute_dex_ref_value(dex, points))
         action = np.zeros(manifest["action_dimension"], dtype=np.float32)
