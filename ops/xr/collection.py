@@ -1,4 +1,4 @@
-"""Repeated, alignment-gated episodes for the pinned DexVerse recorder.
+"""Repeated, manually started episodes for the pinned DexVerse recorder.
 
 This module is frozen into each session capsule. Isaac is imported only by main.
 """
@@ -6,7 +6,6 @@ This module is frozen into each session capsule. Isaac is imported only by main.
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import pickle
@@ -14,6 +13,7 @@ import runpy
 import signal
 import sys
 import time
+import uuid
 
 import numpy as np
 
@@ -87,71 +87,26 @@ class EpisodeStore:
         return receipt
 
 
-class AlignmentGate:
-    def __init__(self, duration=0.8):
-        self.duration = duration
-        self.since = None
+class ManualStart:
+    """A click belongs to one attempt; stale retries cannot start another one."""
 
-    def update(self, aligned, now):
-        if not aligned:
-            self.since = None
-            return 0.0
-        if self.since is None:
-            self.since = now
-        return min(1.0, max(0.0, (now - self.since) / self.duration))
+    def __init__(self):
+        self.reset()
 
+    def reset(self):
+        self.attempt_id = str(uuid.uuid4())
+        self.requested = False
 
-def alignment_feedback(points, side, target):
-    from anatomy import palm_frame
-    from alignment import alignment_points, TOLERANCE
+    def request(self, attempt_id):
+        if attempt_id == self.attempt_id:
+            self.requested = True
 
-    p = np.asarray(points)
-    frame = palm_frame(p, side)
-    distance = float(np.linalg.norm(p[0] - target))
-    forward = math.degrees(math.acos(float(np.clip(frame[0, 0], -1, 1))))
-    palm = math.degrees(math.acos(float(np.clip(frame[2, 2], -1, 1))))
-    _, _, point_errors = alignment_points(p, side, target)
-    details = dict(
-        distance_cm=round(distance * 100),
-        forward_degrees=round(forward),
-        palm_degrees=round(palm),
-        point_errors_cm=np.round(point_errors * 100, 1).tolist(),
-        points_matched=int(np.count_nonzero(point_errors <= TOLERANCE)),
-    )
-    # Calibration handles small anatomical and robot-size differences; do not
-    # require every human point to overlap the robot's differently sized hand.
-    if distance > TOLERANCE:
-        return (
-            False,
-            f"Match the white wrist dot to its gold ring ({round(distance * 100)} cm away)",
-            details,
-        )
-    if palm > 40:
-        return False, "Turn your palm down to match the gold rings", details
-    if forward > 35:
-        return (
-            False,
-            "Point your fingers in the same direction as the robot fingers",
-            details,
-        )
-    if np.any(point_errors > TOLERANCE):
-        return False, "Match both white knuckle dots to their gold rings", details
-    # Check extension without requiring the human to match robot finger lengths.
-    for base, tip in ((5, 8), (9, 12), (13, 16), (17, 20)):
-        vector = p[tip] - p[base]
-        if (
-            np.linalg.norm(vector) < 0.025
-            or np.dot(vector, frame[:, 0]) / np.linalg.norm(vector) < 0.75
-        ):
-            return False, "Open your fingers to match the robot hand", details
-    return True, "Aligned. Hold still…", details
+    def consume(self, tracking):
+        requested, self.requested = self.requested, False
+        return requested and tracking
 
 
-def aligned_hand(points, side, target):
-    return alignment_feedback(points, side, target)[0]
-
-
-def install_robot_point_display(retargeter, read_points, is_recording):
+def install_robot_point_display(retargeter, read_points, is_visible):
     """Blue markers show actual robot joint locations, in the same world frame."""
     marker = retargeter._canonical_markers
     visible = False
@@ -159,7 +114,7 @@ def install_robot_point_display(retargeter, read_points, is_recording):
 
     def visualize(_hand_data):
         nonlocal visible
-        show = bool(is_recording())
+        show = bool(is_visible())
         if show:
             marker.visualize(translations=read_points())
         if show != visible:
@@ -189,7 +144,6 @@ def run_loop(
         DEX_RETARGETING_HAND_JOINT_NAMES,
     )
     from isaaclab.devices.device_base import DeviceBase
-    from alignment import AlignmentGuide
 
     if pose_validity is None:
         from omni.kit.xr.core import XRPoseValidityFlags
@@ -198,8 +152,9 @@ def run_loop(
 
     store = EpisodeStore(root, recorder._metadata)
     executor = ThreadPoolExecutor(max_workers=1)
-    gate = AlignmentGate()
-    phase, instruction, progress = "aligning", "Align the hand with the robot hand", 0.0
+    start = ManualStart()
+    phase, instruction = "ready", "Tap Start to begin"
+    tracking = False
     goal = cfg["instructions"]
     last_write, heartbeat, save_future, stop_requested = 0.0, 0.0, None, False
     saving_since = 0.0
@@ -207,12 +162,9 @@ def run_loop(
     tracking_lost_since = None
     reset_requested, success_count = False, 0
     connected_once = False
-    previous_positions, previous_sample = {}, 0.0
     raw_markers_visible = True
     tracked_sides = ["left", "right"] if cfg["hand"] == "both" else [cfg["hand"]]
-    alignment_guide = AlignmentGuide(tracked_sides)
     targets = {}
-    alignment_details = {}
     raw_data = {}
     get_raw = teleop._get_raw_data
     manifest = cfg.get("hand_manifest", {})
@@ -233,7 +185,7 @@ def run_loop(
 
     for retargeter in teleop._retargeters:
         install_robot_point_display(
-            retargeter, robot_points, lambda: phase == "recording"
+            retargeter, robot_points, lambda: phase not in {"ended", "error"}
         )
     if anatomical_wrist:
         from anatomy import palm_frame
@@ -273,8 +225,8 @@ def run_loop(
                 goal=goal,
                 saved=len(store.receipts),
                 episode=len(store.receipts) + 1,
-                alignment=progress,
-                alignment_check=alignment_details,
+                can_start=phase == "ready" and tracking,
+                attempt_id=start.attempt_id,
                 control_alive=now - heartbeat < 2.0,
                 updated_at=time.time(),
                 session_id=os.environ.get("SKYNET_LIVE_SESSION_ID", ""),
@@ -289,6 +241,8 @@ def run_loop(
         verb = message.get("command")
         if verb == "heartbeat":
             heartbeat, connected_once = time.monotonic(), True
+        elif verb == "start" and phase == "ready":
+            start.request(message.get("attempt_id"))
         elif verb == "restart":
             reset_requested = True
         elif verb == "end":
@@ -306,8 +260,9 @@ def run_loop(
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    # Older clients cannot bypass the alignment gate with Play.
-    teleop.add_callback("START", lambda: None)
+    teleop.add_callback(
+        "START", lambda: start.request(start.attempt_id) if phase == "ready" else None
+    )
     teleop.add_callback("STOP", stop)
     teleop.add_callback(
         "RESET",
@@ -317,19 +272,12 @@ def run_loop(
     )
 
     def reset():
-        nonlocal \
-            phase, \
-            instruction, \
-            success_count, \
-            progress, \
-            previous_positions, \
-            alignment_details
+        nonlocal phase, instruction, success_count
         recorder.discard_episode()
         ns["handle_reset"](env)
         teleop.reset()
-        success_count, progress, previous_positions = 0, 0.0, {}
-        alignment_details = {}
-        gate.update(False, time.monotonic())
+        success_count = 0
+        start.reset()
         robot = env.scene["robot"]
         for side in tracked_sides:
             # Imported palms retain their source name; native Shadow names differ by side.
@@ -350,9 +298,7 @@ def run_loop(
                 .numpy()
                 .copy()
             )
-        phase, instruction = "aligning", "Match the white dots to the gold rings"
-        alignment_guide.last_targets.clear()
-        alignment_guide.update(None, targets, True)
+        phase, instruction = "ready", "Tap Start to begin"
         publish(True)
 
     def read_hands():
@@ -393,7 +339,7 @@ def run_loop(
     try:
         env.sim.reset()
         reset()
-        print("Teleop Device: handtracking · automatic episode collection", flush=True)
+        print("Teleop Device: handtracking · manual Start collection", flush=True)
         with torch.inference_mode():
             while ns["simulation_app"].is_running():
                 now = time.monotonic()
@@ -422,12 +368,7 @@ def run_loop(
                 action = teleop.advance()
                 points = read_hands()
                 tracking = points is not None and now - heartbeat < 2.0
-                alignment_guide.update(
-                    points if tracking else None,
-                    targets,
-                    phase in {"aligning", "interrupted"},
-                )
-                show_raw = phase == "recording" and tracking
+                show_raw = tracking
                 if show_raw != raw_markers_visible:
                     for retargeter in teleop._retargeters:
                         retargeter._markers.set_visibility(show_raw)
@@ -443,7 +384,7 @@ def run_loop(
                     reset()
                     phase, interrupted_since = "interrupted", now
                     instruction = (
-                        "Tracking lost. Episode discarded. Align the hand again."
+                        "Tracking lost. Episode discarded. Tap Start to retry."
                     )
                 elif tracking:
                     tracking_lost_since = None
@@ -453,45 +394,17 @@ def run_loop(
                     env.sim.render()
                     if tracking and now - interrupted_since >= 1.5:
                         phase, instruction = (
-                            "aligning",
-                            "Align the hand with the robot hand",
+                            "ready",
+                            "Tap Start to begin",
                         )
-                if phase == "aligning":
-                    aligned = tracking
-                    hint = "Match the white dots to the gold rings"
-                    if points:
-                        try:
-                            for side, p in points.items():
-                                matches, hand_hint, details = alignment_feedback(
-                                    p, side, targets[side]
-                                )
-                                alignment_details[side] = details
-                                if not matches:
-                                    hint = hand_hint
-                                aligned = aligned and matches
-                                if side in previous_positions and now > previous_sample:
-                                    speed = np.linalg.norm(
-                                        p[0] - previous_positions[side]
-                                    ) / (now - previous_sample)
-                                    details["speed_cm_s"] = round(float(speed) * 100)
-                                    if matches and speed >= 0.12:
-                                        hint = "Hold your hand still to start"
-                                    aligned = aligned and speed < 0.12
-                                previous_positions[side] = p[0].copy()
-                        except ValueError as exc:
-                            aligned = False
-                            hint = str(exc)
-                    previous_sample = now
-                    progress = gate.update(aligned, now)
+                if phase == "ready":
                     if not connected_once:
                         instruction = "Connect the headset to begin"
                     elif not tracking:
-                        instruction = "Keep your hand visible to the headset"
-                    elif progress > 0:
-                        instruction = "Aligned. Hold still…"
+                        instruction = "Keep your hand visible to enable Start"
                     else:
-                        instruction = hint
-                    if progress >= 1:
+                        instruction = "Tap Start to begin"
+                    if start.consume(tracking):
                         for retargeter in teleop._retargeters:
                             retargeter.calibrate_wrist_pose()
                         recorder.start_episode(
@@ -507,7 +420,7 @@ def run_loop(
                         recorder._active_episode["episode_name"] = (
                             f"demo_{len(store.receipts)}"
                         )
-                        recorder._active_episode["skynet_alignment"] = {
+                        recorder._active_episode["skynet_start_pose"] = {
                             s: p.tolist() for s, p in points.items()
                         }
                         recorder._active_episode["skynet_retargeting"] = dict(
@@ -517,7 +430,6 @@ def run_loop(
                             else "relative_calibrated",
                         )
                         phase, instruction = "recording", goal
-                        alignment_guide.update(None, targets, False)
                         publish(True)
                         continue  # Recompute actions after wrist calibration before stepping physics.
                     env.sim.render()
@@ -552,7 +464,7 @@ def run_loop(
                     elif bool(result[2].any()) or bool(result[3].any()):
                         reset()
                         phase, interrupted_since = "interrupted", now
-                        instruction = "Object left the task area. Episode discarded. Align to retry."
+                        instruction = "Object left the task area. Episode discarded. Tap Start to retry."
                 publish()
                 if env.sim.is_stopped():
                     break
@@ -560,7 +472,6 @@ def run_loop(
             "ended",
             f"Collection ended. {len(store.receipts)} episodes saved.",
         )
-        alignment_guide.update(None, targets, False)
         publish(True)
         # Let the connected client receive the final acknowledgement before closing the stream.
         deadline = time.monotonic() + 1.5

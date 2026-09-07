@@ -12,7 +12,7 @@
     <script src="/static/collection-ui.js?v=20260907-simple" defer></script>
     <script src="/static/hands-ui.js?v=20260907-imported-hands-2" defer></script>
     <script src="/static/live-review.js?v=20260907-collection-review" defer></script>
-    <script src="/static/live-xr.js?v=20260907-segments" defer></script>
+    <script src="/static/live-xr.js?v=20260907-manual-start" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -985,7 +985,7 @@
                   <ol id="live-xr-progress-steps" aria-label="Startup steps"></ol>
                   <p id="live-xr-progress-error" class="inline-alert" role="alert" hidden></p>
                 </section>
-                <p class="live-xr-keypoint-legend"><span><i class="keypoint-dot keypoint-red" aria-hidden="true"></i>Red: tracked hand</span><span><i class="keypoint-dot keypoint-blue" aria-hidden="true"></i>Blue: robot hand joints</span></p>
+                <p class="live-xr-keypoint-legend"><span><i class="keypoint-dot keypoint-red" aria-hidden="true"></i>Red: human</span><span><i class="keypoint-dot keypoint-blue" aria-hidden="true"></i>Blue: robot</span></p>
                 <p id="live-xr-message" role="status">Loading live sessions…</p>
                 <p id="live-xr-error" class="inline-alert" role="alert" hidden></p>
               </div>
@@ -999,9 +999,9 @@
               <div class="live-xr-help-body">
                 <ol class="live-xr-steps">
                   <li>Open <strong>Isaac XR Teleop</strong>. Enter the session’s server address, then choose <strong>Connect</strong>.</li>
-                  <li>Align your open hand(s) with the robot hand(s) and hold still. Recording starts automatically.</li>
+                  <li>Keep your hand(s) visible and tap Start in the headset to begin recording.</li>
                   <li><span id="live-xr-task-instructions">Choose a task to see its goal.</span></li>
-                  <li>Success saves the episode and resets the scene. Align again for the next episode. Use <strong>Review recording</strong> to inspect saved data.</li>
+                  <li>Success saves the episode and resets the scene. Tap <strong>Start</strong> for the next episode. Use <strong>Review recording</strong> to inspect saved data.</li>
                 </ol>
                 <p><strong>Restart episode</strong> discards the unfinished attempt. <strong>End collection</strong> or <strong>Stop session</strong> ends collection and keeps saved episodes.</p>
                 <ul id="live-xr-unavailable"></ul>

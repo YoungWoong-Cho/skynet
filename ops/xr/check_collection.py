@@ -10,7 +10,7 @@ import time
 from types import SimpleNamespace
 
 bundle, output = map(Path, sys.argv[1:3])
-alignment_file = Path(sys.argv[3]) if len(sys.argv) > 3 else None
+hand_pose_file = Path(sys.argv[3]) if len(sys.argv) > 3 else None
 manifest = json.loads((bundle / "manifest.json").read_text())
 sys.path.insert(0, str(bundle))
 sys.argv = [
@@ -33,7 +33,6 @@ try:
     from scipy.spatial.transform import Rotation
     from runtime import install, validate_environment
     import collection as collection_runtime
-    import alignment as alignment_runtime
     from collection import run_loop
     from dexverse.devices.retargeters.simple_relative_retargeting import (
         SimpleRelativeRetargeter,
@@ -73,11 +72,11 @@ try:
     for f, y in enumerate([0.075, 0.03, 0, -0.025, -0.05]):
         for j in range(4):
             human[1 + 4 * f + j] = [0.065 + j * 0.03, y, 0]
-    if alignment_file:
+    if hand_pose_file:
         from anatomy import canonical_points
 
         human = canonical_points(
-            json.loads(alignment_file.read_text()), manifest["side"]
+            json.loads(hand_pose_file.read_text()), manifest["side"]
         )
     normalization = Rotation.from_euler("y", 90, degrees=True) * Rotation.from_euler(
         "x", -90, degrees=True
@@ -92,31 +91,6 @@ try:
         .numpy()
         .copy()
     )
-    guide_updates = {"visible": 0, "hidden": 0, "matched": 0}
-    guide_update = alignment_runtime.AlignmentGuide.update
-
-    def observe_guide(self, points, targets, show):
-        guide_update(self, points, targets, show)
-        assert self.markers.is_visible() == show
-        guide_updates["visible" if show else "hidden"] += 1
-        if show and points:
-            instancer = self.markers._instancer_manager
-            positions = np.asarray(instancer.GetPositionsAttr().Get())
-            np.testing.assert_allclose(positions[:3], points["right"][[0, 5, 17]])
-            expected, rings, errors = alignment_runtime.alignment_points(
-                points["right"], "right", targets["right"]
-            )
-            np.testing.assert_allclose(positions[3:], rings)
-            indices = list(instancer.GetProtoIndicesAttr().Get())
-            assert (
-                indices
-                == [0, 0, 0]
-                + np.where(errors <= alignment_runtime.TOLERANCE, 2, 1).tolist()
-            )
-            if indices[3:] == [2, 2, 2]:
-                guide_updates["matched"] += 1
-
-    alignment_runtime.AlignmentGuide.update = observe_guide
     raw = {
         name: np.r_[human[i] + neutral_wrist, quat]
         for i, name in enumerate(DEX_RETARGETING_HAND_JOINT_NAMES)
@@ -137,8 +111,8 @@ try:
     retargeter._canonical_markers.visualize = observe_points
     wrist_motion = Rotation.from_euler("XYZ", [0.2, -0.15, 0.25])
     displacement = np.array([0.03, -0.02, 0.05])
-    alignment_offset = np.array([0.006, 0.004, 0.002])
-    alignment_rotation = Rotation.from_euler("z", 5, degrees=True)
+    start_offset = np.array([0.08, 0.02, 0.015])
+    start_rotation = Rotation.from_euler("z", 35, degrees=True)
     marker_indices = [
         robot.body_names.index(n)
         for n in dict.fromkeys(
@@ -173,6 +147,9 @@ try:
     dropout, dropped_once, dropout_since = False, False, 0.0
     brief_once, dropout_duration = False, 1.0
     last_phase, attempt_start_step = None, 0
+    ready_attempt, ready_since, ready_steps = None, 0.0, 0
+    previous_attempt = None
+    manual_starts, preview_checks = 0, 0
 
     class Teleop:
         _xr_core = XR()
@@ -185,6 +162,8 @@ try:
             global dropout, dropped_once, dropout_since, brief_once, dropout_duration
             global rotated_overlay_checked
             global last_phase, attempt_start_step
+            global ready_attempt, ready_since, ready_steps, previous_attempt
+            global manual_starts, preview_checks
             status = json.loads((output / "collection-status.json").read_text())
             if steps == 5 and not dropped_once:
                 dropout, dropped_once, dropout_since = True, True, time.monotonic()
@@ -197,42 +176,55 @@ try:
                 )
             if dropout and time.monotonic() - dropout_since > dropout_duration:
                 dropout = False
-            command = "end" if status["saved"] >= 2 else "heartbeat"
-            for callback in events:
-                callback(
-                    SimpleNamespace(
-                        payload={"message": json.dumps({"command": command})}
+            commands = [{"command": "end" if status["saved"] >= 2 else "heartbeat"}]
+            if status["phase"] == "ready":
+                if ready_attempt != status["attempt_id"]:
+                    previous_attempt, ready_attempt = (
+                        ready_attempt,
+                        status["attempt_id"],
                     )
-                )
+                    ready_since, ready_steps = time.monotonic(), steps
+                assert steps == ready_steps, "The simulator recorded without Start"
+                if previous_attempt:
+                    commands.append(
+                        {"command": "start", "attempt_id": previous_attempt}
+                    )
+                if status["can_start"] and time.monotonic() - ready_since >= 1.2:
+                    commands.append({"command": "start", "attempt_id": ready_attempt})
+            for command in commands:
+                for callback in events:
+                    callback(SimpleNamespace(payload={"message": json.dumps(command)}))
             if time.monotonic() - started > 45:
                 raise TimeoutError(
-                    "Automatic collection failed to complete two synthetic episodes"
+                    "Manual collection failed to complete two synthetic episodes"
                 )
             moving = status["phase"] == "recording"
             if moving and last_phase != "recording":
                 attempt_start_step = steps
+                manual_starts += 1
             last_phase = status["phase"]
             fingers = human.copy()
             if moving and steps - attempt_start_step > 3:
                 fingers[6:9, 1] += 0.015  # Deliberate index spread must remain visible.
             rotation = (
                 wrist_motion if moving else Rotation.identity()
-            ) * alignment_rotation
-            position = (
-                neutral_wrist + alignment_offset + (displacement if moving else 0)
-            )
+            ) * start_rotation
+            position = neutral_wrist + start_offset + (displacement if moving else 0)
             current_quat = (
                 rotation * Rotation.from_quat(quat[[1, 2, 3, 0]])
             ).as_quat()[[3, 0, 1, 2]]
             for i, name in enumerate(DEX_RETARGETING_HAND_JOINT_NAMES):
                 raw[name] = np.r_[rotation.apply(fingers[i]) + position, current_quat]
             action = retargeter.retarget(self._get_raw_data())
+            np.testing.assert_allclose(
+                drawn_points,
+                robot.data.body_pos_w[0, marker_indices].cpu().numpy(),
+                atol=1e-6,
+            )
+            if not moving:
+                assert retargeter._canonical_markers.is_visible()
+                preview_checks += 1
             if moving:
-                np.testing.assert_allclose(
-                    drawn_points,
-                    robot.data.body_pos_w[0, marker_indices].cpu().numpy(),
-                    atol=1e-6,
-                )
                 np.testing.assert_allclose(
                     action[:3].cpu().numpy(), displacement, atol=1e-5
                 )
@@ -260,9 +252,7 @@ try:
                 .numpy()
             )
             error = float(
-                np.linalg.norm(
-                    position - neutral_wrist - alignment_offset - displacement
-                )
+                np.linalg.norm(position - neutral_wrist - start_offset - displacement)
             )
             wrist_position_errors.append(error)
             assert error < 0.025, f"Wrist keeps a position offset: {error} m"
@@ -295,20 +285,21 @@ try:
         "Wrist rotation and displayed control points were not exercised"
     )
     assert brief_once, "Brief tracking dropout was not exercised"
-    assert all(guide_updates.values()), guide_updates
+    assert manual_starts == 3 and preview_checks > 1
+    assert "aligning" not in phase_history
     receipts = json.loads((output / "episodes.json").read_text())
     assert len(receipts) == 2 and all(r["steps"] == episode_steps for r in receipts)
     for receipt in receipts:
         episode = pickle.loads((output / receipt["path"]).read_bytes())["episodes"][0]
         np.testing.assert_allclose(
             episode["actions"][:, :3],
-            np.broadcast_to(alignment_offset + displacement, (episode_steps, 3)),
+            np.broadcast_to(start_offset + displacement, (episode_steps, 3)),
             atol=1e-5,
         )
         np.testing.assert_allclose(
             episode["actions"][:, 3:6],
             np.broadcast_to(
-                (wrist_motion * alignment_rotation).as_euler("XYZ"), (episode_steps, 3)
+                (wrist_motion * start_rotation).as_euler("XYZ"), (episode_steps, 3)
             ),
             atol=1e-5,
         )
@@ -336,8 +327,9 @@ try:
                 rotated_control_points_checked=rotated_overlay_checked,
                 absolute_wrist_position_checked=True,
                 wrist_position_errors_m=wrist_position_errors,
-                recorded_alignment_input=bool(alignment_file),
-                alignment_guide_checked=guide_updates,
+                recorded_hand_input=bool(hand_pose_file),
+                manual_starts=manual_starts,
+                pre_start_robot_marker_checks=preview_checks,
                 bundle_digest=manifest["digest"],
             )
         ),

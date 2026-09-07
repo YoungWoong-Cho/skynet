@@ -1,8 +1,8 @@
 diff --git a/IsaacXRTeleopClient/AppModel.swift b/IsaacXRTeleopClient/AppModel.swift
-index 6f14fa0..01eb853 100644
+index 6f14fa0..49df2a3 100644
 --- a/IsaacXRTeleopClient/AppModel.swift
 +++ b/IsaacXRTeleopClient/AppModel.swift
-@@ -8,11 +8,24 @@
+@@ -8,11 +8,25 @@
  // without an express license agreement from NVIDIA CORPORATION or
  // its affiliates is strictly prohibited.
  
@@ -22,7 +22,8 @@ index 6f14fa0..01eb853 100644
 +    let goal: String
 +    let saved: Int
 +    let episode: Int
-+    let alignment: Double
++    let can_start: Bool?
++    let attempt_id: String?
 +    let updated_at: Double
 +    let session_id: String
 +    let control_alive: Bool?
@@ -30,7 +31,7 @@ index 6f14fa0..01eb853 100644
  
  @Observable
  class AppModel {
-@@ -49,7 +62,109 @@ class AppModel {
+@@ -49,7 +63,137 @@ class AppModel {
  
      var immersiveSpaceIsOpen: Bool = false
  
@@ -38,18 +39,35 @@ index 6f14fa0..01eb853 100644
 +    var connectionError: String?
 +    var collection: CollectionStatus?
 +    var endingCollection = false
++    var startingAttempt: String?
++    private var startSentAt: Date?
++
++    var canStartRecording: Bool {
++        collection?.phase == "ready" && collection?.can_start == true
++            && collection?.attempt_id != nil && startingAttempt == nil && !endingCollection
++    }
 +
 +    var collectionInstruction: String {
 +        if endingCollection { return "Ending collection…" }
++        if startingAttempt != nil { return "Starting recording…" }
 +        return collection?.instruction ?? "Waiting for collection instructions…"
 +    }
 +
 +    func sendCollectionCommand(_ command: String) {
++        if command == "start", !canStartRecording && startingAttempt == nil { return }
++        var payload = ["command": command]
++        if command == "start" {
++            payload["attempt_id"] = startingAttempt ?? collection?.attempt_id
++        }
 +        let message = ClientToServerCommand(
-+            type: "skynet_collection_command", message: ["command": command])
++            type: "skynet_collection_command", message: payload)
 +        do {
 +            cxrSession.sendServerMessage(try JSONEncoder().encode(message))
 +            if command == "end" { endingCollection = true }
++            if command == "start", startingAttempt == nil {
++                startingAttempt = collection?.attempt_id
++                startSentAt = Date()
++            }
 +        } catch {
 +            connectionError = "Could not send collection command: \(error.localizedDescription)"
 +        }
@@ -88,7 +106,7 @@ index 6f14fa0..01eb853 100644
 +                }
 +                let status = try JSONDecoder().decode(CollectionStatus.self, from: data)
 +                guard status.schema == "skynet.collection/v1",
-+                    ["aligning", "recording", "saving", "interrupted", "ended", "error"].contains(
++                    ["ready", "recording", "saving", "interrupted", "ended", "error"].contains(
 +                        status.phase),
 +                    abs(Date().timeIntervalSince1970 - status.updated_at) < 8
 +                else {
@@ -100,6 +118,16 @@ index 6f14fa0..01eb853 100644
 +                        ])
 +                }
 +                collection = status
++                if let attempt = startingAttempt {
++                    if status.phase != "ready" || status.attempt_id != attempt || status.can_start != true {
++                        startingAttempt = nil
++                        startSentAt = nil
++                    } else if let sent = startSentAt, Date().timeIntervalSince(sent) > 4 {
++                        startingAttempt = nil
++                        startSentAt = nil
++                        connectionError = "Start was not acknowledged. Please try Start again."
++                    }
++                }
 +                failures = 0
 +                unacknowledged = status.control_alive == true ? 0 : unacknowledged + 1
 +                if status.phase == "ended" {
@@ -118,6 +146,7 @@ index 6f14fa0..01eb853 100644
 +                }
 +                sendCollectionCommand("heartbeat")
 +                if endingCollection { sendCollectionCommand("end") }
++                else if startingAttempt != nil { sendCollectionCommand("start") }
 +            } catch {
 +                if Task.isCancelled { return }
 +                failures += 1
@@ -212,7 +241,7 @@ index 002b7b9..244ade3 100644
                  )
          }
 diff --git a/IsaacXRTeleopClient/StreamingControlsView.swift b/IsaacXRTeleopClient/StreamingControlsView.swift
-index 9c472c8..df9c10a 100644
+index 9c472c8..e497c34 100644
 --- a/IsaacXRTeleopClient/StreamingControlsView.swift
 +++ b/IsaacXRTeleopClient/StreamingControlsView.swift
 @@ -8,26 +8,25 @@
@@ -392,7 +421,7 @@ index 9c472c8..df9c10a 100644
                  switch connectionState {
                  case .initialized, .disconnected:
                      var config = CloudXRKit.Config()
-@@ -154,9 +246,19 @@ extension StreamingControlsView {
+@@ -154,9 +246,20 @@ extension StreamingControlsView {
                      config.resolutionPreset = .standardPreset
                      config.handTrackingMode = .legacy
                      appModel.cxrSession.configure(config: config)
@@ -400,6 +429,7 @@ index 9c472c8..df9c10a 100644
 +                    appModel.connectionError = nil
 +                    appModel.collection = nil
 +                    appModel.endingCollection = false
++                    appModel.startingAttempt = nil
 +                    reportedFailure = false
 +                    do {
 +                        try await requestLocalNetwork()
@@ -414,7 +444,7 @@ index 9c472c8..df9c10a 100644
                      Self.logger.error("Streaming controls state machine error: \(errorMessage)")
                  }
              }
-@@ -172,22 +274,24 @@ extension StreamingControlsView {
+@@ -172,22 +275,24 @@ extension StreamingControlsView {
          }
  
          var ipFieldDisabled: Bool {
@@ -444,11 +474,60 @@ index 9c472c8..df9c10a 100644
              }
          }
      }
+diff --git a/IsaacXRTeleopClient/StreamingView.swift b/IsaacXRTeleopClient/StreamingView.swift
+index 6ccd65d..9765ebf 100644
+--- a/IsaacXRTeleopClient/StreamingView.swift
++++ b/IsaacXRTeleopClient/StreamingView.swift
+@@ -19,8 +19,34 @@ struct StreamingView: View {
+     @State var viewModel: ViewModel
+ 
+     var body: some View {
+-        RealityView { content in
++        RealityView { content, attachments in
+             viewModel.initializeStreamingContent(content: content)
++            if let instruction = attachments.entity(for: "collection-instruction") {
++                let head = AnchorEntity(.head, trackingMode: .continuous)
++                instruction.position = [0, 0.32, -0.9]
++                instruction.scale = [0.7, 0.7, 0.7]
++                head.addChild(instruction)
++                content.add(head)
++            }
++        } attachments: {
++            Attachment(id: "collection-instruction") {
++                VStack(spacing: 12) {
++                    if let status = viewModel.appModel.collection, status.phase == "ready" {
++                        Text(status.goal).font(.system(size: 42, weight: .semibold))
++                        Text(viewModel.appModel.collectionInstruction).font(.title2)
++                    } else {
++                        Text(viewModel.appModel.collectionInstruction)
++                            .font(.system(size: 42, weight: .semibold))
++                    }
++                }
++                    .multilineTextAlignment(.center)
++                    .foregroundStyle(.white)
++                    .frame(width: 660)
++                    .fixedSize(horizontal: false, vertical: true)
++                    .padding(20)
++                    .glassBackgroundEffect()
++                    .allowsHitTesting(false)
++            }
+         }
+         .upperLimbVisibility(.hidden)
+         .persistentSystemOverlays(viewModel.showSystemOverlays)
+@@ -36,7 +62,7 @@ struct StreamingView: View {
+ extension StreamingView {
+     @Observable
+     class ViewModel {
+-        private let appModel: AppModel
++        let appModel: AppModel
+ 
+         init(appModel: AppModel) {
+             self.appModel = appModel
 diff --git a/IsaacXRTeleopClient/TeleopControlView.swift b/IsaacXRTeleopClient/TeleopControlView.swift
-index 702ea6d..52d457f 100644
+index 702ea6d..b60c9b6 100644
 --- a/IsaacXRTeleopClient/TeleopControlView.swift
 +++ b/IsaacXRTeleopClient/TeleopControlView.swift
-@@ -8,148 +8,52 @@
+@@ -8,148 +8,61 @@
  // without an express license agreement from NVIDIA CORPORATION or
  // its affiliates is strictly prohibited.
  
@@ -493,28 +572,18 @@ index 702ea6d..52d457f 100644
 -                    .font(.title3)
 -                    .buttonStyle(.bordered)
 -                    .disabled(viewModel.teleopStopButtonDisabled)
++            Button(viewModel.appModel.startingAttempt == nil ? "Start" : "Starting…", systemImage: "record.circle") {
++                viewModel.appModel.sendCollectionCommand("start")
++            }
++            .buttonStyle(.borderedProminent)
++            .disabled(!viewModel.appModel.canStartRecording)
++            if let status = viewModel.appModel.collection {
++                Text("Episode \(status.episode) · \(status.saved) saved")
++                    .font(.callout).foregroundStyle(.secondary)
++            }
 +            HStack {
 +                Button("Restart episode", systemImage: "arrow.counterclockwise") {
 +                    viewModel.appModel.sendCollectionCommand("restart")
-+                }
-+                .disabled(
-+                    viewModel.appModel.collection == nil
-+                        || viewModel.appModel.collection?.phase == "saving"
-+                        || viewModel.appModel.endingCollection
-+                        || viewModel.appModel.collection?.phase == "ended")
-+                Button("End collection", systemImage: "stop.circle") {
-+                    viewModel.appModel.sendCollectionCommand("end")
-+                }
-+                .disabled(
-+                    viewModel.appModel.collection == nil || viewModel.appModel.endingCollection
-+                        || viewModel.appModel.collection?.phase == "ended")
-+            }
-+            .buttonStyle(.bordered)
-+            VStack(alignment: .leading, spacing: 8) {
-+                Label {
-+                    Text("Tracked hand")
-+                } icon: {
-+                    Circle().fill(.red).frame(width: 8, height: 8)
                  }
 -                Divider()
 -                Button {
@@ -525,15 +594,34 @@ index 702ea6d..52d457f 100644
 -                        Text(viewModel.teleopResetButtonText)
 -                    }
 -                    .frame(width: viewModel.teleopButtonWidth)
-+                Label {
-+                    Text("Robot hand joints")
-+                } icon: {
-+                    Circle().fill(.cyan).frame(width: 8, height: 8)
++                .disabled(
++                    viewModel.appModel.collection == nil
++                        || viewModel.appModel.collection?.phase == "saving"
++                        || viewModel.appModel.endingCollection
++                        || viewModel.appModel.collection?.phase == "ended")
++                Button("End collection", systemImage: "stop.circle") {
++                    viewModel.appModel.sendCollectionCommand("end")
                  }
 -                .font(.title3)
 -                .buttonStyle(.bordered)
++                .disabled(
++                    viewModel.appModel.collection == nil || viewModel.appModel.endingCollection
++                        || viewModel.appModel.collection?.phase == "ended")
              }
 -            .frame(height: 100, alignment: .top)
++            .buttonStyle(.bordered)
++            VStack(alignment: .leading, spacing: 8) {
++                Label {
++                    Text("Human")
++                } icon: {
++                    Circle().fill(.red).frame(width: 8, height: 8)
++                }
++                Label {
++                    Text("Robot")
++                } icon: {
++                    Circle().fill(.cyan).frame(width: 8, height: 8)
++                }
++            }
 +            .font(.caption)
          }
          .padding()
@@ -629,7 +717,7 @@ index 702ea6d..52d457f 100644
      }
  }
 diff --git a/IsaacXRTeleopClient/TopConfigView.swift b/IsaacXRTeleopClient/TopConfigView.swift
-index 5284c39..d28fa39 100644
+index 5284c39..6939685 100644
 --- a/IsaacXRTeleopClient/TopConfigView.swift
 +++ b/IsaacXRTeleopClient/TopConfigView.swift
 @@ -8,9 +8,9 @@
@@ -644,7 +732,7 @@ index 5284c39..d28fa39 100644
  
  let configViewTitle = "IsaacSimTeleopConfigViewWindowGroup"
  
-@@ -19,73 +19,67 @@ struct TopConfigView: View {
+@@ -19,73 +19,49 @@ struct TopConfigView: View {
      @State var viewModel: ViewModel
  
      var body: some View {
@@ -657,20 +745,17 @@ index 5284c39..d28fa39 100644
 -                                HUDView(session: viewModel.cxrSession, hudConfig: viewModel.hudConfig)
 -                            }
 +        VStack(alignment: .leading, spacing: 0) {
-+            if viewModel.showTeleopView || viewModel.appModel.collection?.phase == "ended" {
-+                VStack(alignment: .leading, spacing: 12) {
-+                    Text(viewModel.appModel.collectionInstruction)
-+                        .font(.system(size: 40, weight: .semibold))
-+                        .fixedSize(horizontal: false, vertical: true)
-+                    if let status = viewModel.appModel.collection {
-+                        if status.phase == "aligning" {
-+                            ProgressView(value: status.alignment)
-+                            Text(status.goal).font(.title3)
++            HStack(alignment: .top, spacing: 0) {
++                ScrollView {
++                    VStack(alignment: .leading, spacing: 24) {
++                        if viewModel.showTeleopView {
++                            TeleopControlView(
++                                viewModel: TeleopControlView.ViewModel(appModel: viewModel.appModel)
++                            )
 +                        }
-+                        if status.phase != "ended" {
-+                            Text("Episode \(status.episode) · \(status.saved) saved")
-+                                .font(.callout).foregroundStyle(.secondary)
-+                        }
++                        StreamingControlsView(
++                            viewModel: StreamingControlsView.ViewModel(appModel: viewModel.appModel)
++                        )
                      }
 -                }.ornament(
 -                    visibility: viewModel.showOrnaments ? .visible : .hidden,
@@ -683,7 +768,7 @@ index 5284c39..d28fa39 100644
 -                }
 -                .onChange(of: scenePhase) {
 -                    viewModel.scenePhaseChanged(to: scenePhase)
-                 }
+-                }
 -        }
 -    }
 -
@@ -693,26 +778,13 @@ index 5284c39..d28fa39 100644
 -                Spacer()
 -                Text("Main").font(.extraLargeTitle2)
 -                Spacer()
-+                .padding(28)
-             }
+-            }
 -            .frame(height: 50, alignment: .top).padding()
 -
 -            if viewModel.showTeleopView {
 -                VStack {
 -                    TeleopControlView(viewModel: TeleopControlView.ViewModel(appModel: viewModel.appModel))
 -                        .frame(alignment: .top)
-+            HStack(alignment: .top, spacing: 0) {
-+                ScrollView {
-+                    VStack(alignment: .leading, spacing: 24) {
-+                        if viewModel.showTeleopView {
-+                            TeleopControlView(
-+                                viewModel: TeleopControlView.ViewModel(appModel: viewModel.appModel)
-+                            )
-+                        }
-+                        StreamingControlsView(
-+                            viewModel: StreamingControlsView.ViewModel(appModel: viewModel.appModel)
-+                        )
-+                    }
 +                    .padding(.vertical, 16)
                  }
 -                .frame(height: 200, alignment: .top)
@@ -766,7 +838,7 @@ index 5284c39..d28fa39 100644
          // Defined for convenience for the HUD.
          let cxrSession: CloudXRSession
  
-@@ -101,24 +95,8 @@ extension TopConfigView {
+@@ -101,24 +77,8 @@ extension TopConfigView {
              appModel.windowScenePhaseChanged(to: newValue)
          }
  

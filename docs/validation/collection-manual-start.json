@@ -1,0 +1,35 @@
+{
+  "date": "2026-09-07",
+  "headset_visual_confirmation": false,
+  "scope": "Manual Start, visible human/robot markers before recording, repeated episodes, and a head-following native instruction label",
+  "checks": {
+    "python_tests_passed": 371,
+    "live_ui_regression": "passed",
+    "review_ui_regression": "passed",
+    "native_build": "passed",
+    "native_install_and_launch": "passed",
+    "native_install_time": "2026-09-07T16:01:10-04:00",
+    "native_patch_reverse_check": "passed"
+  },
+  "gpu": {
+    "host": "rl2-bonjour",
+    "log": "validation/20260907-manual/test.log",
+    "synthetic": true,
+    "episodes_saved": 2,
+    "successful_episode_steps": [60, 60],
+    "discarded_steps": 5,
+    "manual_starts": 3,
+    "wait_without_start_checked": true,
+    "stale_start_retry_checked": true,
+    "tracking_recovery_checked": true,
+    "pre_start_robot_marker_checks": 1797,
+    "wrist_position_errors_m": [0.0008030034283832499, 0.0008032029551473382],
+    "bundle_digest": "e5eba2bb657c51c8fd44bc00d53341a5a47f9e062c308805f7756872574bb7a8"
+  },
+  "native_instruction": {
+    "anchor": "head, continuous tracking",
+    "position_m": [0, 0.32, -0.9],
+    "goal_visible_before_start": true,
+    "duplicate_controls_window_instruction_removed": true
+  }
+}

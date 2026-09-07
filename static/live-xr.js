@@ -230,7 +230,7 @@
         "secondary",
       );
       const phaseLabel = {
-        aligning: "WAITING FOR ALIGNMENT",
+        ready: "READY TO RECORD",
         recording: "RECORDING",
         saving: "SAVING",
         interrupted: "INTERRUPTED",
