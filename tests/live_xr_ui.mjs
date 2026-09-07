@@ -16,7 +16,7 @@ window.fetch = (path, options) =>
     requests.push({
       path,
       options,
-      resolve: (data) => resolve({ ok: true, json: async () => data }),
+      resolve: (data, ok = true) => resolve({ ok, json: async () => data }),
     }),
   );
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -58,6 +58,10 @@ const catalog = {
 const job = {
   id: "test-session",
   state: "PENDING",
+  startup_stage: "launch",
+  server_connected_at: "2026-09-07T00:00:00Z",
+  runtime_checked_at: "2026-09-07T00:00:01Z",
+  hand_prepared_at: "2026-09-07T00:00:02Z",
   job_id: "123",
   server_ready: false,
   profile: { robot: "floating_shadow_left", task: "Dexverse-PickCube-v0" },
@@ -110,6 +114,14 @@ try {
   assert.match(get("live-xr-sessions").textContent, /test-ses/);
   assert.equal(get("live-xr-hand").disabled, true);
   assert.equal(get("live-xr-start").textContent, "Waiting for GPU…");
+  assert.equal(get("live-xr-progress").hidden, false);
+  const stages = () => [
+    ...get("live-xr-progress-steps").querySelectorAll("li"),
+  ];
+  assert.equal(stages()[0].dataset.state, "done");
+  assert.equal(stages()[2].dataset.state, "done");
+  assert.match(stages()[3].textContent, /Queued/);
+  assert.match(stages()[4].textContent, /Not started/);
   window.loadLiveXR();
   const stop = [...get("live-xr-sessions").querySelectorAll("button")].find(
     (b) => b.textContent === "Stop session",
@@ -129,6 +141,7 @@ try {
     )?.disabled,
   );
   assert.equal(get("live-xr-start").textContent, "Stopping…");
+  assert.match(stages()[3].textContent, /Interrupted/);
   window.loadLiveXR();
   requests[5].resolve({
     sessions: [
@@ -167,8 +180,56 @@ try {
     get("live-xr-sessions").textContent,
     /Run training cycle/,
   );
+  const failed = {
+    ...job,
+    id: "failed-attempt",
+    job_id: null,
+    scheduler_final: true,
+    state: "FAILED",
+    startup_stage: "server",
+    failed_stage: "server",
+    server_connected_at: null,
+    runtime_checked_at: null,
+    hand_prepared_at: null,
+    error: "Connection timed out",
+  };
+  const overview = { sessions: [failed], license: { accepted: true }, catalog };
+  window.loadLiveXR();
+  requests.at(-1).resolve(overview);
+  await flush();
+  assert.equal(get("live-xr-start").textContent, "Start live session");
+  assert.equal(get("live-xr-progress-title").textContent, "Startup failed");
+  assert.equal(stages()[0].dataset.state, "failed");
+  assert.ok(
+    stages()
+      .slice(1)
+      .every((step) => step.textContent.endsWith("Not started")),
+  );
+  window.loadLiveXR();
+  requests.at(-1).resolve(overview);
+  await flush();
+  assert.equal(get("live-xr-progress-error").hidden, false);
+  assert.match(
+    get("live-xr-progress-error").textContent,
+    /Connection timed out/,
+  );
+  get("live-xr-start-form").dispatchEvent(
+    new window.Event("submit", { cancelable: true }),
+  );
+  assert.equal(
+    get("live-xr-progress-title").textContent,
+    "Submitting request…",
+  );
+  requests.at(-1).resolve({ detail: "Hand files missing" }, false);
+  await flush();
+  window.loadLiveXR();
+  requests.at(-1).resolve(overview);
+  await flush();
+  assert.equal(get("live-xr-progress-title").textContent, "Could not start");
+  assert.match(get("live-xr-progress-error").textContent, /Hand files missing/);
+  assert.ok(stages().every((step) => step.textContent.endsWith("Not started")));
   console.log(
-    "Live UI: selected values, unsupported hands, stale responses, and direct review passed.",
+    "Live UI: selection, progress milestones, persistent failures, stale responses, and review passed.",
   );
 } finally {
   window.close();

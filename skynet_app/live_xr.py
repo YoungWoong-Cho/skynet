@@ -99,6 +99,8 @@ class LiveXRService:
     def update(self, identifier, **changes):
         with self.lock, self.database.transaction() as c:
             job = self.get(identifier)
+            if changes.get("state") == "FAILED" and "failed_stage" not in changes:
+                changes["failed_stage"] = job.get("startup_stage")
             job.update(changes, updated_at=utc_now())
             c.execute(
                 "UPDATE live_xr_sessions SET payload_json=? WHERE id=?",
@@ -222,6 +224,7 @@ class LiveXRService:
             job = dict(
                 id=identifier,
                 state="PREPARING",
+                startup_stage="server",
                 profile=profile,
                 worker=worker,
                 hand_bundle_path=hand_bundle_path,
@@ -233,7 +236,7 @@ class LiveXRService:
                 created_at=utc_now(),
                 updated_at=utc_now(),
                 server_ready=False,
-                detail="Checking the pinned CloudXR and DexVerse runtime",
+                detail=f"Connecting to {profile['gateway']}",
             )
             c.execute(
                 "INSERT INTO live_xr_sessions VALUES (?,?)",
@@ -256,6 +259,18 @@ class LiveXRService:
                 return
             p = job["profile"]
             transport = self.transport(job)
+            self.update(
+                identifier,
+                startup_stage="server",
+                detail=f"Connecting to {job['gateway']}",
+            )
+            transport.ssh(job["gateway"], "true", timeout=10)
+            self.update(
+                identifier,
+                server_connected_at=utc_now(),
+                startup_stage="runtime",
+                detail="Checking simulation runtime",
+            )
             checks = [
                 f"test -x {shlex.quote(p['cloudxr_runtime'] + '/bin/cloudxr-service')}",
                 f"test -x {shlex.quote(p['runtime'] + '/bin/python')}",
@@ -271,9 +286,14 @@ class LiveXRService:
                 transport.ssh(job["gateway"], " && ".join(checks), timeout=15)
             except ClusterError as exc:
                 raise ValueError(
-                    "Live runtime is unavailable. Follow the live setup guide; no GPU job was submitted. "
-                    + str(exc)
+                    "Simulation runtime check failed: " + str(exc)
                 ) from exc
+            self.update(
+                identifier,
+                runtime_checked_at=utc_now(),
+                startup_stage="hand",
+                detail="Preparing hand files",
+            )
             if job.get("hand_bundle_path"):
                 self.update(
                     identifier,
@@ -287,6 +307,12 @@ class LiveXRService:
                 )
                 p["hand_bundle"]["root"] = remote
                 self.update(identifier, profile=p)
+            self.update(
+                identifier,
+                hand_prepared_at=utc_now(),
+                startup_stage="launch",
+                detail="Starting session",
+            )
             transport.write_capsule_file(
                 identifier, "runner.py", job["worker"], job["gateway"]
             )
@@ -381,7 +407,20 @@ class LiveXRService:
                 or identifier in self.refreshing
                 or (
                     not force
-                    and time.monotonic() - self.refreshed.get(identifier, 0) < 10
+                    and time.monotonic() - self.refreshed.get(identifier, 0)
+                    < (
+                        2
+                        if job["state"]
+                        in {
+                            "PREPARING",
+                            "SUBMITTING",
+                            "SUBMISSION_UNKNOWN",
+                            "PENDING",
+                            "STARTING_SERVER",
+                            "STARTING_SIMULATION",
+                        }
+                        else 10
+                    )
                 )
             ):
                 return self.public(job)
@@ -456,6 +495,10 @@ print(json.dumps(value))
                             "server_ready",
                             "recordings",
                             "recording_summary",
+                            "startup_stage",
+                            "failed_stage",
+                            "stream_ready_at",
+                            "scene_ready_at",
                         )
                         if k in control
                     }
@@ -478,7 +521,8 @@ print(json.dumps(value))
                         state="STOPPED"
                         if scheduler["State"] == "CANCELLED"
                         else "FAILED",
-                        error=f"Live process ended ({scheduler['State']}, {scheduler.get('Result', 'see logs')}) without a completed capture status. Inspect logs.",
+                        error=changes.get("error")
+                        or f"Live process ended ({scheduler['State']}, {scheduler.get('Result', 'see logs')}) without a completed capture status. Inspect logs.",
                     )
             elif changes.get("state") in TERMINAL:
                 changes.update(

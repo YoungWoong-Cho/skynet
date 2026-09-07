@@ -12,7 +12,7 @@
     <script src="/static/collection-ui.js?v=20260907-simple" defer></script>
     <script src="/static/hands-ui.js?v=20260907-imported-hands-2" defer></script>
     <script src="/static/live-review.js?v=20260907-collection-review" defer></script>
-    <script src="/static/live-xr.js?v=20260907-session-status" defer></script>
+    <script src="/static/live-xr.js?v=20260907-startup-progress" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -979,6 +979,12 @@
                   <label id="live-xr-consent-field" class="check-field"><input id="live-xr-consent" type="checkbox">I accept the <a id="live-xr-eula" href="https://developer.download.nvidia.com/cloudxr/EULA/NVIDIA_CloudXR_GA_License_without_Data_Collection_25Feb2025.pdf" target="_blank" rel="noreferrer">NVIDIA CloudXR license</a>.</label>
                   <div class="form-actions"><button id="live-xr-start" class="button button-accent" type="submit">Start live session</button></div>
                 </form>
+                <section id="live-xr-progress" class="live-xr-progress" aria-labelledby="live-xr-progress-title" hidden>
+                  <h3 id="live-xr-progress-title" role="status"></h3>
+                  <p id="live-xr-progress-context"></p>
+                  <ol id="live-xr-progress-steps" aria-label="Startup steps"></ol>
+                  <p id="live-xr-progress-error" class="inline-alert" role="alert" hidden></p>
+                </section>
                 <p id="live-xr-message" role="status">Loading live sessions…</p>
                 <p id="live-xr-error" class="inline-alert" role="alert" hidden></p>
               </div>

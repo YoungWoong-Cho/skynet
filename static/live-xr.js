@@ -11,6 +11,27 @@
     AWAITING_HEADSET: "Scene ready",
     STOPPING: "Stopping…",
   };
+  const startingStates = new Set([
+    "PREPARING",
+    "SUBMITTING",
+    "SUBMISSION_UNKNOWN",
+    "PENDING",
+    "STARTING_SERVER",
+    "STARTING_SIMULATION",
+  ]);
+  const stageLabels = {
+    server: "Connecting to server…",
+    runtime: "Checking runtime…",
+    hand: "Preparing hand files…",
+    launch: "Starting session…",
+    stream: "Starting stream…",
+    simulation: "Loading hand and simulation…",
+    ready: "Ready for Vision Pro",
+  };
+  let focusedSession = new URL(location.href).searchParams.get("live_session"),
+    requestPending = false,
+    requestFailure = null,
+    target = null;
   let catalog = null,
     selectionWarning = null;
   let sessions = [],
@@ -47,6 +68,111 @@
     if (className) n.className = className;
     parent.append(n);
     return n;
+  }
+  function progressTitle(session, pending, failedRequest) {
+    if (pending) return "Submitting request…";
+    if (failedRequest) return "Could not start";
+    if (session.connection_check_failed) return "Status unavailable";
+    if (session.state === "FAILED")
+      return session.scene_ready_at ? "Session failed" : "Startup failed";
+    const ended = {
+      CAPTURED: "Recording saved",
+      TIMED_OUT: "Session timed out",
+      STOPPED: "Session stopped",
+    };
+    if (ended[session.state]) return ended[session.state];
+    if (session.stop_requested || session.state === "STOPPING")
+      return "Stopping…";
+    if (session.state === "PENDING") return "Waiting for GPU…";
+    return (
+      stageLabels[session.startup_stage] ||
+      sessionLabels[session.state] ||
+      "Checking status…"
+    );
+  }
+  function renderProgress(running) {
+    const panel = el("live-xr-progress");
+    const session =
+      running || sessions.find((s) => s.id === focusedSession) || sessions[0];
+    const pending = requestPending && !running;
+    const failedRequest = !running && requestFailure;
+    panel.hidden = !session && !pending && !failedRequest;
+    if (panel.hidden) return;
+    const shown = pending || failedRequest ? null : session;
+    const profile = shown?.profile || {
+      robot: el("live-xr-hand").value,
+      task: el("live-xr-task").value,
+    };
+    const hand =
+      profile.hand_name ||
+      catalog?.hands.find((h) => h.key === profile.robot)?.name ||
+      profile.robot ||
+      "";
+    const task =
+      profile.task_name ||
+      catalog?.tasks.find((t) => t.key === profile.task)?.name ||
+      profile.task ||
+      "";
+    el("live-xr-progress-context").textContent = `${hand} · ${task}`;
+    const state = shown?.state;
+    const stage = shown?.failed_stage || shown?.startup_stage;
+    const ended = terminal.has(state);
+    el("live-xr-progress-title").textContent = progressTitle(
+      shown,
+      pending,
+      failedRequest,
+    );
+    const failure =
+      failedRequest ||
+      (!pending && shown?.error) ||
+      (state === "FAILED" ? shown.detail : "");
+    el("live-xr-progress-error").textContent = failure || "";
+    el("live-xr-progress-error").hidden = !failure;
+    const steps = el("live-xr-progress-steps");
+    steps.replaceChildren();
+    // Old sessions did not record milestones; never invent completed/failed steps.
+    steps.hidden = !!shown && !shown.startup_stage;
+    if (steps.hidden) return;
+    const current = stage === "launch" ? "stream" : stage;
+    for (const [key, label, timestamp, done] of [
+      [
+        "server",
+        `Server · ${shown?.gateway || target?.host || "server"}`,
+        "server_connected_at",
+        "Connected",
+      ],
+      ["runtime", "Simulation runtime", "runtime_checked_at", "Checked"],
+      ["hand", "Hand files", "hand_prepared_at", "Prepared"],
+      ["stream", "Streaming", "stream_ready_at", "Ready"],
+      ["simulation", "Hand & simulation", "scene_ready_at", "Loaded"],
+    ]) {
+      const reached = !!shown?.[timestamp];
+      const failed =
+        (state === "FAILED" || shown?.failed_stage) &&
+        current === key &&
+        !reached;
+      let stepState = "pending",
+        stepLabel = "Not started";
+      if (failed) {
+        stepState = "failed";
+        stepLabel = "Failed";
+      } else if (reached) {
+        stepState = "done";
+        stepLabel = done;
+      } else if (current === key && !pending && !failedRequest) {
+        if (shown.connection_check_failed) stepLabel = "Unknown";
+        else if (ended || shown.stop_requested || state === "STOPPING")
+          stepLabel = "Interrupted";
+        else {
+          stepState = "active";
+          stepLabel = state === "PENDING" ? "Queued" : "In progress…";
+        }
+      }
+      const row = text(steps, "li", "");
+      row.dataset.state = stepState;
+      text(row, "span", label);
+      text(row, "strong", stepLabel);
+    }
   }
   function apply(session) {
     revision += 1;
@@ -234,13 +360,16 @@
       el("live-xr-selection-note").textContent = "";
     }
     if (!active && catalog) updateChoices(false);
+    renderProgress(running);
     el("live-xr-start").disabled = active || submitting || !catalog;
     el("live-xr-hand").disabled = active || submitting || !catalog;
     el("live-xr-task").disabled = active || submitting || !catalog;
     el("live-xr-start").textContent = active
       ? running.stop_requested
         ? "Stopping…"
-        : sessionLabels[running.state] || "Session active"
+        : (running.state === "PREPARING"
+            ? stageLabels[running.startup_stage]
+            : sessionLabels[running.state]) || "Session active"
       : submitting
         ? "Starting…"
         : "Start live session";
@@ -315,7 +444,7 @@
       const result = await api();
       if (revision !== startedAtRevision) return;
       if (result.target) {
-        const target = result.target;
+        target = result.target;
         el("live-xr-target").textContent =
           `${target.host} · ${target.duration_minutes} min limit`;
       }
@@ -341,9 +470,14 @@
     } finally {
       loading = false;
       if (visible())
-        timer = setTimeout(() => {
-          if (visible()) load();
-        }, 10000);
+        timer = setTimeout(
+          () => {
+            if (visible()) load();
+          },
+          sessions.some((s) => startingStates.has(s.state)) || requestPending
+            ? 1000
+            : 10000,
+        );
     }
   }
   el("live-xr-start-form").onsubmit = async (e) => {
@@ -351,25 +485,33 @@
     if (submitting || !catalog || sessions.some((s) => !terminal.has(s.state)))
       return;
     submitting = true;
+    requestPending = true;
+    requestFailure = null;
     render();
     el("live-xr-message").textContent = "";
     error(null);
     try {
-      apply(
-        await api("/sessions", {
-          method: "POST",
-          body: JSON.stringify({
-            accepted_license: el("live-xr-consent").checked,
-            task: el("live-xr-task").value,
-            robot: el("live-xr-hand").value,
-          }),
+      const session = await api("/sessions", {
+        method: "POST",
+        body: JSON.stringify({
+          accepted_license: el("live-xr-consent").checked,
+          task: el("live-xr-task").value,
+          robot: el("live-xr-hand").value,
         }),
-      );
+      });
+      requestPending = false;
+      focusedSession = session.id;
+      const url = new URL(location.href);
+      url.searchParams.set("live_session", session.id);
+      history.replaceState(null, "", url);
+      apply(session);
       await load();
     } catch (e) {
-      error(e.message);
+      requestFailure = e.message;
+      error(null);
       el("live-xr-message").textContent = "";
     } finally {
+      requestPending = false;
       submitting = false;
       render();
     }

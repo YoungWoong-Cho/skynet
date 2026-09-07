@@ -188,11 +188,18 @@ def main():
         nonlocal pending_result
         if state in ("CAPTURED", "STOPPED", "TIMED_OUT", "FAILED"):
             details["server_ready"] = False
+            if state == "FAILED":
+                details.setdefault("failed_stage", status.get("startup_stage"))
             pending_result = (state, details)
             publish(
                 "STOPPING",
                 server_ready=False,
                 detail="Closing live processes and saving logs",
+                **{
+                    key: details[key]
+                    for key in ("error", "failed_stage")
+                    if key in details
+                },
             )
         else:
             publish(state, **details)
@@ -204,7 +211,9 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     try:
-        update("STARTING_SERVER", detail="Starting CloudXR 5.0.1")
+        update(
+            "STARTING_SERVER", startup_stage="stream", detail="Starting CloudXR 5.0.1"
+        )
         # Holding an input pipe avoids Monado epoll errors on /dev/null.
         with (root / "cloudxr.log").open("w") as stream:
             server = subprocess.Popen(
@@ -287,6 +296,8 @@ def main():
         children.append(sim)
         update(
             "STARTING_SIMULATION",
+            startup_stage="simulation",
+            stream_ready_at=time.time(),
             server_ready=True,
             detail="CloudXR is ready; loading the DexVerse scene",
         )
@@ -338,6 +349,8 @@ def main():
                     summaries.append(json.loads(result.stdout))
                 update(
                     "CAPTURED",
+                    startup_stage="ready",
+                    scene_ready_at=status.get("scene_ready_at", time.time()),
                     detail="A successful demonstration was saved and validated. Open Review recording to inspect and download it.",
                     recordings=[str(p.relative_to(root)) for p in files],
                     recording_summary={
@@ -352,6 +365,8 @@ def main():
             if "Teleop Device:" in tail and status["state"] == "STARTING_SIMULATION":
                 update(
                     "AWAITING_HEADSET",
+                    startup_stage="ready",
+                    scene_ready_at=time.time(),
                     detail="Scene loaded. Connect the headset, then choose Play to calibrate and record.",
                 )
             time.sleep(1)

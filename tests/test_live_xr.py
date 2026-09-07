@@ -229,6 +229,97 @@ def test_imported_hand_preparation_failure_does_not_launch_shadow(
     result = service.get(job["id"])
     assert result["state"] == "FAILED"
     assert "checksum mismatch" in result["error"]
+    assert result["failed_stage"] == "hand"
+    assert result["server_connected_at"] and result["runtime_checked_at"]
+    assert not result.get("hand_prepared_at")
     assert result["profile"]["robot"] == imported_hand[1]["robot"]
     assert service.cluster.calls == 0
     assert not service.cluster.writes
+
+
+def test_connection_failure_retains_failed_step_without_claiming_readiness(service):
+    job = service.create(True)
+    service.cluster.offline = True
+    service.prepare(job["id"])
+    failed = service.get(job["id"])
+    assert failed["state"] == "FAILED"
+    assert failed["failed_stage"] == "server"
+    assert not any(
+        failed.get(k)
+        for k in (
+            "server_connected_at",
+            "runtime_checked_at",
+            "hand_prepared_at",
+            "stream_ready_at",
+            "scene_ready_at",
+        )
+    )
+    restarted = LiveXRService(service.database, service.cluster, root=service.root)
+    assert restarted.list()[0]["failed_stage"] == "server"
+    assert service.cluster.calls == 0
+
+
+def test_runtime_failure_keeps_successful_connection_milestone(service, monkeypatch):
+    def ssh(gateway, command, **kwargs):
+        if command == "true":
+            return ""
+        raise ClusterError("Required runtime file is missing")
+
+    monkeypatch.setattr(service.cluster, "ssh", ssh)
+    job = service.create(True)
+    service.prepare(job["id"])
+    failed = service.get(job["id"])
+    assert failed["server_connected_at"]
+    assert failed["failed_stage"] == "runtime"
+    assert not failed.get("runtime_checked_at")
+    assert not failed.get("hand_prepared_at")
+    assert "Required runtime file is missing" in failed["error"]
+    assert service.cluster.calls == 0
+
+
+def test_worker_milestones_distinguish_stream_from_loaded_scene(service):
+    job = service.create(True)
+    service.prepare(job["id"])
+    service.cluster.control = {
+        "job_id": "123",
+        "state": "STARTING_SIMULATION",
+        "startup_stage": "simulation",
+        "stream_ready_at": 100,
+        "server_ready": True,
+    }
+    loading = service.refresh(job["id"], force=True)
+    assert all(
+        loading.get(k)
+        for k in (
+            "server_connected_at",
+            "runtime_checked_at",
+            "hand_prepared_at",
+            "stream_ready_at",
+        )
+    )
+    assert not loading.get("scene_ready_at")
+    service.cluster.control.update(
+        state="AWAITING_HEADSET", startup_stage="ready", scene_ready_at=102
+    )
+    ready = service.refresh(job["id"], force=True)
+    assert ready["scene_ready_at"] == 102
+    assert ready["startup_stage"] == "ready"
+
+
+def test_worker_failure_keeps_specific_error_after_process_exits(service):
+    job = service.create(True)
+    service.prepare(job["id"])
+    service.cluster.control = {
+        "job_id": "123",
+        "state": "FAILED",
+        "startup_stage": "simulation",
+        "failed_stage": "simulation",
+        "stream_ready_at": 100,
+        "error": "Selected hand has a missing palm body",
+    }
+    service.cluster.state = "FAILED"
+    failed = service.refresh(job["id"], force=True)
+    assert failed["failed_stage"] == "simulation"
+    assert failed["error"] == "Selected hand has a missing palm body"
+    assert failed["stream_ready_at"] == 100
+    assert not failed.get("scene_ready_at")
