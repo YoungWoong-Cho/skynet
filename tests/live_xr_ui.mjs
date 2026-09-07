@@ -109,6 +109,7 @@ try {
   await flush();
   assert.match(get("live-xr-sessions").textContent, /test-ses/);
   assert.equal(get("live-xr-hand").disabled, true);
+  assert.equal(get("live-xr-start").textContent, "Waiting for GPU…");
   window.loadLiveXR();
   const stop = [...get("live-xr-sessions").querySelectorAll("button")].find(
     (b) => b.textContent === "Stop session",
@@ -127,6 +128,7 @@ try {
       (b) => b.textContent === "Stopping…",
     )?.disabled,
   );
+  assert.equal(get("live-xr-start").textContent, "Stopping…");
   window.loadLiveXR();
   requests[5].resolve({
     sessions: [

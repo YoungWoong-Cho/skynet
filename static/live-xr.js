@@ -1,6 +1,16 @@
 (() => {
   const el = (id) => document.getElementById(id);
   const terminal = new Set(["CAPTURED", "STOPPED", "TIMED_OUT", "FAILED"]);
+  const sessionLabels = {
+    PREPARING: "Checking server…",
+    SUBMITTING: "Starting session…",
+    SUBMISSION_UNKNOWN: "Checking startup…",
+    PENDING: "Waiting for GPU…",
+    STARTING_SERVER: "Starting stream…",
+    STARTING_SIMULATION: "Loading scene…",
+    AWAITING_HEADSET: "Scene ready",
+    STOPPING: "Stopping…",
+  };
   let catalog = null,
     selectionWarning = null;
   let sessions = [],
@@ -227,10 +237,12 @@
     el("live-xr-start").disabled = active || submitting || !catalog;
     el("live-xr-hand").disabled = active || submitting || !catalog;
     el("live-xr-task").disabled = active || submitting || !catalog;
-    el("live-xr-start").textContent = submitting
-      ? "Starting…"
-      : active
-        ? "Session in progress"
+    el("live-xr-start").textContent = active
+      ? running.stop_requested
+        ? "Stopping…"
+        : sessionLabels[running.state] || "Session active"
+      : submitting
+        ? "Starting…"
         : "Start live session";
   }
   function setupChoices(value) {
