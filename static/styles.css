@@ -1764,8 +1764,8 @@ footer {
 
 /* Live capture uses the Collection panels, with consistent body/action spacing. */
 .live-xr-intro { padding: 16px; }
-.live-xr-intro > p:first-child { margin-top: 0; }
-#live-xr-start-form .form-actions { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.live-xr-intro > p:empty, #live-xr-selection-note:empty { display: none; }
+#live-xr-start-form .form-actions { margin-top: 12px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 #live-xr-sessions td:last-child { white-space: nowrap; }
 #live-xr-sessions td:last-child .button { margin-left: 12px; }
 .live-xr-steps li + li { margin-top: 8px; }
@@ -1774,8 +1774,12 @@ footer {
 #hand-export-dialog .form-actions { display: flex; gap: 12px; justify-content: flex-end; }
 
 /* Native capture review shares the collection dialog, fields and table controls. */
-.live-xr-availability { margin: 12px 0 18px; }
-.live-xr-availability li { margin-block: 8px; }
+#live-xr-selection-note { margin: 8px 0 0; }
+.live-xr-help-body { padding: 0 16px 16px; font-size: 12px; line-height: 1.5; }
+.live-xr-help-body ol { padding-left: 20px; }
+.live-xr-connection-check { margin-top: 6px; font-size: 10px; }
+.live-xr-connection-check summary { cursor: pointer; }
+.live-xr-connection-check label { margin-top: 6px; }
 #live-review-content > * { margin-block: 12px; }
 .live-review-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 #live-review-frame { margin-left: auto; font-variant-numeric: tabular-nums; }

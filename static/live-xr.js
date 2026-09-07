@@ -85,34 +85,17 @@
             : ""),
         "secondary",
       );
-      text(
-        name,
-        "div",
-        session.profile?.execution === "workstation"
-          ? "Workstation · " + session.gateway
-          : session.job_id
-            ? "GPU job " + session.job_id
-            : "Preparing",
-        "secondary",
-      );
       text(status, "strong", session.state.replaceAll("_", " "));
-      text(
-        status,
-        "div",
+      const detail =
         session.error ||
-          (session.state === "CAPTURED"
-            ? "Demonstration saved. Open Review recording to inspect and download it."
-            : session.detail) ||
-          "",
-        "secondary",
-      );
+        (!terminal.has(session.state) || session.state === "FAILED"
+          ? session.detail
+          : "");
+      if (detail) text(status, "div", detail, "secondary");
       if (!terminal.has(session.state)) {
-        const label = text(
-          status,
-          "label",
-          "Headset result (reported)",
-          "secondary",
-        );
+        const check = text(status, "details", "", "live-xr-connection-check");
+        text(check, "summary", "Connection check");
+        const label = text(check, "label", "Headset result", "secondary");
         const select = document.createElement("select");
         select.setAttribute(
           "aria-label",
@@ -142,31 +125,13 @@
           }
         };
         label.append(select);
-      } else if (
-        session.headset_result &&
-        session.headset_result !== "NOT_TESTED"
-      ) {
-        text(
-          status,
-          "div",
-          "Headset result: " +
-            session.headset_result.replaceAll("_", " ").toLowerCase(),
-          "secondary",
-        );
       }
       if (session.headset_result === "PORT_UNREACHABLE")
         text(
           status,
           "div",
-          "Network access is blocked or unavailable from the headset. Verify the permitted route before retrying.",
+          "Headset cannot reach the server.",
           "collection-quality-warning",
-        );
-      if (session.checked_at)
-        text(
-          status,
-          "div",
-          "Checked " + new Date(session.checked_at).toLocaleTimeString(),
-          "secondary",
         );
       if (
         session.server_ready &&
@@ -188,12 +153,7 @@
             );
           }
         };
-      } else
-        text(
-          address,
-          "span",
-          terminal.has(session.state) ? "Session ended" : "Not ready",
-        );
+      } else text(address, "span", "—");
       if (session.state === "CAPTURED") {
         (session.recordings || []).forEach((file, index) => {
           const review = text(
@@ -245,10 +205,9 @@
         text(
           status,
           "div",
-          session.recordings.length +
-            (session.recording_summary
-              ? ` native file saved · ${session.recording_summary.episodes} successful demonstration(s), ${session.recording_summary.steps} steps.`
-              : " native file saved. Open Review recording to validate and inspect it."),
+          session.recording_summary
+            ? `${session.recording_summary.episodes} demo${session.recording_summary.episodes === 1 ? "" : "s"} · ${session.recording_summary.steps} steps`
+            : `${session.recordings.length} recording${session.recordings.length === 1 ? "" : "s"}`,
           "secondary",
         );
     }
@@ -262,8 +221,7 @@
         catalog.tasks.find((t) => t.key === running.profile.task)
           ?.instructions ||
         "See the task instructions on the headset.";
-      el("live-xr-selection-note").textContent =
-        "This session uses the hand and task shown above. Stop it before choosing a different combination.";
+      el("live-xr-selection-note").textContent = "";
     }
     if (!active && catalog) updateChoices(false);
     el("live-xr-start").disabled = active || submitting || !catalog;
@@ -308,13 +266,12 @@
     task.value = catalog.tasks.some((t) => t.key === chosenTask)
       ? chosenTask
       : catalog.default_task;
-    el("live-xr-catalog-note").textContent = catalog.note;
     const invalidLink =
       (chosenHand && hand.value !== chosenHand) ||
       (chosenTask && task.value !== chosenTask);
     if (invalidLink)
       selectionWarning =
-        "This link requested an unsupported hand or task. The configured defaults are shown; review them before starting.";
+        "Unsupported hand or task in link. Check the selection before starting.";
     updateChoices(false);
     hand.onchange = task.onchange = () => updateChoices(true);
   }
@@ -322,17 +279,11 @@
     if (persist) selectionWarning = null;
     const robot = el("live-xr-hand").value,
       task = el("live-xr-task").value;
-    const imported = catalog.hands.find((h) => h.key === robot)?.imported;
     const verified = catalog.verified_pairs.some(
       (pair) => pair.robot === robot && pair.task === task,
     );
     el("live-xr-selection-note").textContent =
-      selectionWarning ||
-      (verified
-        ? "Verified with a successful Vision Pro demonstration. One successful demonstration is saved per session."
-        : imported
-          ? "Uses the stored URDF and meshes. First startup prepares the simulator model and checks its joints. This adapter still needs GPU/headset validation; preparation errors appear in the session row."
-          : "Available in this DexVerse release; this combination has not yet been tested on the headset. Startup failures are shown in the session row. One successful demonstration is saved per session.");
+      selectionWarning || (verified ? "" : "Not headset-tested");
     el("live-xr-task-instructions").textContent = catalog.tasks.find(
       (t) => t.key === task,
     ).instructions;
@@ -354,16 +305,11 @@
       if (result.target) {
         const target = result.target;
         el("live-xr-target").textContent =
-          target.execution === "workstation"
-            ? `Runs directly on ${target.host} for up to ${target.duration_minutes} minutes.`
-            : `Runs on one cluster GPU via ${target.host} for up to ${target.duration_minutes} minutes.`;
+          `${target.host} · ${target.duration_minutes} min limit`;
       }
       if (result.catalog && !catalog) setupChoices(result.catalog);
       sessions = result.sessions;
       el("live-xr-consent-field").hidden = result.license.accepted;
-      el("live-xr-consent-status").textContent = result.license.accepted
-        ? "CloudXR license acceptance is saved for this installation."
-        : "";
       el("live-xr-consent").required = !result.license.accepted;
       render();
       for (const session of sessions.filter(
@@ -374,17 +320,12 @@
         sessions = sessions.map((s) => (s.id === update.id ? update : s));
         render();
       }
-      el("live-xr-message").textContent = sessions.some(
-        (s) => !terminal.has(s.state),
-      )
-        ? "Session status refreshes every 10 seconds while this view is open."
-        : "No live session is running.";
+      el("live-xr-message").textContent = "";
       error(null);
     } catch (e) {
       if (revision !== startedAtRevision) return;
       error(e.message);
-      el("live-xr-message").textContent =
-        "Could not refresh session status. Displayed information may be out of date.";
+      el("live-xr-message").textContent = "Status may be out of date.";
     } finally {
       loading = false;
       if (visible())
@@ -399,7 +340,7 @@
       return;
     submitting = true;
     render();
-    el("live-xr-message").textContent = "Submitting the live session…";
+    el("live-xr-message").textContent = "";
     error(null);
     try {
       apply(
@@ -415,13 +356,12 @@
       await load();
     } catch (e) {
       error(e.message);
-      el("live-xr-message").textContent = "Could not start the live session.";
+      el("live-xr-message").textContent = "";
     } finally {
       submitting = false;
       render();
     }
   };
-  el("live-xr-refresh").onclick = load;
   window.loadLiveXR = load;
   document.addEventListener("visibilitychange", () => {
     if (visible()) load();

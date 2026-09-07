@@ -79,25 +79,18 @@ try {
   );
   get("live-xr-hand").value = "skynet_wuji_1_right";
   get("live-xr-hand").dispatchEvent(new window.Event("change"));
-  assert.match(get("live-xr-selection-note").textContent, /stored URDF/);
-  assert.match(
-    get("live-xr-selection-note").textContent,
-    /needs GPU\/headset validation/,
-  );
+  assert.match(get("live-xr-selection-note").textContent, /Not headset-tested/);
   assert.equal(get("live-xr-start").disabled, false);
   get("live-xr-hand").value = "floating_shadow_left";
   get("live-xr-task").value = "Dexverse-PickCube-v0";
   get("live-xr-task").dispatchEvent(new window.Event("change"));
   assert.match(get("live-xr-task-instructions").textContent, /Lift cube/);
-  assert.match(
-    get("live-xr-selection-note").textContent,
-    /not yet been tested/,
-  );
+  assert.match(get("live-xr-selection-note").textContent, /Not headset-tested/);
   assert.equal(
     new URL(window.location).searchParams.get("live_hand"),
     "floating_shadow_left",
   );
-  get("live-xr-refresh").click(); // Pending refresh must not erase subsequent accepted submission.
+  window.loadLiveXR(); // Pending refresh must not erase subsequent accepted submission.
   get("live-xr-start-form").dispatchEvent(
     new window.Event("submit", { cancelable: true }),
   );
@@ -116,7 +109,7 @@ try {
   await flush();
   assert.match(get("live-xr-sessions").textContent, /test-ses/);
   assert.equal(get("live-xr-hand").disabled, true);
-  get("live-xr-refresh").click();
+  window.loadLiveXR();
   const stop = [...get("live-xr-sessions").querySelectorAll("button")].find(
     (b) => b.textContent === "Stop session",
   );
@@ -134,7 +127,7 @@ try {
       (b) => b.textContent === "Stopping…",
     )?.disabled,
   );
-  get("live-xr-refresh").click();
+  window.loadLiveXR();
   requests[5].resolve({
     sessions: [
       {
@@ -157,7 +150,7 @@ try {
   await flush();
   assert.match(
     get("live-xr-target").textContent,
-    /directly on test-workstation/,
+    /test-workstation · 30 min limit/,
   );
   let reviewed;
   window.openLiveReview = (...args) => {

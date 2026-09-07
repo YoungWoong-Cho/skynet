@@ -14,6 +14,7 @@ function setCollectionView(view, {persist = true, focus = false} = {}) {
       history.pushState(null, '', url);
     }
   }
+  document.querySelector('.page-actions [data-collection-guide="record"]').textContent = view === "live" ? "Help" : "How to record";
   if (view === "live") window.loadLiveXR?.();
   if (focus) document.querySelector(`[data-collection-tab="${view}"]`).focus({preventScroll: true});
 }
@@ -39,6 +40,13 @@ document.querySelectorAll('[data-collection-tab]').forEach(button => {
   });
 });
 document.querySelectorAll('[data-collection-go]').forEach(button => button.addEventListener('click', () => {
+  if (button.dataset.collectionGuide === 'record' && !document.querySelector('#collection-view-live').hidden) {
+    const help = document.querySelector('#live-xr-help');
+    help.open = true;
+    help.scrollIntoView({block: 'start'});
+    help.querySelector('summary').focus({preventScroll: true});
+    return;
+  }
   setCollectionView(button.dataset.collectionGo, {focus: true});
   const targets = {record: '#collection-record-instructions', dexverse: '#collection-dexverse-setup'};
   const target = document.querySelector(targets[button.dataset.collectionGuide] || '#collection-headset-guide');

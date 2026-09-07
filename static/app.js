@@ -12375,7 +12375,10 @@ elements.evaluationForm.addEventListener("change", () => {
 });
 document.querySelector("#evaluation-search").addEventListener("input", () => renderEvaluations());
 document.querySelector("#evaluation-state-filter").addEventListener("change", () => renderEvaluations());
-elements.refreshCollection.addEventListener("click", () => loadCollection(true));
+elements.refreshCollection.addEventListener("click", () => {
+  if (!document.getElementById("collection-view-live").hidden) window.loadLiveXR?.();
+  else loadCollection(true);
+});
 elements.addCollectionAdapter.addEventListener("click", (event) => fillCollectionAdapterForm(null, event.currentTarget));
 elements.closeCollectionAdapter.addEventListener("click", () => {
   hideRevealedPanel(elements.collectionAdapterForm, elements.addCollectionAdapter);
