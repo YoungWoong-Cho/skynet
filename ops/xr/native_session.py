@@ -14,7 +14,9 @@ import subprocess
 import time
 
 
-def inspect_recording(path):
+def inspect_recording(
+    path, task="Dexverse-PickUpStick-v0", robot="floating_shadow_right"
+):
     """Validate a trusted pickle written by this session's pinned recorder."""
     import pickle
     import numpy as np
@@ -29,8 +31,8 @@ def inspect_recording(path):
         not isinstance(payload, dict)
         or payload.get("format") != "dexverse_trajectory"
         or payload.get("schema_version") != 3
-        or payload.get("task") != "Dexverse-PickUpStick-v0"
-        or payload.get("robot_type") != "floating_shadow_right"
+        or payload.get("task") != task
+        or payload.get("robot_type") != robot
     ):
         raise ValueError("Unsupported native demonstration format, task or robot")
     episodes = payload.get("episodes")
@@ -91,9 +93,13 @@ def main():
     parser.add_argument("--config", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--inspect-recording", type=Path)
+    parser.add_argument("--task", default="Dexverse-PickUpStick-v0")
+    parser.add_argument("--robot", default="floating_shadow_right")
     args = parser.parse_args()
     if args.inspect_recording:
-        print(json.dumps(inspect_recording(args.inspect_recording)))
+        print(
+            json.dumps(inspect_recording(args.inspect_recording, args.task, args.robot))
+        )
         return
     if not args.config or not args.output:
         parser.error("--config and --output are required to run a live session")
@@ -281,6 +287,10 @@ def main():
                             str(Path(__file__).resolve()),
                             "--inspect-recording",
                             str(path),
+                            "--task",
+                            cfg["task"],
+                            "--robot",
+                            cfg["robot"],
                         ],
                         capture_output=True,
                         text=True,
@@ -294,7 +304,7 @@ def main():
                     summaries.append(json.loads(result.stdout))
                 update(
                     "CAPTURED",
-                    detail="A successful native demonstration was saved and validated; dataset conversion is still required",
+                    detail="A successful demonstration was saved and validated. Open Review recording to inspect and download it.",
                     recordings=[str(p.relative_to(root)) for p in files],
                     recording_summary={
                         "episodes": sum(s["episodes"] for s in summaries),

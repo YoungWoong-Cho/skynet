@@ -71,7 +71,7 @@ def cancel_job(identifier: str):
         job = service.get(identifier)
         if job["state"] not in ("RUNNING", "PENDING") or not job.get("job_id"):
             raise HTTPException(409, "Only a submitted, active job can be cancelled")
-        service.cluster.cancel(job["job_id"], job["gateway"])
+        service.transport(job).cancel(job["job_id"], job["gateway"])
         # Keep status until the scheduler confirms cancellation.
         service.update(identifier, cancellation_requested=True)
         return service.refresh(identifier, force=True)
@@ -94,7 +94,7 @@ def logs(identifier: str):
             for name in ("stderr.log", "stdout.log")
         )
         return (
-            service.cluster.ssh(job["gateway"], command, timeout=20)
+            service.transport(job).ssh(job["gateway"], command, timeout=20)
             or "The job has not written any logs yet."
         )
     except KeyError as error:
@@ -137,7 +137,7 @@ def artifact(identifier: str, name: str, request: Request):
         if expected is None:
             raise HTTPException(404, "Artifact not found")
         path = job["root"] + "/output/" + name
-        host, size = service.cluster.file_size(path, job["gateway"])
+        host, size = service.transport(job).file_size(path, job["gateway"])
         if size != expected["size_bytes"]:
             raise HTTPException(409, "Artifact size has changed since verification")
         try:
@@ -169,7 +169,7 @@ def artifact(identifier: str, name: str, request: Request):
         if partial:
             headers["Content-Range"] = f"bytes {start}-{end}/{size}"
         return StreamingResponse(
-            service.cluster.stream_file_range(path, host, start=start, end=end),
+            service.transport(job).stream_file_range(path, host, start=start, end=end),
             status_code=206 if partial else 200,
             media_type=media,
             headers=headers,

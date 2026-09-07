@@ -75,7 +75,7 @@ function renderCaptureCycle(job, expanded = false) {
     <tr id="${escapeHtml(detailId)}" class="row-disclosure-row" data-cycle-details="${escapeHtml(job.id)}" ${expanded ? '' : 'hidden'}><td colspan="6" class="row-disclosure-cell"><div class="row-disclosure">
       <div class="panel-heading row-disclosure-heading"><h2>Files and job details</h2><button type="button" class="text-button" data-cycle-details-close="${escapeHtml(job.id)}">Close</button></div>
       <div class="row-disclosure-body">
-        <p class="secondary">Cycle ${escapeHtml(job.id)} · Seed ${escapeHtml(job.config.seed)}${job.job_id ? ` · Cluster job ${escapeHtml(job.job_id)}` : ''}</p>
+        <p class="secondary">Cycle ${escapeHtml(job.id)} · Seed ${escapeHtml(job.config.seed)}${job.job_id ? job.config.pipeline.execution === 'workstation' ? ` · Workstation ${escapeHtml(job.gateway)}` : ` · Cluster job ${escapeHtml(job.job_id)}` : ''}</p>
         ${job.result ? `<p class="collection-section-help">Dataset: ${escapeHtml(job.result.dataset.frames)} frames. Source replay: ${job.result.dataset.capture_success ? 'task achieved' : 'task not achieved'}. Policy: state-based behavior cloning.</p><div class="collection-file-links">${files}<a href="#datasets">Open dataset registry</a></div>` : ''}
         ${job.root ? `<p><a href="/api/collection/processing/jobs/${encodeURIComponent(job.id)}/logs" target="_blank" rel="noopener">Read job log</a></p>` : ''}
         ${job.state === 'FAILED' && job.job_id ? '<p>This attempt is preserved. After resolving the error, change the scene seed to start a new cycle.</p>' : ''}
@@ -155,7 +155,7 @@ document.querySelector('#capture-cycle-jobs').addEventListener('click', async ev
     captureCyclePreviewSource = video.dataset.cycleVideo;
     const dialog = document.querySelector('#capture-cycle-preview');
     document.querySelector('#capture-cycle-preview-context').textContent = video.dataset.videoContext;
-    document.querySelector('#capture-cycle-video-status').textContent = 'Loading video from the cluster…';
+    document.querySelector('#capture-cycle-video-status').textContent = 'Loading video from the execution host…';
     document.querySelector('#capture-cycle-video-retry').hidden = true;
     document.querySelector('#capture-cycle-preview-title').textContent = video.dataset.videoTitle;
     if (!dialog.open) dialog.showModal();

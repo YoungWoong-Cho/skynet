@@ -1,18 +1,23 @@
 from typing import Literal
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, FileResponse
 from pydantic import BaseModel, ConfigDict
 from .collection_api import service as collection
 from .cluster_runtime import ClusterError
 from .live_xr import LiveXRService
+from .live_xr_catalog import catalog
+from .live_xr_review import LiveReviewService
 
 router = APIRouter(prefix="/api/collection/live", tags=["collection"])
 service = LiveXRService(collection.database)
+reviews = LiveReviewService(service)
 
 
 class StartRequest(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
     accepted_license: bool = False
+    task: str | None = None
+    robot: str | None = None
 
 
 def checked(call, *args):
@@ -31,6 +36,7 @@ def overview():
     profile = checked(service.profile)
     return {
         "sessions": service.list(),
+        "catalog": catalog(),
         "license": service.consent(),
         "target": {
             "execution": profile["execution"],
@@ -42,7 +48,9 @@ def overview():
 
 @router.post("/sessions", status_code=202)
 def start(request: StartRequest):
-    return checked(service.create, request.accepted_license)
+    return checked(
+        service.create, request.accepted_license, request.task, request.robot
+    )
 
 
 @router.get("/sessions/{identifier}")
@@ -79,3 +87,29 @@ def logs(identifier: str):
 @router.get("/guide", response_class=PlainTextResponse)
 def guide():
     return (service.root / "docs/live-dexverse.md").read_text()
+
+
+@router.get("/sessions/{identifier}/recordings/{index}/review")
+def review_status(identifier: str, index: int):
+    return checked(reviews.status, identifier, index)
+
+
+@router.post("/sessions/{identifier}/recordings/{index}/review", status_code=202)
+def review_create(identifier: str, index: int):
+    return checked(reviews.create, identifier, index)
+
+
+@router.get("/sessions/{identifier}/recordings/{index}/{name}")
+def review_file(identifier: str, index: int, name: str):
+    path = checked(reviews.artifact, identifier, index, name)
+    return FileResponse(
+        path,
+        media_type="application/json"
+        if name.endswith(".json")
+        else "application/octet-stream",
+        filename=None if name == "review.json" else f"{identifier[:8]}-{index}-{name}",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, max-age=3600",
+        },
+    )

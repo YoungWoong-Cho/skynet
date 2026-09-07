@@ -96,6 +96,8 @@ def test_lost_workstation_reply_recovers_exact_service(service, monkeypatch):
     launch = json.loads(calls[0])
     assert launch["unit"] == client.unit(job["id"])
     assert "--property=Restart=no" in launch["command"]
+    assert "--conflict-exit-code=75" in launch["command"]
+    assert job["profile"]["work_root"] + "/.gpu-session.lock" in launch["command"]
     monkeypatch.setattr(client, "service_status", lambda *a: {"LoadState": "loaded"})
     assert (
         client.recover_submission(job["id"], job["id"], job["gateway"]).job_id
@@ -155,3 +157,22 @@ def test_stop_handles_unit_unloading_during_request(service, monkeypatch):
 
     monkeypatch.setattr(client, "ssh", unloaded)
     client.cancel(client.unit(str(uuid4())), service.profile()["gateway"])
+
+
+def test_workstation_gpu_lock_conflict_is_explicit(service, monkeypatch):
+    client = WorkstationClient(service.profile())
+    unit = client.unit(str(uuid4()))
+    monkeypatch.setattr(
+        client,
+        "service_status",
+        lambda *a: {
+            "LoadState": "loaded",
+            "ActiveState": "failed",
+            "ExecMainStatus": "75",
+        },
+    )
+    result = client.job_statuses([unit], "test-workstation")[1][unit]
+    assert result["State"] == "FAILED"
+    assert "already running" in result["Result"]
+    with pytest.raises(ValueError, match="inside the workstation"):
+        client._remote_path("/home/test/skynet-xr/../../other.pkl")

@@ -18,6 +18,7 @@ from .cluster_runtime import (
 )
 from .database import canonical_json, utc_now
 from .capture_processing.dexverse_runner import TASK, ROBOT, REVISION
+from .live_xr_catalog import selection
 from .live_xr_workstation import LaunchRejected, WorkstationClient, validate_profile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -164,7 +165,7 @@ class LiveXRService:
             return WorkstationClient(job["profile"])
         return self.cluster
 
-    def create(self, accepted_license=False):
+    def create(self, accepted_license=False, task=None, robot=None):
         if not self.consent(accepted_license)["accepted"]:
             raise ValueError(
                 "Accept the NVIDIA CloudXR license before starting a session"
@@ -172,10 +173,30 @@ class LiveXRService:
         profile = dict(
             self.profile(), cloudxr_eula_accepted=True, cloudxr_eula_url=EULA
         )
+        task_info, hand = selection(
+            profile["task"] if task is None else task,
+            profile["robot"] if robot is None else robot,
+        )
+        profile.update(
+            task=task_info["key"],
+            robot=hand["key"],
+            hand=hand["side"],
+            display_name=f"Live DexVerse · {hand['name']} · {task_info['name']}",
+            task_name=task_info["name"],
+            hand_name=hand["name"],
+            instructions=task_info["instructions"],
+        )
         worker = (self.root / "ops/xr/native_session.py").read_text()
         with self.lock, self.database.transaction() as c:
             for job in self.list():
                 if job["state"] not in TERMINAL:
+                    if (job["profile"]["task"], job["profile"]["robot"]) != (
+                        profile["task"],
+                        profile["robot"],
+                    ):
+                        raise ValueError(
+                            "A different live session is already running. Stop it before changing the hand or task."
+                        )
                     return job
             identifier = str(uuid4())
             job = dict(

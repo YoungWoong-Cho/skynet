@@ -1,6 +1,8 @@
 (() => {
   const el = (id) => document.getElementById(id);
   const terminal = new Set(["CAPTURED", "STOPPED", "TIMED_OUT", "FAILED"]);
+  let catalog = null,
+    selectionWarning = null;
   let sessions = [],
     loading = false,
     submitting = false,
@@ -57,7 +59,32 @@
         address = text(row, "td", ""),
         actions = text(row, "td", "");
       status.className = "wrap-cell";
-      text(name, "strong", session.id.slice(0, 8));
+      text(
+        name,
+        "strong",
+        session.profile?.task_name ||
+          catalog?.tasks.find((t) => t.key === session.profile?.task)?.name ||
+          session.profile?.task ||
+          session.id.slice(0, 8),
+      );
+      text(
+        name,
+        "div",
+        session.profile?.hand_name ||
+          catalog?.hands.find((h) => h.key === session.profile?.robot)?.name ||
+          session.profile?.robot ||
+          "",
+        "secondary",
+      );
+      text(
+        name,
+        "div",
+        session.id.slice(0, 8) +
+          (session.created_at
+            ? " · " + new Date(session.created_at).toLocaleString()
+            : ""),
+        "secondary",
+      );
       text(
         name,
         "div",
@@ -69,7 +96,16 @@
         "secondary",
       );
       text(status, "strong", session.state.replaceAll("_", " "));
-      text(status, "div", session.error || session.detail || "", "secondary");
+      text(
+        status,
+        "div",
+        session.error ||
+          (session.state === "CAPTURED"
+            ? "Demonstration saved. Open Review recording to inspect and download it."
+            : session.detail) ||
+          "",
+        "secondary",
+      );
       if (!terminal.has(session.state)) {
         const label = text(
           status,
@@ -158,6 +194,20 @@
           "span",
           terminal.has(session.state) ? "Session ended" : "Not ready",
         );
+      if (session.state === "CAPTURED") {
+        (session.recordings || []).forEach((file, index) => {
+          const review = text(
+            actions,
+            "button",
+            session.recordings.length > 1
+              ? `Review recording ${index + 1}`
+              : "Review recording",
+            "button button-outline",
+          );
+          review.type = "button";
+          review.onclick = () => window.openLiveReview(session, index);
+        });
+      }
       const logs = text(actions, "a", "Logs ↗", "text-button");
       logs.href = "/api/collection/live/sessions/" + session.id + "/logs";
       logs.target = "_blank";
@@ -197,18 +247,98 @@
           "div",
           session.recordings.length +
             (session.recording_summary
-              ? ` native file saved · ${session.recording_summary.episodes} successful demonstration(s), ${session.recording_summary.steps} steps. Dataset conversion is still required.`
-              : " native file saved. Validation/conversion is still required."),
+              ? ` native file saved · ${session.recording_summary.episodes} successful demonstration(s), ${session.recording_summary.steps} steps.`
+              : " native file saved. Open Review recording to validate and inspect it."),
           "secondary",
         );
     }
-    const active = sessions.some((s) => !terminal.has(s.state));
-    el("live-xr-start").disabled = active || submitting;
+    const running = sessions.find((s) => !terminal.has(s.state));
+    const active = !!running;
+    if (catalog && running?.profile) {
+      el("live-xr-hand").value = running.profile.robot;
+      el("live-xr-task").value = running.profile.task;
+      el("live-xr-task-instructions").textContent =
+        running.profile.instructions ||
+        catalog.tasks.find((t) => t.key === running.profile.task)
+          ?.instructions ||
+        "See the task instructions on the headset.";
+      el("live-xr-selection-note").textContent =
+        "This session uses the hand and task shown above. Stop it before choosing a different combination.";
+    }
+    if (!active && catalog) updateChoices(false);
+    el("live-xr-start").disabled = active || submitting || !catalog;
+    el("live-xr-hand").disabled = active || submitting || !catalog;
+    el("live-xr-task").disabled = active || submitting || !catalog;
     el("live-xr-start").textContent = submitting
       ? "Starting…"
       : active
         ? "Session in progress"
         : "Start live session";
+  }
+  function setupChoices(value) {
+    catalog = value;
+    const hand = el("live-xr-hand"),
+      task = el("live-xr-task");
+    hand.replaceChildren();
+    task.replaceChildren();
+    const unavailable = new Map();
+    for (const item of catalog.hands) {
+      const option = new Option(
+        item.name + (item.available ? "" : " — unsupported"),
+        item.key,
+      );
+      option.disabled = !item.available;
+      hand.add(option);
+      if (!item.available) {
+        const names = unavailable.get(item.reason) || [];
+        names.push(item.name);
+        unavailable.set(item.reason, names);
+      }
+    }
+    for (const [reason, names] of unavailable) {
+      text(el("live-xr-unavailable"), "li", names.join(", ") + ": " + reason);
+    }
+    for (const item of catalog.tasks) task.add(new Option(item.name, item.key));
+    const params = new URL(location.href).searchParams;
+    const chosenHand = params.get("live_hand"),
+      chosenTask = params.get("live_task");
+    hand.value = catalog.hands.some((h) => h.key === chosenHand && h.available)
+      ? chosenHand
+      : catalog.default_robot;
+    task.value = catalog.tasks.some((t) => t.key === chosenTask)
+      ? chosenTask
+      : catalog.default_task;
+    el("live-xr-catalog-note").textContent = catalog.note;
+    const invalidLink =
+      (chosenHand && hand.value !== chosenHand) ||
+      (chosenTask && task.value !== chosenTask);
+    if (invalidLink)
+      selectionWarning =
+        "This link requested an unsupported hand or task. The configured defaults are shown; review them before starting.";
+    updateChoices(false);
+    hand.onchange = task.onchange = () => updateChoices(true);
+  }
+  function updateChoices(persist) {
+    if (persist) selectionWarning = null;
+    const robot = el("live-xr-hand").value,
+      task = el("live-xr-task").value;
+    const verified = catalog.verified_pairs.some(
+      (pair) => pair.robot === robot && pair.task === task,
+    );
+    el("live-xr-selection-note").textContent =
+      selectionWarning ||
+      (verified
+        ? "Verified with a successful Vision Pro demonstration. One successful demonstration is saved per session."
+        : "Available in this DexVerse release; this combination has not yet been tested on the headset. Startup failures are shown in the session row. One successful demonstration is saved per session.");
+    el("live-xr-task-instructions").textContent = catalog.tasks.find(
+      (t) => t.key === task,
+    ).instructions;
+    if (persist) {
+      const url = new URL(location.href);
+      url.searchParams.set("live_hand", robot);
+      url.searchParams.set("live_task", task);
+      history.replaceState(null, "", url);
+    }
   }
   async function load() {
     if (loading) return;
@@ -225,6 +355,7 @@
             ? `Runs directly on ${target.host} for up to ${target.duration_minutes} minutes.`
             : `Runs on one cluster GPU via ${target.host} for up to ${target.duration_minutes} minutes.`;
       }
+      if (result.catalog && !catalog) setupChoices(result.catalog);
       sessions = result.sessions;
       el("live-xr-consent-field").hidden = result.license.accepted;
       el("live-xr-consent-status").textContent = result.license.accepted
@@ -261,6 +392,8 @@
   }
   el("live-xr-start-form").onsubmit = async (e) => {
     e.preventDefault();
+    if (submitting || !catalog || sessions.some((s) => !terminal.has(s.state)))
+      return;
     submitting = true;
     render();
     el("live-xr-message").textContent = "Submitting the live session…";
@@ -271,6 +404,8 @@
           method: "POST",
           body: JSON.stringify({
             accepted_license: el("live-xr-consent").checked,
+            task: el("live-xr-task").value,
+            robot: el("live-xr-hand").value,
           }),
         }),
       );

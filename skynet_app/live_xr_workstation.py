@@ -39,6 +39,17 @@ class WorkstationClient(ClusterClient):
             raise ValueError("Invalid live session identifier")
         return self.profile["work_root"] + "/sessions/" + identifier
 
+    def _remote_path(self, path):
+        candidate = PurePosixPath(path)
+        root = PurePosixPath(self.profile["work_root"])
+        if (
+            ".." in candidate.parts
+            or not candidate.is_relative_to(root)
+            or candidate == root
+        ):
+            raise ValueError("Remote artifact must be inside the workstation workspace")
+        return str(candidate)
+
     def write_capsule_file(self, identifier, name, content, gateway):
         if name not in {"runner.py", "request.json", "run.sh"}:
             raise ValueError("Unknown live session file")
@@ -86,6 +97,11 @@ else:
             "--working-directory=" + root,
             "--setenv=SKYNET_LIVE_JOB_ID=" + unit,
             "--setenv=SKYNET_LIVE_SESSION_ID=" + identifier,
+            "/usr/bin/flock",
+            "--nonblock",
+            "--no-fork",
+            "--conflict-exit-code=75",
+            self.profile["work_root"] + "/.gpu-session.lock",
             "/bin/bash",
             root + "/run.sh",
         ]
@@ -175,6 +191,8 @@ print(request['unit'])
                 status["Result"] = "worker-finished" if clean else "service-missing"
             elif status.get("ActiveState") == "failed":
                 state = "FAILED"
+                if status.get("ExecMainStatus") == "75":
+                    status["Result"] = "Another Skynet GPU session is already running"
             elif status.get("SubState") == "exited":
                 state = "COMPLETED" if status.get("ExecMainStatus") == "0" else "FAILED"
             elif status.get("ActiveState") == "inactive":

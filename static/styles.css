@@ -1772,3 +1772,20 @@ footer {
 
 #hand-export-json { width: 100%; margin: 8px 0 16px; font: 11px/1.5 var(--mono); resize: vertical; }
 #hand-export-dialog .form-actions { display: flex; gap: 12px; justify-content: flex-end; }
+
+/* Native capture review shares the collection dialog, fields and table controls. */
+.live-xr-availability { margin: 12px 0 18px; }
+.live-xr-availability li { margin-block: 8px; }
+#live-review-content > * { margin-block: 12px; }
+.live-review-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+#live-review-frame { margin-left: auto; font-variant-numeric: tabular-nums; }
+#live-review-seek { width: 100%; accent-color: var(--accent, #516b34); }
+.live-review-values { max-height: 270px; overflow: auto; }
+#live-review-state { max-height: 300px; overflow: auto; font-size: 12px; }
+#live-xr-sessions td:last-child { min-width: 150px; }
+#live-xr-sessions td:last-child > * { margin: 3px; }
+
+#live-xr-start-form .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: 720px; }
+@media (max-width: 600px) { #live-xr-start-form .form-grid { grid-template-columns: 1fr; } }
+
+.live-review-downloads { display: flex; flex-wrap: wrap; gap: 8px 18px; }

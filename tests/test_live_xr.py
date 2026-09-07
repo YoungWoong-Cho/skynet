@@ -140,3 +140,25 @@ def test_worker_finish_waits_for_scheduler_and_surfaces_cleanup_failure(service)
     assert result["state"] == "FAILED"
     assert result["scheduler_final"]
     assert "FAILED" in result["error"]
+
+
+def test_selected_hand_and_task_are_frozen_in_request(service):
+    job = service.create(True, "Dexverse-PickCube-v0", "floating_shadow_left")
+    assert job["profile"]["task"] == "Dexverse-PickCube-v0"
+    assert job["profile"]["robot"] == "floating_shadow_left"
+    assert job["profile"]["hand"] == "left"
+    service.prepare(job["id"])
+    request = next(w[2] for w in service.cluster.writes if w[1] == "request.json")
+    assert json.loads(request)["robot"] == "floating_shadow_left"
+    with pytest.raises(ValueError, match="different live session"):
+        service.create(True, "Dexverse-PickCube-v0", "floating_shadow_right")
+    assert service.cluster.calls == 1
+
+
+def test_unsupported_selection_does_not_start_or_fall_back(service):
+    with pytest.raises(ValueError, match="Unsupported live hand"):
+        service.create(True, robot="wuji-1")
+    with pytest.raises(ValueError, match="Unsupported live task"):
+        service.create(True, task="")
+    assert not service.list()
+    assert service.cluster.calls == 0

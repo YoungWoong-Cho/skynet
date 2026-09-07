@@ -460,7 +460,8 @@ def main():
             )
             try:
                 for i in range(len(xs)):
-                    with torch.inference_mode():
+                    # Simulator buffers remain mutable across episode resets.
+                    with torch.no_grad():
                         raw = (
                             net((state_vector(obs) - saved["x_mean"]) / saved["x_std"])
                             * saved["y_std"]

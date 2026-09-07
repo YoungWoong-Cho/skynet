@@ -96,6 +96,13 @@ class ProcessingService:
                 id TEXT PRIMARY KEY, request_sha256 TEXT UNIQUE NOT NULL, capture_sha256 TEXT NOT NULL,
                 state TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
 
+    def transport(self, job):
+        if job["config"]["pipeline"].get("execution") == "workstation":
+            from skynet_app.live_xr_workstation import WorkstationClient
+
+            return WorkstationClient(job["config"]["pipeline"])
+        return self.cluster
+
     def catalog(self):
         data = json.loads(self.config_path.read_text())
         return data["pipelines"]
@@ -261,7 +268,7 @@ class ProcessingService:
                     )
             precheck = f'test -x {shlex.quote(runtime + "/bin/python")} && test "$(cat {shlex.quote(repo + "/.skynet-source-revision")})" = {shlex.quote(rev)} && test -f {shlex.quote(repo + "/source/dexverse/dexverse/robot_agents/shadow/retarget/floating_shadow_right.urdf")}'
             try:
-                self.cluster.ssh(gateway, precheck, timeout=20)
+                self.transport(job).ssh(gateway, precheck, timeout=20)
             except ClusterError as error:
                 raise ClusterError(
                     "DexVerse runtime is not configured on the selected host. Follow the saved-recording setup guide and retry. "
@@ -386,7 +393,7 @@ class ProcessingService:
             if job["state"] in ("SUBMITTING", "SUBMISSION_UNKNOWN"):
                 if identifier in self.active:
                     return self.get(identifier)
-                result = self.cluster.recover_submission(
+                result = self.transport(job).recover_submission(
                     identifier, identifier, job["gateway"]
                 )
                 if result is None:
@@ -402,7 +409,9 @@ class ProcessingService:
                 job = self.get(identifier, private=True)
             if not job.get("job_id"):
                 return self.get(identifier)
-            _, states = self.cluster.job_statuses([job["job_id"]], job["gateway"])
+            _, states = self.transport(job).job_statuses(
+                [job["job_id"]], job["gateway"]
+            )
             status = states.get(job["job_id"])
             if not status:
                 raise ClusterError(
@@ -422,7 +431,7 @@ for name in ('progress.json','error.json','result.json'):
 print(json.dumps(out))
 """
             control = json.loads(
-                self.cluster.ssh(job["gateway"], command, stdin=read, timeout=20)
+                self.transport(job).ssh(job["gateway"], command, stdin=read, timeout=20)
             )
             changes = {
                 "scheduler": status,
@@ -531,7 +540,7 @@ print('verified')
 """
         # Python source and JSON are separate arguments; neither is shell-expanded.
         command = f"{shlex.quote(job['config']['pipeline']['runtime'] + '/bin/python')} -c {shlex.quote(script)} {shlex.quote(job['root'] + '/output')}"
-        self.cluster.ssh(
+        self.transport(job).ssh(
             job["gateway"], command, stdin=canonical_json(artifacts), timeout=45
         )
 

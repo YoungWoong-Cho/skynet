@@ -11,7 +11,8 @@
     <script src="/static/capture-processing.js?v=20260905-cycle" defer></script>
     <script src="/static/collection-ui.js" defer></script>
     <script src="/static/hands-ui.js?v=20260906-hands-xr" defer></script>
-    <script src="/static/live-xr.js?v=20260906-workstation-xr" defer></script>
+    <script src="/static/live-review.js?v=20260907-collection-review" defer></script>
+    <script src="/static/live-xr.js?v=20260907-collection-review" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -968,12 +969,17 @@
           </div>
           <div id="collection-view-live" data-collection-view="live" role="tabpanel" aria-labelledby="collection-tab-live" hidden>
             <section class="panel table-panel">
-              <div class="panel-heading"><div><h2>Manipulate in DexVerse</h2><p class="collection-section-help">See the task on Vision Pro and control the simulated Shadow right hand.</p></div><button id="live-xr-refresh" class="button button-outline" type="button">Refresh session</button></div>
+              <div class="panel-heading"><div><h2>Manipulate in DexVerse</h2><p class="collection-section-help">Choose a hand and task, collect a demonstration on Vision Pro, then review the saved data here.</p></div><button id="live-xr-refresh" class="button button-outline" type="button">Refresh session</button></div>
               <div class="live-xr-intro">
-                <p>Pick up stick · Shadow right hand · CloudXR 5.0.1. Other hands and tasks need compatible live adapters.</p>
                 <p id="live-xr-target">Loading the configured execution host…</p>
                 <p>The headset must be able to reach the server's streaming ports; an SSH connection from this Mac does not establish headset access.</p>
                 <form id="live-xr-start-form">
+                  <div class="form-grid">
+                    <div class="field"><label for="live-xr-hand">Simulated hand</label><select id="live-xr-hand" required disabled><option value="">Loading hands…</option></select></div>
+                    <div class="field"><label for="live-xr-task">Task</label><select id="live-xr-task" required disabled><option value="">Loading tasks…</option></select></div>
+                  </div>
+                  <p id="live-xr-selection-note" class="collection-section-help" role="status"></p>
+                  <details class="live-xr-availability"><summary>Hand and task availability</summary><p id="live-xr-catalog-note" class="secondary"></p><ul id="live-xr-unavailable"></ul><a class="text-button" href="#hands">Explore the hand model library</a></details>
                   <label id="live-xr-consent-field" class="check-field"><input id="live-xr-consent" type="checkbox">I accept the <a id="live-xr-eula" href="https://developer.download.nvidia.com/cloudxr/EULA/NVIDIA_CloudXR_GA_License_without_Data_Collection_25Feb2025.pdf" target="_blank" rel="noreferrer">NVIDIA CloudXR license</a>.</label>
                   <p id="live-xr-consent-status" class="secondary"></p>
                   <div class="form-actions"><button id="live-xr-start" class="button button-accent" type="submit">Start live session</button><a href="/api/collection/live/guide" target="_blank" rel="noreferrer">Setup and troubleshooting ↗</a></div>
@@ -985,18 +991,34 @@
             <section class="panel table-panel">
               <div class="panel-heading"><h2>Live sessions</h2></div>
               <div class="table-scroll"><table><thead><tr><th>Session</th><th>Status</th><th>Server address</th><th>Actions</th></tr></thead><tbody id="live-xr-sessions"><tr class="empty-row"><td colspan="4">Loading…</td></tr></tbody></table></div>
-              <div class="collection-table-footer"><span class="collection-section-help">Saved native demonstrations stay on the GPU workspace. Automatic conversion of a live demonstration into a training/evaluation cycle is not supported yet.</span></div>
+              <div class="collection-table-footer"><span class="collection-section-help">Review recording downloads and validates a local copy. Review and downloads remain available after the GPU session ends. No training or evaluation is started.</span></div>
             </section>
             <section class="panel collection-setup-card">
               <div class="panel-heading"><h2>In the headset</h2></div>
               <ol class="collection-disclosure-body live-xr-steps">
                 <li>Open Isaac XR Teleop. Use Enable local network if needed, then enter the active address above and choose Test server connection.</li>
-                <li>Choose Connect. When the scene opens, hold your right hand in front of you and choose Play to calibrate and begin recording.</li>
-                <li>Lift the stick at least 20 cm above where it started, turn it vertical (within 30°), and hold it briefly. Stop only pauses; Reset discards the active attempt.</li>
-                <li>DexVerse saves a demonstration after its task-success condition holds for ten simulation steps. The session then closes; saved files remain available in its output folder.</li>
+                <li>Choose Connect. When the scene opens, hold the selected hand(s) in front of you and choose Play to calibrate and begin recording.</li>
+                <li><span id="live-xr-task-instructions">Choose a task above to see its goal.</span> Stop only pauses; Reset discards the active attempt.</li>
+                <li>DexVerse saves a demonstration after its task-success condition holds for ten simulation steps. The session then closes. Choose Review recording in the session row to inspect the saved data.</li>
               </ol>
             </section>
           </div>
+          <dialog id="live-review-dialog" class="collection-video-dialog" aria-labelledby="live-review-title">
+            <div class="panel-heading"><div><h3 id="live-review-title">Review recording</h3><p id="live-review-context" class="secondary"></p></div><button id="live-review-close" class="button button-outline" type="button">Close review</button></div>
+            <p id="live-review-status" role="status">Loading recording…</p>
+            <button id="live-review-retry" class="button button-outline" type="button" hidden>Retry download</button>
+            <div id="live-review-content" hidden>
+              <div class="live-review-downloads"><a id="live-review-original" class="text-button" download>Download original (.pkl)</a><a id="live-review-summary" class="text-button" download>Download summary</a><a id="live-review-json" class="text-button" download>Download preview values</a></div>
+              <div class="field"><label for="live-review-episode">Demonstration</label><select id="live-review-episode"></select></div>
+              <div class="live-review-controls"><button id="live-review-prev" type="button" class="button button-outline">Previous frame</button><button id="live-review-play" type="button" class="button button-outline">Play</button><button id="live-review-next" type="button" class="button button-outline">Next frame</button><output id="live-review-frame" aria-live="off"></output></div>
+              <label for="live-review-seek" class="secondary">Recorded scene frame</label><input id="live-review-seek" type="range" min="0" value="0" step="1">
+              <p id="live-review-time-note" class="secondary"></p>
+              <div class="field"><label for="live-review-field">Recorded value</label><select id="live-review-field"></select></div>
+              <p id="live-review-value-note" class="secondary"></p>
+              <div class="table-scroll live-review-values"><table><thead><tr><th>Component</th><th>Saved value</th></tr></thead><tbody id="live-review-values"></tbody></table></div>
+              <details><summary>Full scene state at this frame</summary><pre id="live-review-state"></pre></details>
+            </div>
+          </dialog>
           <div id="collection-view-cycles" data-collection-view="cycles" role="tabpanel" aria-labelledby="collection-tab-cycles" hidden>
             <section class="panel table-panel" aria-labelledby="collection-roles-title">
               <div class="panel-heading"><div>

@@ -1,88 +1,138 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { JSDOM } from "jsdom";
-
 const dom = new JSDOM(
-  `
-  <section id="collection"><div id="collection-view-live"></div></section>
-  <form id="live-xr-start-form"><button id="live-xr-start"></button></form>
-  <input type="checkbox" id="live-xr-consent">
-  <div id="live-xr-consent-field"></div><div id="live-xr-consent-status"></div>
-  <div id="live-xr-message"></div><div id="live-xr-error"></div>
-  <div id="live-xr-target"></div>
-  <table><tbody id="live-xr-sessions"></tbody></table>
-  <button id="live-xr-refresh"></button>
-`,
-  { runScripts: "outside-only", pretendToBeVisual: true },
+  await readFile(new URL("../static/index.html", import.meta.url), "utf8"),
+  {
+    runScripts: "outside-only",
+    pretendToBeVisual: true,
+    url: "http://localhost:8080/#collection",
+  },
 );
-const { window } = dom;
-const requests = [];
+const { window } = dom,
+  requests = [];
 window.fetch = (path, options) =>
-  new Promise((resolve) => {
+  new Promise((resolve) =>
     requests.push({
       path,
       options,
       resolve: (data) => resolve({ ok: true, json: async () => data }),
-    });
-  });
+    }),
+  );
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const get = (id) => window.document.getElementById(id);
+get("collection").hidden = false;
+get("collection-view-live").hidden = false;
+const catalog = {
+  default_robot: "floating_shadow_right",
+  default_task: "Dexverse-PickUpStick-v0",
+  hands: [
+    { key: "floating_shadow_right", name: "Right", available: true },
+    { key: "floating_shadow_left", name: "Left", available: true },
+    {
+      key: "wuji-1",
+      name: "WUJI",
+      available: false,
+      reason: "Adapter missing",
+    },
+  ],
+  tasks: [
+    {
+      key: "Dexverse-PickUpStick-v0",
+      name: "Stick",
+      instructions: "Lift vertically",
+    },
+    { key: "Dexverse-PickCube-v0", name: "Cube", instructions: "Lift cube" },
+  ],
+  verified_pairs: [
+    { robot: "floating_shadow_right", task: "Dexverse-PickUpStick-v0" },
+  ],
+  note: "Pinned release",
+};
 const job = {
   id: "test-session",
   state: "PENDING",
   job_id: "123",
   server_ready: false,
+  profile: { robot: "floating_shadow_left", task: "Dexverse-PickCube-v0" },
 };
 try {
   window.eval(
     await readFile(new URL("../static/live-xr.js", import.meta.url), "utf8"),
   );
-  assert.equal(requests.length, 1, "initial refresh is pending");
+  get("live-xr-start-form").dispatchEvent(
+    new window.Event("submit", { cancelable: true }),
+  );
+  assert.equal(requests.length, 1, "Cannot submit before choices load");
+  requests[0].resolve({ sessions: [], license: { accepted: true }, catalog });
+  await flush();
+  assert.equal(
+    get("live-xr-hand").querySelector('option[value="wuji-1"]').disabled,
+    true,
+  );
+  get("live-xr-hand").value = "floating_shadow_left";
+  get("live-xr-task").value = "Dexverse-PickCube-v0";
+  get("live-xr-task").dispatchEvent(new window.Event("change"));
+  assert.match(get("live-xr-task-instructions").textContent, /Lift cube/);
+  assert.match(
+    get("live-xr-selection-note").textContent,
+    /not yet been tested/,
+  );
+  assert.equal(
+    new URL(window.location).searchParams.get("live_hand"),
+    "floating_shadow_left",
+  );
+  get("live-xr-refresh").click(); // Pending refresh must not erase subsequent accepted submission.
   get("live-xr-start-form").dispatchEvent(
     new window.Event("submit", { cancelable: true }),
   );
   assert.equal(get("live-xr-start").textContent, "Starting…");
-  requests[1].resolve(job);
+  assert.equal(
+    JSON.parse(requests[2].options.body).robot,
+    "floating_shadow_left",
+  );
+  assert.equal(
+    JSON.parse(requests[2].options.body).task,
+    "Dexverse-PickCube-v0",
+  );
+  requests[2].resolve(job);
+  await flush();
+  requests[1].resolve({ sessions: [], license: { accepted: true }, catalog });
   await flush();
   assert.match(get("live-xr-sessions").textContent, /test-ses/);
-  requests[0].resolve({ sessions: [], license: { accepted: true } });
-  await flush();
-  assert.match(
-    get("live-xr-sessions").textContent,
-    /test-ses/,
-    "stale refresh must not erase the accepted session",
-  );
-  assert.equal(get("live-xr-start").disabled, true);
-
+  assert.equal(get("live-xr-hand").disabled, true);
   get("live-xr-refresh").click();
   const stop = [...get("live-xr-sessions").querySelectorAll("button")].find(
     (b) => b.textContent === "Stop session",
   );
   stop.click();
-  assert.equal(stop.textContent, "Stopping…");
-  requests[3].resolve({ ...job, stop_requested: true, server_ready: false });
+  requests[4].resolve({ ...job, stop_requested: true });
   await flush();
-  requests[2].resolve({ sessions: [job], license: { accepted: true } });
+  requests[3].resolve({
+    sessions: [job],
+    license: { accepted: true },
+    catalog,
+  });
   await flush();
-  const stopping = [...get("live-xr-sessions").querySelectorAll("button")].find(
-    (b) => b.textContent === "Stopping…",
-  );
   assert.ok(
-    stopping?.disabled,
-    "stale refresh must not re-enable a completed stop request",
+    [...get("live-xr-sessions").querySelectorAll("button")].find(
+      (b) => b.textContent === "Stopping…",
+    )?.disabled,
   );
   get("live-xr-refresh").click();
-  requests[4].resolve({
+  requests[5].resolve({
     sessions: [
       {
         ...job,
-        state: "STOPPED",
+        state: "CAPTURED",
         scheduler_final: true,
-        profile: { execution: "workstation" },
+        profile: { ...job.profile, execution: "workstation" },
         gateway: "test-workstation",
+        recordings: ["recordings/live/demo.pkl"],
       },
     ],
     license: { accepted: true },
+    catalog,
     target: {
       execution: "workstation",
       host: "test-workstation",
@@ -94,13 +144,21 @@ try {
     get("live-xr-target").textContent,
     /directly on test-workstation/,
   );
-  assert.match(
+  let reviewed;
+  window.openLiveReview = (...args) => {
+    reviewed = args;
+  };
+  [...get("live-xr-sessions").querySelectorAll("button")]
+    .find((b) => b.textContent === "Review recording")
+    .click();
+  assert.equal(reviewed[0].id, job.id);
+  assert.equal(reviewed[1], 0);
+  assert.doesNotMatch(
     get("live-xr-sessions").textContent,
-    /Workstation · test-workstation/,
+    /Run training cycle/,
   );
-  assert.doesNotMatch(get("live-xr-sessions").textContent, /GPU job/);
   console.log(
-    "Live UI regression passed: pending refreshes preserve start and stop responses.",
+    "Live UI: selected values, unsupported hands, stale responses, and direct review passed.",
   );
 } finally {
   window.close();

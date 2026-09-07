@@ -16,6 +16,7 @@ classifiers = [
 dependencies = [
   "fastapi>=0.115,<1",
   "keyring>=25,<26",
+  "numpy>=1.26,<3",
   "pydantic>=2.9,<3",
   "uvicorn[standard]>=0.30,<1",
 ]
