@@ -475,10 +475,10 @@ index 9c472c8..e497c34 100644
          }
      }
 diff --git a/IsaacXRTeleopClient/StreamingView.swift b/IsaacXRTeleopClient/StreamingView.swift
-index 6ccd65d..bc50086 100644
+index 6ccd65d..a17a252 100644
 --- a/IsaacXRTeleopClient/StreamingView.swift
 +++ b/IsaacXRTeleopClient/StreamingView.swift
-@@ -19,8 +19,48 @@ struct StreamingView: View {
+@@ -19,8 +19,57 @@ struct StreamingView: View {
      @State var viewModel: ViewModel
  
      var body: some View {
@@ -502,12 +502,21 @@ index 6ccd65d..bc50086 100644
 +                        Text(viewModel.appModel.collectionInstruction)
 +                            .font(.system(size: 42, weight: .semibold))
 +                    }
-+                    HStack(spacing: 24) {
++                    HStack(spacing: 16) {
 +                        Button(viewModel.appModel.startingAttempt == nil ? "Start" : "Starting…", systemImage: "record.circle") {
 +                            viewModel.appModel.sendCollectionCommand("start")
 +                        }
 +                        .buttonStyle(.borderedProminent)
 +                        .disabled(!viewModel.appModel.canStartRecording)
++                        Button("Restart episode", systemImage: "arrow.counterclockwise") {
++                            viewModel.appModel.sendCollectionCommand("restart")
++                        }
++                        .buttonStyle(.bordered)
++                        .disabled(
++                            viewModel.appModel.collection == nil
++                                || viewModel.appModel.collection?.phase == "saving"
++                                || viewModel.appModel.endingCollection
++                                || viewModel.appModel.collection?.phase == "ended")
 +                        Button(viewModel.appModel.endingCollection ? "Ending…" : "End collection", systemImage: "stop.circle") {
 +                            viewModel.appModel.sendCollectionCommand("end")
 +                        }
@@ -528,7 +537,7 @@ index 6ccd65d..bc50086 100644
          }
          .upperLimbVisibility(.hidden)
          .persistentSystemOverlays(viewModel.showSystemOverlays)
-@@ -36,7 +76,7 @@ struct StreamingView: View {
+@@ -36,7 +85,7 @@ struct StreamingView: View {
  extension StreamingView {
      @Observable
      class ViewModel {
@@ -538,10 +547,10 @@ index 6ccd65d..bc50086 100644
          init(appModel: AppModel) {
              self.appModel = appModel
 diff --git a/IsaacXRTeleopClient/TeleopControlView.swift b/IsaacXRTeleopClient/TeleopControlView.swift
-index 702ea6d..bf065e7 100644
+index 702ea6d..49eca66 100644
 --- a/IsaacXRTeleopClient/TeleopControlView.swift
 +++ b/IsaacXRTeleopClient/TeleopControlView.swift
-@@ -8,148 +8,51 @@
+@@ -8,148 +8,39 @@
  // without an express license agreement from NVIDIA CORPORATION or
  // its affiliates is strictly prohibited.
  
@@ -573,20 +582,7 @@ index 702ea6d..bf065e7 100644
 -                    .font(.title3)
 -                    .buttonStyle(.bordered)
 -                    .disabled(viewModel.teleopStartButtonDisabled)
-+            if let status = viewModel.appModel.collection {
-+                Text("Episode \(status.episode) · \(status.saved) saved")
-+                    .font(.callout).foregroundStyle(.secondary)
-+            }
-+            HStack {
-+                Button("Restart episode", systemImage: "arrow.counterclockwise") {
-+                    viewModel.appModel.sendCollectionCommand("restart")
-+                }
-+                .disabled(
-+                    viewModel.appModel.collection == nil
-+                        || viewModel.appModel.collection?.phase == "saving"
-+                        || viewModel.appModel.endingCollection
-+                        || viewModel.appModel.collection?.phase == "ended")
- 
+-
 -                    Button {
 -                        viewModel.teleopStopButtonPressed()
 -                    } label: {
@@ -599,8 +595,10 @@ index 702ea6d..bf065e7 100644
 -                    .font(.title3)
 -                    .buttonStyle(.bordered)
 -                    .disabled(viewModel.teleopStopButtonDisabled)
++            if let status = viewModel.appModel.collection {
++                Text("Episode \(status.episode) · \(status.saved) saved")
++                    .font(.callout).foregroundStyle(.secondary)
 +            }
-+            .buttonStyle(.bordered)
 +            VStack(alignment: .leading, spacing: 8) {
 +                Label {
 +                    Text("Human")

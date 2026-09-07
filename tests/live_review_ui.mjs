@@ -11,6 +11,11 @@ const dom = new JSDOM(
 );
 const { window } = dom,
   requests = [];
+let videoPauses = 0;
+window.HTMLMediaElement.prototype.pause = function () {
+  videoPauses++;
+};
+window.HTMLMediaElement.prototype.load = function () {};
 const get = (id) => window.document.getElementById(id);
 const dialog = get("live-review-dialog");
 dialog.showModal = () => {
@@ -62,6 +67,34 @@ try {
   await flush();
   requests[1].resolve(data);
   await flush();
+  assert.equal(requests[2].path.endsWith("/video?episode=0"), true);
+  requests[2].resolve({
+    state: "READY",
+    kind: "replay",
+    sha256: "first-video",
+  });
+  await flush();
+  assert.equal(get("live-review-video").hidden, false);
+  assert.match(
+    get("live-review-video").src,
+    /first\/recordings\/0\/video.mp4\?episode=0&v=first-video$/,
+  );
+  assert.match(
+    get("live-review-video-status").textContent,
+    /rendered from recorded states/,
+  );
+  assert.equal(get("live-review-data").open, false);
+  get("live-review-video").dispatchEvent(new window.Event("error"));
+  assert.equal(get("live-review-video-retry").hidden, false);
+  get("live-review-video-retry").click();
+  assert.equal(requests[3].options.method, "POST");
+  requests[3].resolve({
+    state: "READY",
+    kind: "capture",
+    sha256: "captured-video",
+  });
+  await flush();
+  assert.equal(get("live-review-video-status").textContent, "Collection video");
   assert.match(get("live-review-values").textContent, /Initial state/);
   assert.equal(get("live-review-prev").disabled, true);
   get("live-review-next").click();
@@ -82,15 +115,54 @@ try {
   window.openLiveReview({ id: "stale" }, 0);
   get("live-review-close").click();
   window.openLiveReview({ id: "current" }, 0);
-  requests[2].resolve({ state: "READY" });
+  assert.equal(get("live-review-video").hasAttribute("src"), false);
+  assert.ok(videoPauses > 0);
+  const beforeStale = requests.length;
+  requests[4].resolve({ state: "READY" });
   await flush();
-  assert.equal(requests.length, 4, "Closed review must not fetch stale data");
-  requests[3].resolve({ state: "FAILED", error: "Host unreachable" });
+  assert.equal(
+    requests.length,
+    beforeStale,
+    "Closed review must not fetch stale data",
+  );
+  requests[5].resolve({ state: "FAILED", error: "Host unreachable" });
   await flush();
   assert.match(get("live-review-status").textContent, /Host unreachable/);
   assert.equal(get("live-review-retry").hidden, false);
   get("live-review-retry").click();
-  assert.equal(requests[4].options.method, "POST");
+  assert.equal(requests[6].options.method, "POST");
+  window.openLiveReview({
+    id: "multiple",
+    recordings: ["first.pkl", "second.pkl"],
+  });
+  assert.equal(get("live-review-recording").parentElement.hidden, false);
+  assert.equal(get("live-review-recording").options.length, 2);
+  const staleRecording = requests.at(-1);
+  get("live-review-recording").value = "1";
+  get("live-review-recording").dispatchEvent(new window.Event("change"));
+  const selectedRecording = requests.at(-1);
+  assert.match(selectedRecording.path, /multiple\/recordings\/1\/review$/);
+  const beforeSwitchResponse = requests.length;
+  staleRecording.resolve({ state: "READY" });
+  await flush();
+  assert.equal(
+    requests.length,
+    beforeSwitchResponse,
+    "Switching recording must ignore the previous download",
+  );
+  selectedRecording.resolve({ state: "READY" });
+  await flush();
+  requests.at(-1).resolve(data);
+  await flush();
+  assert.match(
+    requests.at(-1).path,
+    /multiple\/recordings\/1\/video\?episode=0$/,
+  );
+  requests
+    .at(-1)
+    .resolve({ state: "READY", kind: "replay", sha256: "second-video" });
+  await flush();
+  assert.match(get("live-review-video").src, /recordings\/1\/video.mp4/);
   console.log(
     "Review UI: frame boundaries, values, action alignment, close races and retry passed.",
   );

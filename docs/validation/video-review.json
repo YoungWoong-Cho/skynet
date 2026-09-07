@@ -1,0 +1,67 @@
+{
+  "schema": "skynet.validation/video-review-v1",
+  "date": "2026-09-07",
+  "python_tests": 386,
+  "browser_ui_tests": [
+    "live_review_ui.mjs",
+    "live_xr_ui.mjs"
+  ],
+  "headset": {
+    "installed": true,
+    "bundle_id": "dev.skynet.xrstream.standard",
+    "restart_in_floating_panel": true,
+    "user_confirmation": "yes everything works",
+    "session": "5699d1c1-56fb-49e7-b4dc-a04201b1991e",
+    "episodes_saved": 2,
+    "actions": [
+      170,
+      140
+    ]
+  },
+  "review_mode": "scene replay from saved states; camera capture during live XR is unsupported and disabled",
+  "xr_camera_diagnostics": {
+    "normal_rgb": "empty buffer",
+    "direct_color": "stereo XR view overrides scene camera",
+    "separate_context": "empty buffer after bounded warmup",
+    "gpu_diagnostics_stopped": true
+  },
+  "browser_checks": [
+    "Native video play and seek at 3 seconds in 6.2-second episode 4630d662",
+    "Ended session has no green startup milestones",
+    "One Review recordings button per session",
+    "Modal switches between two recording files",
+    "Recording 2 played to completion: visible cube grasp/lift at 2 seconds; 71 video frames"
+  ],
+  "videos": [
+    {
+      "capture_error": "The simulation camera did not produce a video frame (shape (0,))",
+      "fps": 30,
+      "frames": 86,
+      "kind": "replay",
+      "renderer_version": "970fbc0ca579e6d8",
+      "sha256": "eac7259e6a62c54f876c40fefbca896e11957a07f9c1927d3f6f3fc9ed4f435a",
+      "size_bytes": 60383,
+      "state": "READY",
+      "updated_at": "2026-09-07T22:04:50.724Z"
+    },
+    {
+      "capture_error": "The simulation camera did not produce a video frame (shape (0,))",
+      "fps": 30,
+      "frames": 71,
+      "kind": "replay",
+      "renderer_version": "970fbc0ca579e6d8",
+      "sha256": "68a69dc410da8a27f5b429656e81cea798b3d3a3fdb7e8837dba4337f746d6b8",
+      "size_bytes": 49639,
+      "state": "READY",
+      "updated_at": "2026-09-07T22:06:14.450Z"
+    }
+  ],
+  "source_hashes": {
+    "ops/xr/video.py": "5597ec3600f76c1d76b749bf6ed8287abd80b3c338c7cdf76e7d96d1e9bf77e5",
+    "ops/xr/render_recording.py": "53f0b377940933c2cf8e3f4b419f827b9818fd51699a83ada9a2477f28bf9f72",
+    "ops/xr/headset-client-errors.patch": "73649568d592f8f239f2382e15e09fa5c7ef4a70266ba6fcfc4002ad511cacb0",
+    "skynet_app/live_xr_video.py": "7fe3dd49040e7486cf379941357c9ba756f18dec935866427958b938726e657f",
+    "static/live-review.js": "d927b728804002c1fd85b81b50215dcb5b756e4d0b10a69f0f4ba5a8c99f2a19",
+    "static/live-xr.js": "41dc73cb95d6fff4b5be8f0ad7d45223c08d28acd0335c0fbce2cd622a09360e"
+  }
+}

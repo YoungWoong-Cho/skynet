@@ -9,6 +9,86 @@
     animation,
     playing = false;
   const dialog = el("live-review-dialog");
+  const video = el("live-review-video");
+  let reviewSession;
+  let videoToken = 0,
+    videoTimer;
+  function clearVideo() {
+    ++videoToken;
+    clearTimeout(videoTimer);
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+    video.hidden = true;
+    el("live-review-video-download").hidden = true;
+    el("live-review-video-retry").hidden = true;
+  }
+  async function loadVideo(ownToken, ownVideoToken, index, start = false) {
+    clearTimeout(videoTimer);
+    const current = () =>
+      ownToken === token && ownVideoToken === videoToken && dialog.open;
+    try {
+      const result = await request(
+        base + `/video?episode=${index}`,
+        start ? { method: "POST" } : {},
+      );
+      if (!current()) return;
+      el("live-review-video-retry").hidden = true;
+      if (result.state === "READY") {
+        const url =
+          base +
+          `/video.mp4?episode=${index}&v=${encodeURIComponent(result.sha256)}`;
+        video.src = url;
+        video.hidden = false;
+        el("live-review-video-download").href = url;
+        el("live-review-video-download").hidden = false;
+        el("live-review-video-status").textContent =
+          result.kind === "capture"
+            ? "Collection video"
+            : result.capture_error
+              ? `Scene replay · video capture failed: ${result.capture_error}`
+              : "Scene replay · rendered from recorded states";
+      } else if (result.state === "FAILED") {
+        throw new Error(result.error);
+      } else if (result.state === "NOT_PREPARED") {
+        await loadVideo(ownToken, ownVideoToken, index, true);
+      } else {
+        el("live-review-video-status").textContent =
+          result.detail || "Preparing video…";
+        videoTimer = setTimeout(
+          () => loadVideo(ownToken, ownVideoToken, index),
+          1500,
+        );
+      }
+    } catch (error) {
+      if (!current()) return;
+      el("live-review-video-status").textContent =
+        "Video unavailable: " + error.message;
+      el("live-review-video-retry").hidden = false;
+    }
+  }
+  video.addEventListener("error", () => {
+    if (!video.hasAttribute("src") || !dialog.open) return;
+    el("live-review-video-status").textContent =
+      "The video could not be played. Retry to reload it.";
+    el("live-review-video-retry").hidden = false;
+  });
+  video.addEventListener("timeupdate", () => {
+    if (!episode || !el("live-review-data").open) return;
+    let index = 0;
+    while (
+      index + 1 < episode.frames.length &&
+      episode.frames[index + 1].time_seconds <= video.currentTime
+    )
+      index++;
+    frame = index;
+    draw();
+  });
+  el("live-review-video-retry").onclick = () => {
+    clearVideo();
+    el("live-review-video-status").textContent = "Retrying video…";
+    loadVideo(token, videoToken, Number(el("live-review-episode").value), true);
+  };
   const status = (message) => {
     el("live-review-status").textContent = message;
   };
@@ -29,7 +109,7 @@
   function pause() {
     playing = false;
     cancelAnimationFrame(animation);
-    el("live-review-play").textContent = "Play";
+    el("live-review-play").textContent = "Play values";
   }
   function flat(value, prefix = "", result = {}) {
     for (const [key, item] of Object.entries(value)) {
@@ -120,6 +200,9 @@
   }
   function chooseEpisode() {
     pause();
+    clearVideo();
+    el("live-review-video-status").textContent = "Checking video…";
+    loadVideo(token, videoToken, Number(el("live-review-episode").value));
     episode = data.episodes[Number(el("live-review-episode").value)];
     frame = 0;
     const fields = el("live-review-field");
@@ -135,7 +218,7 @@
       : "action";
     el("live-review-seek").max = episode.frames.length - 1;
     el("live-review-time-note").textContent =
-      `${data.time_note} ${episode.sampled ? `Preview samples ${episode.frames.length} of ${episode.state_count} states; the original download contains every state.` : `All ${episode.state_count} saved scene states are available.`} Playback shows recorded values, not a rendered simulation.`;
+      `${data.time_note} ${episode.sampled ? `Preview samples ${episode.frames.length} of ${episode.state_count} states; the original download contains every state.` : `All ${episode.state_count} saved scene states are available.`}`;
     draw();
   }
   async function load(ownToken, start = false) {
@@ -154,9 +237,10 @@
         el("live-review-context").textContent =
           `${data.task_name} · ${data.hand_name}`;
         status(
-          `${data.episodes.length} successful demonstration${data.episodes.length === 1 ? "" : "s"} · ${data.episodes.reduce((sum, ep) => sum + ep.steps, 0)} actions · ${(data.size_bytes / 1024).toFixed(1)} KB · Validated local copy`,
+          `${data.episodes.length} demonstration${data.episodes.length === 1 ? "" : "s"} · ${data.episodes.reduce((sum, ep) => sum + ep.duration_seconds, 0).toFixed(1)} s`,
         );
         const select = el("live-review-episode");
+        select.parentElement.hidden = data.episodes.length === 1;
         select.replaceChildren();
         data.episodes.forEach((ep, index) =>
           select.add(
@@ -173,9 +257,7 @@
       } else if (result.state === "FAILED") throw new Error(result.error);
       else if (result.state === "NOT_DOWNLOADED") await load(ownToken, true);
       else {
-        status(
-          "Downloading and checking the saved recording… No GPU job is started. You can close this window; the download will continue.",
-        );
+        status("Downloading recording…");
         timer = setTimeout(() => load(ownToken), 1500);
       }
     } catch (error) {
@@ -184,28 +266,50 @@
       el("live-review-retry").hidden = false;
     }
   }
-  window.openLiveReview = (session, index) => {
+  function selectRecording(index) {
     pause();
+    clearVideo();
+    el("live-review-data").open = false;
     clearTimeout(timer);
     const ownToken = ++token;
-    base = `/api/collection/live/sessions/${session.id}/recordings/${index}`;
+    base = `/api/collection/live/sessions/${reviewSession.id}/recordings/${index}`;
     data = episode = null;
     el("live-review-content").hidden = true;
     el("live-review-retry").hidden = true;
     el("live-review-context").textContent =
-      `Session ${session.id.slice(0, 8)} · Recording ${index + 1}`;
+      `Session ${reviewSession.id.slice(0, 8)} · Recording ${index + 1}`;
     status("Checking the local recording copy…");
-    dialog.showModal();
     load(ownToken);
+  }
+  window.openLiveReview = (session, index = 0) => {
+    reviewSession = session;
+    const select = el("live-review-recording");
+    const count = session.recordings?.length || 1;
+    select.replaceChildren(
+      ...Array.from(
+        { length: count },
+        (_, i) => new Option(`Recording ${i + 1}`, i),
+      ),
+    );
+    select.value = index >= 0 && index < count ? index : 0;
+    select.parentElement.hidden = count < 2;
+    if (!dialog.open) dialog.showModal();
+    selectRecording(Number(select.value));
   };
+  el("live-review-recording").onchange = (event) =>
+    selectRecording(Number(event.target.value));
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) pause();
+    if (document.hidden) {
+      pause();
+      video.pause();
+    }
   });
   el("live-review-close").onclick = () => dialog.close();
   dialog.addEventListener("close", () => {
     ++token;
     clearTimeout(timer);
     pause();
+    clearVideo();
   });
   el("live-review-retry").onclick = () => {
     status("Retrying download…");

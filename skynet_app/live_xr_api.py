@@ -7,10 +7,12 @@ from .cluster_runtime import ClusterError
 from .live_xr import LiveXRService
 from .live_xr_catalog import catalog
 from .live_xr_review import LiveReviewService
+from .live_xr_video import LiveVideoService
 
 router = APIRouter(prefix="/api/collection/live", tags=["collection"])
 service = LiveXRService(collection.database)
 reviews = LiveReviewService(service)
+videos = LiveVideoService(reviews)
 
 
 class StartRequest(BaseModel):
@@ -99,8 +101,27 @@ def review_create(identifier: str, index: int):
     return checked(reviews.create, identifier, index)
 
 
+@router.get("/sessions/{identifier}/recordings/{index}/video")
+def video_status(identifier: str, index: int, episode: int = 0):
+    return checked(videos.status, identifier, index, episode)
+
+
+@router.post("/sessions/{identifier}/recordings/{index}/video", status_code=202)
+def video_create(identifier: str, index: int, episode: int = 0):
+    return checked(videos.create, identifier, index, episode)
+
+
 @router.get("/sessions/{identifier}/recordings/{index}/{name}")
-def review_file(identifier: str, index: int, name: str):
+def review_file(identifier: str, index: int, name: str, episode: int = 0):
+    if name == "video.mp4":
+        return FileResponse(
+            checked(videos.artifact, identifier, index, episode),
+            media_type="video/mp4",
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "private, max-age=3600",
+            },
+        )
     path = checked(reviews.artifact, identifier, index, name)
     return FileResponse(
         path,

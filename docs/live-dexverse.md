@@ -108,3 +108,13 @@ Red points are the tracked human joints in the scene. Blue/cyan points are wrist
 The [GPU validation receipt](validation/hands-gpu.json) records bounded checks on rl2-bonjour: imported-hand USD conversion, actual OpenXR-to-canonical conversion, 330 physics steps of hand input and neutral-pose recovery per imported variant. The `ops/xr/hands/check_simulation.py` and `check_native.py` utilities reproduce these checks with the pinned recorder and prepared bundles. Human fingertip goals may be limited by self-contact; the receipt retains those tracking residuals separately. These checks do not establish headset tracking quality or successful grasping for every hand/task pair.
 
 The [automatic collection receipt](validation/collection-episodes.json) records a later WUJI 2 check with real Isaac physics and recorder code, synthetic tracking, and a synthetic success signal. It deliberately offsets wrist axes by 25°, interrupts a five-step attempt, then verifies two separate 20-step saves, automatic resets, and End collection. The interrupted attempt is absent from the saved files. `ops/xr/check_collection.py` reproduces this bounded check outside the user recording directory. Headset alignment, instructions, and the corrected finger mapping still need operator confirmation.
+
+## Recording review
+
+Each session has one **Review recordings** button. Choose a recording in the modal, then use the video controls to play, seek, or download it. The **Recorded values** section contains the corresponding saved scene states and actions.
+
+The current CloudXR 5.0.1 / Isaac Sim 5.1 integration supports **scene replay**: a fixed camera renders the recorded hand and object states into a 960 × 540, 30 fps MP4. Rendering restores saved states directly without rerunning the policy, training, evaluation, or physics actions. Videos are cached locally; subsequent playback does not need the workstation.
+
+Preparing an uncached replay requires the original workstation and a free GPU. A busy GPU produces a retryable message. Existing cached videos remain playable during collection. Older Slurm sessions currently show an explicit unsupported message for video rendering.
+
+Direct camera capture during live XR is unsupported in this integration. The XR renderer replaces the normal camera view with its stereo view and can return empty RGB buffers. Live collection therefore records the scene trajectory, and review labels its video **Scene replay**. If a recording contains a failed video-capture attempt, its error is shown alongside the replay.

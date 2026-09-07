@@ -83,7 +83,7 @@
     if (session.state === "FAILED")
       return session.scene_ready_at ? "Session failed" : "Startup failed";
     const ended = {
-      CAPTURED: "Recording saved",
+      CAPTURED: "Recording saved · Session ended",
       TIMED_OUT: "Session timed out",
       STOPPED: "Session stopped",
     };
@@ -91,7 +91,8 @@
     if (session.stop_requested || session.state === "STOPPING")
       return "Stopping…";
     if (session.state === "PENDING") return "Waiting for GPU…";
-    if (session.state === "COLLECTING") return session.detail || "Collecting episodes";
+    if (session.state === "COLLECTING")
+      return session.detail || "Collecting episodes";
     return (
       stageLabels[session.startup_stage] ||
       sessionLabels[session.state] ||
@@ -139,7 +140,8 @@
     const steps = el("live-xr-progress-steps");
     steps.replaceChildren();
     // Old sessions did not record milestones; never invent completed/failed steps.
-    steps.hidden = !!shown && !shown.startup_stage;
+    steps.hidden =
+      !!shown && (!shown.startup_stage || (ended && state !== "FAILED"));
     if (steps.hidden) return;
     const current = stage === "launch" ? "stream" : stage;
     for (const [key, label, timestamp, done] of [
@@ -161,12 +163,17 @@
         !reached;
       let stepState = "pending",
         stepLabel = "Not started";
-      if (failed) {
+      if (shown?.connection_check_failed) {
+        stepLabel = "Unknown";
+      } else if (failed) {
         stepState = "failed";
         stepLabel = "Failed";
       } else if (reached) {
-        stepState = "done";
-        stepLabel = done;
+        stepState =
+          ended || shown?.stop_requested || state === "STOPPING"
+            ? "pending"
+            : "done";
+        stepLabel = stepState === "done" ? done : "Previously completed";
       } else if (current === key && !pending && !failedRequest) {
         if (shown.connection_check_failed) stepLabel = "Unknown";
         else if (ended || shown.stop_requested || state === "STOPPING")
@@ -237,9 +244,13 @@
         ended: "ENDING",
         error: "FAILED",
       };
-      text(status, "strong", session.state === "COLLECTING"
-        ? phaseLabel[session.episode_phase] || "SESSION IN PROGRESS"
-        : session.state.replaceAll("_", " "));
+      text(
+        status,
+        "strong",
+        session.state === "COLLECTING"
+          ? phaseLabel[session.episode_phase] || "SESSION IN PROGRESS"
+          : session.state.replaceAll("_", " "),
+      );
       const detail =
         session.error ||
         (!terminal.has(session.state) || session.state === "FAILED"
@@ -309,18 +320,14 @@
         };
       } else text(address, "span", "—");
       if (session.recordings?.length) {
-        (session.recordings || []).forEach((file, index) => {
-          const review = text(
-            actions,
-            "button",
-            session.recordings.length > 1
-              ? `Review recording ${index + 1}`
-              : "Review recording",
-            "button button-outline",
-          );
-          review.type = "button";
-          review.onclick = () => window.openLiveReview(session, index);
-        });
+        const review = text(
+          actions,
+          "button",
+          "Review recordings",
+          "button button-outline",
+        );
+        review.type = "button";
+        review.onclick = () => window.openLiveReview(session, 0);
       }
       const logs = text(actions, "a", "Logs ↗", "text-button");
       logs.href = "/api/collection/live/sessions/" + session.id + "/logs";

@@ -1804,6 +1804,8 @@ footer {
 #live-xr-progress-steps [data-state=done] strong { color: var(--green); }
 #live-xr-progress-steps [data-state=failed] strong { color: var(--danger); }
 #live-xr-progress-error { margin: 12px 0 0; overflow-wrap: anywhere; }
+#live-xr-sessions > tr > td:nth-child(2) { min-width: 140px; }
+#live-xr-sessions > tr > td:nth-child(2) > strong { white-space: nowrap; }
 
 .live-xr-keypoint-legend { display: flex; flex-wrap: wrap; gap: 8px 20px; color: var(--muted); font-size: 13px; }
 .live-xr-keypoint-legend span { display: inline-flex; align-items: center; gap: 6px; }

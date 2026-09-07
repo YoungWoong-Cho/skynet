@@ -150,3 +150,116 @@ def test_catalog_rejects_unknown_or_model_only_hands():
     with pytest.raises(ValueError, match="Unsupported live task"):
         selection("Not-A-Task", "floating_shadow_right")
     assert selection("Dexverse-PickCube-v0", "floating_shadow_left")[1]["available"]
+
+
+def test_capture_video_download_is_verified_cached_and_never_uses_gpu(review):
+    from skynet_app.live_xr_video import LiveVideoService
+    import hashlib
+
+    reviews, job, calls = review
+    reviews.directory("session", 0).mkdir(parents=True)
+    reviews.prepare("session", 0)
+    path = reviews.artifact("session", 0, "review.json")
+    document = json.loads(path.read_text())
+    raw = b"\x00\x00\x00\x18ftypisom" + b"video payload"
+    metadata = dict(
+        state="READY",
+        path="recordings/live/demo.mp4",
+        sha256=hashlib.sha256(raw).hexdigest(),
+        size_bytes=len(raw),
+        fps=30,
+        frames=2,
+    )
+    document["episodes"][0]["video"] = metadata
+    path.write_text(json.dumps(document))
+    videos = LiveVideoService(reviews)
+    reviews.live.transport = lambda _: SimpleNamespace(
+        file_size=lambda *a: ("test-host", len(raw)),
+        stream_file_range=lambda *a, **k: iter([raw[:5], raw[5:]]),
+    )
+    videos.render = lambda *a: pytest.fail(
+        "A captured video must not launch a GPU render"
+    )
+    videos.prepare("session", 0, 0)
+    assert videos.status("session", 0)["state"] == "READY"
+    assert videos.status("session", 0)["kind"] == "capture"
+    assert videos.artifact("session", 0).read_bytes() == raw
+    reviews.live.transport = lambda _: pytest.fail("Cached video must work offline")
+    assert videos.create("session", 0)["state"] == "READY"
+    metadata["path"] = "recordings/../../secret.mp4"
+    with pytest.raises(ValueError, match="does not match"):
+        videos.capture_source(job, 0, metadata)
+    with pytest.raises(KeyError, match="Demonstration"):
+        videos.create("session", 0, 1)
+
+
+def test_video_failure_and_interrupted_preparation_are_explicit_and_retryable(review):
+    from skynet_app.live_xr_video import LiveVideoService
+
+    reviews, job, calls = review
+    reviews.directory("session", 0).mkdir(parents=True)
+    reviews.prepare("session", 0)
+    videos = LiveVideoService(reviews)
+    directory = videos.source("session", 0, 0)[3]
+    videos.publish(directory, state="PREPARING")
+    assert videos.status("session", 0)["state"] == "FAILED"
+    videos.render = lambda *a: {
+        "state": "FAILED",
+        "error": "GPU is busy with live collection",
+    }
+    videos.prepare("session", 0, 0)
+    assert "GPU is busy" in videos.status("session", 0)["error"]
+    assert not (directory / "video.mp4").exists()
+    queued = []
+    videos.executor.submit = lambda *a: queued.append(a)
+    assert videos.create("session", 0)["state"] == "PREPARING"
+    assert videos.create("session", 0)["state"] == "PREPARING"
+    assert len(queued) == 1
+
+    # A recording removed after queueing must not permanently block retries.
+    reviews.source = lambda *a: (_ for _ in ()).throw(KeyError("Recording removed"))
+    videos.prepare("session", 0, 0)
+    assert not videos.active
+
+
+def test_video_checksum_or_incomplete_download_cannot_be_published(review):
+    from skynet_app.live_xr_video import LiveVideoService
+    import hashlib
+
+    reviews, _, _ = review
+    reviews.directory("session", 0).mkdir(parents=True)
+    reviews.prepare("session", 0)
+    videos = LiveVideoService(reviews)
+    directory = videos.source("session", 0, 0)[3]
+    directory.mkdir()
+    raw = b"\x00\x00\x00\x18ftypisom"
+    metadata = dict(sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw))
+    for received in [raw[:-1], b"bad bytes!!!"]:
+        transport = SimpleNamespace(
+            file_size=lambda *a: ("host", len(raw)),
+            stream_file_range=lambda *a, **k: iter([received]),
+        )
+        with pytest.raises(ValueError, match="incomplete|checksum"):
+            videos.download(transport, "host", "/video.mp4", metadata, directory)
+        assert not (directory / "video.mp4").exists()
+        assert not (directory / "download.part").exists()
+
+
+def test_browser_video_supports_byte_ranges(tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from skynet_app import live_xr_api
+
+    p = tmp_path / "video.mp4"
+    p.write_bytes(b"\x00\x00\x00\x18ftypisom" + bytes(range(128)))
+    monkeypatch.setattr(live_xr_api, "videos", SimpleNamespace(artifact=lambda *a: p))
+    app = FastAPI()
+    app.include_router(live_xr_api.router)
+    response = TestClient(app).get(
+        "/api/collection/live/sessions/session/recordings/0/video.mp4",
+        headers={"Range": "bytes=0-11"},
+    )
+    assert response.status_code == 206
+    assert response.headers["content-type"] == "video/mp4"
+    assert response.headers["content-range"] == f"bytes 0-11/{p.stat().st_size}"
+    assert response.content == p.read_bytes()[:12]

@@ -5,14 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Skynet Slurm experiment and evaluation console.">
     <title>Skynet / Experiment Console</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260906-hands-xr">
+    <link rel="stylesheet" href="/static/styles.css?v=20260907-live-review">
     <script src="/static/app.js?v=20260906-hands-xr" defer></script>
     <script src="/static/local-capture.js?v=20260905-cycle" defer></script>
     <script src="/static/capture-processing.js?v=20260905-cycle" defer></script>
     <script src="/static/collection-ui.js?v=20260907-simple" defer></script>
     <script src="/static/hands-ui.js?v=20260907-imported-hands-2" defer></script>
-    <script src="/static/live-review.js?v=20260907-collection-review" defer></script>
-    <script src="/static/live-xr.js?v=20260907-manual-start" defer></script>
+    <script src="/static/live-review.js?v=20260907-video-review-4" defer></script>
+    <script src="/static/live-xr.js?v=20260907-session-state-2" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -1001,7 +1001,7 @@
                   <li>Open <strong>Isaac XR Teleop</strong>. Enter the session’s server address, then choose <strong>Connect</strong>.</li>
                   <li>Keep your hand(s) visible and tap Start in the headset to begin recording.</li>
                   <li><span id="live-xr-task-instructions">Choose a task to see its goal.</span></li>
-                  <li>Success saves the episode and resets the scene. Tap <strong>Start</strong> for the next episode. Use <strong>Review recording</strong> to inspect saved data.</li>
+                  <li>Success saves the episode and resets the scene. Tap <strong>Start</strong> for the next episode. Use <strong>Review recordings</strong> to play a saved episode.</li>
                 </ol>
                 <p><strong>Restart episode</strong> discards the unfinished attempt. <strong>End collection</strong> or <strong>Stop session</strong> ends collection and keeps saved episodes.</p>
                 <ul id="live-xr-unavailable"></ul>
@@ -1010,19 +1010,25 @@
             </details>
           </div>
           <dialog id="live-review-dialog" class="collection-video-dialog" aria-labelledby="live-review-title">
-            <div class="panel-heading"><div><h3 id="live-review-title">Review recording</h3><p id="live-review-context" class="secondary"></p></div><button id="live-review-close" class="button button-outline" type="button">Close review</button></div>
+            <div class="panel-heading"><div><h3 id="live-review-title">Review recordings</h3><p id="live-review-context" class="secondary"></p></div><button id="live-review-close" class="button button-outline" type="button">Close review</button></div>
+            <div class="field"><label for="live-review-recording">Recording</label><select id="live-review-recording"></select></div>
             <p id="live-review-status" role="status">Loading recording…</p>
             <button id="live-review-retry" class="button button-outline" type="button" hidden>Retry download</button>
             <div id="live-review-content" hidden>
-              <div class="live-review-downloads"><a id="live-review-original" class="text-button" download>Download original (.pkl)</a><a id="live-review-summary" class="text-button" download>Download summary</a><a id="live-review-json" class="text-button" download>Download preview values</a></div>
               <div class="field"><label for="live-review-episode">Demonstration</label><select id="live-review-episode"></select></div>
-              <div class="live-review-controls"><button id="live-review-prev" type="button" class="button button-outline">Previous frame</button><button id="live-review-play" type="button" class="button button-outline">Play</button><button id="live-review-next" type="button" class="button button-outline">Next frame</button><output id="live-review-frame" aria-live="off"></output></div>
+              <video id="live-review-video" controls playsinline preload="metadata" hidden aria-label="Recorded demonstration video"></video>
+              <p id="live-review-video-status" class="secondary" role="status"></p>
+              <div class="live-review-downloads"><button id="live-review-video-retry" class="button button-outline" type="button" hidden>Retry video</button><a id="live-review-video-download" class="text-button" download hidden>Download video</a></div>
+              <details id="live-review-data"><summary>Recorded values</summary>
+              <div class="live-review-downloads"><a id="live-review-original" class="text-button" download>Download original (.pkl)</a><a id="live-review-summary" class="text-button" download>Download summary</a><a id="live-review-json" class="text-button" download>Download preview values</a></div>
+              <div class="live-review-controls"><button id="live-review-prev" type="button" class="button button-outline">Previous frame</button><button id="live-review-play" type="button" class="button button-outline">Play values</button><button id="live-review-next" type="button" class="button button-outline">Next frame</button><output id="live-review-frame" aria-live="off"></output></div>
               <label for="live-review-seek" class="secondary">Recorded scene frame</label><input id="live-review-seek" type="range" min="0" value="0" step="1">
               <p id="live-review-time-note" class="secondary"></p>
               <div class="field"><label for="live-review-field">Recorded value</label><select id="live-review-field"></select></div>
               <p id="live-review-value-note" class="secondary"></p>
               <div class="table-scroll live-review-values"><table><thead><tr><th>Component</th><th>Saved value</th></tr></thead><tbody id="live-review-values"></tbody></table></div>
               <details><summary>Full scene state at this frame</summary><pre id="live-review-state"></pre></details>
+              </details>
             </div>
           </dialog>
           <div id="collection-view-cycles" data-collection-view="cycles" role="tabpanel" aria-labelledby="collection-tab-cycles" hidden>

@@ -130,6 +130,7 @@ def inspect(path, profile):
                 "state_count": len(states),
                 "sampled": len(frames) != len(states),
                 "frames": frames,
+                "video": episode.get("skynet_video"),
             }
         )
     return {

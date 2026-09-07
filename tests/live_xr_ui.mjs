@@ -160,7 +160,7 @@ try {
         scheduler_final: true,
         profile: { ...job.profile, execution: "workstation" },
         gateway: "test-workstation",
-        recordings: ["recordings/live/demo.pkl"],
+        recordings: ["recordings/live/demo.pkl", "recordings/live/demo-2.pkl"],
       },
     ],
     license: { accepted: true },
@@ -176,12 +176,21 @@ try {
     get("live-xr-target").textContent,
     /test-workstation · 30 min limit/,
   );
+  assert.equal(get("live-xr-progress-steps").hidden, true);
+  assert.equal(stages().length, 0);
+  assert.match(get("live-xr-progress-title").textContent, /Session ended/);
   let reviewed;
   window.openLiveReview = (...args) => {
     reviewed = args;
   };
+  assert.equal(
+    [...get("live-xr-sessions").querySelectorAll("button")].filter(
+      (b) => b.textContent === "Review recordings",
+    ).length,
+    1,
+  );
   [...get("live-xr-sessions").querySelectorAll("button")]
-    .find((b) => b.textContent === "Review recording")
+    .find((b) => b.textContent === "Review recordings")
     .click();
   assert.equal(reviewed[0].id, job.id);
   assert.equal(reviewed[1], 0);
