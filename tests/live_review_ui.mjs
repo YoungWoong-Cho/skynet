@@ -17,6 +17,27 @@ window.HTMLMediaElement.prototype.pause = function () {
 };
 window.HTMLMediaElement.prototype.load = function () {};
 const get = (id) => window.document.getElementById(id);
+const watchdogs = new Map();
+let nextWatchdog = 100000;
+const realSetTimeout = window.setTimeout.bind(window);
+const realClearTimeout = window.clearTimeout.bind(window);
+window.setTimeout = (callback, delay, ...args) => {
+  if (delay !== 30000) return realSetTimeout(callback, delay, ...args);
+  const id = ++nextWatchdog;
+  watchdogs.set(id, callback);
+  return id;
+};
+window.clearTimeout = (id) => {
+  watchdogs.delete(id);
+  realClearTimeout(id);
+};
+const mediaEvent = (event, readyState = 2) => {
+  Object.defineProperty(get("live-review-video"), "readyState", {
+    value: readyState,
+    configurable: true,
+  });
+  get("live-review-video").dispatchEvent(new window.Event(event));
+};
 const dialog = get("live-review-dialog");
 dialog.showModal = () => {
   dialog.open = true;
@@ -79,6 +100,24 @@ try {
     get("live-review-video").src,
     /first\/recordings\/0\/video.mp4\?episode=0&v=first-video$/,
   );
+  assert.equal(get("live-review-video-status").textContent, "Loading video…");
+  assert.equal(watchdogs.size, 1);
+  const initialWatchdog = [...watchdogs.values()][0];
+  mediaEvent("stalled", 0);
+  assert.equal(
+    [...watchdogs.values()][0],
+    initialWatchdog,
+    "Repeated stalls must not postpone the timeout",
+  );
+  [...watchdogs.values()][0]();
+  assert.match(
+    get("live-review-video-status").textContent,
+    /did not load within 30 seconds/,
+  );
+  assert.equal(get("live-review-video-retry").hidden, false);
+  mediaEvent("loadeddata");
+  assert.equal(watchdogs.size, 0);
+  assert.equal(get("live-review-video-retry").hidden, true);
   assert.match(
     get("live-review-video-status").textContent,
     /rendered from recorded states/,
@@ -94,7 +133,17 @@ try {
     sha256: "captured-video",
   });
   await flush();
+  mediaEvent("canplay");
   assert.equal(get("live-review-video-status").textContent, "Collection video");
+  mediaEvent("waiting", 1);
+  assert.equal(get("live-review-video-status").textContent, "Buffering video…");
+  assert.equal(watchdogs.size, 1);
+  mediaEvent("playing", 3);
+  assert.equal(watchdogs.size, 0);
+  mediaEvent("seeking", 1);
+  assert.equal(watchdogs.size, 1);
+  mediaEvent("seeked", 3);
+  assert.equal(watchdogs.size, 0);
   assert.match(get("live-review-values").textContent, /Initial state/);
   assert.equal(get("live-review-prev").disabled, true);
   get("live-review-next").click();
@@ -111,10 +160,19 @@ try {
   get("live-review-field").value = "robot.joint_position";
   get("live-review-field").dispatchEvent(new window.Event("change"));
   assert.match(get("live-review-values").textContent, /1\.000000/);
+  mediaEvent("waiting", 1);
+  const staleWatchdog = [...watchdogs.values()][0];
   get("live-review-close").click();
+  assert.equal(watchdogs.size, 0);
   window.openLiveReview({ id: "stale" }, 0);
   get("live-review-close").click();
   window.openLiveReview({ id: "current" }, 0);
+  staleWatchdog();
+  assert.equal(
+    get("live-review-video-retry").hidden,
+    true,
+    "A closed video's timer must not alter the new review",
+  );
   assert.equal(get("live-review-video").hasAttribute("src"), false);
   assert.ok(videoPauses > 0);
   const beforeStale = requests.length;

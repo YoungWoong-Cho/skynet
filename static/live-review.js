@@ -12,10 +12,40 @@
   const video = el("live-review-video");
   let reviewSession;
   let videoToken = 0,
-    videoTimer;
+    videoTimer,
+    mediaTimer,
+    mediaTime = 0,
+    mediaLabel = "",
+    mediaCurrent = () => false;
+  function stopMediaWatch() {
+    clearTimeout(mediaTimer);
+    mediaTimer = undefined;
+  }
+  function videoFailure(message) {
+    stopMediaWatch();
+    video.pause();
+    el("live-review-video-status").textContent = message;
+    el("live-review-video-retry").hidden = false;
+  }
+  function watchMedia(message) {
+    if (!mediaCurrent() || mediaTimer !== undefined) return;
+    const current = mediaCurrent;
+    mediaTimer = setTimeout(() => {
+      if (current()) videoFailure(message);
+    }, 30000);
+  }
+  function mediaReady() {
+    if (!mediaCurrent() || video.readyState < 2) return;
+    stopMediaWatch();
+    el("live-review-video-status").textContent = mediaLabel;
+    el("live-review-video-retry").hidden = true;
+  }
   function clearVideo() {
     ++videoToken;
     clearTimeout(videoTimer);
+    stopMediaWatch();
+    mediaTime = 0;
+    mediaCurrent = () => false;
     video.pause();
     video.removeAttribute("src");
     video.load();
@@ -38,16 +68,23 @@
         const url =
           base +
           `/video.mp4?episode=${index}&v=${encodeURIComponent(result.sha256)}`;
+        mediaCurrent = current;
+        video.preload = "auto";
         video.src = url;
         video.hidden = false;
         el("live-review-video-download").href = url;
         el("live-review-video-download").hidden = false;
-        el("live-review-video-status").textContent =
+        mediaLabel =
           result.kind === "capture"
             ? "Collection video"
             : result.capture_error
               ? `Scene replay · video capture failed: ${result.capture_error}`
               : "Scene replay · rendered from recorded states";
+        el("live-review-video-status").textContent = "Loading video…";
+        watchMedia(
+          "The video did not load within 30 seconds. Retry to reload it.",
+        );
+        video.load();
       } else if (result.state === "FAILED") {
         throw new Error(result.error);
       } else if (result.state === "NOT_PREPARED") {
@@ -68,12 +105,29 @@
     }
   }
   video.addEventListener("error", () => {
-    if (!video.hasAttribute("src") || !dialog.open) return;
-    el("live-review-video-status").textContent =
-      "The video could not be played. Retry to reload it.";
-    el("live-review-video-retry").hidden = false;
+    if (!mediaCurrent()) return;
+    videoFailure("The video could not be played. Retry to reload it.");
+  });
+  for (const event of ["loadeddata", "canplay", "playing", "seeked"])
+    video.addEventListener(event, mediaReady);
+  video.addEventListener("waiting", () => {
+    if (!mediaCurrent()) return;
+    el("live-review-video-status").textContent = "Buffering video…";
+    watchMedia("Video playback stalled. Retry to reload it.");
+  });
+  video.addEventListener("stalled", () => {
+    if (video.readyState < 2)
+      watchMedia("The video stopped loading. Retry to reload it.");
+  });
+  video.addEventListener("seeking", () => {
+    watchMedia("The video could not seek to that point. Retry to reload it.");
+  });
+  video.addEventListener("pause", () => {
+    if (video.readyState >= 2 && !video.seeking) stopMediaWatch();
   });
   video.addEventListener("timeupdate", () => {
+    if (!video.paused && video.currentTime !== mediaTime) mediaReady();
+    mediaTime = video.currentTime;
     if (!episode || !el("live-review-data").open) return;
     let index = 0;
     while (

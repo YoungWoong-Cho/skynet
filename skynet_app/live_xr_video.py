@@ -9,11 +9,14 @@ from pathlib import PurePosixPath
 import re
 import shlex
 import threading
+import time
 
 from .database import canonical_json, utc_now
 from .live_xr_review import ArrayUnpickler
 
 MAX_BYTES = 256 * 1024 * 1024
+GPU_WAIT_SECONDS = 120
+GPU_RETRY_SECONDS = 5
 
 
 class LiveVideoService:
@@ -22,6 +25,7 @@ class LiveVideoService:
         self.live = reviews.live
         self.lock = threading.RLock()
         self.active = set()
+        self.queue = []
         self.executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="review-video"
         )
@@ -57,18 +61,35 @@ class LiveVideoService:
             json.loads(path.read_text()) if path.exists() else {"state": "NOT_PREPARED"}
         )
         if (
-            result["state"] == "PREPARING"
+            result["state"] in {"QUEUED", "PREPARING", "WAITING_GPU"}
             and (identifier, index, episode) not in self.active
         ):
-            return dict(
-                state="FAILED",
-                error="Video preparation was interrupted. Retry to continue.",
+            return {"state": "NOT_PREPARED"}
+        # Old releases persisted temporary lock conflicts as permanent failures.
+        # New failures carry a code and remain visible until explicitly retried.
+        if (
+            result["state"] == "FAILED"
+            and not result.get("code")
+            and any(
+                message in result.get("error", "")
+                for message in (
+                    "End the live session before preparing video",
+                    "The GPU is busy with another session or video job",
+                    "Video preparation was interrupted",
+                )
             )
+        ):
+            return {"state": "NOT_PREPARED"}
+        if result["state"] == "QUEUED":
+            with self.lock:
+                key = (identifier, index, episode)
+                if key in self.queue:
+                    result = dict(
+                        result,
+                        detail=f"Waiting to prepare video… (queue position {self.queue.index(key) + 1})",
+                    )
         if result["state"] == "READY" and not (directory / "video.mp4").is_file():
-            return dict(
-                state="FAILED",
-                error="The cached video is missing. Retry to download it again.",
-            )
+            return {"state": "NOT_PREPARED"}
         if (
             result["state"] == "READY"
             and result.get("kind") == "replay"
@@ -92,9 +113,15 @@ class LiveVideoService:
                 return state
             _, _, _, directory = self.source(*key)
             self.active.add(key)
-            self.publish(directory, state="PREPARING", detail="Preparing video…")
-            self.executor.submit(self.prepare, *key)
-            return dict(state="PREPARING", detail="Preparing video…")
+            self.queue.append(key)
+            self.publish(directory, state="QUEUED", detail="Waiting to prepare video…")
+            try:
+                self.executor.submit(self.prepare, *key)
+            except Exception:
+                self.active.discard(key)
+                self.queue.remove(key)
+                raise
+            return self.status(*key)
 
     @staticmethod
     def capture_source(job, index, metadata):
@@ -175,7 +202,7 @@ print(p.read_text() if p.is_file() else '{}')
             + q(directory + "/render.log")
             + " 2>&1\n"
             + "result=$?\n"
-            + 'if [ "$result" = 75 ]; then echo "The GPU is busy with another session or video job. Retry when it finishes." >&2; exit 75; fi\n'
+            + 'if [ "$result" = 75 ]; then echo \'{"state":"WAITING_GPU"}\'; exit 0; fi\n'
             + 'if [ "$result" != 0 ]; then tail -c 1500 '
             + q(directory + "/render.log")
             + ' >&2; exit "$result"; fi\n'
@@ -219,6 +246,10 @@ print(p.read_text() if p.is_file() else '{}')
 
     def prepare(self, identifier, index, episode):
         directory = None
+        key = (identifier, index, episode)
+        with self.lock:
+            if key in self.queue:
+                self.queue.remove(key)
         try:
             job, remote, review, directory = self.source(identifier, index, episode)
             transport = self.live.transport(job)
@@ -233,7 +264,25 @@ print(p.read_text() if p.is_file() else '{}')
                 self.publish(
                     directory, state="PREPARING", detail="Rendering recorded scene…"
                 )
-                metadata = self.render(transport, job, remote, review, episode)
+                deadline = time.monotonic() + GPU_WAIT_SECONDS
+                while True:
+                    metadata = self.render(transport, job, remote, review, episode)
+                    if metadata.get("state") != "WAITING_GPU":
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ValueError(
+                            "The GPU is still busy. End collection or wait for the other video job, then retry."
+                        )
+                    self.publish(
+                        directory,
+                        state="WAITING_GPU",
+                        detail="Waiting for the GPU… Retrying automatically for up to 2 minutes.",
+                    )
+                    time.sleep(min(GPU_RETRY_SECONDS, remaining))
+                    self.publish(
+                        directory, state="PREPARING", detail="Rendering recorded scene…"
+                    )
                 if metadata.get("state") != "READY":
                     raise ValueError(
                         metadata.get("error")
@@ -255,10 +304,12 @@ print(p.read_text() if p.is_file() else '{}')
             )
         except Exception as exc:
             if directory is not None:
-                self.publish(directory, state="FAILED", error=str(exc))
+                self.publish(
+                    directory, state="FAILED", code="PREPARATION_FAILED", error=str(exc)
+                )
         finally:
             with self.lock:
-                self.active.discard((identifier, index, episode))
+                self.active.discard(key)
 
     def artifact(self, identifier, index, episode=0):
         if self.status(identifier, index, episode)["state"] != "READY":

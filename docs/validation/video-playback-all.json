@@ -1,0 +1,289 @@
+{
+  "schema": "skynet.validation/video-playback-v1",
+  "date": "2026-09-07",
+  "recordings": 21,
+  "sessions": 9,
+  "method": "Opened each session's Review recordings modal, selected each recording, pressed the native video play control, and read HTMLMediaElement state after actual playback ended. No simulated playback events or seeking to the end.",
+  "review_mode": "Scene replay rendered from saved simulator states",
+  "browser": {
+    "surface": "Codex in-app browser",
+    "console_errors_after_final_reload": [],
+    "extra_checks": [
+      "Visible Shadow hand and stick scene",
+      "Visible WUJI 2 hand grasping cube",
+      "Visible Sharpa stacking scene",
+      "Recording switching ignores previous loading callbacks",
+      "Native seek restores a decoded frame at 6.006 seconds",
+      "Ended sessions show no stale green startup milestones"
+    ]
+  },
+  "fixes": [
+    "Legacy cached GPU-busy and interrupted-preparation failures resume automatically",
+    "GPU lock conflicts retry for up to 120 seconds; remaining failures are explicit and retryable",
+    "Queued videos show their queue position",
+    "Player loading, buffering and seeking have a 30-second watchdog; repeated stalls do not extend it",
+    "Closing or switching recording clears old media timers"
+  ],
+  "tests": {
+    "python_passed": 389,
+    "js_passed": [
+      "live_review_ui.mjs",
+      "live_xr_ui.mjs"
+    ],
+    "targeted_python_passed_after_final_wording": 15
+  },
+  "playback": [
+    {
+      "session": "5699d1c1-56fb-49e7-b4dc-a04201b1991e",
+      "recording": 0,
+      "episode": 0,
+      "time": 2.866667,
+      "duration": 2.866667,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "5699d1c1-56fb-49e7-b4dc-a04201b1991e",
+      "recording": 1,
+      "episode": 0,
+      "time": 2.366667,
+      "duration": 2.366667,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "4630d662-a024-4e42-a943-ee9cf2f95346",
+      "recording": 0,
+      "episode": 0,
+      "time": 6.233333,
+      "duration": 6.233333,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "e801b1b7-3bd4-41af-bc30-b10667b4b509",
+      "recording": 0,
+      "episode": 0,
+      "time": 4.4,
+      "duration": 4.4,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "f9aaefdb-f660-42b0-977c-7458630e2fb3",
+      "recording": 0,
+      "episode": 0,
+      "time": 2.233333,
+      "duration": 2.233333,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "f9aaefdb-f660-42b0-977c-7458630e2fb3",
+      "recording": 1,
+      "episode": 0,
+      "time": 2.066667,
+      "duration": 2.066667,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "f9aaefdb-f660-42b0-977c-7458630e2fb3",
+      "recording": 2,
+      "episode": 0,
+      "time": 1.966667,
+      "duration": 1.966667,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "f9aaefdb-f660-42b0-977c-7458630e2fb3",
+      "recording": 3,
+      "episode": 0,
+      "time": 1.8,
+      "duration": 1.8,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "f9aaefdb-f660-42b0-977c-7458630e2fb3",
+      "recording": 4,
+      "episode": 0,
+      "time": 2.033333,
+      "duration": 2.033333,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "f9aaefdb-f660-42b0-977c-7458630e2fb3",
+      "recording": 5,
+      "episode": 0,
+      "time": 2.166667,
+      "duration": 2.166667,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "f9aaefdb-f660-42b0-977c-7458630e2fb3",
+      "recording": 6,
+      "episode": 0,
+      "time": 2.033333,
+      "duration": 2.033333,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "f9aaefdb-f660-42b0-977c-7458630e2fb3",
+      "recording": 7,
+      "episode": 0,
+      "time": 1.933333,
+      "duration": 1.933333,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "f9aaefdb-f660-42b0-977c-7458630e2fb3",
+      "recording": 8,
+      "episode": 0,
+      "time": 3.033333,
+      "duration": 3.033333,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "7826a25c-2bdd-4d77-92c7-30793972c6cf",
+      "recording": 0,
+      "episode": 0,
+      "time": 3,
+      "duration": 3,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "7826a25c-2bdd-4d77-92c7-30793972c6cf",
+      "recording": 1,
+      "episode": 0,
+      "time": 2.466667,
+      "duration": 2.466667,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "17140695-9a10-4122-b7ef-c571122b0932",
+      "recording": 0,
+      "episode": 0,
+      "time": 3.7,
+      "duration": 3.7,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "e66b2d2d-857c-4385-accb-08e88af1e96d",
+      "recording": 0,
+      "episode": 0,
+      "time": 13.9,
+      "duration": 13.9,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "98df13c9-6f9c-4fa1-b264-45bae51e5409",
+      "recording": 0,
+      "episode": 0,
+      "time": 3.8,
+      "duration": 3.8,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "6a335a76-3fc9-4e0a-a644-b5254be0d4a3",
+      "recording": 0,
+      "episode": 0,
+      "time": 3.9,
+      "duration": 3.9,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "98df13c9-6f9c-4fa1-b264-45bae51e5409",
+      "recording": 1,
+      "episode": 0,
+      "time": 3.1,
+      "duration": 3.1,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    },
+    {
+      "session": "98df13c9-6f9c-4fa1-b264-45bae51e5409",
+      "recording": 2,
+      "episode": 0,
+      "time": 6.066667,
+      "duration": 6.066667,
+      "width": 960,
+      "height": 540,
+      "ready": 4,
+      "ended": true,
+      "error": null
+    }
+  ]
+}

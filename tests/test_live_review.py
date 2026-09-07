@@ -202,7 +202,7 @@ def test_video_failure_and_interrupted_preparation_are_explicit_and_retryable(re
     videos = LiveVideoService(reviews)
     directory = videos.source("session", 0, 0)[3]
     videos.publish(directory, state="PREPARING")
-    assert videos.status("session", 0)["state"] == "FAILED"
+    assert videos.status("session", 0)["state"] == "NOT_PREPARED"
     videos.render = lambda *a: {
         "state": "FAILED",
         "error": "GPU is busy with live collection",
@@ -212,14 +212,110 @@ def test_video_failure_and_interrupted_preparation_are_explicit_and_retryable(re
     assert not (directory / "video.mp4").exists()
     queued = []
     videos.executor.submit = lambda *a: queued.append(a)
-    assert videos.create("session", 0)["state"] == "PREPARING"
-    assert videos.create("session", 0)["state"] == "PREPARING"
+    assert videos.create("session", 0)["state"] == "QUEUED"
+    assert videos.create("session", 0)["state"] == "QUEUED"
+    assert "queue position 1" in videos.status("session", 0)["detail"]
     assert len(queued) == 1
 
     # A recording removed after queueing must not permanently block retries.
     reviews.source = lambda *a: (_ for _ in ()).throw(KeyError("Recording removed"))
     videos.prepare("session", 0, 0)
     assert not videos.active
+    assert not videos.queue
+
+
+def test_video_recovers_legacy_busy_errors_and_interrupted_jobs(review):
+    from skynet_app.live_xr_video import LiveVideoService
+
+    reviews, _, _ = review
+    reviews.directory("session", 0).mkdir(parents=True)
+    reviews.prepare("session", 0)
+    videos = LiveVideoService(reviews)
+    directory = videos.source("session", 0, 0)[3]
+    for message in (
+        "rl2-bonjour: End the live session before preparing video for this older recording.",
+        "rl2-bonjour: The GPU is busy with another session or video job. Retry when it finishes.",
+        "Video preparation was interrupted. Retry to continue.",
+    ):
+        videos.publish(directory, state="FAILED", error=message)
+        assert videos.status("session", 0)["state"] == "NOT_PREPARED"
+    for state in ("QUEUED", "PREPARING", "WAITING_GPU"):
+        videos.publish(directory, state=state)
+        assert videos.status("session", 0)["state"] == "NOT_PREPARED"
+    videos.publish(directory, state="READY")
+    assert videos.status("session", 0)["state"] == "NOT_PREPARED"
+
+
+def test_video_waits_for_gpu_then_finishes_or_reports_bounded_failure(
+    review, monkeypatch
+):
+    from skynet_app import live_xr_video
+
+    reviews, _, _ = review
+    reviews.directory("session", 0).mkdir(parents=True)
+    reviews.prepare("session", 0)
+    videos = live_xr_video.LiveVideoService(reviews)
+    videos.version = "test-version"
+    directory = videos.source("session", 0, 0)[3]
+    key = ("session", 0, 0)
+    ready = dict(
+        state="READY",
+        kind="replay",
+        path="/video.mp4",
+        fps=30,
+        frames=2,
+        size_bytes=24,
+        sha256="a" * 64,
+        renderer_version=videos.version,
+    )
+    renders = iter([{"state": "WAITING_GPU"}, ready])
+    videos.render = lambda *a: next(renders)
+    videos.download = lambda *a: (directory / "video.mp4").write_bytes(b"cached video")
+    waits = []
+    monkeypatch.setattr(
+        live_xr_video.time, "sleep", lambda seconds: waits.append(videos.status(*key))
+    )
+    videos.active.add(key)
+    videos.prepare(*key)
+    assert waits[0]["state"] == "WAITING_GPU"
+    assert videos.status(*key)["state"] == "READY"
+    assert not videos.active
+
+    (directory / "video.mp4").unlink()
+    videos.render = lambda *a: {"state": "WAITING_GPU"}
+    clock = iter([0, live_xr_video.GPU_WAIT_SECONDS + 1])
+    monkeypatch.setattr(live_xr_video.time, "monotonic", lambda: next(clock))
+    videos.prepare(*key)
+    result = videos.status(*key)
+    assert result["state"] == "FAILED"
+    assert "GPU is still busy" in result["error"]
+    assert not videos.active
+
+
+def test_video_remote_lock_conflict_is_a_wait_state(review):
+    from skynet_app.live_xr_video import LiveVideoService
+
+    reviews, job, _ = review
+    job["profile"].update(
+        execution="workstation",
+        runtime="/runtime",
+        repository="/repo",
+        work_root="/work",
+    )
+    videos = LiveVideoService(reviews)
+    videos.sources = {}
+    calls = []
+
+    def ssh(*args, **kwargs):
+        calls.append(args[1])
+        return "{}" if len(calls) == 1 else '{"state":"WAITING_GPU"}'
+
+    result = videos.render(
+        SimpleNamespace(ssh=ssh), job, "/recording.pkl", {"sha256": "a" * 64}, 0
+    )
+    assert result["state"] == "WAITING_GPU"
+    assert "--conflict-exit-code=75" in calls[1]
+    assert '\'{"state":"WAITING_GPU"}\'; exit 0' in calls[1]
 
 
 def test_video_checksum_or_incomplete_download_cannot_be_published(review):
