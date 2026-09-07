@@ -80,6 +80,13 @@ def test_real_source_names_mimic_and_floating_wrist_survive_bundle(source):
     ]
     xml = parse_urdf((path / "simulation.urdf").read_bytes())
     assert hands.validate_tree(xml) == "skynet_base"
+    for name in manifest["wrist_joints"][3:]:
+        wrist = xml.find(f"joint[@name='{name}']")
+        assert wrist.get("type") == "revolute"
+        assert float(wrist.find("limit").get("lower")) < -1000
+        assert float(wrist.find("limit").get("upper")) > 1000
+    finger = xml.find("joint[@name='h_0_0']/limit")
+    assert (finger.get("lower"), finger.get("upper")) == ("0", "1.5")
     assert xml.find(".//mesh").get("filename") == "assets/palm.stl"
     assert (
         next(j for j in joint_metadata(xml) if j["name"] == "h_coupled")["mimic"][

@@ -64,7 +64,7 @@ def service(tmp_path, monkeypatch):
         (root / "ops/xr/native_session.py").read_text()
     )
     (tmp_path / "ops/xr/hands").mkdir()
-    for name in ("collection.py", "hands/anatomy.py"):
+    for name in ("collection.py", "hands/anatomy.py", "wrist.py"):
         (tmp_path / "ops/xr" / name).write_text((root / "ops/xr" / name).read_text())
     service = LiveXRService(Database(tmp_path / "db.sqlite"), Cluster(), root=tmp_path)
     monkeypatch.setattr(service, "dispatch", lambda _: None)
@@ -94,6 +94,7 @@ def test_frozen_session_extracts_the_complete_collection_runtime(service, tmp_pa
     assert {p.name for p in entry.parent.iterdir()} == {
         "collection.py",
         "anatomy.py",
+        "wrist.py",
     }
     assert (entry.parent / "anatomy.py").read_text() == (
         service.root / "ops/xr/hands/anatomy.py"

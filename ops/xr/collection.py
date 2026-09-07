@@ -150,6 +150,12 @@ def run_loop(
 
         pose_validity = XRPoseValidityFlags
 
+    from wrist import (
+        ContinuousEulerXYZ,
+        configure_virtual_wrist,
+        install_relative_wrist_tracking,
+    )
+
     store = EpisodeStore(root, recorder._metadata)
     executor = ThreadPoolExecutor(max_workers=1)
     start = ManualStart()
@@ -170,6 +176,11 @@ def run_loop(
     manifest = cfg.get("hand_manifest", {})
     anatomical_wrist = manifest.get("retargeting_mode") == "finger_segments"
     robot = env.scene["robot"]
+    configure_virtual_wrist(robot, manifest, tracked_sides)
+    anatomical_angles = ContinuousEulerXYZ()
+    reset_wrist_histories = [
+        install_relative_wrist_tracking(r) for r in teleop._retargeters
+    ]
     if manifest:
         marker_names = [
             manifest["palm"],
@@ -189,7 +200,6 @@ def run_loop(
         )
     if anatomical_wrist:
         from anatomy import palm_frame
-        from scipy.spatial.transform import Rotation
 
         if manifest["wrist_joints"] != [
             "skynet_x",
@@ -276,6 +286,9 @@ def run_loop(
         recorder.discard_episode()
         ns["handle_reset"](env)
         teleop.reset()
+        anatomical_angles.reset()
+        for reset_history in reset_wrist_histories:
+            reset_history()
         success_count = 0
         start.reset()
         robot = env.scene["robot"]
@@ -407,6 +420,9 @@ def run_loop(
                     if start.consume(tracking):
                         for retargeter in teleop._retargeters:
                             retargeter.calibrate_wrist_pose()
+                        for reset_history in reset_wrist_histories:
+                            reset_history()
+                        anatomical_angles.reset()
                         recorder.start_episode(
                             initial_state=env.scene.get_state(is_relative=True),
                             goal_pose=ns["_get_goal_pose_from_env"](env),
@@ -438,9 +454,7 @@ def run_loop(
                         p = points[manifest["side"]]
                         pose = np.r_[
                             p[0] - targets[manifest["side"]],
-                            Rotation.from_matrix(
-                                palm_frame(p, manifest["side"])
-                            ).as_euler("XYZ"),
+                            anatomical_angles.update(palm_frame(p, manifest["side"])),
                         ]
                         action[:6] = torch.as_tensor(
                             pose, device=action.device, dtype=action.dtype

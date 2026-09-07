@@ -22,7 +22,7 @@ COLLECTION_FILES = {}
 
 
 def write_collection_files(root):
-    required = {"collection.py", "anatomy.py"}
+    required = {"collection.py", "anatomy.py", "wrist.py"}
     if set(COLLECTION_FILES) != required:
         raise ValueError("Automatic collection runtime is incomplete in this session")
     source_root = root / "collector"

@@ -85,7 +85,9 @@ def joint(xml, name, parent, child, kind="fixed", axis=None, rpy=None):
     ET.SubElement(item, "origin", xyz="0 0 0", rpy=" ".join(map(str, rpy or [0, 0, 0])))
     if axis:
         ET.SubElement(item, "axis", xyz=axis)
-        bound = "2" if kind == "prismatic" else str(math.pi)
+        # PhysX chooses an unwrapped articulation axis only when finite limits
+        # exist at creation. A URDF continuous joint still wraps at 360 degrees.
+        bound = "2" if kind == "prismatic" else "1000000"
         ET.SubElement(
             item, "limit", lower="-" + bound, upper=bound, effort="30", velocity="5"
         )

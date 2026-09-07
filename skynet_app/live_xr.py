@@ -197,6 +197,7 @@ class LiveXRService:
         worker = (self.root / "ops/xr/native_session.py").read_text()
         sources = {
             "collection.py": (self.root / "ops/xr/collection.py").read_text(),
+            "wrist.py": (self.root / "ops/xr/wrist.py").read_text(),
             "anatomy.py": (self.root / "ops/xr/hands/anatomy.py").read_text(),
         }
         worker = worker.replace(

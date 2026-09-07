@@ -1,0 +1,381 @@
+{
+  "schema": "skynet.validation/wrist-continuity-v1",
+  "date": "2026-09-07",
+  "host": "rl2-bonjour",
+  "unit_tests": 382,
+  "native_build": "passed",
+  "native_installed_at": "2026-09-07T16:44:31-04:00",
+  "native_launched_at": "2026-09-07T16:45:03-04:00",
+  "headset_confirmation": true,
+  "floating_panel": {
+    "position": [
+      0,
+      -0.08,
+      -0.9
+    ],
+    "buttons": [
+      "Start",
+      "End collection"
+    ]
+  },
+  "checks": [
+    {
+      "synthetic": true,
+      "robot": "skynet_wuji_2_right",
+      "bundle_digest": "ca08da3d3d584428f2d444fe1b9e34ad56ed90c8e8700df35332be6f4f3b2b24",
+      "physical_finger_limits_unchanged": true,
+      "trajectories": [
+        {
+          "trajectory": "palm_roll_forward",
+          "steps": 305,
+          "final_angle": 7.853469371795654,
+          "target_angle": 7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005122624113375178,
+          "max_tracking_error": 0.40373884544276667
+        },
+        {
+          "trajectory": "palm_roll_backward",
+          "steps": 305,
+          "final_angle": -7.8534698486328125,
+          "target_angle": -7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005117856280152021,
+          "max_tracking_error": 0.4037269841716568
+        },
+        {
+          "trajectory": "pitch_forward",
+          "steps": 170,
+          "final_angle": 3.141079902648926,
+          "target_angle": 3.141592653589793,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005127897590238186,
+          "max_tracking_error": 0.4062255940712165
+        },
+        {
+          "trajectory": "pitch_backward",
+          "steps": 170,
+          "final_angle": -3.141079902648926,
+          "target_angle": -3.141592653589793,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005127933914296345,
+          "max_tracking_error": 0.40619650739732394
+        },
+        {
+          "trajectory": "yaw_forward",
+          "steps": 305,
+          "final_angle": 7.853472709655762,
+          "target_angle": 7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005089348769404526,
+          "max_tracking_error": 0.4037358623336131
+        },
+        {
+          "trajectory": "yaw_backward",
+          "steps": 305,
+          "final_angle": -7.853472709655762,
+          "target_angle": -7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005089349899243017,
+          "max_tracking_error": 0.40373007373595354
+        }
+      ]
+    },
+    {
+      "synthetic": true,
+      "robot": "skynet_wuji_2_left",
+      "bundle_digest": "60cee78fb123c8173c049c0a6631eaa57d0b912a01c853fadd5957fa254bfb4b",
+      "physical_finger_limits_unchanged": true,
+      "trajectories": [
+        {
+          "trajectory": "palm_roll_forward",
+          "steps": 305,
+          "final_angle": 7.8534698486328125,
+          "target_angle": 7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.000511785632648526,
+          "max_tracking_error": 0.4037281476620086
+        },
+        {
+          "trajectory": "palm_roll_backward",
+          "steps": 305,
+          "final_angle": -7.853469371795654,
+          "target_angle": -7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005122624174429037,
+          "max_tracking_error": 0.40373836856539014
+        },
+        {
+          "trajectory": "pitch_forward",
+          "steps": 170,
+          "final_angle": 3.141079902648926,
+          "target_angle": 3.141592653589793,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005127883897991879,
+          "max_tracking_error": 0.4062260709049296
+        },
+        {
+          "trajectory": "pitch_backward",
+          "steps": 170,
+          "final_angle": -3.141079902648926,
+          "target_angle": -3.141592653589793,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005127917440281561,
+          "max_tracking_error": 0.40619626900701555
+        },
+        {
+          "trajectory": "yaw_forward",
+          "steps": 305,
+          "final_angle": 7.853472709655762,
+          "target_angle": 7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005089339508993473,
+          "max_tracking_error": 0.4037301214131292
+        },
+        {
+          "trajectory": "yaw_backward",
+          "steps": 305,
+          "final_angle": -7.853472709655762,
+          "target_angle": -7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005089338457063203,
+          "max_tracking_error": 0.40373586224853053
+        }
+      ]
+    },
+    {
+      "synthetic": true,
+      "robot": "skynet_sharpa_right",
+      "bundle_digest": "750b90a9eda5fc9a5aaa9e129a9251e03d642879e936371e1aeafdc2d00e6945",
+      "physical_finger_limits_unchanged": true,
+      "trajectories": [
+        {
+          "trajectory": "palm_roll_forward",
+          "steps": 305,
+          "final_angle": 7.853463172912598,
+          "target_angle": 7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005184610626730166,
+          "max_tracking_error": 0.403726429987273
+        },
+        {
+          "trajectory": "palm_roll_backward",
+          "steps": 305,
+          "final_angle": -7.853463172912598,
+          "target_angle": -7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005184610626727775,
+          "max_tracking_error": 0.4037265256027677
+        },
+        {
+          "trajectory": "pitch_forward",
+          "steps": 170,
+          "final_angle": 3.1410715579986572,
+          "target_angle": 3.141592653589793,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005210955926858276,
+          "max_tracking_error": 0.40703391294463787
+        },
+        {
+          "trajectory": "pitch_backward",
+          "steps": 170,
+          "final_angle": -3.1410720348358154,
+          "target_angle": -3.141592653589793,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005206187542745024,
+          "max_tracking_error": 0.40620985827789197
+        },
+        {
+          "trajectory": "yaw_forward",
+          "steps": 305,
+          "final_angle": 7.853463172912598,
+          "target_angle": 7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005184610656406804,
+          "max_tracking_error": 0.4037254936957042
+        },
+        {
+          "trajectory": "yaw_backward",
+          "steps": 305,
+          "final_angle": -7.853463172912598,
+          "target_angle": -7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005184610656330719,
+          "max_tracking_error": 0.40372549369587074
+        }
+      ]
+    },
+    {
+      "synthetic": true,
+      "robot": "floating_shadow_right",
+      "bundle_digest": null,
+      "physical_finger_limits_unchanged": true,
+      "trajectories": [
+        {
+          "trajectory": "palm_roll_forward",
+          "steps": 305,
+          "final_angle": 7.853095054626465,
+          "target_angle": 7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0009068902044031614,
+          "max_tracking_error": 0.40376894489408177
+        },
+        {
+          "trajectory": "palm_roll_backward",
+          "steps": 305,
+          "final_angle": -7.853095531463623,
+          "target_angle": -7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0009587251405791456,
+          "max_tracking_error": 0.4036915243132327
+        },
+        {
+          "trajectory": "pitch_forward",
+          "steps": 170,
+          "final_angle": 3.1409449577331543,
+          "target_angle": 3.141592653589793,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0007535160372389886,
+          "max_tracking_error": 0.4736385603068677
+        },
+        {
+          "trajectory": "pitch_backward",
+          "steps": 170,
+          "final_angle": -3.140955686569214,
+          "target_angle": -3.141592653589793,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0006909949429925209,
+          "max_tracking_error": 0.4061742979236249
+        },
+        {
+          "trajectory": "yaw_forward",
+          "steps": 305,
+          "final_angle": 7.853414058685303,
+          "target_angle": 7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005839326173351758,
+          "max_tracking_error": 0.4038647130208645
+        },
+        {
+          "trajectory": "yaw_backward",
+          "steps": 305,
+          "final_angle": -7.853414535522461,
+          "target_angle": -7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005864892641172612,
+          "max_tracking_error": 0.40371037130089676
+        }
+      ]
+    },
+    {
+      "synthetic": true,
+      "robot": "floating_shadow_left",
+      "bundle_digest": null,
+      "physical_finger_limits_unchanged": true,
+      "trajectories": [
+        {
+          "trajectory": "palm_roll_forward",
+          "steps": 305,
+          "final_angle": 7.853068828582764,
+          "target_angle": 7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0009846277941052259,
+          "max_tracking_error": 0.40373339260035956
+        },
+        {
+          "trajectory": "palm_roll_backward",
+          "steps": 305,
+          "final_angle": -7.853046417236328,
+          "target_angle": -7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0009572880606387114,
+          "max_tracking_error": 0.40378520831305215
+        },
+        {
+          "trajectory": "pitch_forward",
+          "steps": 170,
+          "final_angle": 3.140944719314575,
+          "target_angle": 3.141592653589793,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0007658401483285008,
+          "max_tracking_error": 0.4761181817274243
+        },
+        {
+          "trajectory": "pitch_backward",
+          "steps": 170,
+          "final_angle": -3.140963315963745,
+          "target_angle": -3.141592653589793,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0007009405736506079,
+          "max_tracking_error": 0.40613213601324133
+        },
+        {
+          "trajectory": "yaw_forward",
+          "steps": 305,
+          "final_angle": 7.853418350219727,
+          "target_angle": 7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005880724102983152,
+          "max_tracking_error": 0.40369064952001343
+        },
+        {
+          "trajectory": "yaw_backward",
+          "steps": 305,
+          "final_angle": -7.85341739654541,
+          "target_angle": -7.853981633974483,
+          "max_reverse_step": 0.0,
+          "final_error": 0.0005795288491311086,
+          "max_tracking_error": 0.4037320539107049
+        }
+      ]
+    },
+    {
+      "synthetic": true,
+      "episodes": 2,
+      "steps": 125,
+      "phases": [
+        "ready",
+        "recording",
+        "ready",
+        "interrupted",
+        "ready",
+        "recording",
+        "saving",
+        "ready",
+        "recording",
+        "saving",
+        "ready",
+        "ended"
+      ],
+      "wrist_axis_bias_degrees": 25,
+      "rotated_control_points_checked": true,
+      "absolute_wrist_position_checked": true,
+      "wrist_position_errors_m": [
+        0.0008030037151368417,
+        0.0008032029551473382
+      ],
+      "recorded_hand_input": true,
+      "manual_starts": 3,
+      "pre_start_robot_marker_checks": 1716,
+      "bundle_digest": "ca08da3d3d584428f2d444fe1b9e34ad56ed90c8e8700df35332be6f4f3b2b24"
+    }
+  ],
+  "source_hashes": {
+    "ops/xr/wrist.py": "801a69bb931e84cd89048bb54ed12bda95ac5c040a28dfa56c309ecbf27367d6",
+    "ops/xr/collection.py": "bff041d7947865ab274adbd2b6be5d751ac7a01d0cf8373c8708dd1e43c6375f",
+    "skynet_app/simulation_hands.py": "56e8a6139f690bce83e0647e94bfd4b3daa96f8fe9f0f33b8ff572f6ad358ce3",
+    "ops/xr/headset-client-errors.patch": "a036257b65adf95bb527325330dfa19b7cff4a2d40a92cc5dd5fb88ee7cf4bab"
+  },
+  "physics_reference": "https://docs.omniverse.nvidia.com/kit/docs/omni_physics/107.3/dev_guide/rigid_bodies_articulations/articulations.html",
+  "live_session": "4630d662-a024-4e42-a943-ee9cf2f95346",
+  "live_startup": "ready; streaming TCP 48010 reachable; PhysX joint-limit readback verified",
+  "browser_review": "Verified saved WUJI 2 episode f9aaefdb recording 1: 133 actions and 134 states",
+  "headset_result": "User confirmed lowered floating Start/End controls and rotation past palm-up work; collection ended cleanly.",
+  "headset_capture": {
+    "session": "4630d662-a024-4e42-a943-ee9cf2f95346",
+    "episodes": 1,
+    "steps": 372,
+    "state": "CAPTURED"
+  },
+  "live_runtime_wrist_sha256": "101ddce10ce0013d36a75320c04682edfc8e7852d17e325ea8394a6a9de4640b"
+}
