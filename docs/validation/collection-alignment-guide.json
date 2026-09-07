@@ -2,7 +2,9 @@
   "date": "2026-09-07",
   "scope": "Visible wrist, index-knuckle and pinky-knuckle alignment targets",
   "headset_tested": false,
-  "unit_suite": {"passed": 375},
+  "unit_suite": {"passed": 376},
+  "session_packaging_round_trip_tested": true,
+  "browser_startup_verified": "bb212402-ebc9-41e1-98d4-74229ca21d97",
   "guide": {
     "tracked": "white dots",
     "targets": "gold rings; green when within tolerance",

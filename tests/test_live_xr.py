@@ -83,6 +83,27 @@ def test_requires_license_and_deduplicates_live_start(service):
     assert "--gres=gpu:rtx_6000:1" in service.get(job["id"])["script"]
 
 
+def test_frozen_session_extracts_the_complete_collection_runtime(service, tmp_path):
+    job = service.create(True)
+    ns = {"__name__": "test_frozen_session"}
+    exec(compile(service.get(job["id"])["worker"], "runner.py", "exec"), ns)
+    destination = tmp_path / "frozen-runtime"
+    destination.mkdir()
+    entry = ns["write_collection_files"](destination)
+    assert entry.name == "collection.py"
+    assert {p.name for p in entry.parent.iterdir()} == {
+        "collection.py",
+        "anatomy.py",
+        "alignment.py",
+    }
+    assert (entry.parent / "alignment.py").read_text() == (
+        service.root / "ops/xr/alignment.py"
+    ).read_text()
+    ns["COLLECTION_FILES"]["../unexpected.py"] = ""
+    with pytest.raises(ValueError, match="incomplete"):
+        ns["write_collection_files"](destination)
+
+
 def test_lost_submission_recovers_without_duplicate(service):
     job = service.create(True)
     service.cluster.lost = True

@@ -21,6 +21,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 COLLECTION_FILES = {}
 
 
+def write_collection_files(root):
+    required = {"collection.py", "anatomy.py", "alignment.py"}
+    if set(COLLECTION_FILES) != required:
+        raise ValueError("Automatic collection runtime is incomplete in this session")
+    source_root = root / "collector"
+    source_root.mkdir()
+    for name, source in COLLECTION_FILES.items():
+        (source_root / name).write_text(source)
+    return source_root / "collection.py"
+
+
 def collection_http(root, address, port=48011):
     """Expose only the small collection-state document; never serve recordings or paths."""
 
@@ -348,15 +359,7 @@ def main():
             DEXVERSE_DATA_DIR=str(root / "recordings"),
             PATH=str(runtime / "bin") + ":" + os.environ["PATH"],
         )
-        if set(COLLECTION_FILES) != {"collection.py", "anatomy.py"}:
-            raise ValueError(
-                "Automatic collection runtime is missing from this session"
-            )
-        source_root = root / "collector"
-        source_root.mkdir()
-        for name, source in COLLECTION_FILES.items():
-            (source_root / name).write_text(source)
-        recorder = source_root / "collection.py"
+        recorder = write_collection_files(root)
         env["SKYNET_LIVE_CONFIG"] = str(args.config.resolve())
         env["SKYNET_COLLECTION_ROOT"] = str(root)
         http = collection_http(root, status["address"])
