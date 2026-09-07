@@ -67,4 +67,4 @@ Raw recording providers remain behind `CaptureProvider` in `skynet_app/local_cap
 
 For another processing combination, add a versioned converter and worker with explicit task, embodiment, observation and action contracts. Register its supported configuration in the processing service and catalog; publish its validation and simulator tests. Shared job storage, upload checksums, recovery, artifact delivery and dataset-lineage registration can be reused. Merely editing a catalog task/model name does not make a combination supported.
 
-Live Vision Pro simulator teleoperation is a separate integration. The pinned official CloudXR client requires visionOS 26, while the tested headset is on 2.5. This offline pipeline does not claim that live integration is complete.
+Live Vision Pro simulator teleoperation is a separate integration. The patched CloudXR 5.0.1 client has been installed and launched on the tested visionOS 2.5 headset; immersive streaming still requires a working network route. See [live setup](live-dexverse.md) for current tests and limitations.

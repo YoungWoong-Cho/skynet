@@ -28,7 +28,16 @@ def checked(call, *args):
 
 @router.get("")
 def overview():
-    return {"sessions": service.list(), "license": service.consent()}
+    profile = checked(service.profile)
+    return {
+        "sessions": service.list(),
+        "license": service.consent(),
+        "target": {
+            "execution": profile["execution"],
+            "host": profile["gateway"],
+            "duration_minutes": profile["duration_minutes"],
+        },
+    }
 
 
 @router.post("/sessions", status_code=202)

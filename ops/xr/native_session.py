@@ -1,4 +1,4 @@
-"""Run CloudXR and the pinned DexVerse recorder as ordinary Slurm processes."""
+"""Run CloudXR and DexVerse inside a managed workstation or Slurm session."""
 
 from __future__ import annotations
 import argparse
@@ -6,11 +6,68 @@ import json
 import ipaddress
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import socket
 import subprocess
 import time
+
+
+def inspect_recording(path):
+    """Validate a trusted pickle written by this session's pinned recorder."""
+    import pickle
+    import numpy as np
+
+    if not 0 < path.stat().st_size <= 1024**3:
+        raise ValueError(
+            "Native demonstration is empty or exceeds the 1 GiB validation limit"
+        )
+    with path.open("rb") as stream:
+        payload = pickle.load(stream)
+    if (
+        not isinstance(payload, dict)
+        or payload.get("format") != "dexverse_trajectory"
+        or payload.get("schema_version") != 3
+        or payload.get("task") != "Dexverse-PickUpStick-v0"
+        or payload.get("robot_type") != "floating_shadow_right"
+    ):
+        raise ValueError("Unsupported native demonstration format, task or robot")
+    episodes = payload.get("episodes")
+    if (
+        not isinstance(episodes, list)
+        or not episodes
+        or payload.get("num_episodes") != len(episodes)
+    ):
+        raise ValueError("Native recording contains no complete demonstration")
+    steps = 0
+    for episode in episodes:
+        actions = np.asarray(episode.get("actions"))
+        if (
+            actions.ndim != 2
+            or not all(actions.shape)
+            or not np.isfinite(actions).all()
+        ):
+            raise ValueError("Native demonstration has empty or invalid action values")
+        if episode.get("num_steps") != len(actions):
+            raise ValueError(
+                "Native demonstration action count does not match its step count"
+            )
+        states = episode.get("states")
+        if (
+            not isinstance(states, list)
+            or len(states) != len(actions) + 1
+            or not all(isinstance(s, dict) and s for s in states)
+        ):
+            raise ValueError(
+                "Native demonstration must have one initial state and one state per action"
+            )
+        if episode.get("success") is not True:
+            raise ValueError(
+                "Native demonstration did not satisfy the task success condition"
+            )
+        steps += len(actions)
+    return {"episodes": len(episodes), "steps": steps, "success": True}
 
 
 def server_address():
@@ -31,14 +88,35 @@ def server_address():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True, type=Path)
-    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--inspect-recording", type=Path)
     args = parser.parse_args()
+    if args.inspect_recording:
+        print(json.dumps(inspect_recording(args.inspect_recording)))
+        return
+    if not args.config or not args.output:
+        parser.error("--config and --output are required to run a live session")
     cfg = json.loads(args.config.read_text())
     if not cfg.get("cloudxr_eula_accepted"):
         raise ValueError("Accept the NVIDIA CloudXR license before starting a session")
-    if not os.environ.get("SLURM_JOB_ID"):
-        raise ValueError("Live XR must run inside an allocated Slurm GPU job")
+    execution = cfg.get("execution", "slurm")
+    if execution == "workstation":
+        identifier = os.environ.get("SKYNET_LIVE_SESSION_ID", "")
+        job_id = os.environ.get("SKYNET_LIVE_JOB_ID", "")
+        if (
+            not re.fullmatch(r"[a-f0-9-]{36}", identifier)
+            or job_id != "skynet-live-" + identifier + ".service"
+        ):
+            raise ValueError(
+                "Workstation sessions must run through their managed live service"
+            )
+    elif execution == "slurm" and os.environ.get("SLURM_JOB_ID"):
+        identifier = job_id = os.environ["SLURM_JOB_ID"]
+    else:
+        raise ValueError(
+            "Live XR requires an allocated Slurm job or managed workstation session"
+        )
     root = args.output.resolve()
     root.mkdir(parents=True, exist_ok=True)
     cxr = Path(cfg["cloudxr_runtime"])
@@ -46,14 +124,15 @@ def main():
     runtime = Path(cfg["runtime"])
     if (repo / ".skynet-source-revision").read_text().strip() != cfg["source_revision"]:
         raise ValueError("The DexVerse source revision does not match this session")
-    run = Path("/tmp") / ("skynet-cloudxr-" + os.environ["SLURM_JOB_ID"])
+    run = Path("/tmp") / ("skynet-cloudxr-" + identifier)
     run.mkdir(mode=0o700)
     started = time.time()
     children = []
     stopping = False
     status = {
         "schema": "skynet.live-xr/v1",
-        "job_id": os.environ["SLURM_JOB_ID"],
+        "job_id": job_id,
+        "execution": execution,
         "host": socket.getfqdn(),
         "address": server_address(),
         "task": cfg["task"],
@@ -111,7 +190,7 @@ def main():
             not (run / "runtime_started").exists()
             or not (run / "ipc_cloudxr").is_socket()
         ):
-            if stopping:
+            if stopping or (root / "stop.request").exists():
                 raise InterruptedError("Session stopped during server startup")
             if server.poll() is not None:
                 raise RuntimeError(
@@ -194,10 +273,33 @@ def main():
                         if errors
                         else "DexVerse exited without a demonstration file"
                     )
+                summaries = []
+                for path in files:
+                    result = subprocess.run(
+                        [
+                            str(runtime / "bin/python"),
+                            str(Path(__file__).resolve()),
+                            "--inspect-recording",
+                            str(path),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+                    if result.returncode:
+                        raise ValueError(
+                            "Native demonstration validation failed: "
+                            + result.stderr.strip()[-2000:]
+                        )
+                    summaries.append(json.loads(result.stdout))
                 update(
                     "CAPTURED",
-                    detail="A native demonstration was saved; dataset validation is still required",
+                    detail="A successful native demonstration was saved and validated; dataset conversion is still required",
                     recordings=[str(p.relative_to(root)) for p in files],
+                    recording_summary={
+                        "episodes": sum(s["episodes"] for s in summaries),
+                        "steps": sum(s["steps"] for s in summaries),
+                    },
                 )
                 return
             with (root / "simulation.log").open("rb") as log:
@@ -206,7 +308,7 @@ def main():
             if "Teleop Device:" in tail and status["state"] == "STARTING_SIMULATION":
                 update(
                     "AWAITING_HEADSET",
-                    detail="Scene loaded. Connect the headset, then use START to calibrate and record.",
+                    detail="Scene loaded. Connect the headset, then choose Play to calibrate and record.",
                 )
             time.sleep(1)
         update(

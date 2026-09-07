@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 import pytest
 from skynet_app.cluster_runtime import (
@@ -43,7 +44,26 @@ class Cluster(ClusterClient):
 
 @pytest.fixture
 def service(tmp_path, monkeypatch):
-    service = LiveXRService(Database(tmp_path / "db.sqlite"), Cluster())
+    root = Path(__file__).resolve().parents[1]
+    (tmp_path / "config").mkdir()
+    (tmp_path / "ops/xr").mkdir(parents=True)
+    (tmp_path / "config/capture_pipelines.json").write_text(
+        (root / "config/capture_pipelines.json").read_text()
+    )
+    (tmp_path / "config/live_xr.json").write_text(
+        json.dumps(
+            {
+                "pipeline_key": "dexverse-shadow-right",
+                "cloudxr_runtime": "/coc/flash7/ycho420/tools/skynet-xr/native-5.0.1",
+                "gpu_type": "rtx_6000",
+                "duration_minutes": 30,
+            }
+        )
+    )
+    (tmp_path / "ops/xr/native_session.py").write_text(
+        (root / "ops/xr/native_session.py").read_text()
+    )
+    service = LiveXRService(Database(tmp_path / "db.sqlite"), Cluster(), root=tmp_path)
     monkeypatch.setattr(service, "dispatch", lambda _: None)
     return service
 
@@ -97,7 +117,7 @@ def test_network_failure_is_not_reported_as_ready_or_completed(service):
 
 def test_persistent_sessions_and_consent_survive_restart(service):
     job = service.create(True)
-    other = LiveXRService(service.database, service.cluster)
+    other = LiveXRService(service.database, service.cluster, root=service.root)
     assert other.consent()["accepted"]
     assert other.list()[0]["id"] == job["id"]
     assert "worker" not in other.list()[0]

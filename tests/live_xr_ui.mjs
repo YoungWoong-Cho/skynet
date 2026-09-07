@@ -9,6 +9,7 @@ const dom = new JSDOM(
   <input type="checkbox" id="live-xr-consent">
   <div id="live-xr-consent-field"></div><div id="live-xr-consent-status"></div>
   <div id="live-xr-message"></div><div id="live-xr-error"></div>
+  <div id="live-xr-target"></div>
   <table><tbody id="live-xr-sessions"></tbody></table>
   <button id="live-xr-refresh"></button>
 `,
@@ -70,6 +71,34 @@ try {
     stopping?.disabled,
     "stale refresh must not re-enable a completed stop request",
   );
+  get("live-xr-refresh").click();
+  requests[4].resolve({
+    sessions: [
+      {
+        ...job,
+        state: "STOPPED",
+        scheduler_final: true,
+        profile: { execution: "workstation" },
+        gateway: "test-workstation",
+      },
+    ],
+    license: { accepted: true },
+    target: {
+      execution: "workstation",
+      host: "test-workstation",
+      duration_minutes: 30,
+    },
+  });
+  await flush();
+  assert.match(
+    get("live-xr-target").textContent,
+    /directly on test-workstation/,
+  );
+  assert.match(
+    get("live-xr-sessions").textContent,
+    /Workstation · test-workstation/,
+  );
+  assert.doesNotMatch(get("live-xr-sessions").textContent, /GPU job/);
   console.log(
     "Live UI regression passed: pending refreshes preserve start and stop responses.",
   );

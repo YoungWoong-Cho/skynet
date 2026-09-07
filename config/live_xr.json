@@ -1,7 +1,12 @@
 {
   "schema": "skynet.live-xr-profile/v1",
   "pipeline_key": "dexverse-shadow-right",
-  "cloudxr_runtime": "/coc/flash7/ycho420/tools/skynet-xr/native-5.0.1",
-  "gpu_type": "rtx_6000",
+  "execution": "workstation",
+  "gateway": "rl2-bonjour",
+  "work_root": "/home/rl2-bonjour/skynet-xr",
+  "repository": "/home/rl2-bonjour/skynet-xr/repos/skynet-dexverse/30cc673e27684b9f10186fa6bea731aed246bc9f",
+  "runtime": "/home/rl2-bonjour/skynet-xr/env",
+  "cloudxr_runtime": "/home/rl2-bonjour/skynet-xr/tools/native-5.0.1",
+  "memory_gb": 24,
   "duration_minutes": 30
 }

@@ -61,7 +61,11 @@
       text(
         name,
         "div",
-        session.job_id ? "GPU job " + session.job_id : "Preparing",
+        session.profile?.execution === "workstation"
+          ? "Workstation · " + session.gateway
+          : session.job_id
+            ? "GPU job " + session.job_id
+            : "Preparing",
         "secondary",
       );
       text(status, "strong", session.state.replaceAll("_", " "));
@@ -192,7 +196,9 @@
           status,
           "div",
           session.recordings.length +
-            " native demonstration saved. Validation/conversion is still required.",
+            (session.recording_summary
+              ? ` native file saved · ${session.recording_summary.episodes} successful demonstration(s), ${session.recording_summary.steps} steps. Dataset conversion is still required.`
+              : " native file saved. Validation/conversion is still required."),
           "secondary",
         );
     }
@@ -212,6 +218,13 @@
     try {
       const result = await api();
       if (revision !== startedAtRevision) return;
+      if (result.target) {
+        const target = result.target;
+        el("live-xr-target").textContent =
+          target.execution === "workstation"
+            ? `Runs directly on ${target.host} for up to ${target.duration_minutes} minutes.`
+            : `Runs on one cluster GPU via ${target.host} for up to ${target.duration_minutes} minutes.`;
+      }
       sessions = result.sessions;
       el("live-xr-consent-field").hidden = result.license.accepted;
       el("live-xr-consent-status").textContent = result.license.accepted

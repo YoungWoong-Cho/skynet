@@ -1,4 +1,4 @@
-"""Durable live DexVerse sessions using the existing idempotent Slurm transport."""
+"""Durable live DexVerse sessions on a cluster or a direct SSH workstation."""
 
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
@@ -18,6 +18,7 @@ from .cluster_runtime import (
 )
 from .database import canonical_json, utc_now
 from .capture_processing.dexverse_runner import TASK, ROBOT, REVISION
+from .live_xr_workstation import LaunchRejected, WorkstationClient, validate_profile
 
 ROOT = Path(__file__).resolve().parents[1]
 EULA = "https://developer.download.nvidia.com/cloudxr/EULA/NVIDIA_CloudXR_GA_License_without_Data_Collection_25Feb2025.pdf"
@@ -115,22 +116,37 @@ class LiveXRService:
             raise ValueError(
                 "Unsupported live task, robot or source revision; configure a matching live worker first"
             )
-        profile = dict(
-            profile,
-            **{
-                k: config[k]
-                for k in ("cloudxr_runtime", "gpu_type", "duration_minutes")
-            },
-        )
-        self.cluster.candidates(profile["gateway"])
-        for key in ("repository", "runtime", "cloudxr_runtime"):
-            if not self.cluster._remote_path(profile[key]).startswith(WORK_ROOT + "/"):
-                raise ValueError(
-                    "Live runtime paths must be inside the configured cluster workspace"
-                )
-        for key in ("account", "partition", "gpu_type"):
-            if not re.fullmatch(r"[A-Za-z0-9_-]+", profile[key]):
-                raise ValueError(f"Invalid live profile {key}")
+        profile = dict(profile, execution=config.get("execution", "slurm"))
+        for key in (
+            "cloudxr_runtime",
+            "gpu_type",
+            "duration_minutes",
+            "gateway",
+            "work_root",
+            "repository",
+            "runtime",
+            "memory_gb",
+        ):
+            if key in config:
+                profile[key] = config[key]
+        if profile["execution"] == "workstation":
+            validate_profile(profile)
+            for key in ("account", "partition", "gpu_type", "asset_bundle"):
+                profile.pop(key, None)
+        elif profile["execution"] == "slurm":
+            self.cluster.candidates(profile["gateway"])
+            for key in ("repository", "runtime", "cloudxr_runtime"):
+                if not self.cluster._remote_path(profile[key]).startswith(
+                    WORK_ROOT + "/"
+                ):
+                    raise ValueError(
+                        "Live runtime paths must be inside the configured cluster workspace"
+                    )
+            for key in ("account", "partition", "gpu_type"):
+                if not re.fullmatch(r"[A-Za-z0-9_-]+", profile[key]):
+                    raise ValueError(f"Invalid live profile {key}")
+        else:
+            raise ValueError("Unsupported live execution backend")
         if (
             type(profile["duration_minutes"]) is not int
             or not 5 <= profile["duration_minutes"] <= 60
@@ -142,6 +158,11 @@ class LiveXRService:
             description="Immersive hand-tracked manipulation in the DexVerse scene",
         )
         return profile
+
+    def transport(self, job):
+        if job["profile"].get("execution", "slurm") == "workstation":
+            return WorkstationClient(job["profile"])
+        return self.cluster
 
     def create(self, accepted_license=False):
         if not self.consent(accepted_license)["accepted"]:
@@ -163,7 +184,9 @@ class LiveXRService:
                 profile=profile,
                 worker=worker,
                 worker_sha256=hashlib.sha256(worker.encode()).hexdigest(),
-                root=f"{WORK_ROOT}/jobs/runs/{identifier}",
+                root=f"{profile['work_root']}/sessions/{identifier}"
+                if profile["execution"] == "workstation"
+                else f"{WORK_ROOT}/jobs/runs/{identifier}",
                 gateway=profile["gateway"],
                 created_at=utc_now(),
                 updated_at=utc_now(),
@@ -190,23 +213,29 @@ class LiveXRService:
             if job["state"] != "PREPARING":
                 return
             p = job["profile"]
+            transport = self.transport(job)
             checks = [
                 f"test -x {shlex.quote(p['cloudxr_runtime'] + '/bin/cloudxr-service')}",
                 f"test -x {shlex.quote(p['runtime'] + '/bin/python')}",
                 f"test -f {shlex.quote(p['cloudxr_runtime'] + '/share/openxr/1/openxr_cloudxr.json')}",
                 f"test -f {shlex.quote(p['repository'] + '/scripts/record_demos.py')}",
             ]
+            if p.get("execution") == "workstation":
+                checks += [
+                    "systemctl --user show-environment >/dev/null",
+                    f"test -f {shlex.quote(p['runtime'] + '/.skynet-runtime-ready.json')}",
+                ]
             try:
-                self.cluster.ssh(job["gateway"], " && ".join(checks), timeout=15)
+                transport.ssh(job["gateway"], " && ".join(checks), timeout=15)
             except ClusterError as exc:
                 raise ValueError(
                     "Live runtime is unavailable. Follow the live setup guide; no GPU job was submitted. "
                     + str(exc)
                 ) from exc
-            self.cluster.write_capsule_file(
+            transport.write_capsule_file(
                 identifier, "runner.py", job["worker"], job["gateway"]
             )
-            self.cluster.write_capsule_file(
+            transport.write_capsule_file(
                 identifier, "request.json", canonical_json(p), job["gateway"]
             )
             script = self.compile(job)
@@ -214,16 +243,22 @@ class LiveXRService:
                 identifier,
                 state="SUBMITTING",
                 script=script,
-                detail="Submitting one GPU session",
+                detail="Starting a workstation session"
+                if p.get("execution") == "workstation"
+                else "Submitting one GPU session",
             )
-            submitted = self.cluster.submit_script(
+            submitted = transport.submit_script(
                 script, identifier, job["gateway"], submission_key=identifier
             )
             self.update(
                 identifier,
-                state="PENDING",
+                state="STARTING_SERVER"
+                if p.get("execution") == "workstation"
+                else "PENDING",
                 job_id=submitted.job_id,
-                detail="Waiting for a GPU allocation",
+                detail="Starting the live worker"
+                if p.get("execution") == "workstation"
+                else "Waiting for a GPU allocation",
                 error=None,
             )
         except SubmissionOutcomeUnknown as exc:
@@ -243,9 +278,10 @@ class LiveXRService:
     def compile(job):
         p, root = job["profile"], job["root"]
         minutes = p["duration_minutes"] + 5
-        return "\n".join(
-            [
-                "#!/bin/bash",
+        directives = (
+            []
+            if p.get("execution") == "workstation"
+            else [
                 f"#SBATCH --job-name=live-xr-{job['id'][:8]}",
                 f"#SBATCH --account={p['account']}",
                 f"#SBATCH --partition={p['partition']}",
@@ -255,10 +291,17 @@ class LiveXRService:
                 f"#SBATCH --time={minutes // 60:02}:{minutes % 60:02}:00",
                 f"#SBATCH --output={root}/stdout.log",
                 f"#SBATCH --error={root}/stderr.log",
+            ]
+        )
+        return "\n".join(
+            [
+                "#!/bin/bash",
+                *directives,
                 "set -euo pipefail",
                 "umask 077",
                 f"printf '%s  %s\\n' {job['worker_sha256']} {shlex.quote(root + '/runner.py')} | sha256sum --check --status",
-                shlex.join(
+                "exec "
+                + shlex.join(
                     [
                         "python3",
                         root + "/runner.py",
@@ -290,13 +333,14 @@ class LiveXRService:
             self.refreshed[identifier] = time.monotonic()
             self.refreshing.add(identifier)
         try:
+            transport = self.transport(job)
             if job["state"] == "PREPARING":
                 self.dispatch(identifier)
                 return self.public(job)
             if job["state"] in {"SUBMITTING", "SUBMISSION_UNKNOWN"}:
                 if identifier in self.active:
                     return self.public(job)
-                receipt = self.cluster.recover_submission(
+                receipt = transport.recover_submission(
                     identifier, identifier, job["gateway"]
                 )
                 if receipt is None:
@@ -309,11 +353,11 @@ class LiveXRService:
                     identifier, state="PENDING", job_id=receipt.job_id, error=None
                 )
                 job = self.get(identifier)
-            _, states = self.cluster.job_statuses([job["job_id"]], job["gateway"])
+            _, states = transport.job_statuses([job["job_id"]], job["gateway"])
             scheduler = states.get(job["job_id"])
             if not scheduler:
                 raise ClusterError(
-                    "The scheduler has not returned this session's status yet"
+                    "The execution host has not returned this session's status yet"
                 )
             script = """import json,sys
 from pathlib import Path
@@ -324,7 +368,7 @@ if p.is_file():
 print(json.dumps(value))
 """
             control = json.loads(
-                self.cluster.ssh(
+                transport.ssh(
                     job["gateway"],
                     "python3 - " + shlex.quote(job["root"] + "/output/status.json"),
                     stdin=script,
@@ -356,6 +400,7 @@ print(json.dumps(value))
                             "host",
                             "server_ready",
                             "recordings",
+                            "recording_summary",
                         )
                         if k in control
                     }
@@ -378,13 +423,13 @@ print(json.dumps(value))
                         state="STOPPED"
                         if scheduler["State"] == "CANCELLED"
                         else "FAILED",
-                        error=f"GPU session ended ({scheduler['State']}) without a completed capture status. Inspect logs.",
+                        error=f"Live process ended ({scheduler['State']}, {scheduler.get('Result', 'see logs')}) without a completed capture status. Inspect logs.",
                     )
             elif changes.get("state") in TERMINAL:
                 changes.update(
                     state="STOPPING",
                     server_ready=False,
-                    detail="Worker finished; waiting for the scheduler to release the GPU",
+                    detail="Worker finished; waiting for process cleanup to complete",
                 )
             elif not control:
                 changes.update(
@@ -395,6 +440,14 @@ print(json.dumps(value))
                     else "Starting the live worker",
                 )
             return self.update(identifier, **changes)
+        except LaunchRejected as exc:
+            return self.update(
+                identifier,
+                state="FAILED",
+                scheduler_final=True,
+                error=str(exc),
+                server_ready=False,
+            )
         except (ClusterError, ValueError, OSError) as exc:
             return self.update(
                 identifier,
@@ -408,6 +461,7 @@ print(json.dumps(value))
 
     def stop(self, identifier):
         job = self.get(identifier)
+        transport = self.transport(job)
         if job["state"] in TERMINAL:
             return self.public(job)
         if not job.get("job_id"):
@@ -415,11 +469,14 @@ print(json.dumps(value))
                 "Submission is still being resolved. Refresh before stopping this session."
             )
         # Ask the worker to stop cleanly; cancellation covers sessions still queued.
-        if job["state"] == "PENDING":
-            self.cluster.cancel(job["job_id"], job["gateway"])
+        if (
+            job["state"] == "PENDING"
+            or job["profile"].get("execution") == "workstation"
+        ):
+            transport.cancel(job["job_id"], job["gateway"])
         else:
             dest = job["root"] + "/output/stop.request"
-            self.cluster.ssh(
+            transport.ssh(
                 job["gateway"],
                 f"mkdir -p {shlex.quote(str(Path(dest).parent))} && touch {shlex.quote(dest)}",
                 timeout=15,
@@ -427,7 +484,7 @@ print(json.dumps(value))
         return self.update(
             identifier,
             stop_requested=True,
-            detail="Stop requested; waiting for the worker or scheduler",
+            detail="Stop requested; waiting for process cleanup",
             server_ready=False,
         )
 
@@ -443,7 +500,7 @@ print(json.dumps(value))
             path = shlex.quote(job["root"] + "/" + name)
             parts.append(f"if test -f {path}; then tail -c 16000 {path}; fi")
         return (
-            self.cluster.ssh(job["gateway"], "\n".join(parts), timeout=20)
+            self.transport(job).ssh(job["gateway"], "\n".join(parts), timeout=20)
             or job.get("error")
             or "No logs yet."
         )
