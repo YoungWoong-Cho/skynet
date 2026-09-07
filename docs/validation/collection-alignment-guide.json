@@ -1,0 +1,39 @@
+{
+  "date": "2026-09-07",
+  "scope": "Visible wrist, index-knuckle and pinky-knuckle alignment targets",
+  "headset_tested": false,
+  "unit_suite": {"passed": 375},
+  "guide": {
+    "tracked": "white dots",
+    "targets": "gold rings; green when within tolerance",
+    "target_geometry": "user palm dimensions in the neutral anatomical frame",
+    "point_tolerance_m": 0.025,
+    "hold_seconds": 0.8,
+    "requires_open_hand": true,
+    "hidden_during_recording": true,
+    "stale_tracking_dots_hidden": true
+  },
+  "gpu": {
+    "host": "rl2-bonjour",
+    "log": "validation/20260907-guide/test-b.log",
+    "synthetic": true,
+    "episodes_saved": 2,
+    "successful_episode_steps": [60, 60],
+    "discarded_steps": 5,
+    "tracking_recovery_checked": true,
+    "guide_positions_and_colors_checked": true,
+    "guide_visible_updates": 1468,
+    "guide_hidden_updates": 468,
+    "guide_matched_updates": 1384,
+    "wrist_position_errors_m": [0.00031219724667400686, 0.0003125658508694519]
+  },
+  "preceding_real_recording": {
+    "session": "e66b2d2d-857c-4385-accb-08e88af1e96d",
+    "contains_alignment_guide": false,
+    "episodes": 1,
+    "actions": 833,
+    "states": 834,
+    "sha256": "43485e3e42125d631a8a3f40615e3695502d1b1669ef40e1aa28237b94443fa9",
+    "browser_review_verified": true
+  }
+}

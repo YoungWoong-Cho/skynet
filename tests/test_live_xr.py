@@ -64,7 +64,7 @@ def service(tmp_path, monkeypatch):
         (root / "ops/xr/native_session.py").read_text()
     )
     (tmp_path / "ops/xr/hands").mkdir()
-    for name in ("collection.py", "hands/anatomy.py"):
+    for name in ("collection.py", "alignment.py", "hands/anatomy.py"):
         (tmp_path / "ops/xr" / name).write_text((root / "ops/xr" / name).read_text())
     service = LiveXRService(Database(tmp_path / "db.sqlite"), Cluster(), root=tmp_path)
     monkeypatch.setattr(service, "dispatch", lambda _: None)

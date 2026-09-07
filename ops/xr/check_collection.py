@@ -33,6 +33,7 @@ try:
     from scipy.spatial.transform import Rotation
     from runtime import install, validate_environment
     import collection as collection_runtime
+    import alignment as alignment_runtime
     from collection import run_loop
     from dexverse.devices.retargeters.simple_relative_retargeting import (
         SimpleRelativeRetargeter,
@@ -91,6 +92,31 @@ try:
         .numpy()
         .copy()
     )
+    guide_updates = {"visible": 0, "hidden": 0, "matched": 0}
+    guide_update = alignment_runtime.AlignmentGuide.update
+
+    def observe_guide(self, points, targets, show):
+        guide_update(self, points, targets, show)
+        assert self.markers.is_visible() == show
+        guide_updates["visible" if show else "hidden"] += 1
+        if show and points:
+            instancer = self.markers._instancer_manager
+            positions = np.asarray(instancer.GetPositionsAttr().Get())
+            np.testing.assert_allclose(positions[:3], points["right"][[0, 5, 17]])
+            expected, rings, errors = alignment_runtime.alignment_points(
+                points["right"], "right", targets["right"]
+            )
+            np.testing.assert_allclose(positions[3:], rings)
+            indices = list(instancer.GetProtoIndicesAttr().Get())
+            assert (
+                indices
+                == [0, 0, 0]
+                + np.where(errors <= alignment_runtime.TOLERANCE, 2, 1).tolist()
+            )
+            if indices[3:] == [2, 2, 2]:
+                guide_updates["matched"] += 1
+
+    alignment_runtime.AlignmentGuide.update = observe_guide
     raw = {
         name: np.r_[human[i] + neutral_wrist, quat]
         for i, name in enumerate(DEX_RETARGETING_HAND_JOINT_NAMES)
@@ -111,8 +137,8 @@ try:
     retargeter._canonical_markers.visualize = observe_points
     wrist_motion = Rotation.from_euler("XYZ", [0.2, -0.15, 0.25])
     displacement = np.array([0.03, -0.02, 0.05])
-    alignment_offset = np.array([0.03, 0.02, 0.01])
-    alignment_rotation = Rotation.from_euler("z", 10, degrees=True)
+    alignment_offset = np.array([0.006, 0.004, 0.002])
+    alignment_rotation = Rotation.from_euler("z", 5, degrees=True)
     marker_indices = [
         robot.body_names.index(n)
         for n in dict.fromkeys(
@@ -269,6 +295,7 @@ try:
         "Wrist rotation and displayed control points were not exercised"
     )
     assert brief_once, "Brief tracking dropout was not exercised"
+    assert all(guide_updates.values()), guide_updates
     receipts = json.loads((output / "episodes.json").read_text())
     assert len(receipts) == 2 and all(r["steps"] == episode_steps for r in receipts)
     for receipt in receipts:
@@ -310,6 +337,7 @@ try:
                 absolute_wrist_position_checked=True,
                 wrist_position_errors_m=wrist_position_errors,
                 recorded_alignment_input=bool(alignment_file),
+                alignment_guide_checked=guide_updates,
                 bundle_digest=manifest["digest"],
             )
         ),

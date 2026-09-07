@@ -198,6 +198,7 @@ class LiveXRService:
         sources = {
             "collection.py": (self.root / "ops/xr/collection.py").read_text(),
             "anatomy.py": (self.root / "ops/xr/hands/anatomy.py").read_text(),
+            "alignment.py": (self.root / "ops/xr/alignment.py").read_text(),
         }
         worker = worker.replace(
             "COLLECTION_FILES = {}", "COLLECTION_FILES = " + repr(sources), 1

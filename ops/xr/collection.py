@@ -103,33 +103,39 @@ class AlignmentGate:
 
 def alignment_feedback(points, side, target):
     from anatomy import palm_frame
+    from alignment import alignment_points, TOLERANCE
 
     p = np.asarray(points)
     frame = palm_frame(p, side)
     distance = float(np.linalg.norm(p[0] - target))
     forward = math.degrees(math.acos(float(np.clip(frame[0, 0], -1, 1))))
     palm = math.degrees(math.acos(float(np.clip(frame[2, 2], -1, 1))))
+    _, _, point_errors = alignment_points(p, side, target)
     details = dict(
         distance_cm=round(distance * 100),
         forward_degrees=round(forward),
         palm_degrees=round(palm),
+        point_errors_cm=np.round(point_errors * 100, 1).tolist(),
+        points_matched=int(np.count_nonzero(point_errors <= TOLERANCE)),
     )
     # Calibration handles small anatomical and robot-size differences; do not
     # require every human point to overlap the robot's differently sized hand.
-    if distance > 0.12:
+    if distance > TOLERANCE:
         return (
             False,
-            f"Move your wrist closer to the robot wrist ({round(distance * 100)} cm away)",
+            f"Match the white wrist dot to its gold ring ({round(distance * 100)} cm away)",
             details,
         )
     if palm > 40:
-        return False, "Turn your palm down to match the robot hand", details
+        return False, "Turn your palm down to match the gold rings", details
     if forward > 35:
         return (
             False,
             "Point your fingers in the same direction as the robot fingers",
             details,
         )
+    if np.any(point_errors > TOLERANCE):
+        return False, "Match both white knuckle dots to their gold rings", details
     # Check extension without requiring the human to match robot finger lengths.
     for base, tip in ((5, 8), (9, 12), (13, 16), (17, 20)):
         vector = p[tip] - p[base]
@@ -138,7 +144,7 @@ def alignment_feedback(points, side, target):
             or np.dot(vector, frame[:, 0]) / np.linalg.norm(vector) < 0.75
         ):
             return False, "Open your fingers to match the robot hand", details
-    return True, "Hold still…", details
+    return True, "Aligned. Hold still…", details
 
 
 def aligned_hand(points, side, target):
@@ -183,6 +189,7 @@ def run_loop(
         DEX_RETARGETING_HAND_JOINT_NAMES,
     )
     from isaaclab.devices.device_base import DeviceBase
+    from alignment import AlignmentGuide
 
     if pose_validity is None:
         from omni.kit.xr.core import XRPoseValidityFlags
@@ -201,7 +208,9 @@ def run_loop(
     reset_requested, success_count = False, 0
     connected_once = False
     previous_positions, previous_sample = {}, 0.0
+    raw_markers_visible = True
     tracked_sides = ["left", "right"] if cfg["hand"] == "both" else [cfg["hand"]]
+    alignment_guide = AlignmentGuide(tracked_sides)
     targets = {}
     alignment_details = {}
     raw_data = {}
@@ -341,7 +350,9 @@ def run_loop(
                 .numpy()
                 .copy()
             )
-        phase, instruction = "aligning", "Align the hand with the robot hand"
+        phase, instruction = "aligning", "Match the white dots to the gold rings"
+        alignment_guide.last_targets.clear()
+        alignment_guide.update(None, targets, True)
         publish(True)
 
     def read_hands():
@@ -411,6 +422,16 @@ def run_loop(
                 action = teleop.advance()
                 points = read_hands()
                 tracking = points is not None and now - heartbeat < 2.0
+                alignment_guide.update(
+                    points if tracking else None,
+                    targets,
+                    phase in {"aligning", "interrupted"},
+                )
+                show_raw = phase == "recording" and tracking
+                if show_raw != raw_markers_visible:
+                    for retargeter in teleop._retargeters:
+                        retargeter._markers.set_visibility(show_raw)
+                    raw_markers_visible = show_raw
                 if phase == "recording" and not tracking:
                     if tracking_lost_since is None:
                         tracking_lost_since = now
@@ -437,7 +458,7 @@ def run_loop(
                         )
                 if phase == "aligning":
                     aligned = tracking
-                    hint = "Align your red hand points with the robot hand"
+                    hint = "Match the white dots to the gold rings"
                     if points:
                         try:
                             for side, p in points.items():
@@ -467,7 +488,7 @@ def run_loop(
                     elif not tracking:
                         instruction = "Keep your hand visible to the headset"
                     elif progress > 0:
-                        instruction = "Hold still…"
+                        instruction = "Aligned. Hold still…"
                     else:
                         instruction = hint
                     if progress >= 1:
@@ -496,6 +517,7 @@ def run_loop(
                             else "relative_calibrated",
                         )
                         phase, instruction = "recording", goal
+                        alignment_guide.update(None, targets, False)
                         publish(True)
                         continue  # Recompute actions after wrist calibration before stepping physics.
                     env.sim.render()
@@ -538,6 +560,7 @@ def run_loop(
             "ended",
             f"Collection ended. {len(store.receipts)} episodes saved.",
         )
+        alignment_guide.update(None, targets, False)
         publish(True)
         # Let the connected client receive the final acknowledgement before closing the stream.
         deadline = time.monotonic() + 1.5
