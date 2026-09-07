@@ -43,6 +43,12 @@
     !document.hidden &&
     !el("collection").hidden &&
     !el("collection-view-live").hidden;
+  function focusSession(id) {
+    focusedSession = id;
+    const url = new URL(location.href);
+    url.searchParams.set("live_session", id);
+    history.replaceState(null, "", url);
+  }
   function error(message) {
     el("live-xr-error").textContent = message || "";
     el("live-xr-error").hidden = !message;
@@ -308,35 +314,6 @@
       logs.href = "/api/collection/live/sessions/" + session.id + "/logs";
       logs.target = "_blank";
       logs.rel = "noreferrer";
-      if (!terminal.has(session.state) && session.job_id) {
-        const stop = text(
-          actions,
-          "button",
-          session.stop_requested || session.state === "STOPPING"
-            ? "Stopping…"
-            : "Stop session",
-          "button button-outline",
-        );
-        stop.type = "button";
-        stop.disabled =
-          !!session.stop_requested || session.state === "STOPPING";
-        stop.onclick = async () => {
-          stop.disabled = true;
-          stop.textContent = "Stopping…";
-          try {
-            apply(
-              await api("/sessions/" + session.id + "/stop", {
-                method: "POST",
-              }),
-            );
-            await load();
-          } catch (e) {
-            error(e.message);
-            stop.disabled = false;
-            stop.textContent = "Stop session";
-          }
-        };
-      }
       if (session.recordings?.length)
         text(
           status,
@@ -361,6 +338,31 @@
     }
     if (!active && catalog) updateChoices(false);
     renderProgress(running);
+    const stop = el("live-xr-stop");
+    stop.disabled =
+      !running?.job_id ||
+      !!running.stop_requested ||
+      running.state === "STOPPING";
+    stop.textContent =
+      running?.stop_requested || running?.state === "STOPPING"
+        ? "Stopping…"
+        : "Stop session";
+    stop.onclick = async () => {
+      if (!running?.job_id || stop.disabled) return;
+      focusSession(running.id);
+      stop.disabled = true;
+      stop.textContent = "Stopping…";
+      try {
+        apply(
+          await api("/sessions/" + running.id + "/stop", { method: "POST" }),
+        );
+        await load();
+      } catch (e) {
+        error(e.message);
+        stop.disabled = false;
+        stop.textContent = "Stop session";
+      }
+    };
     el("live-xr-start").disabled = active || submitting || !catalog;
     el("live-xr-hand").disabled = active || submitting || !catalog;
     el("live-xr-task").disabled = active || submitting || !catalog;
@@ -500,10 +502,7 @@
         }),
       });
       requestPending = false;
-      focusedSession = session.id;
-      const url = new URL(location.href);
-      url.searchParams.set("live_session", session.id);
-      history.replaceState(null, "", url);
+      focusSession(session.id);
       apply(session);
       await load();
     } catch (e) {

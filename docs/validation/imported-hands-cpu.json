@@ -1,8 +1,8 @@
 {
   "schema": "skynet.imported-hand-cpu-validation/v1",
-  "checked_at": "2026-09-07T03:27:28.378617+00:00",
+  "checked_at": "2026-09-07T16:28:42.810214+00:00",
   "dexverse_revision": "30cc673e27684b9f10186fa6bea731aed246bc9f",
-  "scope": "Synthetic reachable fingertip targets, joint limits, mimic joints, and floating-wrist kinematics. Does not verify Isaac conversion, physics, human tracking, or headset capture.",
+  "scope": "Palm-down frame and side checks against native Shadow/OpenXR, synthetic reachable fingertip targets, joint limits, mimic joints, and combined floating-wrist kinematics. GPU results are recorded separately; no headset validation is implied.",
   "gpu_tested": false,
   "headset_tested": false,
   "python": "3.11.16",
@@ -17,153 +17,403 @@
   "results": [
     {
       "robot": "skynet_wuji_1_right",
-      "bundle_digest": "ac96745eb7a5d1e5e007a2fbe24daa58b7e315c5ddfb94aeab07032ec065cbd9",
+      "bundle_digest": "bd74788709d2ac0001444485904a7b4a167f96b9ec41b35a7bc2973db6d3141d",
       "action_dimension": 26,
       "poses_checked": 42,
       "combined_wrist_poses_checked": 4,
-      "max_fingertip_vector_error_m": 0.003394894137004538,
-      "mean_solve_ms": 1.432907534763217,
+      "palm_frame_checked": true,
+      "open_fingertips_m": [
+        [
+          0.0679981477032852,
+          0.1244587601248199,
+          -0.014938787835806705
+        ],
+        [
+          0.19458216893183228,
+          0.042997673830040474,
+          0.014052987290242246
+        ],
+        [
+          0.1926529628936365,
+          0.007460729712952105,
+          0.023093653464153804
+        ],
+        [
+          0.18716167208788986,
+          -0.023655953676017565,
+          0.019423260432538166
+        ],
+        [
+          0.17541606671428037,
+          -0.05564381650539648,
+          0.011984392353927509
+        ]
+      ],
+      "max_fingertip_vector_error_m": 0.0033948941370045616,
+      "mean_solve_ms": 0.8890435897878238,
       "mimic_joints_checked": 0,
       "status": "CPU_CHECKED",
       "gpu_tested": false,
-      "headset_tested": false,
-      "source_revision": "4c1073d0a3ad1daaf6546d219db751d8448d3888",
-      "retargeting_scheme": "vector"
+      "headset_tested": false
     },
     {
       "robot": "skynet_wuji_1_left",
-      "bundle_digest": "239252d52196c6371da98662f2e3045e386ba516078a03a77232e57771c11c49",
+      "bundle_digest": "4d019decbc2e5ce1a2ffd0cc7270117265546a37fa7a37f3402681174c44ebbc",
       "action_dimension": 26,
       "poses_checked": 42,
       "combined_wrist_poses_checked": 4,
-      "max_fingertip_vector_error_m": 0.0033944188468516974,
-      "mean_solve_ms": 0.7437877523313675,
+      "palm_frame_checked": true,
+      "open_fingertips_m": [
+        [
+          0.06799869710876204,
+          -0.12445896382763287,
+          -0.014938921032648204
+        ],
+        [
+          0.19458326754603528,
+          -0.042987539059880626,
+          0.01405718372426426
+        ],
+        [
+          0.19265284864742643,
+          -0.0074570141787997065,
+          0.02309495931120724
+        ],
+        [
+          0.18716310270851996,
+          0.023648555139143934,
+          0.019414056906118214
+        ],
+        [
+          0.17541317924634828,
+          0.055656665275468954,
+          0.011987948154510503
+        ]
+      ],
+      "max_fingertip_vector_error_m": 0.0033944188468516905,
+      "mean_solve_ms": 0.6896904891445523,
       "mimic_joints_checked": 0,
       "status": "CPU_CHECKED",
       "gpu_tested": false,
-      "headset_tested": false,
-      "source_revision": "4c1073d0a3ad1daaf6546d219db751d8448d3888",
-      "retargeting_scheme": "vector"
+      "headset_tested": false
     },
     {
       "robot": "skynet_wuji_2_right",
-      "bundle_digest": "ac1ee75d5379fcd099da555a11f9c42bcd65fba46d04f82270c7d76a97cc7efe",
+      "bundle_digest": "f999cfddc0abffab18b2777cdb0b2005ab6e156eb689142bd0b5d9ca14750bfc",
       "action_dimension": 26,
       "poses_checked": 42,
       "combined_wrist_poses_checked": 4,
-      "max_fingertip_vector_error_m": 0.0015581782872458876,
-      "mean_solve_ms": 1.4289583001906674,
+      "palm_frame_checked": true,
+      "open_fingertips_m": [
+        [
+          0.07688143789234922,
+          0.10611730610047564,
+          -0.019383221500364842
+        ],
+        [
+          0.1751970655571317,
+          0.03764395301710931,
+          0.007273989659854746
+        ],
+        [
+          0.1801566711911895,
+          -0.00022405452616502556,
+          0.013108106888725983
+        ],
+        [
+          0.1706507378496258,
+          -0.03491901911260483,
+          0.007533487035260057
+        ],
+        [
+          0.15250080604545177,
+          -0.062293174267911436,
+          0.0015635290898440418
+        ]
+      ],
+      "max_fingertip_vector_error_m": 0.001558178287245916,
+      "mean_solve_ms": 1.2674374794144005,
       "mimic_joints_checked": 0,
       "status": "CPU_CHECKED",
       "gpu_tested": false,
-      "headset_tested": false,
-      "source_revision": "4c1073d0a3ad1daaf6546d219db751d8448d3888",
-      "retargeting_scheme": "dexpilot"
+      "headset_tested": false
     },
     {
       "robot": "skynet_wuji_2_left",
-      "bundle_digest": "44b25ab4334803fd31dbe8d3eb0895d67b7922fafedb7f5f4c01f69176ae5a95",
+      "bundle_digest": "3ed156a0813a04089d7f36e5dbf5c794cd5de035a0441ad379adb11a4d50d1fb",
       "action_dimension": 26,
       "poses_checked": 42,
       "combined_wrist_poses_checked": 4,
-      "max_fingertip_vector_error_m": 0.00155566485324172,
-      "mean_solve_ms": 1.3394097221039591,
+      "palm_frame_checked": true,
+      "open_fingertips_m": [
+        [
+          0.07765495694153542,
+          -0.1062090996173066,
+          -0.01933175085698509
+        ],
+        [
+          0.17520190447287518,
+          -0.037622592530216346,
+          0.007274037896364959
+        ],
+        [
+          0.18015695408588286,
+          0.0002458329150832553,
+          0.01310847338589006
+        ],
+        [
+          0.17064591300483695,
+          0.03493967497211376,
+          0.007533438643358444
+        ],
+        [
+          0.15250668483338378,
+          0.06224467316645878,
+          -0.0004661600417048968
+        ]
+      ],
+      "max_fingertip_vector_error_m": 0.0015556648532416932,
+      "mean_solve_ms": 1.2594306220610936,
       "mimic_joints_checked": 0,
       "status": "CPU_CHECKED",
       "gpu_tested": false,
-      "headset_tested": false,
-      "source_revision": "4c1073d0a3ad1daaf6546d219db751d8448d3888",
-      "retargeting_scheme": "dexpilot"
+      "headset_tested": false
     },
     {
       "robot": "skynet_sharpa_right",
-      "bundle_digest": "f33fb1f4c24e50af5632f9f1bf0ef246ae9645ce96e9246a339b2dc6b22ecdca",
+      "bundle_digest": "b519a7b58d5a4ecd973eb8de9e2ef95dd4576469f9808734a753b43207079b3c",
       "action_dimension": 28,
       "poses_checked": 42,
       "combined_wrist_poses_checked": 4,
-      "max_fingertip_vector_error_m": 0.0019712714131892334,
-      "mean_solve_ms": 1.3067947057563634,
+      "palm_frame_checked": true,
+      "open_fingertips_m": [
+        [
+          0.1102205822290994,
+          0.12330547470427097,
+          -0.015392455672196626
+        ],
+        [
+          0.20040899999859313,
+          0.030300479419032755,
+          -0.0010000955381524888
+        ],
+        [
+          0.20340925742554566,
+          0.01000038388393782,
+          -1.4101194120513962e-12
+        ],
+        [
+          0.19740925742484342,
+          -0.010299520579076092,
+          -0.001500095539098076
+        ],
+        [
+          0.19140899999859315,
+          -0.03109996587559534,
+          -0.0030005146813254662
+        ]
+      ],
+      "max_fingertip_vector_error_m": 0.0019712714131892356,
+      "mean_solve_ms": 1.2061844934665022,
       "mimic_joints_checked": 0,
       "status": "CPU_CHECKED",
       "gpu_tested": false,
-      "headset_tested": false,
-      "source_revision": "6eea427eb24189519f32b9f21674cd534d3f973c",
-      "retargeting_scheme": "dexpilot"
+      "headset_tested": false
     },
     {
       "robot": "skynet_sharpa_left",
-      "bundle_digest": "9405b78f26893fd10c97b64803977e24b0e74534f275fd750101ffb7abade1a7",
+      "bundle_digest": "1e589fa77357009d7f23aa3e52ffccdea0753dd38b86addde148157e4be32a92",
       "action_dimension": 28,
       "poses_checked": 42,
       "combined_wrist_poses_checked": 4,
-      "max_fingertip_vector_error_m": 0.0019712625090903997,
-      "mean_solve_ms": 1.3903997661102385,
+      "palm_frame_checked": true,
+      "open_fingertips_m": [
+        [
+          0.11022054937278485,
+          -0.12330545472958324,
+          -0.015391664616303901
+        ],
+        [
+          0.20040925742554577,
+          -0.03029961611606218,
+          -0.00100000000141012
+        ],
+        [
+          0.20340925742554566,
+          -0.00999961611606218,
+          -1.4101194120513962e-12
+        ],
+        [
+          0.1974092574248438,
+          0.010300479420923908,
+          -0.001500095539098076
+        ],
+        [
+          0.19140929268549453,
+          0.03109917081869646,
+          -0.003000348627034736
+        ]
+      ],
+      "max_fingertip_vector_error_m": 0.001971262509090384,
+      "mean_solve_ms": 1.2034097120964102,
       "mimic_joints_checked": 0,
       "status": "CPU_CHECKED",
       "gpu_tested": false,
-      "headset_tested": false,
-      "source_revision": "6eea427eb24189519f32b9f21674cd534d3f973c",
-      "retargeting_scheme": "dexpilot"
+      "headset_tested": false
     },
     {
       "robot": "skynet_allegro_v4_right",
-      "bundle_digest": "4fb2f475703c303787a73b5b658e7dae8fec571ebb0e3f0e6f65211e338f0a74",
+      "bundle_digest": "51ff5077f03b1862c7da8eedac186d2b683772cd4459de40a688d467687c1ac1",
       "action_dimension": 22,
       "poses_checked": 42,
       "combined_wrist_poses_checked": 4,
-      "max_fingertip_vector_error_m": 0.0018189206574735469,
-      "mean_solve_ms": 1.1989017394149588,
+      "palm_frame_checked": true,
+      "open_fingertips_m": [
+        [
+          -0.08550419597340271,
+          0.16122636081024563,
+          -0.025962828038669936
+        ],
+        [
+          0.13344238159201866,
+          0.05530960313559673,
+          2.963016090085505e-17
+        ],
+        [
+          0.1362,
+          0.0,
+          3.024247519078926e-17
+        ],
+        [
+          0.13344238159201866,
+          -0.05530960313559673,
+          2.963016090085505e-17
+        ]
+      ],
+      "max_fingertip_vector_error_m": 0.0018189206574735631,
+      "mean_solve_ms": 1.0769513790451346,
       "mimic_joints_checked": 0,
       "status": "CPU_CHECKED",
       "gpu_tested": false,
-      "headset_tested": false,
-      "source_revision": "b19b18ea130c4fbe343f2c178eec6cb55186a4ac",
-      "retargeting_scheme": "dexpilot"
+      "headset_tested": false
     },
     {
       "robot": "skynet_leap_v1_right",
-      "bundle_digest": "075266d8222b57c0abc22caf937acf6045d635addbf6ef62c6c22b39361a4a8c",
+      "bundle_digest": "14011a5086d8d59fe37eb74f2a281b73531e19eee29f0a98e14e3e8f72d77f43",
       "action_dimension": 22,
       "poses_checked": 42,
       "combined_wrist_poses_checked": 4,
-      "max_fingertip_vector_error_m": 0.0018424322015605052,
-      "mean_solve_ms": 0.9584454431508979,
+      "palm_frame_checked": true,
+      "open_fingertips_m": [
+        [
+          -0.0823952496528627,
+          0.07665775613489939,
+          -0.006922403578460276
+        ],
+        [
+          0.08210475455750477,
+          0.022657756134899388,
+          -0.019522407666518235
+        ],
+        [
+          0.08210475034713727,
+          -0.022792243865100634,
+          -0.019522403578460246
+        ],
+        [
+          0.08210475455736,
+          -0.06824224386510055,
+          -0.019522407666402758
+        ]
+      ],
+      "max_fingertip_vector_error_m": 0.001842432201560525,
+      "mean_solve_ms": 0.9841318962918151,
       "mimic_joints_checked": 0,
       "status": "CPU_CHECKED",
       "gpu_tested": false,
-      "headset_tested": false,
-      "source_revision": "150bc3d4b61fd6619193ba5a8ef209f3609ced89",
-      "retargeting_scheme": "dexpilot"
+      "headset_tested": false
     },
     {
       "robot": "skynet_inspire_rh56_right",
-      "bundle_digest": "c9763237c7ccb951b1bff436ecfcbae4282d7c1b0b9bfbf5fe06cdc4a616afdc",
+      "bundle_digest": "d3d44d6cb3771aa6c00f87f7f108b72324fd0f662330e4098b4e29676c48743c",
       "action_dimension": 12,
       "poses_checked": 42,
       "combined_wrist_poses_checked": 4,
-      "max_fingertip_vector_error_m": 0.00013099633060125213,
-      "mean_solve_ms": 0.6833155528597888,
+      "palm_frame_checked": true,
+      "open_fingertips_m": [
+        [
+          0.11855912481595915,
+          0.11265148122903478,
+          -0.04376185825880579
+        ],
+        [
+          0.21371842795105722,
+          0.02895874574861374,
+          -0.0031285468446431157
+        ],
+        [
+          0.2171409557331701,
+          0.006949409478563828,
+          -0.0031375884408930627
+        ],
+        [
+          0.21353107410543792,
+          -0.016313505026936768,
+          -0.002937526710659863
+        ],
+        [
+          0.20374597371303357,
+          -0.038670039466184816,
+          -0.0029374673855882623
+        ]
+      ],
+      "max_fingertip_vector_error_m": 0.00013099633060126655,
+      "mean_solve_ms": 0.6396507766718665,
       "mimic_joints_checked": 6,
       "status": "CPU_CHECKED",
       "gpu_tested": false,
-      "headset_tested": false,
-      "source_revision": "39bfca04a69912e6561628156d1c63e37698eb75",
-      "retargeting_scheme": "dexpilot"
+      "headset_tested": false
     },
     {
       "robot": "skynet_inspire_rh56_left",
-      "bundle_digest": "9b04157d6cfc00b2258f38978ca9af76871c46f7e8abf2b706316a770460390d",
+      "bundle_digest": "23c40b42ab029906a8846ba853ce9e5649662c424b1e27d8e1b9320084999d4f",
       "action_dimension": 12,
       "poses_checked": 42,
       "combined_wrist_poses_checked": 4,
-      "max_fingertip_vector_error_m": 0.0001303671655706009,
-      "mean_solve_ms": 0.6973294740808862,
+      "palm_frame_checked": true,
+      "open_fingertips_m": [
+        [
+          0.11890909192717974,
+          -0.11509369804005662,
+          -0.03314690789369603
+        ],
+        [
+          0.21371847697091872,
+          -0.028959858276040404,
+          -0.0031283931524266305
+        ],
+        [
+          0.21714100018622445,
+          -0.006950002507528583,
+          -0.003137551557555282
+        ],
+        [
+          0.2135314005852025,
+          0.01631099892136617,
+          -0.002937613282710554
+        ],
+        [
+          0.2037456111338302,
+          0.038671895329356665,
+          -0.002937672619357035
+        ]
+      ],
+      "max_fingertip_vector_error_m": 0.00013036716557060106,
+      "mean_solve_ms": 0.6144433836674407,
       "mimic_joints_checked": 6,
       "status": "CPU_CHECKED",
       "gpu_tested": false,
-      "headset_tested": false,
-      "source_revision": "39bfca04a69912e6561628156d1c63e37698eb75",
-      "retargeting_scheme": "dexpilot"
+      "headset_tested": false
     }
   ]
 }

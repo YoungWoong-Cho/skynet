@@ -26,10 +26,10 @@ index dd1c889..0cde537 100644
  	<string>This app streams hand tracking data to a remote server.</string>
  	<key>NSMicrophoneUsageDescription</key>
 diff --git a/IsaacXRTeleopClient/StreamingControlsView.swift b/IsaacXRTeleopClient/StreamingControlsView.swift
-index 9c472c8..924837e 100644
+index 9c472c8..75547fc 100644
 --- a/IsaacXRTeleopClient/StreamingControlsView.swift
 +++ b/IsaacXRTeleopClient/StreamingControlsView.swift
-@@ -11,16 +11,26 @@
+@@ -11,6 +11,7 @@
  import SwiftUI
  import CloudXRKit
  import os.log
@@ -37,47 +37,23 @@ index 9c472c8..924837e 100644
  
  struct StreamingControlsView: View {
      @State var viewModel: ViewModel
-+    @State private var showingError = false
- 
-     var body: some View {
-         Section(header: HStack {
+@@ -20,7 +21,7 @@ struct StreamingControlsView: View {
              VStack(alignment: .leading) {
                  Text("Session Controls").font(.title2)
                  if viewModel.showConnectionStatus {
 -                    Text(viewModel.connectingText).font(.callout)
-+                    Text(viewModel.connectingText)
-+                        .font(.callout)
-+                        .lineLimit(nil)
-+                        .fixedSize(horizontal: false, vertical: true)
-+                        .textSelection(.enabled)
-+                    if viewModel.appModel.connectionError != nil {
-+                        Button("Show full error") { showingError = true }
-+                            .font(.callout)
-+                    }
++                    Text("Connecting…").font(.callout)
                  } else {
                      // Blank line to keep UI height consistent when the connecting text appears
                      Text(" ").font(.callout)
-@@ -51,11 +61,38 @@ struct StreamingControlsView: View {
-                 .disabled(viewModel.connectionButtonDisabled)
-                 .tint(viewModel.connectionButtonColor)
-             }
-+            HStack {
-+                Button("Enable local network") { viewModel.enableLocalNetwork() }
-+                Button("Test server connection") { viewModel.testServerConnection() }
-+                    .disabled(viewModel.ipAddress.isEmpty || viewModel.networkTesting)
-+            }
-+            if let detail = viewModel.networkDetail {
-+                Text(detail).font(.callout)
-+                    .lineLimit(nil)
-+                    .fixedSize(horizontal: false, vertical: true)
-+                    .textSelection(.enabled)
-+            }
-         }
-         .onChange(of: viewModel.connectionState) { oldValue, newValue in
+@@ -56,6 +57,25 @@ struct StreamingControlsView: View {
              viewModel.connectionStateChanged(oldValue: oldValue, newValue: newValue)
          }
          .padding()
-+        .sheet(isPresented: $showingError) {
++        .sheet(isPresented: Binding(
++            get: { viewModel.appModel.connectionError != nil },
++            set: { if !$0 { viewModel.appModel.connectionError = nil } }
++        )) {
 +            VStack(alignment: .leading, spacing: 20) {
 +                Text("Connection failed").font(.title2)
 +                ScrollView {
@@ -88,7 +64,7 @@ index 9c472c8..924837e 100644
 +                        .textSelection(.enabled)
 +                        .frame(maxWidth: .infinity, alignment: .leading)
 +                }
-+                Button("Done") { showingError = false }
++                Button("Done") { viewModel.appModel.connectionError = nil }
 +            }
 +            .padding(28)
 +            .frame(width: 440, height: 380)
@@ -96,87 +72,66 @@ index 9c472c8..924837e 100644
      }
  }
  
-@@ -64,6 +101,70 @@ extension StreamingControlsView {
+@@ -64,6 +84,49 @@ extension StreamingControlsView {
      class ViewModel {
          @ObservationIgnored static let logger = Logger()
          let appModel: AppModel
-+        var networkDetail: String?
-+        var networkTesting = false
-+        @ObservationIgnored private var networkConnection: NWConnection?
-+        @ObservationIgnored private var discovery: NWBrowser?
-+        @ObservationIgnored private var networkTimeout: DispatchWorkItem?
++        var requestingConnection = false
++        @ObservationIgnored private var reportedFailure = false
 +
-+        func enableLocalNetwork() {
-+            discovery?.cancel()
-+            let browser = NWBrowser(for: .bonjour(type: "_cloudxr._tcp", domain: "local."), using: .tcp)
-+            discovery = browser
-+            networkDetail = "Allow local network access in the system prompt. This starts local CloudXR discovery; it does not establish a stream."
-+            browser.stateUpdateHandler = { [weak self, weak browser] state in
-+                guard let self, self.discovery === browser else { return }
-+                if case .waiting(let error) = state {
-+                    self.networkDetail = "Local discovery is waiting: \(error.localizedDescription). If permission was denied, enable Local Network in Settings → Privacy & Security."
++        // Request permission as part of Connect; no separate setup controls.
++        private func requestLocalNetwork() async throws {
++            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
++                let browser = NWBrowser(for: .bonjour(type: "_cloudxr._tcp", domain: "local."), using: .tcp)
++                var finished = false
++                var timeout: DispatchWorkItem?
++                func finish(_ result: Result<Void, Error>) {
++                    guard !finished else { return }
++                    finished = true
++                    timeout?.cancel()
++                    browser.stateUpdateHandler = nil
++                    browser.cancel()
++                    continuation.resume(with: result)
 +                }
-+            }
-+            browser.start(queue: .main)
-+            DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self, weak browser] in
-+                browser?.cancel()
-+                if self?.discovery === browser { self?.discovery = nil }
++                browser.stateUpdateHandler = { state in
++                    switch state {
++                    case .ready: finish(.success(()))
++                    case .failed(let error), .waiting(let error):
++                        finish(.failure(NSError(domain: "LocalNetwork", code: Int(error.errorCode), userInfo: [
++                            NSLocalizedDescriptionKey: "Local network access is unavailable. Allow Local Network in Settings → Privacy & Security, then reconnect. \(error.localizedDescription)"
++                        ])))
++                    default: break
++                    }
++                }
++                let deadline = DispatchWorkItem {
++                    finish(.failure(NSError(domain: "LocalNetwork", code: 1, userInfo: [NSLocalizedDescriptionKey: "Local network permission timed out. Allow access when prompted, then reconnect."])))
++                }
++                timeout = deadline
++                DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: deadline)
++                browser.start(queue: .main)
 +            }
 +        }
 +
-+        func testServerConnection() {
-+            networkConnection?.cancel()
-+            networkTimeout?.cancel()
-+            networkTesting = true
-+            let host = ipAddress
-+            networkDetail = "Checking \(host):48010…"
-+            let connection = NWConnection(host: NWEndpoint.Host(host), port: 48010, using: .tcp)
-+            networkConnection = connection
-+            func finish(_ message: String) {
-+                guard self.networkConnection === connection else { return }
-+                self.networkDetail = message
-+                self.networkTesting = false
-+                self.networkTimeout?.cancel()
-+                self.networkTimeout = nil
-+                self.networkConnection = nil
-+                connection.stateUpdateHandler = nil
-+                connection.cancel()
-+            }
-+            connection.stateUpdateHandler = { state in
-+                switch state {
-+                case .ready:
-+                    finish("Server port 48010 is reachable. Tap Connect to test the stream; video and tracking also require UDP connectivity.")
-+                case .failed(let error):
-+                    finish("Cannot reach \(host):48010: \(error.localizedDescription). Check the active server address and network route.")
-+                case .waiting(let error):
-+                    if connection.currentPath?.unsatisfiedReason == .localNetworkDenied {
-+                        finish("Local network access is denied. Tap Enable local network, or allow it in Settings → Privacy & Security → Local Network.")
-+                    } else {
-+                        self.networkDetail = "Waiting for \(host):48010: \(error.localizedDescription)"
-+                    }
-+                default: break
-+                }
-+            }
-+            let timeout = DispatchWorkItem {
-+                finish("No response from \(host):48010 within 8 seconds. The server may be stopped or this network may block its streaming port. SSH connectivity alone does not verify streaming access.")
-+            }
-+            networkTimeout = timeout
-+            DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: timeout)
-+            connection.start(queue: .main)
++        @MainActor
++        private func reportFailure(_ error: Error) async {
++            guard !reportedFailure else { return }
++            reportedFailure = true
++            if appModel.immersiveSpaceIsOpen { await appModel.dismissImmersiveSpace() }
++            appModel.connectionError = Self.describe(error)
 +        }
  
          init(appModel: AppModel) {
              self.appModel = appModel
-@@ -100,22 +201,32 @@ extension StreamingControlsView {
+@@ -99,24 +162,31 @@ extension StreamingControlsView {
+             }
          }
  
-         var connectingText: String {
+-        var connectingText: String {
 -            "Connecting..."
-+            appModel.connectionError ?? "Connecting..."
-         }
- 
+-        }
+-
          var showConnectionStatus: Bool {
-+            if appModel.connectionError != nil { return true }
++            if requestingConnection { return true }
              switch connectionState {
              case .connecting, .authenticating, .authenticated:
 -                true
@@ -197,28 +152,92 @@ index 9c472c8..924837e 100644
              oldValue: SessionState,
              newValue: SessionState
          ) {
-+            if case .disconnected(.failure(let error)) = newValue {
-+                appModel.connectionError = Self.describe(error)
-+            }
              Task { @MainActor in
++                if case .disconnected(.failure(let error)) = newValue {
++                    await reportFailure(error)
++                    return
++                }
                  if newValue == .connected {
                      if !appModel.immersiveSpaceIsOpen {
-@@ -154,7 +265,12 @@ extension StreamingControlsView {
+                         await appModel.openImmersiveSpace(id: streamingSpaceTitle)
+@@ -145,7 +215,10 @@ extension StreamingControlsView {
+         }
+ 
+         private func connect() {
++            guard !requestingConnection else { return }
++            requestingConnection = true
+             Task { @MainActor in
++                defer { requestingConnection = false }
+                 switch connectionState {
+                 case .initialized, .disconnected:
+                     var config = CloudXRKit.Config()
+@@ -154,7 +227,14 @@ extension StreamingControlsView {
                      config.resolutionPreset = .standardPreset
                      config.handTrackingMode = .legacy
                      appModel.cxrSession.configure(config: config)
 -                    try await appModel.cxrSession.connect()
 +                    appModel.connectionError = nil
++                    reportedFailure = false
 +                    do {
++                        try await requestLocalNetwork()
 +                        try await appModel.cxrSession.connect()
 +                    } catch {
-+                        appModel.connectionError = Self.describe(error)
++                        await reportFailure(error)
 +                    }
                  default:
                      let errorMessage = "Connect button pressed when state was \(self.connectionState)"
                      Self.logger.error("Streaming controls state machine error: \(errorMessage)")
+@@ -172,22 +252,24 @@ extension StreamingControlsView {
+         }
+ 
+         var ipFieldDisabled: Bool {
++            if requestingConnection { return true }
+             switch connectionState {
+             case .initialized, .disconnected:
+-                false
++                return false
+             default:
+-                true
++                return true
+             }
+         }
+ 
+         var connectionButtonDisabled: Bool {
++            if requestingConnection { return true }
+             switch connectionState {
+             case .disconnected, .initialized:
+-                ipAddress.isEmpty
++                return ipAddress.isEmpty
+             case .connected:
+-                false
++                return false
+             default:
+-                true
++                return true
+             }
+         }
+     }
+diff --git a/IsaacXRTeleopClient/TeleopControlView.swift b/IsaacXRTeleopClient/TeleopControlView.swift
+index 702ea6d..0cb7479 100644
+--- a/IsaacXRTeleopClient/TeleopControlView.swift
++++ b/IsaacXRTeleopClient/TeleopControlView.swift
+@@ -64,6 +64,14 @@ struct TeleopControlView: View {
+             .frame(height: 100, alignment: .top)
+         }
+         .padding()
++        .safeAreaInset(edge: .bottom) {
++            HStack(spacing: 20) {
++                Label { Text("Tracked hand") } icon: { Circle().fill(.red).frame(width: 8, height: 8) }
++                Label { Text("Hand points for robot control") } icon: { Circle().fill(.cyan).frame(width: 8, height: 8) }
++            }
++            .font(.caption)
++            .padding(.top, 8)
++        }
+     }
+ }
+ 
 diff --git a/IsaacXRTeleopClient/TopConfigView.swift b/IsaacXRTeleopClient/TopConfigView.swift
-index 5284c39..2b2597b 100644
+index 5284c39..88f17b9 100644
 --- a/IsaacXRTeleopClient/TopConfigView.swift
 +++ b/IsaacXRTeleopClient/TopConfigView.swift
 @@ -44,6 +44,7 @@ struct TopConfigView: View {
@@ -229,20 +248,39 @@ index 5284c39..2b2597b 100644
          VStack {
              HStack {
                  Spacer()
-@@ -64,7 +65,7 @@ struct TopConfigView: View {
+@@ -64,17 +65,11 @@ struct TopConfigView: View {
                  StreamingControlsView(viewModel: StreamingControlsView.ViewModel(appModel: viewModel.appModel))
                      .frame(alignment: .top)
              }
 -            .frame(height: 150, alignment: .top)
 +            .frame(minHeight: 150, alignment: .top)
  
-             VStack {
-                 if viewModel.showEyePositionView {
-@@ -75,6 +76,7 @@ struct TopConfigView: View {
-             .frame(height: 100, alignment: .top)
+-            VStack {
+-                if viewModel.showEyePositionView {
+-                    SettingsView(viewModel: SettingsView.ViewModel(appModel: viewModel.appModel))
+-                        .frame(maxHeight: .infinity, alignment: .top)
+-                }
+-            }
+-            .frame(height: 100, alignment: .top)
          }
          .frame(alignment: .top)
 +        }
      }
  }
  
+@@ -106,15 +101,6 @@ extension TopConfigView {
+ 
+         let hudConfig = HUDConfig()
+ 
+-        var showEyePositionView: Bool {
+-            switch cxrSession.state {
+-            case .disconnected, .initialized:
+-                true
+-            default:
+-                false
+-            }
+-        }
+-
+         var showOrnaments: Bool {
+             return cxrSession.state == .connected
+         }

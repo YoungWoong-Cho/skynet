@@ -74,6 +74,11 @@ try {
     new window.Event("submit", { cancelable: true }),
   );
   assert.equal(requests.length, 1, "Cannot submit before choices load");
+  assert.equal(get("live-xr-stop").disabled, true);
+  assert.equal(
+    get("live-xr-stop").parentElement,
+    get("live-xr-start").parentElement,
+  );
   requests[0].resolve({ sessions: [], license: { accepted: true }, catalog });
   await flush();
   assert.equal(
@@ -123,10 +128,17 @@ try {
   assert.match(stages()[3].textContent, /Queued/);
   assert.match(stages()[4].textContent, /Not started/);
   window.loadLiveXR();
-  const stop = [...get("live-xr-sessions").querySelectorAll("button")].find(
-    (b) => b.textContent === "Stop session",
+  const stop = get("live-xr-stop");
+  assert.equal(stop.disabled, false);
+  assert.equal(
+    get("live-xr-sessions").textContent.includes("Stop session"),
+    false,
   );
   stop.click();
+  assert.equal(
+    new URL(window.location.href).searchParams.get("live_session"),
+    job.id,
+  );
   requests[4].resolve({ ...job, stop_requested: true });
   await flush();
   requests[3].resolve({
@@ -135,11 +147,8 @@ try {
     catalog,
   });
   await flush();
-  assert.ok(
-    [...get("live-xr-sessions").querySelectorAll("button")].find(
-      (b) => b.textContent === "Stopping…",
-    )?.disabled,
-  );
+  assert.equal(get("live-xr-stop").textContent, "Stopping…");
+  assert.equal(get("live-xr-stop").disabled, true);
   assert.equal(get("live-xr-start").textContent, "Stopping…");
   assert.match(stages()[3].textContent, /Interrupted/);
   window.loadLiveXR();

@@ -187,3 +187,49 @@ def test_catalog_exposes_ten_imported_variants_and_missing_mesh_reason():
             assert selection(task["key"], hand["key"])[1] == hand
     with pytest.raises(ValueError, match="missing thumb mesh"):
         selection(catalog()["default_task"], "skynet_allegro_v4_left")
+
+
+def test_visual_names_are_valid_usd_identifiers(source):
+    library = source[0]
+    path = library.directory(library.entry("test", "right"), "right") / "model.urdf"
+    path.write_bytes(path.read_bytes().replace(b"<visual>", b'<visual name="link.0">'))
+    directory, _ = build(source)
+    xml = parse_urdf((directory / "simulation.urdf").read_bytes())
+    assert xml.find(".//visual").get("name") == "h_link_0_0"
+
+
+def test_collision_filter_excludes_mounts_but_keeps_other_fingers(tmp_path):
+    path = tmp_path / "hand.urdf"
+    path.write_text(
+        '<robot><joint type="revolute"><parent link="palm"/><child link="index1"/></joint><joint type="revolute"><parent link="index1"/><child link="index2"/></joint><joint type="revolute"><parent link="index2"/><child link="index3"/></joint><joint type="fixed"><parent link="index3"/><child link="tip"/></joint><joint type="revolute"><parent link="palm"/><child link="thumb"/></joint></robot>'
+    )
+    pairs = RUNTIME["adjacent_collision_pairs"](path)
+    assert ("index2", "palm") in pairs
+    assert ("tip", "index1") in pairs
+    assert ("tip", "palm") not in pairs
+    assert not any("thumb" in pair and pair != ("thumb", "palm") for pair in pairs)
+
+
+def test_mesh_filenames_are_safe_for_usd_prim_names(source, monkeypatch):
+    library = source[0]
+    model = library.model("test", "right")
+    original = library.asset("test", "right", "palm.stl")
+    model["files"]["link.0.stl"] = model["files"].pop("palm.stl")
+    path = library.directory(library.entry("test", "right"), "right") / "model.urdf"
+    path.write_bytes(path.read_bytes().replace(b"/palm.stl", b"/link.0.stl"))
+    monkeypatch.setattr(library, "model", lambda *args: model)
+    original_asset = library.asset
+    monkeypatch.setattr(
+        library,
+        "asset",
+        lambda key, side, name: (
+            original if name == "link.0.stl" else original_asset(key, side, name)
+        ),
+    )
+    directory, manifest = build(source)
+    xml = parse_urdf((directory / "simulation.urdf").read_bytes())
+    name = xml.find(".//mesh").get("filename")
+    assert Path(name).stem.startswith("h_link_0_")
+    assert "." not in Path(name).stem
+    assert (directory / name).read_bytes() == original.read_bytes()
+    assert manifest["source_assets"]["link.0.stl"] == name

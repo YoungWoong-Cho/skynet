@@ -31,6 +31,24 @@ def check(path):
         assert np.allclose(
             pose[:3, :3], Rotation.from_euler("XYZ", angles).as_matrix(), atol=1e-8
         )
+    # Independent frame check against the working native Shadow/OpenXR convention:
+    # open fingers point +X, thumbs are on +Y (right) / -Y (left), palms face -Z.
+    # An optimizer round trip alone cannot catch a shared 90-degree frame error.
+    q = floating.q0.copy()
+    for name, value in manifest["neutral"].items():
+        q[floating.get_joint_index(name)] = value
+    floating.compute_forward_kinematics(q)
+    open_tips = np.array(
+        [
+            floating.get_link_pose(floating.get_link_index(n))[:3, 3]
+            for n in manifest["tips"]
+        ]
+    )
+    assert np.all(open_tips[1:, 0] > 0.07), "Open fingers must point forward (+X)"
+    assert np.all(abs(open_tips[1:, 2]) < 0.04), "Open palm must be horizontal"
+    sign = 1 if manifest["side"] == "right" else -1
+    assert sign * open_tips[0, 1] > 0.05, "Thumb is on the wrong side"
+    assert sign * (open_tips[1, 1] - open_tips[-1, 1]) > 0.03, "Fingers are mirrored"
     cfg = json.loads((root / "retarget.json").read_text())["retargeting"]
     config = RetargetingConfig.from_dict(
         cfg, {"urdf_path": str(root / "retarget.urdf"), "low_pass_alpha": 1.0}
@@ -106,6 +124,8 @@ def check(path):
         "action_dimension": manifest["action_dimension"],
         "poses_checked": len(times),
         "combined_wrist_poses_checked": len(wrist_poses),
+        "palm_frame_checked": True,
+        "open_fingertips_m": open_tips.tolist(),
         "max_fingertip_vector_error_m": maximum_error,
         "mean_solve_ms": float(np.mean(times)),
         "mimic_joints_checked": len(manifest["mimic_joints"]),

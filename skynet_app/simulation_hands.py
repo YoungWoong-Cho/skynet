@@ -198,12 +198,34 @@ def build(robot, library=None, output_root=None):
             mimic = item.find("mimic")
             if mimic is not None:
                 mimic.set("joint", mapping[mimic.get("joint")])
+        # USD also uses visual/collision names as prim paths (Allegro names contain dots).
+        for body in xml.findall("link"):
+            for tag in ("visual", "collision"):
+                for index, item in enumerate(body.findall(tag)):
+                    if item.get("name"):
+                        item.set("name", safe_name(item.get("name")) + "_" + str(index))
+        for item in xml.findall(".//material"):
+            if item.get("name"):
+                item.set("name", safe_name(item.get("name")))
         prefix = f"/api/hands/{spec['key']}/{spec['side']}/assets/"
+        asset_names = {name: "assets/" + name for name in model["files"]}
         for mesh in xml.findall(".//mesh"):
             url = mesh.get("filename", "")
             if not url.startswith(prefix) or url[len(prefix) :] not in model["files"]:
                 raise ValueError("Hand mesh is not in its pinned library manifest")
-            mesh.set("filename", "assets/" + url[len(prefix) :])
+            name = url[len(prefix) :]
+            stem = Path(name).stem
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", stem):
+                # Isaac's importer derives mesh prim names from filenames even
+                # when the enclosing visual has an explicit, valid name.
+                asset_names[name] = (
+                    "assets/"
+                    + safe_name(stem)
+                    + "_"
+                    + hashlib.sha256(name.encode()).hexdigest()[:8]
+                    + Path(name).suffix
+                )
+            mesh.set("filename", asset_names[name])
         # One canonical palm frame aligns every source model with DexVerse's Shadow convention.
         link(xml, "skynet_palm")
         joint(
@@ -284,7 +306,7 @@ def build(robot, library=None, output_root=None):
                     != expected["sha256"]
                 ):
                     raise ValueError("Stored hand asset checksum changed: " + name)
-                dest = stage / "assets" / name
+                dest = stage / asset_names[name]
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(original, dest)
             for name, content in runtime_files.items():
@@ -303,6 +325,7 @@ def build(robot, library=None, output_root=None):
                 robot=robot,
                 hand_key=spec["key"],
                 side=spec["side"],
+                collision_neighbor_depth=spec.get("collision_neighbor_depth", 2),
                 retargeting_scheme=spec["retargeting_scheme"],
                 source_revision=spec["revision"],
                 name=spec["name"],
@@ -318,6 +341,7 @@ def build(robot, library=None, output_root=None):
                     if not j["mimic"]
                 },
                 source_names=mapping,
+                source_assets=asset_names,
                 files=files,
                 mimic_joints=[j for j in joint_metadata(xml) if j["mimic"]],
                 physics_note="Initial simulation gains: fingers 10 N m/rad, damping 0.2, effort 2 N m. These are simulation tuning values, not hardware ratings. Headset validation is pending.",

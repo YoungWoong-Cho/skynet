@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import xml.etree.ElementTree as ET
 from types import ModuleType
 
 
@@ -32,6 +33,49 @@ def bounded_fingers(values, limits):
     if array.shape != (len(bounds),) or not np.isfinite(array).all():
         raise ValueError("Hand retargeting returned missing or nonfinite joint values")
     return np.clip(array, bounds[:, 0], bounds[:, 1])
+
+
+def adjacent_collision_pairs(urdf, depth=2):
+    """Exclude overlapping mounts and fixed sensors along the same finger chain."""
+    xml = ET.parse(urdf).getroot()
+    parents = {
+        j.find("child").get("link"): (
+            j.find("parent").get("link"),
+            j.get("type") != "fixed",
+        )
+        for j in xml.findall("joint")
+    }
+    pairs = []
+    for child in parents:
+        node, joints = child, 0
+        while node in parents:
+            parent, moving = parents[node]
+            joints += int(moving)
+            if joints > depth:
+                break
+            pairs.append((child, parent))
+            node = parent
+    return pairs
+
+
+def filter_adjacent_collisions(urdf, usd, depth=2):
+    from pxr import Usd, UsdPhysics
+
+    stage = Usd.Stage.Open(usd)
+    if stage is None or not stage.GetDefaultPrim().IsValid():
+        raise ValueError(
+            "Hand URDF conversion failed; inspect the converter error above"
+        )
+    bodies = {
+        p.GetName(): p for p in stage.Traverse() if p.HasAPI(UsdPhysics.RigidBodyAPI)
+    }
+    for child, parent in adjacent_collision_pairs(urdf, depth):
+        if child in bodies and parent in bodies:
+            # https://openusd.org/release/wp_rigid_body_physics.html#pair-filtering
+            UsdPhysics.FilteredPairsAPI.Apply(
+                bodies[child]
+            ).CreateFilteredPairsRel().AddTarget(bodies[parent].GetPath())
+    stage.GetRootLayer().Save()
 
 
 def install(directory):
@@ -66,6 +110,9 @@ def install(directory):
                 ),
             ),
         )
+    )
+    filter_adjacent_collisions(
+        root / "simulation.urdf", converter.usd_path, m["collision_neighbor_depth"]
     )
     wrist, fingers = m["wrist_joints"], m["finger_joints"]
 
@@ -121,6 +168,7 @@ def install(directory):
                 joint_names_expr=wrist,
                 stiffness=2000.0,
                 damping=400.0,
+                armature=0.01,
                 effort_limit_sim=30.0,
                 velocity_limit_sim=5.0,
             ),
@@ -128,6 +176,7 @@ def install(directory):
                 joint_names_expr=fingers,
                 stiffness=10.0,
                 damping=0.2,
+                armature=0.01,
                 effort_limit_sim=2.0,
                 velocity_limit_sim=5.0,
             ),
@@ -155,6 +204,21 @@ def install(directory):
                 apply_shadow_specific_postprocess=False,
             ),
         )
+
+    # Shadow's ±15° fingertip correction is not a calibration for imported URDFs.
+    # Keep all imported human references in the same palm-down frame as the model.
+    original_canonical = (
+        retargeting.SimpleRelativeRetargeter._convert_hand_to_canonical_joint_positions
+    )
+
+    def canonical(self, hand_data, hand=None):
+        return original_canonical(
+            self, hand_data, None if self.cfg.robot_type == m["robot"] else hand
+        )
+
+    retargeting.SimpleRelativeRetargeter._convert_hand_to_canonical_joint_positions = (
+        canonical
+    )
 
     original_assign = retargeting.SimpleRelativeRetargeter._assign_hand_fingers
 

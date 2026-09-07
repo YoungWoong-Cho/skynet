@@ -13,8 +13,8 @@
         "{side}_finger5_tip_link"
       ],
       "alignment_rpy": {
-        "right": [0, 0, -1.5707963267948966],
-        "left": [0, 0, -1.5707963267948966]
+        "right": [-0.0, 1.5707963267948966, 0.0],
+        "left": [-0.0, 1.5707963267948966, 0.0]
       },
       "retargeting_scheme": "vector"
     },
@@ -30,8 +30,8 @@
         "{s}_pinky_tip"
       ],
       "alignment_rpy": {
-        "right": [3.141592653589793, 0, 0],
-        "left": [0, 3.141592653589793, 0]
+        "right": [-1.5707963267948966, 0.0, 1.5707963267948966],
+        "left": [1.5707963267948966, 0.0, -1.5707963267948966]
       },
       "retargeting_scheme": "dexpilot"
     },
@@ -47,8 +47,8 @@
         "{side}_pinky_fingertip"
       ],
       "alignment_rpy": {
-        "right": [0, 0, -1.5707963267948966],
-        "left": [0, 0, -1.5707963267948966]
+        "right": [-0.0, 1.5707963267948966, 0.0],
+        "left": [-0.0, 1.5707963267948966, 0.0]
       },
       "retargeting_scheme": "dexpilot"
     },
@@ -63,7 +63,7 @@
         "link_11.0_tip"
       ],
       "alignment_rpy": {
-        "right": [0, 0, -1.5707963267948966]
+        "right": [-0.0, 1.5707963267948966, 0.0]
       },
       "retargeting_scheme": "dexpilot"
     },
@@ -73,9 +73,10 @@
       "palm": "palm_lower",
       "tips": ["thumb_fingertip", "fingertip", "fingertip_2", "fingertip_3"],
       "alignment_rpy": {
-        "right": [-1.5707963267948966, -1.5707963267948966, 0]
+        "right": [2.220446049250313e-16, 0.0, 2.220446049250313e-16]
       },
-      "retargeting_scheme": "dexpilot"
+      "retargeting_scheme": "dexpilot",
+      "collision_neighbor_depth": 3
     },
     {
       "key": "inspire-rh56",
@@ -83,10 +84,11 @@
       "palm": "base",
       "tips": ["thumb_tip", "index_tip", "middle_tip", "ring_tip", "pinky_tip"],
       "alignment_rpy": {
-        "right": [0, 0, -1.5707963267948966],
-        "left": [0, 0, -1.5707963267948966]
+        "right": [-0.0, 1.5707963267948966, 0.0],
+        "left": [-0.0, 1.5707963267948966, 0.0]
       },
-      "retargeting_scheme": "dexpilot"
+      "retargeting_scheme": "dexpilot",
+      "collision_neighbor_depth": 3
     }
   ]
 }
