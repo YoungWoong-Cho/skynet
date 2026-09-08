@@ -1969,6 +1969,11 @@ class PipelineService:
                 )
             if str(version.get("status") or "").upper() != "READY":
                 raise ValueError(f"Selected {binding.role} is {version.get('status') or 'unverified'}, not ready on the cluster. Complete its import or transfer before training.")
+            if (version.get("metadata") or {}).get("storage_location") == "workstation":
+                raise ValueError(
+                    "This dataset is stored on the collection workstation. "
+                    "Transfer it to the training cluster and register that copy before submitting training."
+                )
             if binding.formats and str(version.get("format") or "").casefold() not in {
                 item.casefold() for item in binding.formats
             }:

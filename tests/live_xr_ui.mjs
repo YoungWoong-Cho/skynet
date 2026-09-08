@@ -215,7 +215,7 @@ try {
   window.loadLiveXR();
   requests.at(-1).resolve(overview);
   await flush();
-  assert.equal(get("live-xr-start").textContent, "Start live session");
+  assert.equal(get("live-xr-start").textContent, "Start session");
   assert.equal(get("live-xr-progress-title").textContent, "Startup failed");
   assert.equal(stages()[0].dataset.state, "failed");
   assert.ok(

@@ -8492,6 +8492,9 @@ function experimentBundleCompatibility(bundle, adapter = selectedAdapter()) {
     if (String(assignment.version?.status || "").toUpperCase() !== "READY") {
       return { compatible: false, message: `${binding.role} is ${assignment.version?.status || "unverified"}; complete import or transfer to the cluster` };
     }
+    if (assignment.version?.metadata?.storage_location === 'workstation') {
+      return {compatible:false, message:'Stored on the collection workstation; transfer to the training cluster first.'};
+    }
     const formats = Array.isArray(binding.formats) ? binding.formats.map((item) => String(item).toLowerCase()) : [];
     const format = String(assignment.version?.format || "");
     if (formats.length && !formats.includes(format.toLowerCase())) {
@@ -8530,8 +8533,8 @@ function renderDataResources() {
       const id = resource.id || resource.resource_id;
       const latest = resource.latest_version || resource.versions?.[0];
       const versionCount = resource.version_count ?? resource.versions?.length ?? 0;
-      return `<tr>
-        <td><span class="node-name">${escapeHtml([resource.namespace, resource.name].filter(Boolean).join("/"))}</span><span class="secondary">${escapeHtml(id)}</span></td>
+      return `<tr data-resource-id="${escapeHtml(id)}">
+        <td><span class="node-name">${escapeHtml(resource.metadata?.display_name || [resource.namespace, resource.name].filter(Boolean).join("/"))}</span><span class="secondary">${escapeHtml(id)}</span></td>
         <td>${escapeHtml(resource.kind || "-")}</td>
         <td>${escapeHtml(resource.provider || "-")}</td>
         <td>${escapeHtml(versionCount)}</td>
@@ -9094,6 +9097,21 @@ async function viewDataBundlePreview(id, launcher = null) {
     elements.dataBundlePreviewWarnings.hidden = false;
   }
 }
+
+window.openConvertedDataset = async job => {
+  activateTab('datasets');
+  await loadDataRegistry(true);
+  const row = [...elements.dataResourcesBody.querySelectorAll('[data-resource-id]')]
+    .find(row => row.dataset.resourceId === job.resource_id);
+  if (!row) {
+    showNotice(elements.dataRegistryError, 'The converted dataset could not be loaded. Refresh the registry to retry.');
+    return;
+  }
+  row.scrollIntoView({block: 'center'});
+  row.classList.add('converted-dataset-highlight');
+  row.querySelector('button')?.focus({preventScroll: true});
+  setTimeout(() => row.classList.remove('converted-dataset-highlight'), 5000);
+};
 
 async function loadDataRegistry(force = false) {
   if (loadedTabs.has("datasets") && !force) return;
@@ -11988,7 +12006,7 @@ function loadActiveTab(tab, force = false) {
   if (tab === "cluster") return refreshCluster({ force });
   if (tab === "experiments") return loadExperiments(force);
   if (tab === "collection") {
-    if (!document.getElementById("collection-view-live").hidden) window.loadLiveXR?.();
+    window.loadLiveXR?.();
     return loadCollection(force);
   }
   if (tab === "datasets") return loadDataRegistry(force);
@@ -12376,8 +12394,8 @@ elements.evaluationForm.addEventListener("change", () => {
 document.querySelector("#evaluation-search").addEventListener("input", () => renderEvaluations());
 document.querySelector("#evaluation-state-filter").addEventListener("change", () => renderEvaluations());
 elements.refreshCollection.addEventListener("click", () => {
-  if (!document.getElementById("collection-view-live").hidden) window.loadLiveXR?.();
-  else loadCollection(true);
+  window.loadLiveXR?.();
+  loadCollection(true);
 });
 elements.addCollectionAdapter.addEventListener("click", (event) => fillCollectionAdapterForm(null, event.currentTarget));
 elements.closeCollectionAdapter.addEventListener("click", () => {

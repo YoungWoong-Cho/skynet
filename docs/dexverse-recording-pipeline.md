@@ -1,6 +1,8 @@
-# Saved Vision Pro recordings → DexVerse
+# Offline local tracking experiment
 
-Open **Data → Collection → Run a DexVerse cycle**. Choose an imported recording, check the setup, and run the cycle. One cluster GPU is used. Progress, failures, the original dataset lineage, a trained checkpoint and both replay videos appear in the same panel.
+For simulation demonstrations collected in the headset, use **Data → Collection → Recordings → Convert for training**. See [teleoperation dataset conversion](collection-conversion.md).
+
+This older workflow is under **Data → Collection → Setup → Offline experiments & history**. Choose an imported local tracking recording, check the setup, and run the offline experiment. One cluster GPU is used. It automatically trains and evaluates; it is separate from converting a saved teleoperation dataset.
 
 The implemented combination is **Vision Pro right-hand tracking → floating Shadow right hand → Dexverse-PickUpStick-v0 → Skynet state-based behavior cloning**. It runs with the existing visionOS 2.5 recorder. Saved-file processing does not use CloudXR.
 

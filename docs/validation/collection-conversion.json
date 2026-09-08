@@ -1,0 +1,58 @@
+{
+  "schema": "skynet.validation/collection-conversion-v1",
+  "date": "2026-09-08",
+  "browser": "Codex in-app browser",
+  "real_app": {
+    "url": "http://localhost:8080/",
+    "sessions_with_recordings": 19,
+    "saved_episodes": 106,
+    "shadow_cube_session": "982ded94-3e0f-49de-8440-8dcd249f8443",
+    "shadow_cube_episodes": 51,
+    "checks": [
+      "Inspected the original four collection tabs, dataset registry and experiment setup",
+      "Three collection tabs: Teleoperate, Recordings and Setup",
+      "Recordings filter, no-match message and clear filter",
+      "Actual cached Shadow cube video played to its 2.6-second end without a media error",
+      "Recorded values: initial frame, next/previous frame and action alignment",
+      "Review dialog hands off to conversion without leaving video playing",
+      "All 51 recordings selected by default; clear selection disables conversion; subset selection updates count",
+      "Setup disclosures, local tracking filter, needs-review filter and tracking details",
+      "Import remains disabled without a file and focuses the file chooser when opened",
+      "Offline experiment link selects the correct local recording without submitting work",
+      "Teleoperation Help opens the chosen task goal",
+      "Stopped session shows Start enabled, Stop disabled and no stale green startup milestones",
+      "Final layout has no duplicate IDs or document-level horizontal overflow"
+    ]
+  },
+  "isolated_browser_qa": {
+    "url": "http://localhost:8091/",
+    "fixture": "tests/collection_browser_fixture.py",
+    "synthetic": true,
+    "ssh_disabled": true,
+    "separate_database": true,
+    "checks": [
+      "Submitted all-recording conversion through the actual API and UI",
+      "Queued, converting and successful result states",
+      "Native HDF5 download and exact dataset registry handoff",
+      "Manifest/details and training compatibility disclosure",
+      "Failed conversion displays a specific error and retry control",
+      "Retry, close dialog and reload preserve the request",
+      "Selected one of two recordings and produced a separate one-episode result",
+      "Reopened converted result after refresh"
+    ]
+  },
+  "tests": {
+    "python_passed": 413,
+    "javascript": ["live_xr_ui.mjs", "live_review_ui.mjs", "live_conversion_ui.mjs", "browser_regressions.cjs (19 tests)"],
+    "ruff": "passed",
+    "cached_real_recordings_validated": 22,
+    "cached_real_recordings_rejected": 0,
+    "hdf5_integrity": "Real HDF5 files tested for complete episodes, exact actions, finite observations and initial/next/final state alignment"
+  },
+  "limitations": [
+    "Actual Isaac GPU conversion of the user's 51 Shadow cube episodes is pending; workstation access was deferred at the user's request",
+    "Synthetic browser conversion does not validate simulator observation reconstruction",
+    "Uncached video preparation and headset collection were not repeated during this offline investigation",
+    "No training or evaluation was started; native DexVerse HDF5 training requires a compatible trainer and cluster use requires a data transfer"
+  ]
+}

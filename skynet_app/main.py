@@ -16,6 +16,7 @@ from .collection_api import router as collection_router
 from .local_capture_api import router as local_capture_router
 from .hands_api import router as hands_router
 from .live_xr_api import router as live_xr_router
+from .live_xr_api import conversions as live_conversions
 from .pipeline_api import router as pipeline_router
 from .pipeline_api import service as pipeline_service
 
@@ -66,9 +67,11 @@ INIT_COMMAND = "mkdir -p " + " ".join(
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     pipeline_service.start()
+    live_conversions.start()
     try:
         yield
     finally:
+        live_conversions.stop()
         pipeline_service.stop()
 
 

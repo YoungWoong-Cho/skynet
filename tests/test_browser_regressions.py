@@ -75,6 +75,10 @@ def test_bundle_selection_is_consumed_or_rejected_explicitly():
     unavailable['data']['bundle']['assignments'][0]['version']['status'] = 'LOCAL'
     with pytest.raises(ValueError, match='not ready on the cluster'):
         PipelineService._apply_manifest_data_bindings(unavailable, manifests['groot'])
+    workstation = document()
+    workstation['data']['bundle']['assignments'][0]['version']['metadata'] = {'storage_location':'workstation'}
+    with pytest.raises(ValueError, match='collection workstation'):
+        PipelineService._apply_manifest_data_bindings(workstation, manifests['groot'])
     extra = document()
     import copy
     another = copy.deepcopy(extra['data']['bundle']['assignments'][0])

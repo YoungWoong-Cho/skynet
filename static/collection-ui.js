@@ -1,6 +1,8 @@
 /* Collection views share their forms and data; switching views never submits work. */
 function setCollectionView(view, {persist = true, focus = false} = {}) {
-  if (!['recordings', 'live', 'cycles', 'setup'].includes(view)) view = 'recordings';
+  const legacy = view === 'cycles';
+  if (legacy) view = 'setup';
+  if (!['recordings', 'live', 'setup'].includes(view)) view = 'live';
   document.querySelectorAll('[data-collection-view]').forEach(panel => { panel.hidden = panel.dataset.collectionView !== view; });
   document.querySelectorAll('[data-collection-tab]').forEach(button => {
     const selected = button.dataset.collectionTab === view;
@@ -14,8 +16,9 @@ function setCollectionView(view, {persist = true, focus = false} = {}) {
       history.pushState(null, '', url);
     }
   }
-  document.querySelector('.page-actions [data-collection-guide="record"]').textContent = view === "live" ? "Help" : "How to record";
-  if (view === "live") window.loadLiveXR?.();
+  document.querySelector('.page-actions [data-collection-guide="record"]').textContent = 'Help';
+  if (legacy) document.querySelector('#collection-legacy-cycles').open = true;
+  if (view === 'live' || view === 'recordings') window.loadLiveXR?.();
   if (focus) document.querySelector(`[data-collection-tab="${view}"]`).focus({preventScroll: true});
 }
 function chooseCollectionRecording(digest) {
@@ -48,9 +51,12 @@ document.querySelectorAll('[data-collection-go]').forEach(button => button.addEv
     return;
   }
   setCollectionView(button.dataset.collectionGo, {focus: true});
-  const targets = {record: '#collection-record-instructions', dexverse: '#collection-dexverse-setup'};
+  const targets = {record: '#collection-view-setup', dexverse: '#collection-dexverse-setup'};
   const target = document.querySelector(targets[button.dataset.collectionGuide] || '#collection-headset-guide');
   if (target.tagName === 'DETAILS') target.open = true;
+  for (let parent = target.parentElement; parent; parent = parent.parentElement) {
+    if (parent.tagName === 'DETAILS') parent.open = true;
+  }
   target.scrollIntoView({block: 'start'});
 }));
 const collectionTutorial = document.querySelector('#collection-tutorial-button');

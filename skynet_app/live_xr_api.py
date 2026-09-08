@@ -8,11 +8,13 @@ from .live_xr import LiveXRService
 from .live_xr_catalog import catalog
 from .live_xr_review import LiveReviewService
 from .live_xr_video import LiveVideoService
+from .live_conversion import LiveConversionService
 
 router = APIRouter(prefix="/api/collection/live", tags=["collection"])
 service = LiveXRService(collection.database)
 reviews = LiveReviewService(service)
 videos = LiveVideoService(reviews)
+conversions = LiveConversionService(reviews)
 
 
 class StartRequest(BaseModel):
@@ -38,6 +40,7 @@ def overview():
     profile = checked(service.profile)
     return {
         "sessions": service.list(),
+        "conversions": conversions.list(),
         "catalog": catalog(),
         "license": service.consent(),
         "target": {
@@ -89,6 +92,36 @@ def logs(identifier: str):
 @router.get("/guide", response_class=PlainTextResponse)
 def guide():
     return (service.root / "docs/live-dexverse.md").read_text()
+
+
+class ConversionRequest(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    name: str
+    indices: list[int] | None = None
+
+
+@router.post("/sessions/{identifier}/conversions", status_code=202)
+def convert_session(identifier: str, request: ConversionRequest):
+    return checked(conversions.create, identifier, request.name, request.indices)
+
+
+@router.get("/conversions/{identifier}")
+def conversion_status(identifier: str):
+    return checked(conversions.refresh, identifier)
+
+
+@router.get("/conversions/{identifier}/logs", response_class=PlainTextResponse)
+def conversion_logs(identifier: str):
+    return checked(conversions.logs, identifier)
+
+
+@router.get("/conversions/{identifier}/{name}")
+def conversion_artifact(identifier: str, name: str):
+    return FileResponse(
+        checked(conversions.artifact, identifier, name),
+        filename=name,
+        headers={"X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.get("/sessions/{identifier}/recordings/{index}/review")

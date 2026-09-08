@@ -5,14 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Skynet Slurm experiment and evaluation console.">
     <title>Skynet / Experiment Console</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260907-live-review">
-    <script src="/static/app.js?v=20260906-hands-xr" defer></script>
-    <script src="/static/local-capture.js?v=20260905-cycle" defer></script>
-    <script src="/static/capture-processing.js?v=20260905-cycle" defer></script>
-    <script src="/static/collection-ui.js?v=20260907-simple" defer></script>
+    <link rel="stylesheet" href="/static/styles.css?v=20260908-collection-conversion">
+    <script src="/static/app.js?v=20260908-collection-conversion" defer></script>
+    <script src="/static/local-capture.js?v=20260908-collection-conversion" defer></script>
+    <script src="/static/capture-processing.js?v=20260908-collection-conversion" defer></script>
+    <script src="/static/collection-ui.js?v=20260908-collection-conversion" defer></script>
     <script src="/static/hands-ui.js?v=20260907-imported-hands-2" defer></script>
-    <script src="/static/live-review.js?v=20260907-video-review-5" defer></script>
-    <script src="/static/live-xr.js?v=20260907-session-state-2" defer></script>
+    <script src="/static/live-review.js?v=20260908-collection-conversion" defer></script>
+    <script src="/static/live-conversion.js?v=20260908-conversion" defer></script>
+    <script src="/static/live-xr.js?v=20260908-collection-conversion" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -924,17 +925,112 @@
 
           <div id="collection-error" class="inline-alert" role="alert" hidden></div>
           <nav class="data-subnav collection-view-nav" role="tablist" aria-label="Collection views">
-            <button id="collection-tab-recordings" type="button" role="tab" aria-selected="true" aria-controls="collection-view-recordings" data-collection-tab="recordings">Recordings <span id="collection-library-total"></span></button>
-            <button id="collection-tab-live" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="collection-view-live" data-collection-tab="live">Live teleoperation</button>
-            <button id="collection-tab-cycles" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="collection-view-cycles" data-collection-tab="cycles">DexVerse cycles <span id="collection-cycle-total"></span></button>
-            <button id="collection-tab-setup" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="collection-view-setup" data-collection-tab="setup">Setup &amp; integrations</button>
+            <button id="collection-tab-live" type="button" role="tab" aria-selected="true" aria-controls="collection-view-live" data-collection-tab="live">Teleoperate</button>
+            <button id="collection-tab-recordings" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="collection-view-recordings" data-collection-tab="recordings">Recordings <span id="collection-library-total"></span></button>
+            <button id="collection-tab-setup" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="collection-view-setup" data-collection-tab="setup">Setup</button>
           </nav>
           <div id="local-capture-error" class="inline-alert" role="alert" hidden></div>
           <div id="collection-view-recordings" data-collection-view="recordings" role="tabpanel" aria-labelledby="collection-tab-recordings">
+            <section class="panel table-panel">
+              <div class="panel-heading"><h2>Recordings</h2><span id="simulation-recordings-count" class="quiet-label" role="status">Loading…</span></div>
+              <div class="collection-filter-row"><div class="toolbar"><input id="simulation-recordings-search" type="search" aria-label="Find simulation recordings" placeholder="Filter hand, task or date"></div></div>
+              <p id="simulation-recordings-error" class="inline-alert" role="alert" hidden></p>
+              <div class="table-scroll"><table class="simulation-recordings-table"><thead><tr><th>Session</th><th>Recordings</th><th>Dataset</th><th>Actions</th></tr></thead><tbody id="simulation-recordings-body"><tr class="empty-row"><td colspan="4">Loading recordings…</td></tr></tbody></table></div>
+            </section>
+          </div>
+          <div id="collection-view-live" data-collection-view="live" role="tabpanel" aria-labelledby="collection-tab-live" hidden>
+            <section class="panel table-panel">
+              <div class="panel-heading"><h2>New session</h2><span id="live-xr-target" class="quiet-label">Loading server…</span></div>
+              <div class="live-xr-intro">
+                <form id="live-xr-start-form">
+                  <div class="form-grid">
+                    <div class="field"><label for="live-xr-hand">Simulated hand</label><select id="live-xr-hand" required disabled><option value="">Loading hands…</option></select></div>
+                    <div class="field"><label for="live-xr-task">Task</label><select id="live-xr-task" required disabled><option value="">Loading tasks…</option></select></div>
+                  </div>
+                  <p id="live-xr-selection-note" class="collection-section-help" role="status"></p>
+                  <label id="live-xr-consent-field" class="check-field"><input id="live-xr-consent" type="checkbox">I accept the <a id="live-xr-eula" href="https://developer.download.nvidia.com/cloudxr/EULA/NVIDIA_CloudXR_GA_License_without_Data_Collection_25Feb2025.pdf" target="_blank" rel="noreferrer">NVIDIA CloudXR license</a>.</label>
+                  <div class="form-actions"><button id="live-xr-start" class="button button-accent" type="submit">Start session</button><button id="live-xr-stop" class="button button-outline" type="button" disabled>Stop session</button></div>
+                </form>
+                <section id="live-xr-progress" class="live-xr-progress" aria-labelledby="live-xr-progress-title" hidden>
+                  <h3 id="live-xr-progress-title" role="status"></h3>
+                  <p id="live-xr-progress-context"></p>
+                  <ol id="live-xr-progress-steps" aria-label="Startup steps"></ol>
+                  <p id="live-xr-progress-error" class="inline-alert" role="alert" hidden></p>
+                </section>
+                <p class="live-xr-keypoint-legend"><span><i class="keypoint-dot keypoint-red" aria-hidden="true"></i>Red: human</span><span><i class="keypoint-dot keypoint-blue" aria-hidden="true"></i>Blue: robot</span></p>
+                <p id="live-xr-address" class="live-xr-address" hidden></p>
+                <button type="button" id="live-xr-open-recordings" class="text-button" hidden>Review saved recordings →</button>
+                <p id="live-xr-message" role="status">Loading live sessions…</p>
+                <p id="live-xr-error" class="inline-alert" role="alert" hidden></p>
+              </div>
+            </section>
+            <details class="collection-disclosure"><summary>Session history</summary>
+            <section class="panel table-panel">
+              <div class="panel-heading"><h2>Session history</h2></div>
+              <div class="table-scroll"><table><thead><tr><th>Session</th><th>Status</th><th>Server address</th><th>Actions</th></tr></thead><tbody id="live-xr-sessions"><tr class="empty-row"><td colspan="4">Loading…</td></tr></tbody></table></div>
+            </section>
+            </details>
+            <details id="live-xr-help" class="collection-disclosure">
+              <summary>Headset instructions</summary>
+              <div class="live-xr-help-body">
+                <ol class="live-xr-steps">
+                  <li>Open <strong>Isaac XR Teleop</strong>. Enter the session’s server address, then choose <strong>Connect</strong>.</li>
+                  <li>Keep your hand(s) visible and tap Start in the headset to begin recording.</li>
+                  <li><span id="live-xr-task-instructions">Choose a task to see its goal.</span></li>
+                  <li>Success saves the episode and resets the scene. Tap <strong>Start</strong> for the next episode. Use <strong>Review recordings</strong> to play a saved episode.</li>
+                </ol>
+                <p><strong>Restart episode</strong> discards the unfinished attempt. <strong>End collection</strong> or <strong>Stop session</strong> ends collection and keeps saved episodes.</p>
+                <ul id="live-xr-unavailable"></ul>
+                <a href="/api/collection/live/guide" target="_blank" rel="noreferrer">Setup and troubleshooting ↗</a>
+              </div>
+            </details>
+          </div>
+          <dialog id="conversion-dialog" class="collection-video-dialog" aria-labelledby="conversion-title">
+            <div class="panel-heading"><h3 id="conversion-title">Convert for training</h3><button id="conversion-close" class="button button-outline" type="button">Close</button></div>
+            <p id="conversion-context" class="secondary"></p>
+            <form id="conversion-form">
+              <div class="field"><label for="conversion-name">Dataset name</label><input id="conversion-name" maxlength="100" required></div>
+              <p>HDF5 · State observations and actions</p>
+              <details id="conversion-selection"><summary id="conversion-selection-summary">All recordings</summary><div class="form-actions"><button type="button" id="conversion-select-all" class="text-button">Select all</button><button type="button" id="conversion-select-none" class="text-button">Clear selection</button></div><div id="conversion-recordings" class="conversion-recordings"></div></details>
+              <div class="form-actions"><button id="conversion-submit" class="button button-accent" type="submit">Convert dataset</button></div>
+            </form>
+            <p id="conversion-status" role="status"></p><progress id="conversion-progress" hidden></progress>
+            <p id="conversion-error" class="inline-alert" role="alert" hidden></p>
+            <div id="conversion-result" hidden><p id="conversion-summary"></p><div class="form-actions"><a id="conversion-download" class="button button-accent" download>Download HDF5</a><button id="conversion-registry" class="button button-outline" type="button">View in dataset registry</button></div><details><summary>Dataset details</summary><pre id="conversion-details"></pre><a id="conversion-manifest" download>Download manifest</a></details></div>
+            <details><summary>Training compatibility</summary><p>Use a trainer that accepts DexVerse state HDF5. GR00T and OpenPI require a different dataset format. The dataset stays on the collection workstation and is available to download here. Cluster training requires a transfer.</p></details>
+            <div class="form-actions"><button id="conversion-new" type="button" class="button button-outline" hidden>Convert another selection</button><button id="conversion-retry" type="button" class="button button-outline" hidden>Retry conversion</button><button id="conversion-refresh" type="button" class="button button-outline" hidden>Refresh status</button><a id="conversion-logs" class="text-button" target="_blank" rel="noreferrer" hidden>Conversion log ↗</a></div>
+          </dialog>
+          <dialog id="live-review-dialog" class="collection-video-dialog" aria-labelledby="live-review-title">
+            <div class="panel-heading"><div><h3 id="live-review-title">Review recordings</h3><p id="live-review-context" class="secondary"></p></div><button id="live-review-close" class="button button-outline" type="button">Close review</button></div>
+            <div class="form-actions"><button id="live-review-convert" class="button button-outline" type="button">Convert for training</button></div>
+            <div class="field"><label for="live-review-recording">Recording</label><select id="live-review-recording"></select></div>
+            <p id="live-review-status" role="status">Loading recording…</p>
+            <button id="live-review-retry" class="button button-outline" type="button" hidden>Retry download</button>
+            <div id="live-review-content" hidden>
+              <div class="field"><label for="live-review-episode">Demonstration</label><select id="live-review-episode"></select></div>
+              <video id="live-review-video" controls playsinline preload="metadata" hidden aria-label="Recorded demonstration video"></video>
+              <p id="live-review-video-status" class="secondary" role="status"></p>
+              <div class="live-review-downloads"><button id="live-review-video-retry" class="button button-outline" type="button" hidden>Retry video</button><a id="live-review-video-download" class="text-button" download hidden>Download video</a></div>
+              <details id="live-review-data"><summary>Recorded values</summary>
+              <div class="live-review-downloads"><a id="live-review-original" class="text-button" download>Download original (.pkl)</a><a id="live-review-summary" class="text-button" download>Download summary</a><a id="live-review-json" class="text-button" download>Download preview values</a></div>
+              <div class="live-review-controls"><button id="live-review-prev" type="button" class="button button-outline">Previous frame</button><button id="live-review-play" type="button" class="button button-outline">Play values</button><button id="live-review-next" type="button" class="button button-outline">Next frame</button><output id="live-review-frame" aria-live="off"></output></div>
+              <label for="live-review-seek" class="secondary">Recorded scene frame</label><input id="live-review-seek" type="range" min="0" value="0" step="1">
+              <p id="live-review-time-note" class="secondary"></p>
+              <div class="field"><label for="live-review-field">Recorded value</label><select id="live-review-field"></select></div>
+              <p id="live-review-value-note" class="secondary"></p>
+              <div class="table-scroll live-review-values"><table><thead><tr><th>Component</th><th>Saved value</th></tr></thead><tbody id="live-review-values"></tbody></table></div>
+              <details><summary>Full scene state at this frame</summary><pre id="live-review-state"></pre></details>
+              </details>
+            </div>
+          </dialog>
+          <div id="collection-view-setup" data-collection-view="setup" role="tabpanel" aria-labelledby="collection-tab-setup" hidden>
+            <section class="panel collection-setup-card"><div class="panel-heading"><h2>Vision Pro teleoperation</h2></div><div class="collection-disclosure-body"><ol><li>Open Isaac XR Teleop on Vision Pro.</li><li>In Teleoperate, choose a hand and task, then start a session.</li><li>Connect to the displayed server address. Use Start, Restart and End collection in the headset.</li><li>Open Recordings to review episodes and convert them for training.</li></ol><a class="text-button" href="/api/collection/live/guide" target="_blank" rel="noreferrer">Setup and troubleshooting ↗</a></div></section>
+            <details id="collection-tracking-tools" class="collection-disclosure"><summary>Local tracking files <span id="collection-tracking-total" class="collection-summary-note"></span></summary>
+              <p class="collection-section-help">Hand/head motion only. These files do not contain simulated task demonstrations.</p>
             <section id="collection-recordings" class="panel table-panel">
               <div class="panel-heading panel-heading-tools">
                 <div>
-                  <h2 id="local-capture-heading">Recordings</h2>
+                  <h2 id="local-capture-heading">Local tracking files</h2>
                 </div>
                 <div class="panel-heading-actions">
                   <span id="local-capture-count" class="quiet-label" role="status">Loading…</span>
@@ -965,73 +1061,8 @@
                 <details><summary>Storage location</summary><p id="local-capture-storage" class="secondary"></p></details>
               </div>
             </section>
-          </div>
-          <div id="collection-view-live" data-collection-view="live" role="tabpanel" aria-labelledby="collection-tab-live" hidden>
-            <section class="panel table-panel">
-              <div class="panel-heading"><h2>New session</h2><span id="live-xr-target" class="quiet-label">Loading server…</span></div>
-              <div class="live-xr-intro">
-                <form id="live-xr-start-form">
-                  <div class="form-grid">
-                    <div class="field"><label for="live-xr-hand">Simulated hand</label><select id="live-xr-hand" required disabled><option value="">Loading hands…</option></select></div>
-                    <div class="field"><label for="live-xr-task">Task</label><select id="live-xr-task" required disabled><option value="">Loading tasks…</option></select></div>
-                  </div>
-                  <p id="live-xr-selection-note" class="collection-section-help" role="status"></p>
-                  <label id="live-xr-consent-field" class="check-field"><input id="live-xr-consent" type="checkbox">I accept the <a id="live-xr-eula" href="https://developer.download.nvidia.com/cloudxr/EULA/NVIDIA_CloudXR_GA_License_without_Data_Collection_25Feb2025.pdf" target="_blank" rel="noreferrer">NVIDIA CloudXR license</a>.</label>
-                  <div class="form-actions"><button id="live-xr-start" class="button button-accent" type="submit">Start live session</button><button id="live-xr-stop" class="button button-outline" type="button" disabled>Stop session</button></div>
-                </form>
-                <section id="live-xr-progress" class="live-xr-progress" aria-labelledby="live-xr-progress-title" hidden>
-                  <h3 id="live-xr-progress-title" role="status"></h3>
-                  <p id="live-xr-progress-context"></p>
-                  <ol id="live-xr-progress-steps" aria-label="Startup steps"></ol>
-                  <p id="live-xr-progress-error" class="inline-alert" role="alert" hidden></p>
-                </section>
-                <p class="live-xr-keypoint-legend"><span><i class="keypoint-dot keypoint-red" aria-hidden="true"></i>Red: human</span><span><i class="keypoint-dot keypoint-blue" aria-hidden="true"></i>Blue: robot</span></p>
-                <p id="live-xr-message" role="status">Loading live sessions…</p>
-                <p id="live-xr-error" class="inline-alert" role="alert" hidden></p>
-              </div>
-            </section>
-            <section class="panel table-panel">
-              <div class="panel-heading"><h2>Live sessions</h2></div>
-              <div class="table-scroll"><table><thead><tr><th>Session</th><th>Status</th><th>Server address</th><th>Actions</th></tr></thead><tbody id="live-xr-sessions"><tr class="empty-row"><td colspan="4">Loading…</td></tr></tbody></table></div>
-            </section>
-            <details id="live-xr-help" class="collection-disclosure">
-              <summary>Headset instructions</summary>
-              <div class="live-xr-help-body">
-                <ol class="live-xr-steps">
-                  <li>Open <strong>Isaac XR Teleop</strong>. Enter the session’s server address, then choose <strong>Connect</strong>.</li>
-                  <li>Keep your hand(s) visible and tap Start in the headset to begin recording.</li>
-                  <li><span id="live-xr-task-instructions">Choose a task to see its goal.</span></li>
-                  <li>Success saves the episode and resets the scene. Tap <strong>Start</strong> for the next episode. Use <strong>Review recordings</strong> to play a saved episode.</li>
-                </ol>
-                <p><strong>Restart episode</strong> discards the unfinished attempt. <strong>End collection</strong> or <strong>Stop session</strong> ends collection and keeps saved episodes.</p>
-                <ul id="live-xr-unavailable"></ul>
-                <a href="/api/collection/live/guide" target="_blank" rel="noreferrer">Setup and troubleshooting ↗</a>
-              </div>
             </details>
-          </div>
-          <dialog id="live-review-dialog" class="collection-video-dialog" aria-labelledby="live-review-title">
-            <div class="panel-heading"><div><h3 id="live-review-title">Review recordings</h3><p id="live-review-context" class="secondary"></p></div><button id="live-review-close" class="button button-outline" type="button">Close review</button></div>
-            <div class="field"><label for="live-review-recording">Recording</label><select id="live-review-recording"></select></div>
-            <p id="live-review-status" role="status">Loading recording…</p>
-            <button id="live-review-retry" class="button button-outline" type="button" hidden>Retry download</button>
-            <div id="live-review-content" hidden>
-              <div class="field"><label for="live-review-episode">Demonstration</label><select id="live-review-episode"></select></div>
-              <video id="live-review-video" controls playsinline preload="metadata" hidden aria-label="Recorded demonstration video"></video>
-              <p id="live-review-video-status" class="secondary" role="status"></p>
-              <div class="live-review-downloads"><button id="live-review-video-retry" class="button button-outline" type="button" hidden>Retry video</button><a id="live-review-video-download" class="text-button" download hidden>Download video</a></div>
-              <details id="live-review-data"><summary>Recorded values</summary>
-              <div class="live-review-downloads"><a id="live-review-original" class="text-button" download>Download original (.pkl)</a><a id="live-review-summary" class="text-button" download>Download summary</a><a id="live-review-json" class="text-button" download>Download preview values</a></div>
-              <div class="live-review-controls"><button id="live-review-prev" type="button" class="button button-outline">Previous frame</button><button id="live-review-play" type="button" class="button button-outline">Play values</button><button id="live-review-next" type="button" class="button button-outline">Next frame</button><output id="live-review-frame" aria-live="off"></output></div>
-              <label for="live-review-seek" class="secondary">Recorded scene frame</label><input id="live-review-seek" type="range" min="0" value="0" step="1">
-              <p id="live-review-time-note" class="secondary"></p>
-              <div class="field"><label for="live-review-field">Recorded value</label><select id="live-review-field"></select></div>
-              <p id="live-review-value-note" class="secondary"></p>
-              <div class="table-scroll live-review-values"><table><thead><tr><th>Component</th><th>Saved value</th></tr></thead><tbody id="live-review-values"></tbody></table></div>
-              <details><summary>Full scene state at this frame</summary><pre id="live-review-state"></pre></details>
-              </details>
-            </div>
-          </dialog>
-          <div id="collection-view-cycles" data-collection-view="cycles" role="tabpanel" aria-labelledby="collection-tab-cycles" hidden>
+            <details id="collection-legacy-cycles" class="collection-disclosure"><summary>Offline experiments &amp; history <span id="collection-cycle-total" class="collection-summary-note"></span></summary>
             <section class="panel table-panel" aria-labelledby="collection-roles-title">
               <div class="panel-heading"><div>
                 <h2 id="collection-roles-title">How the parts work together</h2>
@@ -1048,11 +1079,18 @@
                   </tbody>
                 </table>
               </div>
-              <div class="collection-table-footer"><span class="collection-section-help">This cycle uses a saved local recording. For immersive control inside the task, open Live teleoperation.</span></div>
+              <div class="collection-table-footer"><span class="collection-section-help">This cycle uses a saved local recording. For immersive control inside the task, open Teleoperate.</span></div>
+            </section>
+            <section id="collection-dexverse-setup" class="panel collection-setup-card"><div class="panel-heading"><div><h2>Offline experiment setup</h2>
+              <p class="collection-section-help">Offline recordings are motion tests: completing a cycle does not mean the robot achieved the task.</p></div></div>
+              <button id="capture-cycle-setup" type="button" class="button button-outline">Check / configure DexVerse</button>
+              <p id="capture-cycle-setup-message" class="collection-section-help" role="status">Uses the saved pipeline on sky2. The dashboard gateway selector does not change this route.</p>
+              <p><a href="/api/collection/processing/guide" target="_blank" rel="noopener">Setup and dataset guide</a></p>
+              <details><summary>DexVerse simulation setup</summary><p>DexVerse records robot actions and scene states inside Isaac Sim. Saved-recording replay needs a compatible NVIDIA GPU host, Isaac Sim 5.1.0, Isaac Lab 2.3.2 and robot assets. Live headset teleoperation additionally needs CloudXR and a compatible client. This cannot run on the Mac’s GPU.</p><p>The patched CloudXR 5.0.1 client builds and runs on the tested visionOS 2.5 headset. Streaming additionally requires a reachable GPU server; headset installation alone does not verify this connection. Local human tracking requires validated retargeting and simulation before it becomes a robot demonstration.</p><p><a href="https://isaac-sim.github.io/IsaacLab/v2.3.2/source/how-to/cloudxr_teleoperation.html" target="_blank" rel="noreferrer">Official Isaac Lab CloudXR setup guide</a>. The adapter below lists the remaining host, stream, and calibration requirements.</p></details>
             </section>
             <section id="collection-cycle-composer" class="panel table-panel" aria-labelledby="collection-cycle-title">
               <div class="panel-heading"><div>
-                <h2 id="collection-cycle-title">Process a recording</h2>
+                <h2 id="collection-cycle-title">Offline tracking experiment</h2>
                 <p class="collection-section-help">Simulation → dataset → training → evaluation.</p>
               </div></div>
               <form id="capture-cycle-form" class="dense-form">
@@ -1070,7 +1108,7 @@
                   </details>
                 </fieldset>
                 <div class="form-actions collection-cycle-actions">
-                  <button id="capture-cycle-start" type="submit" class="button button-accent" disabled>Run full cycle on cluster</button>
+                  <button id="capture-cycle-start" type="submit" class="button button-accent" disabled>Run offline experiment (trains and evaluates)</button>
                   <span class="collection-section-help collection-run-cost">Uses 1 GPU on sky2 · independent of the toolbar gateway</span>
                   <p class="collection-section-help">The same recording and settings reopen a saved cycle. Change the scene seed for a new attempt.</p>
                   <p id="capture-cycle-message" class="collection-section-help" role="status"></p>
@@ -1084,8 +1122,8 @@
               <div class="table-scroll"><table class="collection-cycle-table"><thead><tr><th>Cycle</th><th>State</th><th>Simulation &amp; dataset</th><th>Training</th><th>Evaluation</th><th>Actions</th></tr></thead><tbody id="capture-cycle-jobs" aria-live="polite"><tr class="empty-row"><td colspan="6">Loading cycles…</td></tr></tbody></table></div>
               <dialog id="capture-cycle-preview" class="collection-video-dialog" aria-labelledby="capture-cycle-preview-title"><div class="panel-heading"><div><h3 id="capture-cycle-preview-title">Replay</h3><p id="capture-cycle-preview-context"></p></div><button id="capture-cycle-close-preview" class="button button-outline" type="button">Close video</button></div><video id="capture-cycle-video" controls playsinline preload="metadata"></video><p id="capture-cycle-video-status" role="status">Loading video…</p><button id="capture-cycle-video-retry" type="button" class="button button-outline" hidden>Retry video</button></dialog>
             </section>
-          </div>
-          <div id="collection-view-setup" data-collection-view="setup" role="tabpanel" aria-labelledby="collection-tab-setup" hidden>
+            </details>
+            <details class="collection-disclosure"><summary>Install the local tracking recorder</summary>
             <section id="collection-headset-guide" class="panel collection-setup-card">
               <div class="panel-heading"><div><h2>Apple Vision Pro</h2><p class="collection-section-help">Local hand and head tracking. No NVIDIA GPU is needed to record.</p></div></div>
               <div class="collection-disclosure-body collection-guide">
@@ -1157,15 +1195,10 @@
                 </details>
               </div>
             </section>
-            <section id="collection-dexverse-setup" class="panel collection-setup-card"><div class="panel-heading"><div><h2>DexVerse processing</h2>
-              <p class="collection-section-help">Offline recordings are motion tests: completing a cycle does not mean the robot achieved the task.</p></div></div>
-              <button id="capture-cycle-setup" type="button" class="button button-outline">Check / configure DexVerse</button>
-              <p id="capture-cycle-setup-message" class="collection-section-help" role="status">Uses the saved pipeline on sky2. The dashboard gateway selector does not change this route.</p>
-              <p><a href="/api/collection/processing/guide" target="_blank" rel="noopener">Setup and dataset guide</a></p>
-              <details><summary>DexVerse simulation setup</summary><p>DexVerse records robot actions and scene states inside Isaac Sim. Saved-recording replay needs a compatible NVIDIA GPU host, Isaac Sim 5.1.0, Isaac Lab 2.3.2 and robot assets. Live headset teleoperation additionally needs CloudXR and a compatible client. This cannot run on the Mac’s GPU.</p><p>The patched CloudXR 5.0.1 client builds and runs on the tested visionOS 2.5 headset. Streaming additionally requires a reachable GPU server; headset installation alone does not verify this connection. Local human tracking requires validated retargeting and simulation before it becomes a robot demonstration.</p><p><a href="https://isaac-sim.github.io/IsaacLab/v2.3.2/source/how-to/cloudxr_teleoperation.html" target="_blank" rel="noreferrer">Official Isaac Lab CloudXR setup guide</a>. The adapter below lists the remaining host, stream, and calibration requirements.</p></details>
-            </section>
+            </details>
+
 <details id="collection-advanced" class="collection-disclosure">
- <summary>Live collection &amp; adapters <span class="collection-summary-note">Advanced · <span id="collection-adapter-count">Loading…</span> · <span id="collection-session-count">Loading…</span></span></summary>
+ <summary>Additional collection adapters <span class="collection-summary-note">Advanced · <span id="collection-adapter-count">Loading…</span> · <span id="collection-session-count">Loading…</span></span></summary>
  <div class="collection-disclosure-body">
           <section class="panel table-panel">
             <div class="panel-heading">

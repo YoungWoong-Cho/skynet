@@ -350,6 +350,10 @@
     if (!dialog.open) dialog.showModal();
     selectRecording(Number(select.value));
   };
+  el("live-review-convert").onclick = () => {
+    dialog.close();
+    window.openCollectionConversion(reviewSession);
+  };
   el("live-review-recording").onchange = (event) =>
     selectRecording(Number(event.target.value));
   document.addEventListener("visibilitychange", () => {

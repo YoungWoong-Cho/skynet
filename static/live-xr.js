@@ -43,7 +43,7 @@
   const visible = () =>
     !document.hidden &&
     !el("collection").hidden &&
-    !el("collection-view-live").hidden;
+    (!el("collection-view-live").hidden || !el("collection-view-recordings").hidden);
   function focusSession(id) {
     focusedSession = id;
     const url = new URL(location.href);
@@ -197,6 +197,7 @@
     render();
   }
   function render() {
+    window.renderSimulationRecordings?.(sessions);
     const body = el("live-xr-sessions");
     body.replaceChildren();
     if (!sessions.length) {
@@ -344,6 +345,20 @@
         );
     }
     const running = sessions.find((s) => !terminal.has(s.state));
+    const addressLine = el("live-xr-address");
+    addressLine.hidden = !running?.server_ready || !running.address || running.stop_requested;
+    addressLine.replaceChildren();
+    if (!addressLine.hidden) {
+      text(addressLine, "span", "Vision Pro server: ");
+      text(addressLine, "strong", running.address);
+      const copy = text(addressLine, "button", "Copy address", "text-button");
+      copy.type = "button";
+      copy.onclick = async () => {
+        try { await navigator.clipboard.writeText(running.address); copy.textContent = "Copied"; }
+        catch { error("Clipboard unavailable. Enter the displayed address in the headset."); }
+      };
+    }
+    el("live-xr-open-recordings").hidden = !sessions.some(s => s.recordings?.length);
     const active = !!running;
     if (catalog && running?.profile) {
       el("live-xr-hand").value = running.profile.robot;
@@ -393,7 +408,7 @@
             : sessionLabels[running.state]) || "Session active"
       : submitting
         ? "Starting…"
-        : "Start live session";
+        : "Start session";
   }
   function setupChoices(value) {
     catalog = value;
@@ -441,7 +456,7 @@
     if (persist) selectionWarning = null;
     const robot = el("live-xr-hand").value,
       task = el("live-xr-task").value;
-    const verified = catalog.verified_pairs.some(
+    const verified = sessions.some(s => s.profile?.robot === robot && s.profile?.task === task && s.recordings?.length) || catalog.verified_pairs.some(
       (pair) => pair.robot === robot && pair.task === task,
     );
     el("live-xr-selection-note").textContent =
@@ -470,7 +485,17 @@
           `${target.host} · ${target.duration_minutes} min limit`;
       }
       if (result.catalog && !catalog) setupChoices(result.catalog);
-      sessions = result.sessions;
+      // Older saved sessions predate the human-readable profile labels.
+      // Resolve labels from the same catalog used by the hand/task controls.
+      sessions = result.sessions.map(session => ({
+        ...session,
+        profile: {
+          ...session.profile,
+          task_name: session.profile.task_name || catalog?.tasks.find(task => task.key === session.profile.task)?.name,
+          hand_name: session.profile.hand_name || catalog?.hands.find(hand => hand.key === session.profile.robot)?.name,
+        },
+      }));
+      window.setCollectionConversions?.(result.conversions || []);
       el("live-xr-consent-field").hidden = result.license.accepted;
       el("live-xr-consent").required = !result.license.accepted;
       render();
@@ -488,6 +513,7 @@
       if (revision !== startedAtRevision) return;
       error(e.message);
       el("live-xr-message").textContent = "Status may be out of date.";
+      window.simulationRecordingsError?.(e.message);
     } finally {
       loading = false;
       if (visible())
@@ -535,6 +561,7 @@
     }
   };
   window.loadLiveXR = load;
+  el("live-xr-open-recordings").onclick = () => setCollectionView('recordings', {focus: true});
   document.addEventListener("visibilitychange", () => {
     if (visible()) load();
     else clearTimeout(timer);

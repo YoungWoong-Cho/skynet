@@ -15,7 +15,7 @@ function renderLocalCaptureRows() {
   });
   const reviewCount = localCaptureRows.filter(capture => capture.summary.warnings.length).length;
   document.querySelector('#local-capture-count').textContent = `${query || review ? `${rows.length} of ` : ''}${localCaptureRows.length} recordings${reviewCount ? ` · ${reviewCount} need review` : ''}`;
-  document.querySelector('#collection-library-total').textContent = localCaptureRows.length;
+  document.querySelector('#collection-tracking-total').textContent = localCaptureRows.length;
   document.querySelector('#local-capture-body').innerHTML = rows.length ? rows.map(capture => {
     const summary = capture.summary;
     const hands = summary.tracked_hand_frames;
@@ -26,7 +26,7 @@ function renderLocalCaptureRows() {
       <td data-label="Tracking" class="wrap-cell"><span class="state-pill ${summary.warnings.length ? 'is-mixed' : 'is-idle'}">${summary.warnings.length ? 'Review tracking' : 'Both hands and head recorded'}</span>${summary.warnings.map(warning => `<p class="collection-quality-warning">${escapeHtml(warning)}</p>`).join('')}
         ${!canReplay ? '<p class="collection-quality-warning">DexVerse needs at least 2 right-hand updates.</p>' : ''}
         <details><summary>Tracking details</summary><p>Left hand: ${escapeHtml(hands.left)} updates<br>Right hand: ${escapeHtml(hands.right)} updates<br>Head tracked: ${escapeHtml(summary.head_tracked_frames)} updates</p><p class="secondary">Recording ID: ${escapeHtml(capture.sha256.slice(0, 12))}</p></details></td>
-      <td data-label="Actions" class="row-actions"><div class="collection-record-actions"><button type="button" data-use-capture="${escapeHtml(capture.sha256)}" ${!canReplay || !localCapturesAvailable ? 'disabled' : ''}>Use in DexVerse</button><a class="row-action-link" href="/api/collection/local/captures/${encodeURIComponent(capture.sha256)}/download" download>Export original</a></div></td></tr>`;
+      <td data-label="Actions" class="row-actions"><div class="collection-record-actions"><button type="button" data-use-capture="${escapeHtml(capture.sha256)}" ${!canReplay || !localCapturesAvailable ? 'disabled' : ''}>Offline experiment</button><a class="row-action-link" href="/api/collection/local/captures/${encodeURIComponent(capture.sha256)}/download" download>Export original</a></div></td></tr>`;
   }).join('') : `<tr class="empty-row"><td colspan="4">${localCaptureRows.length ? 'No recordings match these filters. Clear the search or turn off “Needs review only”.' : 'No recordings yet. Open “How to record” to make one, or import an existing .jsonl file above.'}</td></tr>`;
 }
 async function loadLocalCollection(force = false, preferredDigest = null) {

@@ -1,3 +1,17 @@
+/* Collection uses the same panels, tables and controls as the data registry. */
+.simulation-recordings-table { min-width: 760px; }
+.simulation-recordings-table th:first-child { width: 34%; }
+.simulation-recordings-table th:nth-child(2) { width: 14%; }
+.simulation-recordings-table th:nth-child(3) { width: 23%; }
+.simulation-recordings-table .state-pill { white-space: nowrap; }
+.conversion-recordings { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 20px; max-height: 230px; overflow-y: auto; padding: 12px 0; }
+#conversion-dialog { width: min(680px, calc(100vw - 40px)); }
+#conversion-dialog progress { width: 100%; margin-bottom: 12px; }
+#conversion-dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+#conversion-dialog details { margin: 14px 0; }
+#conversion-dialog .form-actions, .live-xr-address { gap: 12px; flex-wrap: wrap; }
+.live-xr-address .text-button { margin-left: 14px; }
+.converted-dataset-highlight { outline: 2px solid var(--accent, #d8f05a); outline-offset: -2px; }
 :root {
   --ink: #20231f;
   --ink-soft: #343934;
@@ -1812,3 +1826,4 @@ footer {
 .keypoint-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .keypoint-red { background: #e34646; }
 .keypoint-blue { background: #00ccee; }
+.collection-video-dialog .form-actions > .text-button { align-self: center; }
