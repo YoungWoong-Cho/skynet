@@ -20,6 +20,39 @@ collection = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(collection)
 
 
+def test_stick_success_accepts_both_vertical_directions_without_relaxing_height():
+    def lift_and_tilt(env, min_height, threshold_rad, tilt_ge, **params):
+        angle = (
+            env.angle
+            if params.get("world_axis", (0, 0, 1))[2] > 0
+            else np.pi - env.angle
+        )
+        return (env.height >= min_height) & (angle <= threshold_rad)
+
+    term = SimpleNamespace(
+        func=lift_and_tilt,
+        params=dict(min_height=0.2, threshold_rad=np.pi / 6, tilt_ge=False),
+    )
+    fixed = collection.collection_success_term("Dexverse-PickUpStick-v0", term)
+    env = SimpleNamespace(
+        angle=np.deg2rad([0, 180, 29, 151, 31, 149, 90, 0, 180]),
+        height=np.array([0.25] * 7 + [0.19, 0.19]),
+    )
+    np.testing.assert_array_equal(
+        fixed.func(env, **fixed.params),
+        [True, True, True, True, False, False, False, False, False],
+    )
+    assert term.func is lift_and_tilt  # The pinned upstream task remains unchanged.
+    assert collection.collection_success_term("Dexverse-PickCube-v0", term) is term
+    with pytest.raises(ValueError, match="Unsupported stick success"):
+        collection.collection_success_term("Dexverse-PickUpStick-v0", None)
+    with pytest.raises(ValueError, match="Unsupported stick success"):
+        collection.collection_success_term(
+            "Dexverse-PickUpStick-v0",
+            SimpleNamespace(func=lift_and_tilt, params={"tilt_ge": True}),
+        )
+
+
 def human(side="right"):
     points = np.zeros((21, 3))
     for finger, y in enumerate([0.075, 0.03, 0, -0.025, -0.05]):

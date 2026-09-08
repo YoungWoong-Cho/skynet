@@ -1,0 +1,294 @@
+{
+  "date": "2026-09-07",
+  "host": "rl2-bonjour",
+  "scope": "Synthetic stick placements in real Isaac Sim, using the actual upstream success checker and recorder; not a headset manipulation test.",
+  "python_tests": 390,
+  "results": {
+    "left": {
+      "synthetic": true,
+      "robot": "floating_shadow_left",
+      "cases": [
+        {
+          "angle_degrees": 0,
+          "height_m": 0.25,
+          "quaternion_sign": 1,
+          "before": true,
+          "after": true
+        },
+        {
+          "angle_degrees": 0,
+          "height_m": 0.25,
+          "quaternion_sign": -1,
+          "before": true,
+          "after": true
+        },
+        {
+          "angle_degrees": 180,
+          "height_m": 0.25,
+          "quaternion_sign": 1,
+          "before": false,
+          "after": true
+        },
+        {
+          "angle_degrees": 180,
+          "height_m": 0.25,
+          "quaternion_sign": -1,
+          "before": false,
+          "after": true
+        },
+        {
+          "angle_degrees": 29,
+          "height_m": 0.25,
+          "quaternion_sign": 1,
+          "before": true,
+          "after": true
+        },
+        {
+          "angle_degrees": 29,
+          "height_m": 0.25,
+          "quaternion_sign": -1,
+          "before": true,
+          "after": true
+        },
+        {
+          "angle_degrees": 151,
+          "height_m": 0.25,
+          "quaternion_sign": 1,
+          "before": false,
+          "after": true
+        },
+        {
+          "angle_degrees": 151,
+          "height_m": 0.25,
+          "quaternion_sign": -1,
+          "before": false,
+          "after": true
+        },
+        {
+          "angle_degrees": 31,
+          "height_m": 0.25,
+          "quaternion_sign": 1,
+          "before": false,
+          "after": false
+        },
+        {
+          "angle_degrees": 31,
+          "height_m": 0.25,
+          "quaternion_sign": -1,
+          "before": false,
+          "after": false
+        },
+        {
+          "angle_degrees": 149,
+          "height_m": 0.25,
+          "quaternion_sign": 1,
+          "before": false,
+          "after": false
+        },
+        {
+          "angle_degrees": 149,
+          "height_m": 0.25,
+          "quaternion_sign": -1,
+          "before": false,
+          "after": false
+        },
+        {
+          "angle_degrees": 90,
+          "height_m": 0.25,
+          "quaternion_sign": 1,
+          "before": false,
+          "after": false
+        },
+        {
+          "angle_degrees": 90,
+          "height_m": 0.25,
+          "quaternion_sign": -1,
+          "before": false,
+          "after": false
+        },
+        {
+          "angle_degrees": 0,
+          "height_m": 0.19,
+          "quaternion_sign": 1,
+          "before": false,
+          "after": false
+        },
+        {
+          "angle_degrees": 0,
+          "height_m": 0.19,
+          "quaternion_sign": -1,
+          "before": false,
+          "after": false
+        },
+        {
+          "angle_degrees": 180,
+          "height_m": 0.19,
+          "quaternion_sign": 1,
+          "before": false,
+          "after": false
+        },
+        {
+          "angle_degrees": 180,
+          "height_m": 0.19,
+          "quaternion_sign": -1,
+          "before": false,
+          "after": false
+        }
+      ],
+      "saved_episodes": 2,
+      "success_hold_steps": 10,
+      "reset_clears_success": true
+    },
+    "right": {
+      "synthetic": true,
+      "robot": "floating_shadow_right",
+      "cases": [
+        {
+          "angle_degrees": 0,
+          "height_m": 0.25,
+          "quaternion_sign": 1,
+          "before": true,
+          "after": true
+        },
+        {
+          "angle_degrees": 0,
+          "height_m": 0.25,
+          "quaternion_sign": -1,
+          "before": true,
+          "after": true
+        },
+        {
+          "angle_degrees": 180,
+          "height_m": 0.25,
+          "quaternion_sign": 1,
+          "before": false,
+          "after": true
+        },
+        {
+          "angle_degrees": 180,
+          "height_m": 0.25,
+          "quaternion_sign": -1,
+          "before": false,
+          "after": true
+        },
+        {
+          "angle_degrees": 29,
+          "height_m": 0.25,
+          "quaternion_sign": 1,
+          "before": true,
+          "after": true
+        },
+        {
+          "angle_degrees": 29,
+          "height_m": 0.25,
+          "quaternion_sign": -1,
+          "before": true,
+          "after": true
+        },
+        {
+          "angle_degrees": 151,
+          "height_m": 0.25,
+          "quaternion_sign": 1,
+          "before": false,
+          "after": true
+        },
+        {
+          "angle_degrees": 151,
+          "height_m": 0.25,
+          "quaternion_sign": -1,
+          "before": false,
+          "after": true
+        },
+        {
+          "angle_degrees": 31,
+          "height_m": 0.25,
+          "quaternion_sign": 1,
+          "before": false,
+          "after": false
+        },
+        {
+          "angle_degrees": 31,
+          "height_m": 0.25,
+          "quaternion_sign": -1,
+          "before": false,
+          "after": false
+        },
+        {
+          "angle_degrees": 149,
+          "height_m": 0.25,
+          "quaternion_sign": 1,
+          "before": false,
+          "after": false
+        },
+        {
+          "angle_degrees": 149,
+          "height_m": 0.25,
+          "quaternion_sign": -1,
+          "before": false,
+          "after": false
+        },
+        {
+          "angle_degrees": 90,
+          "height_m": 0.25,
+          "quaternion_sign": 1,
+          "before": false,
+          "after": false
+        },
+        {
+          "angle_degrees": 90,
+          "height_m": 0.25,
+          "quaternion_sign": -1,
+          "before": false,
+          "after": false
+        },
+        {
+          "angle_degrees": 0,
+          "height_m": 0.19,
+          "quaternion_sign": 1,
+          "before": false,
+          "after": false
+        },
+        {
+          "angle_degrees": 0,
+          "height_m": 0.19,
+          "quaternion_sign": -1,
+          "before": false,
+          "after": false
+        },
+        {
+          "angle_degrees": 180,
+          "height_m": 0.19,
+          "quaternion_sign": 1,
+          "before": false,
+          "after": false
+        },
+        {
+          "angle_degrees": 180,
+          "height_m": 0.19,
+          "quaternion_sign": -1,
+          "before": false,
+          "after": false
+        }
+      ],
+      "saved_episodes": 2,
+      "success_hold_steps": 10,
+      "reset_clears_success": true
+    }
+  },
+  "headset_tested": true,
+  "headset_result": {
+    "user_confirmation": "now it works",
+    "state": "CAPTURED",
+    "saved_episodes": 1,
+    "steps": 151,
+    "scope": "Real Shadow left-hand stick pickup automatically completed and saved; repeated saves and reset rejection verified separately in the synthetic GPU tests."
+  },
+  "live_session": "d47ce157-9d87-4fea-b44b-c3285793d8f0",
+  "worker_sha256": "2baa89bdf180fe698584bfb4e47f0a12d2db8030523a4bc90e0ddeee87f474c6",
+  "browser_checks": [
+    "Selected Shadow left hand and Pick up stick",
+    "Goal explicitly accepts either end up",
+    "Started corrected scene through the collection page",
+    "Scene reached ready without errors"
+  ]
+}

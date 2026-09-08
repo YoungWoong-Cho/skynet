@@ -51,7 +51,7 @@ TASKS = [
     {
         "key": TASK,
         "name": "Pick up stick",
-        "instructions": "Lift the stick at least 20 cm above where it started, turn it vertical (within 30°), and hold it briefly.",
+        "instructions": "Lift the stick at least 20 cm, hold it vertical (within 30°, either end up), and keep it steady briefly.",
     },
     {
         "key": "Dexverse-PickCube-v0",

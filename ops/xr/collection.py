@@ -4,6 +4,7 @@ This module is frozen into each session capsule. Isaac is imported only by main.
 """
 
 from concurrent.futures import ThreadPoolExecutor
+import copy
 import hashlib
 import json
 import os
@@ -16,6 +17,30 @@ import time
 import uuid
 
 import numpy as np
+
+
+def collection_success_term(task, term):
+    """A stick has two equivalent ends; cups and other oriented tasks do not."""
+    if task != "Dexverse-PickUpStick-v0":
+        return term
+    if (
+        term is None
+        or getattr(term.func, "__name__", None) != "lift_and_tilt"
+        or term.params.get("tilt_ge") is not False
+    ):
+        raise ValueError(
+            "Unsupported stick success condition in this DexVerse revision"
+        )
+    original = term.func
+
+    def lift_stick_either_end(env, **params):
+        axis = params.get("world_axis", (0.0, 0.0, 1.0))
+        reverse = dict(params, world_axis=tuple(-value for value in axis))
+        return original(env, **params) | original(env, **reverse)
+
+    configured = copy.copy(term)
+    configured.func = lift_stick_either_end
+    return configured
 
 
 def atomic_json(path, value):
@@ -156,6 +181,10 @@ def run_loop(
         install_relative_wrist_tracking,
     )
 
+    task = cfg.get("task", recorder._metadata.get("task"))
+    success_term = collection_success_term(task, success_term)
+    if task == "Dexverse-PickUpStick-v0":
+        recorder._metadata["skynet_success_orientation"] = "stick_either_end_up_v1"
     store = EpisodeStore(root, recorder._metadata)
     executor = ThreadPoolExecutor(max_workers=1)
     start = ManualStart()
