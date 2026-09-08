@@ -3137,8 +3137,10 @@ class PipelineService:
                 "auto_resume": bool(payload.get("auto_resume", CLUSTER.defaults.checkpoint_auto_resume)),
                 "max_attempts": int(payload.get("max_attempts") or CLUSTER.defaults.max_attempts),
                 "final_selector": str(payload.get("checkpoint_final_selector") or "latest"),
-                "remove_training_state_after_success": bool(
-                    payload.get("remove_training_state_after_success", True)
+                "remove_training_state_after_success": (
+                    True
+                    if _frontend_parameter_is_unset(payload.get("remove_training_state_after_success"))
+                    else bool(payload["remove_training_state_after_success"])
                 ),
             },
         }

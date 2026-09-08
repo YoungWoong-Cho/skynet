@@ -183,6 +183,7 @@ def test_compiler_snapshots_adapter_checkpoint_lifecycle_fields():
             "checkpoint_candidate_kind": "directory",
             "checkpoint_basename_regex": r"\d+",
             "checkpoint_prune_globs": ["train_state"],
+            "training_output_prune_globs": ["artifacts/model-*.safetensors"],
             "checkpoint_inference_required_globs": ["params/*", "assets/*"],
         },
         deep=True,
@@ -196,6 +197,8 @@ def test_compiler_snapshots_adapter_checkpoint_lifecycle_fields():
     assert execution["checkpoint_candidate_kind"] == "directory"
     assert execution["checkpoint_basename_regex"] == r"\d+"
     assert execution["checkpoint_prune_globs"] == ["train_state"]
+    assert execution["training_output_prune_globs"] == ["artifacts/model-*.safetensors"]
+    assert execution["checkpoint"]["remove_training_state_after_success"] is True
     assert execution["checkpoint_inference_required_globs"] == ["params/*", "assets/*"]
 
 
@@ -630,3 +633,93 @@ def test_preparation_runs_before_training_and_reuses_only_verified_outputs(monke
             (third_capsule / "state" / "preparation.json").read_text()
         )
         assert third_state["steps"][0]["status"] == "failed"
+
+
+def _groot_retention_fixture(tmp_path):
+    from skynet_app.adapters import builtin_adapter_manifests
+
+    namespace = {"__name__": "skynet_retention_test"}
+    exec(compile(RUNNER_SOURCE, "runtime-wrapper.py", "exec"), namespace)
+    run = tmp_path / "run"
+    project = tmp_path / "project"
+    project.mkdir()
+    selected = run / "artifacts" / "checkpoint-1"
+    selected.mkdir(parents=True)
+    command = next(m for m in builtin_adapter_manifests() if m.slug == "groot").train
+    execution = command.model_dump(mode="json")
+    execution["checkpoint"] = make_spec().train.checkpoint.model_dump(mode="json")
+    for name in command.checkpoint_inference_required_globs:
+        if "*" not in name:
+            (selected / name).write_text("{}")
+    index = {"weight_map": {"layer1": "model-1.safetensors", "layer2": "model-2.safetensors"}}
+    (selected / "model.safetensors.index.json").write_text(json.dumps(index))
+    for number in (1, 2):
+        (selected / f"model-{number}.safetensors").write_bytes(f"weights-{number}".encode())
+        (selected.parent / f"model-{number}.safetensors").write_bytes(b"final-export")
+    (selected / "optimizer.pt").write_bytes(b"optimizer")
+    (selected.parent / "model.safetensors.index.json").write_text(json.dumps(index))
+    (run / "dataset.hdf5").write_bytes(b"untouched dataset")
+    return namespace, run, project, selected, execution
+
+
+def test_success_removes_optimizer_and_root_export_but_preserves_policy(tmp_path):
+    namespace, run, project, selected, execution = _groot_retention_fixture(tmp_path)
+    original = {p.name: p.read_bytes() for p in selected.iterdir() if p.name != "optimizer.pt"}
+    namespace["snapshot_checkpoints"](run, project, execution, final=False)
+    assert (selected / "optimizer.pt").exists()
+    assert (selected.parent / "model-1.safetensors").exists()
+    namespace["snapshot_checkpoints"](run, project, execution, final=True)
+    assert {p.name: p.read_bytes() for p in selected.iterdir()} == original
+    assert not list(selected.parent.glob("*.safetensors*"))
+    assert (run / "dataset.hdf5").read_bytes() == b"untouched dataset"
+    descriptor = json.loads((run / "checkpoints/selected-for-inference.json").read_text())
+    assert descriptor["cleanup"]["performed"] is True
+    assert "optimizer.pt" in descriptor["cleanup"]["removed"]
+    assert "artifacts/model-1.safetensors" in descriptor["cleanup"]["removed_outputs"]
+    assert descriptor["sha256"] == namespace["checkpoint_identity"](selected)["sha256"]
+    namespace["snapshot_checkpoints"](run, project, execution, final=True)
+    assert {p.name: p.read_bytes() for p in selected.iterdir()} == original
+
+
+@pytest.mark.parametrize("defect", ["missing_shard", "empty_shard", "escape", "overlap", "symlink", "indexed_state"])
+def test_unsafe_success_cleanup_does_not_delete_any_files(tmp_path, defect):
+    namespace, run, project, selected, execution = _groot_retention_fixture(tmp_path)
+    if defect == "missing_shard":
+        (selected / "model-2.safetensors").unlink()
+    elif defect == "empty_shard":
+        (selected / "model-2.safetensors").write_bytes(b"")
+    elif defect == "escape":
+        execution["training_output_prune_globs"] = ["../project/*"]
+    elif defect == "overlap":
+        execution["training_output_prune_globs"] = ["artifacts"]
+    elif defect == "symlink":
+        (project / "weights").write_bytes(b"external")
+        (selected.parent / "model-3.safetensors").symlink_to(project / "weights")
+    elif defect == "indexed_state":
+        (selected / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {"layer": "optimizer.pt"}})
+        )
+    with pytest.raises(RuntimeError):
+        namespace["snapshot_checkpoints"](run, project, execution, final=True)
+    assert (selected / "optimizer.pt").read_bytes() == b"optimizer"
+    assert (selected.parent / "model-1.safetensors").read_bytes() == b"final-export"
+    assert not (run / "checkpoints/selected-for-inference.json").exists()
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_runner_applies_inference_cleanup_only_after_success(tmp_path, monkeypatch, exit_code):
+    namespace, run, project, selected, execution = _groot_retention_fixture(tmp_path)
+    execution.update(argv=[sys.executable, "-c", f"raise SystemExit({exit_code})"],
+                     auto_resume=False, resume_argv=[], preparation_steps=[])
+    path = tmp_path / "execution.json"
+    path.write_text(json.dumps(execution))
+    for name, value in {"SKYNET_RUN_DIR": run, "SKYNET_SOURCE_DIR": project,
+                        "SKYNET_PROJECT_DIR": project, "SKYNET_CAPSULE_DIR": run}.items():
+        monkeypatch.setenv(name, str(value))
+    monkeypatch.setattr(sys, "argv", ["runner", str(path)])
+    monkeypatch.setitem(namespace, "write_runtime_manifest", lambda _: None)
+    monkeypatch.setattr(namespace["signal"], "signal", lambda *_: None)
+    assert namespace["main"]() == exit_code
+    assert (selected / "optimizer.pt").exists() == (exit_code != 0)
+    assert (selected.parent / "model-1.safetensors").exists() == (exit_code != 0)
+    assert (selected / "model-1.safetensors").exists()

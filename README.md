@@ -417,7 +417,8 @@ MLflow uses its own database. The application never writes directly to MLflow's 
 - A full-resume checkpoint should include model, optimizer, scheduler, scaler, RNG, and framework state where supported.
 - Auto-resume creates a new Slurm attempt for `PREEMPTED`, `TIMEOUT`, `NODE_FAIL`, and declared transient failures.
 - Syntax errors, invalid configs, OOM, and user cancellation are not blindly retried.
-- After successful training, the generic retention controller removes all but the selected checkpoint. Removing optimizer/scheduler tensors inside that selected framework checkpoint requires a versioned adapter-specific inference exporter; the controller does not mutate an unknown checkpoint format.
+- After successful training, keep only the selected policy checkpoint. Training-state cleanup is enabled by default (`train.checkpoint.remove_training_state_after_success`). OpenPI retains `params` and `assets` and removes `train_state`. GR00T retains its checkpoint's weights, configuration, processor, normalization statistics, and embodiment map; it removes optimizer/scheduler/RNG state and the trainer's redundant export at the root of `artifacts`.
+- Adapter contracts declare checkpoint-relative `checkpoint_prune_globs` and run-relative `training_output_prune_globs`. Cleanup validates inference files and every indexed model shard before deleting anything, rejects paths outside the run or overlapping the retained policy, then writes the final checkpoint path, digest, and cleanup receipt to `checkpoints/selected-for-inference.json`. The app registers this final identity for later evaluation. Unknown checkpoint formats are not unpacked or modified speculatively.
 - Logs, videos, failure records, and checkpoint lineage remain retained.
 - Evaluation resumes from its episode ledger. Completed `(checkpoint, suite, version, task, seed, episode_index)` entries are skipped and incomplete episodes restart.
 

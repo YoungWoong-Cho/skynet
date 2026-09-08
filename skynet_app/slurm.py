@@ -14,7 +14,7 @@ from pydantic import Field
 from skynet_app.adapters import AdapterPlan, resolve_gpu_count, resolve_gpu_type
 from skynet_app.cluster_config import CLUSTER
 from skynet_app.cluster_runtime import HOME_ROOT, SLURM_BIN
-from skynet_app.experiments import CanonicalModel, ExperimentSpec, WORK_ROOT, canonical_json, canonical_sha256
+from skynet_app.experiments import CanonicalModel, ExperimentSpec, WORK_ROOT, canonical_sha256
 
 
 RUNNER_SOURCE = r'''#!/usr/bin/env python3
@@ -494,6 +494,30 @@ def _checkpoint_satisfies_required_content(candidate, patterns):
     return True
 
 
+def _checkpoint_weight_index_files(selected):
+    # A wildcard matching one shard does not prove that a sharded model is complete.
+    required = []
+    if not selected.is_dir():
+        return required
+    for index in selected.glob("*.safetensors.index.json"):
+        try:
+            weights = json.loads(index.read_text())["weight_map"]
+            if not isinstance(weights, dict) or not weights:
+                raise ValueError("empty weight map")
+            for name in set(weights.values()):
+                path = selected / name
+                if Path(name).is_absolute() or ".." in Path(name).parts:
+                    raise ValueError(f"unsafe shard path: {name}")
+                path.resolve().relative_to(selected.resolve())
+                if not path.is_file() or path.stat().st_size == 0:
+                    raise ValueError(f"missing or empty shard: {name}")
+                required.append(path)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise RuntimeError(f"invalid inference weight index {index}: {error}") from error
+        required.append(index)
+    return required
+
+
 def _checkpoint_cleanup_plan(selected, execution, *, final):
     checkpoint = execution.get("checkpoint", {})
     required_patterns = execution.get("checkpoint_inference_required_globs", [])
@@ -507,6 +531,8 @@ def _checkpoint_cleanup_plan(selected, execution, *, final):
         if final and required_patterns
         else []
     )
+    if final:
+        required.extend(_checkpoint_weight_index_files(selected))
     cleanup_requested = bool(
         final and checkpoint.get("remove_training_state_after_success", False)
     )
@@ -539,6 +565,22 @@ def _checkpoint_cleanup_plan(selected, execution, *, final):
             else "pending"
         ),
     }
+
+
+def _training_output_cleanup_plan(run_dir, selected, execution, cleanup):
+    patterns = execution.get("training_output_prune_globs", [])
+    cleanup["output_prune_globs"] = list(patterns)
+    cleanup["removed_outputs"] = []
+    if not cleanup["requested"] or not patterns:
+        return []
+    if not execution.get("checkpoint_inference_required_globs"):
+        raise RuntimeError("training output cleanup requires an inference content contract")
+    targets = _checkpoint_glob_matches(run_dir, patterns, "training output prune glob")
+    _reject_overlapping_paths(targets, "training output prune targets")
+    for target in targets:
+        if _paths_overlap(target, selected):
+            raise RuntimeError(f"training output cleanup overlaps selected checkpoint: {target}")
+    return targets
 
 
 def _remove_checkpoint_path(path):
@@ -623,8 +665,10 @@ def snapshot_checkpoints(run_dir, project_dir, execution, *, final=False):
     required_patterns, _required, prune, cleanup = _checkpoint_cleanup_plan(
         selected, execution, final=final
     )
+    output_prune = _training_output_cleanup_plan(run_dir, selected, execution, cleanup)
     retained = {selected} if final else set(candidates[-max(1, keep_last) :])
     stale_candidates = [candidate for candidate in candidates if candidate not in retained]
+    _reject_overlapping_paths([*stale_candidates, *prune, *output_prune], "cleanup targets")
     # Validate every destructive target before removing anything. Otherwise a later
     # unsafe candidate could leave retention only partially applied.
     for stale in stale_candidates:
@@ -656,6 +700,9 @@ def snapshot_checkpoints(run_dir, project_dir, execution, *, final=False):
         relative = target.relative_to(selected.resolve()).as_posix()
         _remove_checkpoint_path(target)
         removed.append(relative)
+    for target in output_prune:
+        _remove_checkpoint_path(target)
+        cleanup["removed_outputs"].append(target.relative_to(run_dir).as_posix())
     if required_patterns:
         _checkpoint_glob_matches(
             selected,
@@ -663,12 +710,12 @@ def snapshot_checkpoints(run_dir, project_dir, execution, *, final=False):
             "required inference glob",
             require_each=True,
         )
-    cleanup["performed"] = bool(removed)
+    cleanup["performed"] = bool(removed or output_prune)
     cleanup["removed"] = removed
-    if cleanup["requested"] and cleanup["prune_globs"]:
+    if cleanup["requested"] and (cleanup["prune_globs"] or cleanup["output_prune_globs"]):
         cleanup["reason"] = (
-            "removed adapter-declared training-state content"
-            if removed
+            "removed adapter-declared training state and redundant outputs"
+            if cleanup["performed"]
             else "adapter prune globs matched no content"
         )
     identity = checkpoint_identity(selected)
@@ -945,6 +992,9 @@ def _execution_files(
         "checkpoint_prune_globs": (
             getattr(plan, "checkpoint_prune_globs", []) if is_training else []
         ),
+        "training_output_prune_globs": (
+            getattr(plan, "training_output_prune_globs", []) if is_training else []
+        ),
         "checkpoint_inference_required_globs": getattr(
             plan, "checkpoint_inference_required_globs", []
         ),
@@ -1023,7 +1073,6 @@ def _runtime_launch(spec: ExperimentSpec, wrapper_path: str, execution_path: str
             'if [[ -z "$UV_BIN" ]] && python3 -c "import uv" >/dev/null 2>&1; then UV_BIN="python3 -m uv"; fi',
         ]
         if runtime.bootstrap_uv:
-            version = _shell(runtime.uv_version)
             lines.extend(
                 [
                     'if [[ -z "$UV_BIN" ]]; then',

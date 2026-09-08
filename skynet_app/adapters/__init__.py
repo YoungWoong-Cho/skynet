@@ -285,6 +285,7 @@ class AdapterPlan(CanonicalModel):
     checkpoint_candidate_kind: CheckpointCandidateKind = "any"
     checkpoint_basename_regex: str | None = None
     checkpoint_prune_globs: list[str] = Field(default_factory=list)
+    training_output_prune_globs: list[str] = Field(default_factory=list)
     checkpoint_inference_required_globs: list[str] = Field(default_factory=list)
     progress: TrainingProgressContract | None = None
     blockers: list[str] = Field(default_factory=list)
@@ -306,6 +307,7 @@ class AdapterPlan(CanonicalModel):
     @field_validator(
         "checkpoint_globs",
         "checkpoint_prune_globs",
+        "training_output_prune_globs",
         "checkpoint_inference_required_globs",
     )
     @classmethod
@@ -751,6 +753,47 @@ runpy.run_path("gr00t/experiment/launch_finetune.py", run_name="__main__")
 '''
 
 
+GROOT_CHECKPOINT_CONTRACT = dict(
+    checkpoint_globs=["artifacts/checkpoint-*"],
+    checkpoint_candidate_kind="directory",
+    checkpoint_basename_regex=r"^checkpoint-[0-9]+$",
+    checkpoint_prune_globs=[
+        "global_step*",
+        "optimizer.pt",
+        "scheduler.pt",
+        "rng_state_*.pth",
+        "rng_state.pth",
+        "trainer_state.json",
+        "training_args.bin",
+        "zero_to_fp32.py",
+        "latest",
+    ],
+    training_output_prune_globs=[
+        "artifacts/model-*.safetensors",
+        "artifacts/model.safetensors",
+        "artifacts/model.safetensors.index.json",
+        "artifacts/optimizer.pt",
+        "artifacts/scheduler.pt",
+        "artifacts/rng_state*.pth",
+        "artifacts/training_args.bin",
+        "artifacts/config.json",
+        "artifacts/processor_config.json",
+        "artifacts/statistics.json",
+        "artifacts/embodiment_id.json",
+        "artifacts/processor",
+        "artifacts/experiment_cfg",
+    ],
+    checkpoint_inference_required_globs=[
+        "config.json",
+        "model.safetensors.index.json",
+        "model-*.safetensors",
+        "processor_config.json",
+        "statistics.json",
+        "embodiment_id.json",
+    ],
+)
+
+
 class GrootAdapter(RepositoryAdapter):
     supported_canonical_fields = frozenset(
         {
@@ -867,7 +910,7 @@ class GrootAdapter(RepositoryAdapter):
             },
             environment=environment,
             capsule_files=capsule_files,
-            checkpoint_globs=["artifacts/checkpoint-*"],
+            **GROOT_CHECKPOINT_CONTRACT,
             blockers=blockers,
             todos=[],
             warnings=["GR00T reports nondeterministic augmentation variance even when seeds are fixed."],
@@ -1607,6 +1650,7 @@ class CommandTemplate(CanonicalModel):
     checkpoint_candidate_kind: CheckpointCandidateKind = "any"
     checkpoint_basename_regex: str | None = None
     checkpoint_prune_globs: list[str] = Field(default_factory=list)
+    training_output_prune_globs: list[str] = Field(default_factory=list)
     checkpoint_inference_required_globs: list[str] = Field(default_factory=list)
     environment: dict[str, str] = Field(default_factory=dict)
     required_values: list[str] = Field(default_factory=list)
@@ -1631,6 +1675,7 @@ class CommandTemplate(CanonicalModel):
     @field_validator(
         "checkpoint_globs",
         "checkpoint_prune_globs",
+        "training_output_prune_globs",
         "checkpoint_inference_required_globs",
     )
     @classmethod
@@ -2524,6 +2569,8 @@ class ManifestAdapter(RepositoryAdapter):
                 legacy.checkpoint_basename_regex = command.checkpoint_basename_regex
             if command.checkpoint_prune_globs:
                 legacy.checkpoint_prune_globs = list(command.checkpoint_prune_globs)
+            if command.training_output_prune_globs:
+                legacy.training_output_prune_globs = list(command.training_output_prune_globs)
             if command.checkpoint_inference_required_globs:
                 legacy.checkpoint_inference_required_globs = list(
                     command.checkpoint_inference_required_globs
@@ -2603,6 +2650,7 @@ class ManifestAdapter(RepositoryAdapter):
             checkpoint_candidate_kind=command.checkpoint_candidate_kind,
             checkpoint_basename_regex=command.checkpoint_basename_regex,
             checkpoint_prune_globs=list(command.checkpoint_prune_globs),
+            training_output_prune_globs=list(command.training_output_prune_globs),
             checkpoint_inference_required_globs=list(
                 command.checkpoint_inference_required_globs
             ),
@@ -2635,6 +2683,7 @@ def _builtin_manifest(
     checkpoint_candidate_kind: CheckpointCandidateKind = "any",
     checkpoint_basename_regex: str | None = None,
     checkpoint_prune_globs: list[str] | None = None,
+    training_output_prune_globs: list[str] | None = None,
     checkpoint_inference_required_globs: list[str] | None = None,
     evaluations: list[EvaluationAdapterMetadata] | None = None,
     hyperparameter_defaults: AdapterHyperparameterDefaults | None = None,
@@ -2691,6 +2740,7 @@ def _builtin_manifest(
             checkpoint_candidate_kind=checkpoint_candidate_kind,
             checkpoint_basename_regex=checkpoint_basename_regex,
             checkpoint_prune_globs=checkpoint_prune_globs or [],
+            training_output_prune_globs=training_output_prune_globs or [],
             checkpoint_inference_required_globs=(
                 checkpoint_inference_required_globs or []
             ),
@@ -2916,26 +2966,7 @@ def builtin_adapter_manifests() -> list[AdapterManifest]:
                 "adapter-support/groot-gr1-modality.py": GROOT_GR1_MODALITY_CONFIG_SOURCE,
                 "adapter-support/groot-n16-launcher.py": GROOT_N16_LAUNCHER_SOURCE,
             },
-            checkpoint_globs=["artifacts/checkpoint-*"],
-            checkpoint_candidate_kind="directory",
-            checkpoint_basename_regex=r"^checkpoint-[0-9]+$",
-            checkpoint_prune_globs=[
-                "global_step*",
-                "scheduler.pt",
-                "rng_state_*.pth",
-                "trainer_state.json",
-                "training_args.bin",
-                "zero_to_fp32.py",
-                "latest",
-            ],
-            checkpoint_inference_required_globs=[
-                "config.json",
-                "model.safetensors.index.json",
-                "model-*.safetensors",
-                "processor_config.json",
-                "statistics.json",
-                "embodiment_id.json",
-            ],
+            **GROOT_CHECKPOINT_CONTRACT,
             evaluations=[
                 EvaluationAdapterMetadata(
                     environment="mujoco",

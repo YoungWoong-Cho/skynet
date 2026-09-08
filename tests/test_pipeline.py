@@ -1159,6 +1159,23 @@ def test_frontend_payload_resolves_to_canonical(monkeypatch):
         assert "precision" not in spec.native.overrides
 
 
+@pytest.mark.parametrize("value,expected", [(None, True), (True, True), (False, False), ("missing", True)])
+def test_frontend_checkpoint_cleanup_defaults_to_enabled(tmp_path, value, expected):
+    service = make_pipeline_service(Database(tmp_path / "skynet.db"), FakeCluster())
+    payload = {
+        "name": "retention-default",
+        "adapter": "egoverse",
+        "source": {"repository": "https://github.com/GaTech-RL2/EgoVerse", "revision": COMMIT},
+        "runtime": {"type": "existing"},
+        "resources": {"queue_policy": "normal", "gpu_mode": "manual", "gpus_per_node": 1,
+                      "gpu_type": "a40", "nodes": 1, "time_limit": "04:00:00"},
+    }
+    if value != "missing":
+        payload["remove_training_state_after_success"] = value
+    spec = service.normalize_spec(payload)
+    assert spec.train.checkpoint.remove_training_state_after_success is expected
+
+
 def test_openpi_blank_frontend_parameters_preserve_repository_defaults(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         service = make_pipeline_service(Database(Path(directory) / "skynet.db"), FakeCluster())
