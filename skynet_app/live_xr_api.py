@@ -41,6 +41,11 @@ def overview():
     return {
         "sessions": service.list(),
         "conversions": conversions.list(),
+        "conversion_target": {
+            key: value
+            for key, value in conversions.target().items()
+            if key in {"gateway", "account", "partition", "execution"}
+        },
         "catalog": catalog(),
         "license": service.consent(),
         "target": {

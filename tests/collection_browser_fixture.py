@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
@@ -44,87 +45,101 @@ ClusterClient.ssh = disabled_ssh
 files, outcomes, polls = {}, {}, {}
 
 
-class Transport:
-    def ssh(self, host, command, stdin=None, **_):
-        if stdin:
-            capsule = json.loads(stdin)
-            request = json.loads(capsule["files"]["request.json"])
-            root = request["root"]
-            buf = io.BytesIO()
-            with h5py.File(buf, "w") as h5:
-                for i in range(len(request["sources"])):
-                    g = h5.create_group(f"data/demo_{i}")
-                    g["actions"] = np.ones((3, 28), dtype=np.float32) * i
-                    g["obs/proprio/joint_pos"] = np.ones((3, 28), dtype=np.float32)
-                h5.attrs["fixture"] = (
-                    "Synthetic browser QA, not collected training data"
-                )
-            raw = buf.getvalue()
-            meta = dict(
-                format=FORMAT,
-                task=request["profile"]["task"],
-                robot=request["profile"]["robot"],
-                episodes=len(request["sources"]),
-                steps=3 * len(request["sources"]),
-                action_dim=28,
-                observation_shapes={"proprio/joint_pos": [28]},
-                sources=request["sources"],
-                converter_sha256=request["converter_sha256"],
-                artifact=dict(
-                    sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw)
-                ),
-            )
-            manifest = canonical_json(meta).encode()
-            files[root + "/dataset.hdf5"] = raw
-            files[root + "/manifest.json"] = manifest
-            outcomes[root] = dict(
-                state="READY",
-                metadata=meta,
-                manifest=dict(
-                    sha256=hashlib.sha256(manifest).hexdigest(),
-                    size_bytes=len(manifest),
-                ),
-            )
-            if "broken" in request["session_id"]:
-                outcomes[root] = dict(
-                    state="FAILED",
-                    error="Synthetic QA failure: recording checksum changed. Original data was preserved.",
-                )
-            polls[root] = 0
-            return '{"returncode":0}'
-        root = next((r for r in outcomes if r in command), None)
-        if command.startswith("tail"):
-            return "Synthetic conversion log. No GPU or SSH connection was used."
-        if not root:
-            raise ValueError("Unknown QA conversion")
-        polls[root] += 1
-        if polls[root] < 2:
-            result = dict(state="QUEUED", detail="Synthetic QA: waiting for GPU…")
-        elif polls[root] < 4:
-            result = dict(
-                state="RUNNING",
-                detail="Synthetic QA: converting episode 1 of 2…",
-                total=2,
-                completed=1,
-            )
-        else:
-            result = outcomes[root]
-        return json.dumps(
-            dict(
-                result,
-                service={
-                    "ActiveState": "active",
-                    "SubState": "running",
-                    "ExecMainStatus": "0",
-                },
-            )
+class FixtureCluster:
+    """Only scheduler and remote artifacts are simulated; never opens SSH."""
+
+    def submit_script(self, script, identifier, gateway, **_):
+        assert "#SBATCH --gres=gpu:rtx_6000:1" in script
+        request = json.loads(
+            (qa_root / "conversions" / identifier / "request.json").read_text()
         )
+        root = request["root"]
+        buf = io.BytesIO()
+        with h5py.File(buf, "w") as h5:
+            for i in range(len(request["sources"])):
+                g = h5.create_group(f"data/demo_{i}")
+                g["actions"] = np.ones((3, 28), dtype=np.float32) * i
+                g["obs/proprio/joint_pos"] = np.ones((3, 28), dtype=np.float32)
+            h5.attrs["fixture"] = "Synthetic browser QA, not collected training data"
+        raw = buf.getvalue()
+        meta = dict(
+            format=FORMAT,
+            task=request["profile"]["task"],
+            robot=request["profile"]["robot"],
+            episodes=len(request["sources"]),
+            steps=3 * len(request["sources"]),
+            action_dim=28,
+            observation_shapes={"proprio/joint_pos": [28]},
+            sources=request["sources"],
+            converter_sha256=request["converter_sha256"],
+            artifact=dict(sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw)),
+        )
+        manifest = canonical_json(meta).encode()
+        files[root + "/dataset.hdf5"] = raw
+        files[root + "/manifest.json"] = manifest
+        outcomes[root] = dict(
+            state="READY",
+            metadata=meta,
+            manifest=dict(
+                sha256=hashlib.sha256(manifest).hexdigest(), size_bytes=len(manifest)
+            ),
+        )
+        if "broken" in request["session_id"]:
+            outcomes[root] = dict(
+                state="FAILED",
+                error="Synthetic QA failure: recording checksum changed. Original data was preserved.",
+            )
+        polls[root] = 0
+        return SimpleNamespace(job_id=identifier)
+
+    def job_statuses(self, identifiers, gateway):
+        job = api.conversions.get(identifiers[0])
+        root = job["dataset_root"]
+        polls[root] += 1
+        state = (
+            "PENDING"
+            if polls[root] < 2
+            else "RUNNING"
+            if polls[root] < 4
+            else "COMPLETED"
+        )
+        return gateway, {identifiers[0]: {"State": state, "Reason": "Synthetic QA"}}
+
+    def ssh(self, host, command, **_):
+        root = next((r for r in outcomes if r in command), None)
+        if not root:
+            raise ValueError(
+                "External connections are disabled in the browser QA fixture"
+            )
+        if polls[root] < 2:
+            return "{}"
+        if polls[root] < 4:
+            return json.dumps(
+                dict(
+                    state="RUNNING",
+                    detail="Synthetic QA: converting episode 1 of 2…",
+                    total=2,
+                    completed=1,
+                )
+            )
+        return json.dumps(outcomes[root])
+
+    def read_log(self, *_, **__):
+        return "sky2", "Synthetic conversion log. No GPU or SSH connection was used."
 
     def file_size(self, path, host):
         return host, len(files[path])
 
     def stream_file_range(self, path, host, start, end):
         yield files[path][start : end + 1]
+
+
+class FixtureConversion(LiveConversionService):
+    def launch(self, job, transport):
+        # The fixture has no physical recording files or external filesystem.
+        # Exercise the real submission and polling paths after simulated staging.
+        job = self.update(job["id"], staged=True)
+        return super().launch(job, transport)
 
 
 profile = dict(
@@ -164,8 +179,12 @@ sessions = [
 ]
 api.service.list = lambda: sessions
 api.service.get = lambda identifier: next(s for s in sessions if s["id"] == identifier)
-api.service.transport = lambda _: Transport()
-api.conversions = LiveConversionService(api.reviews, qa_root / "conversions")
+api.conversions = FixtureConversion(
+    api.reviews, qa_root / "conversions", cluster=FixtureCluster()
+)
+# Resolve the real, read-only configuration without a simulated SSH connection.
+api.conversions.cluster.candidates = ClusterClient().candidates
+api.conversions.cluster._remote_path = ClusterClient._remote_path
 app = FastAPI()
 app.include_router(api.router)
 app.include_router(data_router)

@@ -134,6 +134,7 @@ def convert(request):
     from arrays import ArrayUnpickler
 
     root = Path(request["root"])
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
     profile, sources = request["profile"], request["sources"]
     status_path = root / "status.json"
 
@@ -147,7 +148,16 @@ def convert(request):
     partial = root / "dataset.partial.hdf5"
     try:
         publish(state="RUNNING", detail="Checking saved recordings…")
-        payloads = [load_recording(s, profile, ArrayUnpickler) for s in sources]
+        staged = request["staged_sources"]
+        if len(staged) != len(sources) or any(
+            (a["index"], a["sha256"]) != (b["index"], b["sha256"])
+            for a, b in zip(sources, staged)
+        ):
+            raise ValueError("Staged recordings differ from the requested originals")
+        payloads = [load_recording(s, profile, ArrayUnpickler) for s in staged]
+        (root / "source-manifest.json").write_text(
+            json.dumps(sources, sort_keys=True, separators=(",", ":"))
+        )
         episodes = [
             (s, p, ep) for s, p in zip(sources, payloads) for ep in p["episodes"]
         ]
@@ -162,11 +172,33 @@ def convert(request):
             Path(profile["repository"])
             / "scripts/demo_tools/create_demo_files_sequential.py"
         )
-        revision = subprocess.check_output(
-            ["git", "-C", profile["repository"], "rev-parse", "HEAD"], text=True
-        ).strip()
+        repository = Path(profile["repository"])
+        if (repository / ".git").exists():
+            revision = subprocess.check_output(
+                ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+            ).strip()
+        else:
+            # The existing Slurm setup installs a verified git archive, not a
+            # checkout. It records the revision after verifying every source file.
+            revision = (repository / ".skynet-source-revision").read_text().strip()
         if revision != profile["source_revision"]:
             raise ValueError("DexVerse source revision differs from the recording")
+        if file_info(converter)["sha256"] != request["upstream_converter_sha256"]:
+            raise ValueError(
+                "The installed DexVerse converter differs from the pinned source"
+            )
+        # Check the allocated GPU before Isaac starts; its shutdown path can
+        # otherwise hide CUDA initialization errors behind a successful exit.
+        import torch
+
+        if not torch.cuda.is_available():
+            raise ValueError("Slurm did not provide a usable CUDA GPU")
+        capability = torch.cuda.get_device_capability(0)
+        if capability < (7, 5):
+            raise ValueError(
+                f"Unsupported GPU {torch.cuda.get_device_name(0)}: CUDA capability "
+                f"{capability[0]}.{capability[1]}; this runtime requires 7.5 or newer"
+            )
         sys.path.insert(0, str(converter.parent))
         sys.argv = [
             str(converter),
@@ -181,7 +213,6 @@ def convert(request):
         ns = runpy.run_path(str(converter), run_name="skynet_dataset_converter")
         app = ns["simulation_app"]
         import gymnasium as gym
-        import torch
         from dexverse.tasks.utils import (
             parse_env_cfg,
             strip_camera_cfgs,
@@ -227,7 +258,7 @@ def convert(request):
         writer = ns["PerPickleH5Writer"](
             partial,
             task_name=profile["task"],
-            source_pickles=[Path(s["path"]) for s in sources],
+            source_pickles=[Path(s["path"]) for s in staged],
             obs_groups=groups,
             rgb_dtype="uint8",
             depth_dtype="float32",

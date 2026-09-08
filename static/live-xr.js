@@ -496,6 +496,7 @@
         },
       }));
       window.setCollectionConversions?.(result.conversions || []);
+      window.setConversionTarget?.(result.conversion_target);
       el("live-xr-consent-field").hidden = result.license.accepted;
       el("live-xr-consent").required = !result.license.accepted;
       render();

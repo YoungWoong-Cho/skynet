@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from skynet_app.cluster_runtime import ClusterError
+from skynet_app.cluster_runtime import ClusterError, SubmissionOutcomeUnknown, WORK_ROOT
 from skynet_app.database import Database, canonical_json
 from skynet_app.live_conversion import FORMAT, LiveConversionService
 from skynet_app.live_xr_review import ArrayUnpickler, LiveReviewService
@@ -50,7 +50,27 @@ def conversion(tmp_path, monkeypatch):
     )
     db = Database(tmp_path / "test.sqlite")
     live = SimpleNamespace(root=ROOT, database=db, get=lambda _: session)
-    service = LiveConversionService(LiveReviewService(live), tmp_path / "conversions")
+    service = LiveConversionService(
+        LiveReviewService(live, tmp_path / "reviews"), tmp_path / "conversions"
+    )
+    monkeypatch.setattr(
+        service,
+        "target",
+        lambda: dict(
+            profile,
+            execution="slurm",
+            gateway="sky2",
+            work_root=WORK_ROOT,
+            repository=WORK_ROOT + "/repos/dexverse",
+            runtime=WORK_ROOT + "/envs/isaac",
+            account="overcap",
+            partition="overcap",
+            local_source=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(
+        "skynet_app.live_conversion.pinned_converter_digest", lambda _: "c" * 64
+    )
     calls = []
     monkeypatch.setattr(service, "dispatch", calls.append)
     return service, session, calls
@@ -101,36 +121,75 @@ def test_changed_sources_produce_new_version_but_failed_attempts_can_retry(conve
 def test_ssh_loss_does_not_report_remote_work_failed(conversion):
     service, _, _ = conversion
     job = service.create("session", "Cube")
+    service.update(job["id"], job_id="1234")
 
     def offline(*a, **kw):
         raise ClusterError("SSH timed out")
 
-    service.live.transport = lambda _: SimpleNamespace(ssh=offline)
+    service.cluster = SimpleNamespace(job_statuses=offline)
     service.work(job["id"])
     state = service.get(job["id"])
     assert state["state"] == "PREPARING"
-    assert "unavailable" in state["connection_error"]
+    assert "timed out" in state["connection_error"]
     assert service.create("session", "Cube")["id"] == job["id"]
 
 
 def test_launch_capsule_is_stable_after_an_uncertain_acknowledgement(conversion):
-    service, _, _ = conversion
+    service, session, _ = conversion
     job = service.create("session", "Cube")
-    capsules = []
+    service.update(job["id"], staged=True)
+    submissions = []
 
-    def send(*a, **kw):
-        capsules.append(json.loads(kw["stdin"]))
-        return '{"returncode":0}'
+    def submit(script, identifier, gateway, **kwargs):
+        submissions.append((script, identifier, gateway, kwargs))
+        if len(submissions) == 1:
+            raise SubmissionOutcomeUnknown("Lost acknowledgement")
+        return SimpleNamespace(job_id="1234")
 
-    transport = SimpleNamespace(ssh=send)
-    service.launch(job, transport)
-    service.update(job["id"], connection_error="Lost response")
-    service.launch(service.get(job["id"]), transport)
-    assert capsules[0] == capsules[1]
-    script = capsules[0]["files"]["run.sh"]
-    assert "flock --wait 1800" in script
+    service.cluster = SimpleNamespace(
+        submit_script=submit,
+        job_statuses=lambda *_: (
+            "sky2",
+            {"1234": {"State": "PENDING", "Reason": "Resources"}},
+        ),
+        ssh=lambda *a, **k: "{}",
+    )
+    service.work(job["id"])
+    assert service.get(job["id"])["state"] == "SUBMISSION_UNKNOWN"
+    service.work(job["id"])
+    assert service.get(job["id"])["state"] == "QUEUED"
+    assert submissions[0] == submissions[1]
+    script = submissions[0][0]
+    assert "#SBATCH --gres=gpu:1" in script
+    assert "#SBATCH --partition=overcap" in script
     assert "convert_dataset.py" in script
+    assert "flock" not in script and "systemd" not in script
     assert "training" not in script and "evaluation" not in script
+    request = json.loads((service.root / job["id"] / "request.json").read_text())
+    assert request["root"] == job["dataset_root"]
+    assert request["root"].startswith(
+        WORK_ROOT + "/datasets/derivatives/dexverse-live/"
+    )
+    assert all(
+        s["path"].startswith(job["root"] + "/recordings/")
+        for s in request["staged_sources"]
+    )
+    assert request["sources"][0]["path"].startswith(session["root"])
+    assert request["profile"]["robot"] == session["profile"]["robot"]
+    assert request["profile"]["task"] == session["profile"]["task"]
+    assert request["profile"]["execution"] == "slurm"
+
+
+def test_conversion_gpu_uses_existing_cluster_aliases(conversion):
+    from skynet_app.capture_processing.slurm import compile_isaac_job
+
+    service, _, _ = conversion
+    profile = dict(service.target(), gpu_type="rtx_6000")
+    script = compile_isaac_job(profile, WORK_ROOT + "/jobs/runs/test", "test", ["true"])
+    assert "#SBATCH --gres=gpu:rtx_6000:1" in script
+    profile["gpu_type"] = "made-up-gpu"
+    with pytest.raises(ValueError, match="GPU type is not configured"):
+        compile_isaac_job(profile, WORK_ROOT + "/jobs/runs/test", "test", ["true"])
 
 
 def metadata(job, raw):
@@ -153,8 +212,8 @@ def test_verified_download_registers_dataset_bundle_and_lineage_once(conversion)
     m = metadata(job, raw)
     manifest = canonical_json(m).encode()
     files = {
-        job["root"] + "/dataset.hdf5": raw,
-        job["root"] + "/manifest.json": manifest,
+        job["dataset_root"] + "/dataset.hdf5": raw,
+        job["dataset_root"] + "/manifest.json": manifest,
     }
     transport = SimpleNamespace(
         file_size=lambda path, host: (host, len(files[path])),
@@ -176,7 +235,8 @@ def test_verified_download_registers_dataset_bundle_and_lineage_once(conversion)
     assert first["bundle_id"] == second["bundle_id"]
     version = service.database.get_data_resource_version(first["version_id"])
     assert version["format"] == FORMAT
-    assert version["metadata"]["storage_location"] == "workstation"
+    assert version["metadata"]["storage_location"] == "cluster"
+    assert version["path"] == job["dataset_root"] + "/dataset.hdf5"
     assert version["derivation_id"]
     assert len(service.database.list_data_bundles()) == 1
     assert service.artifact(job["id"], "dataset.hdf5").read_bytes() == raw
@@ -203,19 +263,100 @@ def test_truncated_download_is_never_published(conversion):
     assert not (service.root / job["id"] / "dataset.part").exists()
 
 
-def test_queue_exit_and_worker_errors_are_explicit(conversion):
+@pytest.mark.parametrize(
+    "state", ["TIMEOUT", "CANCELLED", "OUT_OF_MEMORY", "FAILED", "PREEMPTED"]
+)
+def test_queue_exit_and_worker_errors_are_explicit(conversion, state):
     service, _, _ = conversion
     job = service.create("session", "Cube")
-    service.update(job["id"], launched=True)
-    result = dict(
-        state="QUEUED", service={"ActiveState": "failed", "ExecMainStatus": "75"}
-    )
-    service.live.transport = lambda _: SimpleNamespace(
-        ssh=lambda *a, **k: json.dumps(result)
+    service.update(job["id"], job_id="1234", launched=True)
+    service.cluster = SimpleNamespace(
+        job_statuses=lambda *_: ("sky2", {"1234": {"State": state}}),
+        ssh=lambda *a, **k: "{}",
     )
     service.work(job["id"])
     assert service.get(job["id"])["state"] == "FAILED"
-    assert "GPU remained busy" in service.get(job["id"])["error"]
+    assert state in service.get(job["id"])["error"]
+
+
+def test_ready_worker_is_not_published_before_slurm_completion(conversion):
+    service, _, _ = conversion
+    job = service.create("session", "Cube")
+    service.update(job["id"], job_id="1234")
+    service.cluster = SimpleNamespace(
+        job_statuses=lambda *_: ("sky2", {"1234": {"State": "RUNNING"}}),
+        ssh=lambda *a, **k: '{"state":"READY"}',
+    )
+    service.work(job["id"])
+    assert service.get(job["id"])["state"] == "RUNNING"
+    assert service.database.list_data_resources() == []
+
+
+def test_missing_result_is_not_a_successful_dataset(conversion, monkeypatch):
+    service, _, _ = conversion
+    job = service.create("session", "Cube")
+    service.update(job["id"], job_id="1234")
+    service.cluster = SimpleNamespace(
+        job_statuses=lambda *_: ("sky2", {"1234": {"State": "COMPLETED"}}),
+        ssh=lambda *a, **k: "{}",
+    )
+    monkeypatch.setattr("skynet_app.live_conversion.time.time", lambda: 1000)
+    service.work(job["id"])
+    assert service.get(job["id"])["state"] == "RUNNING"
+    assert service.database.list_data_resources() == []
+    monkeypatch.setattr("skynet_app.live_conversion.time.time", lambda: 1121)
+    service.work(job["id"])
+    assert service.get(job["id"])["state"] == "FAILED"
+    assert "without a verified dataset" in service.get(job["id"])["error"]
+
+
+def test_shared_storage_delay_recovers_same_completed_job(conversion, monkeypatch):
+    service, _, _ = conversion
+    job = service.create("session", "Cube")
+    service.update(job["id"], job_id="1234")
+    result = {}
+    service.cluster = SimpleNamespace(
+        job_statuses=lambda *_: ("sky2", {"1234": {"State": "COMPLETED"}}),
+        ssh=lambda *a, **k: json.dumps(result),
+    )
+    service.work(job["id"])
+    assert service.get(job["id"])["state"] == "RUNNING"
+    result["state"] = "READY"
+    completed = []
+    monkeypatch.setattr(service, "finish", lambda j, *_: completed.append(j["job_id"]))
+    service.work(job["id"])
+    assert completed == ["1234"]
+    assert len(service.list()) == 1
+
+
+def test_corrupt_cached_input_cannot_be_submitted(conversion):
+    service, _, _ = conversion
+    job = service.create("session", "Cube")
+    directory = service.reviews.directory("session", 0)
+    directory.mkdir(parents=True)
+    (directory / "recording.pkl").write_bytes(b"changed")
+    with pytest.raises(ValueError, match="checksum changed"):
+        service.local_recording(job, job["sources"][0])
+
+
+def test_input_copy_failure_can_retry_without_submitting_a_gpu_job(
+    conversion, monkeypatch
+):
+    service, _, _ = conversion
+    job = service.create("session", "Cube")
+    calls = []
+    monkeypatch.setattr(
+        service.reviews,
+        "status",
+        lambda *_: {"state": "FAILED", "error": "Source server unavailable"},
+    )
+    monkeypatch.setattr(service.reviews, "create", lambda *args: calls.append(args))
+    assert service.local_recording(job, job["sources"][0]) is None
+    job = service.get(job["id"])
+    with pytest.raises(ValueError, match="Source server unavailable"):
+        service.local_recording(job, job["sources"][0])
+    assert calls == [("session", 0)]
+    assert not job.get("job_id")
 
 
 @pytest.fixture

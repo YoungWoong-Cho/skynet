@@ -8,21 +8,57 @@ import json
 from pathlib import Path
 import re
 import shlex
+import subprocess
 import threading
+import time
 from uuid import uuid4
 
 from .database import canonical_json, utc_now
 from .live_xr import TERMINAL
 from .live_xr_review import ArrayUnpickler
+from .cluster_runtime import (
+    ClusterClient,
+    ClusterError,
+    SubmissionOutcomeUnknown,
+    WORK_ROOT,
+)
+from .capture_processing.service import upload_capture
+from .capture_processing.slurm import compile_isaac_job
+from .simulation_hands import upload as upload_hand
 
 FORMAT = "dexverse-demo-hdf5/v1"
-PENDING = {"PREPARING", "QUEUED", "RUNNING", "DOWNLOADING"}
+PENDING = {
+    "PREPARING",
+    "SUBMITTING",
+    "SUBMISSION_UNKNOWN",
+    "QUEUED",
+    "RUNNING",
+    "DOWNLOADING",
+}
+
+
+def pinned_converter_digest(profile):
+    upstream = subprocess.run(
+        [
+            "git",
+            "-C",
+            profile["local_source"],
+            "show",
+            profile["source_revision"]
+            + ":scripts/demo_tools/create_demo_files_sequential.py",
+        ],
+        capture_output=True,
+        check=True,
+        timeout=20,
+    ).stdout
+    return hashlib.sha256(upstream).hexdigest()
 
 
 class LiveConversionService:
-    def __init__(self, reviews, root=None):
+    def __init__(self, reviews, root=None, cluster=None):
         self.reviews, self.live = reviews, reviews.live
         self.database = self.live.database
+        self.cluster = cluster or ClusterClient()
         self.root = Path(root or self.live.root / "data/live-conversions")
         self.lock, self.active = threading.RLock(), set()
         self.stopping, self.monitor = threading.Event(), None
@@ -48,6 +84,45 @@ class LiveConversionService:
     @cached_property
     def version(self):
         return hashlib.sha256(canonical_json(self.sources).encode()).hexdigest()
+
+    def target(self):
+        config = json.loads(
+            (self.live.root / "config/live_conversion.json").read_text()
+        )
+        key = config["pipeline_key"]
+        profiles = json.loads(
+            (self.live.root / "config/capture_pipelines.json").read_text()
+        )["pipelines"]
+        profile = next((p for p in profiles if p["key"] == key), None)
+        if profile is None:
+            raise ValueError(
+                "Configure an existing DexVerse Slurm pipeline for conversion"
+            )
+        self.cluster.candidates(profile["gateway"])
+        for name in ("repository", "runtime", "asset_bundle"):
+            self.cluster._remote_path(profile[name])
+        return dict(
+            profile, execution="slurm", work_root=WORK_ROOT, gpu_type=config["gpu_type"]
+        )
+
+    def profile(self, session):
+        profile = self.target()
+        original = session["profile"]
+        if profile["source_revision"] != original["source_revision"]:
+            raise ValueError(
+                "The Slurm pipeline and recording use different DexVerse revisions"
+            )
+        for key in ("robot", "task", "hand", "hand_name", "task_name"):
+            if key in original:
+                profile[key] = original[key]
+        if original.get("hand_bundle"):
+            bundle = original["hand_bundle"]
+            if not re.fullmatch(r"[a-f0-9]{64}", bundle["digest"]):
+                raise ValueError("Recording has an invalid hand bundle identity")
+            profile["hand_bundle"] = dict(
+                bundle, root=f"{WORK_ROOT}/hands/{profile['robot']}/{bundle['digest']}"
+            )
+        return profile
 
     def start(self):
         if self.monitor and self.monitor.is_alive():
@@ -103,10 +178,6 @@ class LiveConversionService:
         session = self.live.get(session_id)
         if session["state"] not in TERMINAL:
             raise ValueError("End collection before converting its saved recordings")
-        if session["profile"].get("execution") != "workstation":
-            raise ValueError(
-                "Conversion of older cluster recordings is unsupported; select a workstation collection"
-            )
         files = session.get("recordings", [])
         if not files:
             raise ValueError("This session has no saved recordings")
@@ -121,6 +192,7 @@ class LiveConversionService:
         name = name.strip()
         if not name or len(name) > 100 or any(ord(c) < 32 for c in name):
             raise ValueError("Dataset name must be 1–100 characters")
+        profile = self.profile(session)
         sources = []
         for i in sorted(indices):
             _, path = self.reviews.source(session_id, i)
@@ -132,7 +204,13 @@ class LiveConversionService:
             sources.append(dict(index=i, path=path, sha256=checksum))
         fingerprint = hashlib.sha256(
             canonical_json(
-                dict(session=session_id, sources=sources, converter=self.version)
+                dict(
+                    session=session_id,
+                    sources=sources,
+                    converter=self.version,
+                    profile=profile,
+                    launcher=inspect.getsource(compile_isaac_job),
+                )
             ).encode()
         ).hexdigest()
         with self.lock:
@@ -157,15 +235,19 @@ class LiveConversionService:
                 fingerprint=fingerprint,
                 converter_sha256=self.version,
                 sources=sources,
-                profile=session["profile"],
-                gateway=session["gateway"],
-                root=session["profile"]["work_root"] + "/conversions/" + identifier,
+                profile=profile,
+                source_profile=session["profile"],
+                source_gateway=session["gateway"],
+                gateway=profile["gateway"],
+                root=f"{WORK_ROOT}/jobs/runs/{identifier}",
+                dataset_root=f"{WORK_ROOT}/datasets/derivatives/dexverse-live/{session_id}/{identifier}",
                 created_at=utc_now(),
                 indices=sorted(indices),
             )
             directory = self.root / identifier
             directory.mkdir(parents=True, exist_ok=True)
             (directory / "worker-sources.json").write_text(canonical_json(self.sources))
+            self.save_capsule(value, directory)
             with self.database.transaction() as c:
                 c.execute(
                     "INSERT INTO live_conversions VALUES (?,?)",
@@ -183,127 +265,224 @@ class LiveConversionService:
 
     def refresh(self, identifier):
         job = self.get(identifier)
+        if (
+            job["state"] == "FAILED"
+            and job.get("job_id")
+            and job.get("scheduler", {}).get("State") == "COMPLETED"
+            and job.get("error")
+            == "Slurm completed without a verified dataset. Open the conversion log."
+        ):
+            job = self.update(
+                identifier,
+                state="RUNNING",
+                detail="Checking the completed dataset…",
+                result_wait_since=time.time(),
+                error=None,
+            )
         if job["state"] in PENDING:
             self.dispatch(identifier)
         return job
 
-    @staticmethod
-    def unit(identifier):
-        return "skynet-convert-" + identifier + ".service"
+    def save_capsule(self, job, directory):
+        """Freeze the exact request and shared Slurm script before submission."""
+        profile = job["profile"]
+        request = dict(
+            root=job["dataset_root"],
+            profile=profile,
+            sources=job["sources"],
+            staged_sources=[
+                dict(s, path=f"{job['root']}/recordings/{s['index']}.pkl")
+                for s in job["sources"]
+            ],
+            session_id=job["session_id"],
+            converter_sha256=job["converter_sha256"],
+            upstream_converter_sha256=pinned_converter_digest(profile),
+        )
+        (directory / "request.json").write_text(canonical_json(request))
+        files = {**self.sources, "request.json": canonical_json(request)}
+        checks = [
+            f'printf "%s  %s\\n" {hashlib.sha256(content.encode()).hexdigest()} {shlex.quote(job["root"] + "/" + name)} | sha256sum --check --status'
+            for name, content in files.items()
+        ]
+        script = compile_isaac_job(
+            profile,
+            job["root"],
+            "dexverse-convert-" + job["id"][:8],
+            [
+                profile["runtime"] + "/bin/python",
+                job["root"] + "/convert_dataset.py",
+                job["root"] + "/request.json",
+            ],
+            checks=checks,
+            after=[
+                shlex.join(
+                    [
+                        profile["runtime"] + "/bin/python",
+                        "-c",
+                        "import json,sys; s=json.load(open(sys.argv[1])); assert s.get('state') == 'READY', s",
+                        job["dataset_root"] + "/status.json",
+                    ]
+                )
+            ],
+        )
+        (directory / "job.sbatch").write_text(script)
+
+    def local_recording(self, job, source):
+        directory = self.reviews.directory(job["session_id"], source["index"])
+        path = directory / "recording.pkl"
+        if path.is_file():
+            if not 0 < path.stat().st_size <= 100 * 1024 * 1024:
+                raise ValueError("Recording is empty or exceeds 100 MB")
+            with path.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            if digest != source["sha256"]:
+                raise ValueError(
+                    "Cached recording checksum changed; original data was preserved"
+                )
+            return path
+        # Download-only reuse of the existing review service. No GPU work runs
+        # on the collection host; only the original bytes are retrieved.
+        status = self.reviews.status(job["session_id"], source["index"])
+        requested = job.get("requested_inputs", [])
+        if status["state"] == "FAILED" and source["index"] in requested:
+            raise ValueError(
+                f"Could not copy recording {source['index'] + 1} from {job['source_gateway']}: "
+                + status["error"]
+            )
+        if source["index"] not in requested:
+            self.update(job["id"], requested_inputs=[*requested, source["index"]])
+        self.reviews.create(job["session_id"], source["index"])
+        return None
 
     def launch(self, job, transport):
-        q = shlex.quote
-        p, root = job["profile"], job["root"]
-        script = (
-            "#!/bin/bash\nset -euo pipefail\ncd "
-            + q(p["repository"])
-            + "\n"
-            + "export OMNI_KIT_ACCEPT_EULA=YES PYTHONUNBUFFERED=1\n"
-            + "export LD_LIBRARY_PATH="
-            + q(p["runtime"] + "/lib")
-            + "\n"
-            + "export PYTHONPATH="
-            + q(p["repository"] + "/source/dexverse")
-            + "\n"
-            + "export PATH="
-            + q(p["runtime"] + "/bin")
-            + ':"$PATH"\n'
-            + "exec flock --wait 1800 --conflict-exit-code=75 "
-            + q(p["work_root"] + "/.gpu-session.lock")
-            + " timeout -k 10 3600 "
-            + q(p["runtime"] + "/bin/python")
-            + " "
-            + q(root + "/convert_dataset.py")
-            + " "
-            + q(root + "/request.json")
-            + "\n"
-        )
-        # A remote receipt is written before launch; reconnects recover this unit
-        # instead of starting duplicate GPU work after an uncertain response.
-        launcher = """import json,subprocess,sys
+        if not job.get("staged"):
+            paths = []
+            for source in job["sources"]:
+                path = self.local_recording(job, source)
+                if path is None:
+                    self.update(
+                        job["id"],
+                        detail=f"Copying recording {source['index'] + 1} from {job['source_gateway']}…",
+                        connection_error=None,
+                    )
+                    return False
+                paths.append(path)
+            profile = job["profile"]
+            probe = """import json,sys
 from pathlib import Path
-v=json.load(sys.stdin); root=Path(v['root']); root.mkdir(parents=True,exist_ok=True)
-for name,content in v['files'].items():
- p=root/name
- if p.exists() and p.read_text()!=content: raise ValueError('Conversion capsule changed: '+name)
- if not p.exists(): p.write_text(content)
-receipt=root/'launch.json'
-try:
- with receipt.open('x') as f: json.dump({'attempted':True},f)
-except FileExistsError: pass
-else:
- result=subprocess.run(v['argv'],capture_output=True,text=True,timeout=25)
- temp=receipt.with_suffix('.tmp'); temp.write_text(json.dumps({'returncode':result.returncode,'error':result.stderr.strip()})); temp.replace(receipt)
-print(receipt.read_text())
+p=json.load(sys.stdin); repo=Path(p['repository']); runtime=Path(p['runtime'])
+print(json.dumps({'runtime':(runtime/'bin/python').is_file(), 'revision':(repo/'.skynet-source-revision').read_text().strip() if (repo/'.skynet-source-revision').is_file() else '', 'converter':(repo/'scripts/demo_tools/create_demo_files_sequential.py').is_file()}))
 """
-        worker_sources = json.loads(
-            (self.root / job["id"] / "worker-sources.json").read_text()
-        )
-        if (
-            hashlib.sha256(canonical_json(worker_sources).encode()).hexdigest()
-            != job["converter_sha256"]
-        ):
-            raise ValueError("The saved converter source changed")
-        request = {
-            k: job[k]
-            for k in ("root", "profile", "sources", "converter_sha256", "session_id")
-        }
-        files = dict(
-            worker_sources,
-            **{
-                "request.json": canonical_json(request),
-                "source-manifest.json": canonical_json(job["sources"]),
-                "run.sh": script,
-            },
-        )
-        command = [
-            "systemd-run",
-            "--user",
-            "--quiet",
-            "--unit=" + self.unit(job["id"]),
-            "--service-type=exec",
-            "--remain-after-exit",
-            "--property=RuntimeMaxSec=5500",
-            "--property=KillMode=control-group",
-            "--property=MemoryMax=24G",
-            "--property=MemorySwapMax=1G",
-            "--property=CPUQuota=400%",
-            "--property=UMask=0077",
-            "--property=StandardOutput=append:" + root + "/conversion.log",
-            "--property=StandardError=append:" + root + "/conversion.log",
-            "/bin/bash",
-            root + "/run.sh",
-        ]
-        receipt = json.loads(
-            transport.ssh(
-                job["gateway"],
-                "python3 -c " + q(launcher),
-                stdin=canonical_json(dict(root=root, files=files, argv=command)),
-                timeout=40,
+            check = json.loads(
+                transport.ssh(
+                    job["gateway"],
+                    "python3 -c " + shlex.quote(probe),
+                    stdin=canonical_json(profile),
+                    timeout=20,
+                )
             )
-        )
-        if receipt.get("returncode"):
-            raise ValueError(
-                "Could not start conversion: "
-                + receipt.get("error", "Unknown service error")
-            )
+            if (
+                not check["runtime"]
+                or not check["converter"]
+                or check["revision"] != profile["source_revision"]
+            ):
+                raise ValueError(
+                    "The configured Slurm DexVerse runtime/source is not ready. Use the existing DexVerse setup before retrying."
+                )
+            if profile.get("hand_bundle"):
+                bundle = profile["hand_bundle"]
+                local = (
+                    self.live.root
+                    / "data/simulation-hands"
+                    / profile["robot"]
+                    / bundle["digest"]
+                )
+                if not (local / "manifest.json").is_file():
+                    raise ValueError(
+                        "The recording's original hand bundle is missing locally; a different model cannot be substituted"
+                    )
+                if (
+                    upload_hand(local, WORK_ROOT, transport, job["gateway"])
+                    != bundle["root"]
+                ):
+                    raise ValueError(
+                        "Uploaded hand bundle path differs from the saved request"
+                    )
+            for number, (source, path) in enumerate(zip(job["sources"], paths), 1):
+                self.update(
+                    job["id"],
+                    detail=f"Uploading recording {number} of {len(paths)} to {job['gateway']}…",
+                )
+                upload_capture(
+                    transport,
+                    path,
+                    job["id"],
+                    source["sha256"],
+                    job["gateway"],
+                    relative_path=f"recordings/{source['index']}.pkl",
+                )
+            directory = self.root / job["id"]
+            files = json.loads((directory / "worker-sources.json").read_text())
+            if (
+                hashlib.sha256(canonical_json(files).encode()).hexdigest()
+                != job["converter_sha256"]
+            ):
+                raise ValueError("The saved converter source changed")
+            files["request.json"] = (directory / "request.json").read_text()
+            for name, content in files.items():
+                transport.write_capsule_file(job["id"], name, content, job["gateway"])
+            self.update(job["id"], staged=True, connection_error=None)
+        script = (self.root / job["id"] / "job.sbatch").read_text()
         self.update(
-            job["id"], state="QUEUED", detail="Waiting for the GPU…", launched=True
+            job["id"],
+            state="SUBMITTING",
+            detail=f"Submitting to Slurm via {job['gateway']}…",
         )
+        try:
+            submission = transport.submit_script(
+                script, job["id"], job["gateway"], submission_key=job["id"]
+            )
+        except SubmissionOutcomeUnknown:
+            raise
+        except ClusterError as exc:
+            # ClusterClient distinguishes a definitive sbatch rejection from
+            # an uncertain acknowledgement; never invent a second protocol.
+            raise ValueError("Slurm rejected conversion: " + str(exc)) from exc
+        self.update(
+            job["id"],
+            state="QUEUED",
+            detail="Waiting for a Slurm GPU allocation…",
+            job_id=submission.job_id,
+            launched=True,
+            connection_error=None,
+        )
+        return True
 
     def work(self, identifier):
         try:
             job = self.get(identifier)
-            transport = self.live.transport(job)
-            if not job.get("launched"):
-                self.launch(job, transport)
+            if job["profile"].get("execution") != "slurm":
+                raise ValueError(
+                    "This older workstation conversion cannot restart. Retry as a new Slurm conversion."
+                )
+            transport = self.cluster
+            if not job.get("job_id"):
+                if not self.launch(job, transport):
+                    return
                 job = self.get(identifier)
-            reader = """import json,subprocess,sys
+            _, states = transport.job_statuses([job["job_id"]], job["gateway"])
+            scheduler = states.get(job["job_id"])
+            if not scheduler:
+                raise ClusterError(
+                    "Slurm has not reported this job's status yet; its submission is preserved"
+                )
+            reader = """import json,sys
 from pathlib import Path
-p=Path(sys.argv[1]); state=json.loads(p.read_text()) if p.exists() else {'state':'QUEUED','detail':'Waiting for the GPU…'}
-r=subprocess.run(['systemctl','--user','show',sys.argv[2],'--property=ActiveState,SubState,ExecMainStatus'],capture_output=True,text=True,timeout=10)
-state['service']=dict(line.split('=',1) for line in r.stdout.splitlines() if '=' in line)
-print(json.dumps(state))
+p=Path(sys.argv[1])
+if p.exists():
+ if p.stat().st_size>2000000: raise ValueError('Conversion status exceeds limit')
+ print(p.read_text())
+else: print('{}')
 """
             result = json.loads(
                 transport.ssh(
@@ -311,65 +490,90 @@ print(json.dumps(state))
                     "python3 -c "
                     + shlex.quote(reader)
                     + " "
-                    + shlex.quote(job["root"] + "/status.json")
-                    + " "
-                    + shlex.quote(self.unit(identifier)),
+                    + shlex.quote(job["dataset_root"] + "/status.json"),
                     timeout=20,
                 )
             )
-            system = result.pop("service")
-            if result["state"] == "READY":
-                self.update(
-                    identifier,
-                    state="DOWNLOADING",
-                    detail="Verifying and registering dataset…",
-                    connection_error=None,
-                )
-                self.finish(job, result, transport)
-            elif result["state"] == "FAILED":
+            state = scheduler["State"].split()[0].rstrip("+")
+            self.update(identifier, scheduler=scheduler, connection_error=None)
+            if result.get("state") == "FAILED":
                 self.update(
                     identifier,
                     state="FAILED",
                     error=result.get("error", "Conversion failed"),
-                    connection_error=None,
                 )
-            elif (
-                system.get("ActiveState") in {"failed", "inactive"}
-                or system.get("SubState") == "exited"
-            ):
-                code = system.get("ExecMainStatus")
-                message = (
-                    "GPU remained busy for 30 minutes. End collection and retry."
-                    if code == "75"
-                    else "Conversion stopped before producing a complete dataset. Open its log and retry."
-                )
+            elif state == "COMPLETED":
+                if result.get("state") != "READY":
+                    # The gateway's NFS attribute cache can lag the compute
+                    # node after atomic result publication. Allow visibility to
+                    # catch up; do not resubmit or register unverified output.
+                    since = job.get("result_wait_since", time.time())
+                    if time.time() - since >= 120:
+                        raise ValueError(
+                            "Slurm completed without a verified dataset. Open the conversion log."
+                        )
+                    self.update(
+                        identifier,
+                        state="RUNNING",
+                        result_wait_since=since,
+                        detail="Waiting for the completed dataset to appear on shared storage…",
+                        error=None,
+                    )
+                    return
                 self.update(
-                    identifier, state="FAILED", error=message, connection_error=None
+                    identifier,
+                    state="DOWNLOADING",
+                    detail="Verifying and registering dataset…",
                 )
-            else:
+                self.finish(job, result, transport)
+            elif state in {
+                "FAILED",
+                "TIMEOUT",
+                "OUT_OF_MEMORY",
+                "NODE_FAIL",
+                "PREEMPTED",
+                "CANCELLED",
+                "BOOT_FAIL",
+                "DEADLINE",
+            }:
+                self.update(
+                    identifier,
+                    state="FAILED",
+                    error=f"Slurm job {job['job_id']} ended as {state}. Open the conversion log.",
+                )
+            elif state in {"RUNNING", "COMPLETING"}:
+                detail = (
+                    "Finalizing dataset…"
+                    if result.get("state") == "READY"
+                    else result.get("detail", "Starting DexVerse on the allocated GPU…")
+                )
                 fields = {
                     k: result[k]
-                    for k in (
-                        "state",
-                        "detail",
-                        "completed",
-                        "total",
-                        "steps",
-                        "total_steps",
-                    )
+                    for k in ("completed", "total", "steps", "total_steps")
                     if k in result
                 }
-                if fields.get("state") not in {"RUNNING", "QUEUED"}:
-                    raise ValueError("Unsupported conversion worker status")
-                self.update(identifier, **fields, connection_error=None)
-        except ValueError as exc:
-            self.update(identifier, state="FAILED", error=str(exc))
-        except Exception as exc:
-            # A lost SSH response cannot prove the remote job failed. Retain its
-            # identity and retry status/download on the next refresh.
+                self.update(identifier, state="RUNNING", detail=detail, **fields)
+            else:
+                reason = scheduler.get("Reason", "")
+                detail = "Waiting for a Slurm GPU allocation" + (
+                    ": " + reason
+                    if reason and reason not in {"None", "Unknown", "(null)"}
+                    else "…"
+                )
+                self.update(identifier, state="QUEUED", detail=detail)
+        except SubmissionOutcomeUnknown as exc:
             self.update(
-                identifier, connection_error="Workstation unavailable: " + str(exc)
+                identifier,
+                state="SUBMISSION_UNKNOWN",
+                detail="Checking the original Slurm submission…",
+                connection_error=str(exc),
             )
+        except ValueError as exc:
+            self.update(
+                identifier, state="FAILED", error=str(exc), connection_error=None
+            )
+        except Exception as exc:
+            self.update(identifier, connection_error=str(exc))
         finally:
             with self.lock:
                 self.active.discard(identifier)
@@ -390,7 +594,7 @@ print(json.dumps(state))
             with path.open("rb") as stream:
                 if hashlib.file_digest(stream, "sha256").hexdigest() == digest:
                     return path
-        remote = job["root"] + "/" + name
+        remote = job.get("dataset_root", job["root"]) + "/" + name
         _, actual_size = transport.file_size(remote, job["gateway"])
         if actual_size != size:
             raise ValueError("Converted artifact size changed")
@@ -476,7 +680,7 @@ print(json.dumps(state))
                 resource["id"],
                 revision=digest,
                 format=FORMAT,
-                path=job["root"] + "/dataset.hdf5",
+                path=job.get("dataset_root", job["root"]) + "/dataset.hdf5",
                 manifest_sha256=manifest_sha,
                 status="READY",
                 size_bytes=metadata["artifact"]["size_bytes"],
@@ -485,9 +689,9 @@ print(json.dumps(state))
                     **metadata,
                     "display_name": job["name"],
                     "gateway": job["gateway"],
-                    "storage_location": "workstation",
+                    "storage_location": "cluster",
                     "conversion_id": job["id"],
-                    "training_compatibility": "DexVerse state HDF5 trainer required. GR00T/OpenPI formats are unsupported. Transfer required before cluster training.",
+                    "training_compatibility": "DexVerse state HDF5 trainer required. GR00T/OpenPI formats are unsupported.",
                 },
             )
         if not db.get_data_resource_version(version["id"]).get("derivation_id"):
@@ -523,11 +727,12 @@ print(json.dumps(state))
                     source["id"],
                     revision=source_digest,
                     format="dexverse-trajectory-manifest/v1",
-                    path=job["root"] + "/source-manifest.json",
+                    path=job.get("dataset_root", job["root"]) + "/source-manifest.json",
                     manifest_sha256=source_digest,
+                    size_bytes=len(canonical_json(job["sources"]).encode()),
                     metadata={
                         "sources": job["sources"],
-                        "storage_location": "workstation",
+                        "storage_location": "cluster",
                         "gateway": job["gateway"],
                     },
                 )
@@ -582,8 +787,14 @@ print(json.dumps(state))
 
     def logs(self, identifier):
         job = self.get(identifier)
-        return self.live.transport(job).ssh(
-            job["gateway"],
-            "tail -c 20000 " + shlex.quote(job["root"] + "/conversion.log"),
-            timeout=15,
+        if job["profile"].get("execution") != "slurm":
+            raise ValueError(
+                "Logs for the older workstation converter are unsupported here"
+            )
+        _, output = self.cluster.read_log(
+            job["root"] + "/stdout.log", job["gateway"], max_bytes=20000
         )
+        _, errors = self.cluster.read_log(
+            job["root"] + "/stderr.log", job["gateway"], max_bytes=20000
+        )
+        return output + "\n" + errors

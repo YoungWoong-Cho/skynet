@@ -2,7 +2,14 @@
 (() => {
   const el = (id) => document.getElementById(id);
   const terminal = new Set(["CAPTURED", "STOPPED", "TIMED_OUT", "FAILED"]);
-  const pending = new Set(["PREPARING", "QUEUED", "RUNNING", "DOWNLOADING"]);
+  const pending = new Set([
+    "PREPARING",
+    "SUBMITTING",
+    "SUBMISSION_UNKNOWN",
+    "QUEUED",
+    "RUNNING",
+    "DOWNLOADING",
+  ]);
   const dialog = el("conversion-dialog");
   let sessions = [],
     conversions = [],
@@ -12,6 +19,26 @@
     token = 0,
     submitting = false;
   let lastRender = "";
+  let target;
+  function renderRoute() {
+    const route = selectedJob?.profile || target;
+    el("conversion-route").textContent = route
+      ? [
+          route.execution === "workstation"
+            ? "Older workstation conversion"
+            : "Slurm",
+          route.gateway,
+          route.partition,
+          selectedJob?.job_id ? `Job ${selectedJob.job_id}` : "",
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      : "Slurm";
+  }
+  window.setConversionTarget = (value) => {
+    target = value;
+    renderRoute();
+  };
   const label = (session) => session.profile.task_name || session.profile.task;
   const hand = (session) => session.profile.hand_name || session.profile.robot;
   const episodesLabel = (n) => `${n} episode${n === 1 ? "" : "s"}`;
@@ -56,6 +83,8 @@
         READY: "Converted",
         FAILED: "Conversion failed",
         PREPARING: "Preparing…",
+        SUBMITTING: "Submitting…",
+        SUBMISSION_UNKNOWN: "Checking submission…",
         QUEUED: "Queued",
         RUNNING: "Converting…",
         DOWNLOADING: "Registering…",
@@ -208,6 +237,7 @@
   }
   function renderJob() {
     const job = selectedJob;
+    renderRoute();
     el("conversion-form").hidden = !!job;
     el("conversion-progress").hidden = !job || !pending.has(job.state);
     el("conversion-result").hidden = job?.state !== "READY";
@@ -234,6 +264,8 @@
     } else el("conversion-progress").removeAttribute("value");
     if (job.state === "READY") {
       const m = job.metadata;
+      el("conversion-path").textContent =
+        (job.dataset_root || job.root) + "/dataset.hdf5";
       el("conversion-summary").textContent =
         `${episodesLabel(m.episodes)} · ${m.steps} samples · HDF5`;
       el("conversion-download").href =
@@ -247,6 +279,7 @@
           observations: m.observation_shapes,
           action_dimensions: m.action_dim,
           stored_on: job.gateway,
+          dataset_path: (job.dataset_root || job.root) + "/dataset.hdf5",
           excluded_observations: m.excluded_observations,
         },
         null,

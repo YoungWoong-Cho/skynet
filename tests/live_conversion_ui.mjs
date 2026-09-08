@@ -53,7 +53,11 @@ const job = {
   indices: [1],
   state: "QUEUED",
   created_at: "2026-09-08T04:00:00Z",
-  gateway: "test-gpu",
+  gateway: "sky2",
+  profile: { execution: "slurm", gateway: "sky2", partition: "overcap" },
+  job_id: "1234",
+  dataset_root:
+    "/coc/flash7/ycho420/datasets/derivatives/dexverse-live/session/conversion",
 };
 let reviewed, registry;
 w.openLiveReview = (s) => {
@@ -101,25 +105,21 @@ requests.shift().resolve(job);
 await flush();
 assert.equal(el("conversion-form").hidden, true);
 assert.equal(el("conversion-progress").hidden, false);
-requests
-  .shift()
-  .resolve({
-    ...job,
-    state: "RUNNING",
-    detail: "Converting episode 1 of 1",
-    completed: 0,
-    total: 1,
-  });
+requests.shift().resolve({
+  ...job,
+  state: "RUNNING",
+  detail: "Converting episode 1 of 1",
+  completed: 0,
+  total: 1,
+});
 await flush();
 assert.match(el("conversion-status").textContent, /episode 1/);
 el("conversion-refresh").click();
-requests
-  .shift()
-  .resolve({
-    ...job,
-    state: "RUNNING",
-    connection_error: "Workstation unavailable",
-  });
+requests.shift().resolve({
+  ...job,
+  state: "RUNNING",
+  connection_error: "Workstation unavailable",
+});
 await flush();
 assert.equal(el("conversion-error").hidden, false);
 assert.match(el("conversion-error").textContent, /unavailable/);
@@ -149,6 +149,14 @@ const ready = {
 requests.shift().resolve(ready);
 await flush();
 assert.equal(el("conversion-result").hidden, false);
+assert.equal(
+  el("conversion-path").textContent,
+  ready.dataset_root + "/dataset.hdf5",
+);
+assert.match(
+  el("conversion-route").textContent,
+  /Slurm · sky2 · overcap · Job 1234/,
+);
 assert.ok(
   el("conversion-download").href.endsWith("/conversion-2/dataset.hdf5"),
 );

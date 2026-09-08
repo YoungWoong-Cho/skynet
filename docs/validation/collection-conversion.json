@@ -21,7 +21,11 @@
       "Offline experiment link selects the correct local recording without submitting work",
       "Teleoperation Help opens the chosen task goal",
       "Stopped session shows Start enabled, Stop disabled and no stale green startup milestones",
-      "Final layout has no duplicate IDs or document-level horizontal overflow"
+      "Final layout has no duplicate IDs or document-level horizontal overflow",
+      "Submitted and retried a real Slurm conversion through the browser; job ID and queue reason visible",
+      "Downloaded the actual Slurm-produced HDF5 through the browser and opened its exact immutable dataset registry version",
+      "Verified the visible Saved at path and wrapped layout in a 1024-pixel viewport",
+      "Recovered a completed result after shared-storage visibility delay without another Slurm submission"
     ]
   },
   "isolated_browser_qa": {
@@ -38,21 +42,96 @@
       "Failed conversion displays a specific error and retry control",
       "Retry, close dialog and reload preserve the request",
       "Selected one of two recordings and produced a separate one-episode result",
-      "Reopened converted result after refresh"
+      "Reopened converted result after refresh",
+      "Slurm route, fake job lifecycle and durable output path through the updated fixture",
+      "Successful HDF5 download and registry navigation",
+      "Explicit checksum failure with retry form"
     ]
   },
   "tests": {
-    "python_passed": 413,
-    "javascript": ["live_xr_ui.mjs", "live_review_ui.mjs", "live_conversion_ui.mjs", "browser_regressions.cjs (19 tests)"],
+    "python_passed": 423,
+    "javascript": [
+      "live_xr_ui.mjs",
+      "live_review_ui.mjs",
+      "live_conversion_ui.mjs",
+      "browser_regressions.cjs (19 tests)"
+    ],
     "ruff": "passed",
     "cached_real_recordings_validated": 22,
     "cached_real_recordings_rejected": 0,
     "hdf5_integrity": "Real HDF5 files tested for complete episodes, exact actions, finite observations and initial/next/final state alignment"
   },
   "limitations": [
-    "Actual Isaac GPU conversion of the user's 51 Shadow cube episodes is pending; workstation access was deferred at the user's request",
-    "Synthetic browser conversion does not validate simulator observation reconstruction",
-    "Uncached video preparation and headset collection were not repeated during this offline investigation",
-    "No training or evaluation was started; native DexVerse HDF5 training requires a compatible trainer and cluster use requires a data transfer"
-  ]
+    "Only recording 1 of the 51-recording Shadow cube session was converted; the other originals are not cached and source-workstation access remains deferred",
+    "Synthetic browser QA is separate from the real GPU verification recorded above",
+    "Uncached video preparation and headset collection were not repeated in this pass",
+    "No training or evaluation was started; native DexVerse state HDF5 training requires a compatible trainer"
+  ],
+  "slurm_validation": {
+    "job_id": "3785684",
+    "conversion_id": "6bee684e-4b10-4bc0-9eed-5bafca0620ed",
+    "source_session": "982ded94-3e0f-49de-8440-8dcd249f8443",
+    "source_recording_indices": [
+      0
+    ],
+    "gateway": "sky2",
+    "scheduler": {
+      "Account": "overcap",
+      "AllocTRES": "billing=14,cpu=4,gres/gpu:rtx_6000=1,gres/gpu=1,node=1",
+      "Elapsed": "00:00:21",
+      "End": "1788869667",
+      "ExitCode": "0:0",
+      "NodeList": "oppy",
+      "Partition": "overcap",
+      "Reason": "None",
+      "Start": "1788869646",
+      "State": "COMPLETED",
+      "StateRaw": "COMPLETED"
+    },
+    "dataset_path": "/coc/flash7/ycho420/datasets/derivatives/dexverse-live/982ded94-3e0f-49de-8440-8dcd249f8443/6bee684e-4b10-4bc0-9eed-5bafca0620ed/dataset.hdf5",
+    "artifact": {
+      "sha256": "31a49ba77d871dedd41f3478b6c912a354e9fad2b54faa8f0ce6c408804a372e",
+      "size_bytes": 173777
+    },
+    "episodes": 1,
+    "steps": 154,
+    "action_dimension": 28,
+    "observation_shapes": {
+      "policy/actions": [
+        28
+      ],
+      "proprio/joint_pos": [
+        28
+      ],
+      "state/object_pos_b": [
+        3
+      ],
+      "state/object_quat_b": [
+        4
+      ]
+    },
+    "checks": [
+      "All original action values equal exported float32 actions",
+      "Source actions equal actions",
+      "Every joint-position observation matches its original saved simulator state",
+      "Every observation sequence is finite and has correct T, initial, next and final alignment",
+      "Output and downloaded cache SHA-256 match the published manifest",
+      "Original input checksum verified before staging and again on the allocated GPU",
+      "Pinned upstream converter SHA verified against its source revision",
+      "Source workstation not used for the verification conversion; input came from the existing Mac cache"
+    ],
+    "fixes": [
+      "Require a configured RTX 6000 instead of allowing an unsupported TITAN Xp allocation",
+      "Private per-job TMPDIR avoids another user's shared IsaacLab log directory",
+      "Wait up to 120 seconds for gateway shared-storage visibility after Slurm completion",
+      "Require the converter READY result as well as Slurm completion before registry publication"
+    ],
+    "reused_code": [
+      "ClusterClient.submit_script and recovery receipts",
+      "ClusterClient.job_statuses",
+      "ClusterClient.write_capsule_file",
+      "capture_processing.service.upload_capture",
+      "ProcessingService.compile Isaac template extracted to capture_processing/slurm.py"
+    ]
+  }
 }

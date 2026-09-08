@@ -988,6 +988,7 @@
           <dialog id="conversion-dialog" class="collection-video-dialog" aria-labelledby="conversion-title">
             <div class="panel-heading"><h3 id="conversion-title">Convert for training</h3><button id="conversion-close" class="button button-outline" type="button">Close</button></div>
             <p id="conversion-context" class="secondary"></p>
+            <p id="conversion-route" class="secondary"></p>
             <form id="conversion-form">
               <div class="field"><label for="conversion-name">Dataset name</label><input id="conversion-name" maxlength="100" required></div>
               <p>HDF5 · State observations and actions</p>
@@ -996,8 +997,8 @@
             </form>
             <p id="conversion-status" role="status"></p><progress id="conversion-progress" hidden></progress>
             <p id="conversion-error" class="inline-alert" role="alert" hidden></p>
-            <div id="conversion-result" hidden><p id="conversion-summary"></p><div class="form-actions"><a id="conversion-download" class="button button-accent" download>Download HDF5</a><button id="conversion-registry" class="button button-outline" type="button">View in dataset registry</button></div><details><summary>Dataset details</summary><pre id="conversion-details"></pre><a id="conversion-manifest" download>Download manifest</a></details></div>
-            <details><summary>Training compatibility</summary><p>Use a trainer that accepts DexVerse state HDF5. GR00T and OpenPI require a different dataset format. The dataset stays on the collection workstation and is available to download here. Cluster training requires a transfer.</p></details>
+            <div id="conversion-result" hidden><p id="conversion-summary"></p><p>Saved at <code id="conversion-path" style="overflow-wrap:anywhere"></code></p><div class="form-actions"><a id="conversion-download" class="button button-accent" download>Download HDF5</a><button id="conversion-registry" class="button button-outline" type="button">View in dataset registry</button></div><details><summary>Dataset details</summary><pre id="conversion-details"></pre><a id="conversion-manifest" download>Download manifest</a></details></div>
+            <details><summary>Training compatibility</summary><p>Use a trainer that accepts DexVerse state HDF5. GR00T and OpenPI require a different dataset format. New conversions are stored on the Slurm cluster and can also be downloaded here.</p></details>
             <div class="form-actions"><button id="conversion-new" type="button" class="button button-outline" hidden>Convert another selection</button><button id="conversion-retry" type="button" class="button button-outline" hidden>Retry conversion</button><button id="conversion-refresh" type="button" class="button button-outline" hidden>Refresh status</button><a id="conversion-logs" class="text-button" target="_blank" rel="noreferrer" hidden>Conversion log ↗</a></div>
           </dialog>
           <dialog id="live-review-dialog" class="collection-video-dialog" aria-labelledby="live-review-title">

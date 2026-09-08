@@ -22,6 +22,7 @@ from skynet_app.cluster_runtime import (
 from skynet_app.database import canonical_json, utc_now
 from .visionpro import convert
 from .dexverse_runner import TASK, ROBOT, REVISION
+from .slurm import compile_isaac_job
 
 APP_ROOT = Path(__file__).resolve().parents[2]
 TERMINAL = {"SUCCEEDED", "FAILED", "CANCELLED"}
@@ -33,13 +34,16 @@ def file_sha(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def upload_capture(cluster, path, run_id, digest, gateway):
+def upload_capture(
+    cluster, path, run_id, digest, gateway, *, relative_path="original.jsonl"
+):
     """Bounded-memory upload; immutable destination and verified original bytes."""
     cluster.candidates(gateway)
     run_id = cluster._run_id(run_id)
     if not re.fullmatch("[a-f0-9]{64}", digest):
         raise ValueError("Invalid capture checksum")
-    destination = f"{WORK_ROOT}/jobs/runs/{run_id}/original.jsonl"
+    relative_path = cluster._relative_path(relative_path)
+    destination = f"{WORK_ROOT}/jobs/runs/{run_id}/{relative_path}"
     parent = shlex.quote(str(Path(destination).parent))
     dest = shlex.quote(destination)
     command = (
@@ -320,11 +324,6 @@ class ProcessingService:
         config = job["config"]
         profile = config["pipeline"]
         runtime = profile["runtime"]
-        repo = profile["repository"]
-        # The queue and resource limits are operator configuration, not shell text.
-        for key in ("account", "partition"):
-            if not re.fullmatch("[a-zA-Z0-9_-]+", profile[key]):
-                raise ValueError(f"Invalid {key}")
         argv = [
             runtime + "/bin/python",
             root + "/runner.py",
@@ -345,33 +344,17 @@ class ProcessingService:
             "--device",
             "cuda:0",
         ]
-        return "\n".join(
-            [
-                "#!/bin/bash",
-                f"#SBATCH --job-name=capture-cycle-{job['id'][:8]}",
-                f"#SBATCH --account={profile['account']}",
-                f"#SBATCH --partition={profile['partition']}",
-                "#SBATCH --gres=gpu:1",
-                "#SBATCH --cpus-per-task=4",
-                "#SBATCH --mem=48G",
-                "#SBATCH --time=00:30:00",
-                f"#SBATCH --output={root}/stdout.log",
-                f"#SBATCH --error={root}/stderr.log",
-                "set -euo pipefail",
-                "umask 077",
-                "export OMNI_KIT_ACCEPT_EULA=YES",
-                "export PYTHONUNBUFFERED=1",
-                f"export LD_LIBRARY_PATH={shlex.quote(runtime + '/lib')}:${{LD_LIBRARY_PATH:-}}",
-                f"export PYTHONPATH={shlex.quote(repo + '/source/dexverse')}:${{PYTHONPATH:-}}",
-                f"export PATH={shlex.quote(runtime + '/bin')}:$PATH",
-                f"cd {shlex.quote(repo)}",
+        return compile_isaac_job(
+            profile,
+            root,
+            f"capture-cycle-{job['id'][:8]}",
+            argv,
+            checks=[
                 f'printf "%s  %s\\n" {config["runner_sha256"]} {shlex.quote(root + "/runner.py")} | sha256sum --check --status',
                 f'printf "%s  %s\\n" {job["capture_sha256"]} {shlex.quote(root + "/original.jsonl")} | sha256sum --check --status',
                 f'printf "%s  %s\\n" {hashlib.sha256(canonical_json(converted).encode()).hexdigest()} {shlex.quote(root + "/tracking.json")} | sha256sum --check --status',
-                shlex.join(argv),
-                f"test -s {shlex.quote(root + '/output/result.json')}",
-                "",
-            ]
+            ],
+            after=[f"test -s {shlex.quote(root + '/output/result.json')}"],
         )
 
     def refresh(self, identifier, force=False):
