@@ -75,6 +75,104 @@ def install_relative_wrist_tracking(retargeter):
     return histories.clear
 
 
+class DexVerseWristContinuity:
+    """Preserve native retargeting poses while avoiding virtual joint turn jumps.
+
+    Finger commands, wrist position, and wrist orientation come from DexVerse.
+    Only the equivalent Euler representation sent to PhysX changes. No human
+    anatomy, calibration offsets, or per-model pose corrections are added here.
+    """
+
+    def __init__(self, retargeters, sides):
+        from importlib import import_module
+        from dexverse.devices.retargeters.simple_absolute_retargeting import (
+            SimpleAbsoluteRetargeter,
+            SIMPLE_ABSOLUTE_WRIST_ORIGIN_ATTR_OVERRIDES,
+            SIMPLE_ABSOLUTE_WRIST_ORIGIN_ATTR_NAME,
+        )
+        from dexverse.devices.retargeters.simple_relative_retargeting import (
+            SIMPLE_RETARGETER_LAYOUT_SOURCES,
+        )
+
+        layouts, dimensions = {}, set()
+        for retargeter in retargeters:
+            if type(retargeter) is not SimpleAbsoluteRetargeter:
+                raise ValueError(
+                    "Collection requires DexVerse absolute hand retargeting"
+                )
+            if retargeter.cfg.retargeting_scheme != "dexpilot":
+                raise ValueError(
+                    "Collection requires the standard DexPilot finger solver"
+                )
+            robot_type = retargeter.cfg.robot_type
+            module = import_module(SIMPLE_RETARGETER_LAYOUT_SOURCES[robot_type][0])
+            origins = getattr(
+                module,
+                SIMPLE_ABSOLUTE_WRIST_ORIGIN_ATTR_OVERRIDES.get(
+                    robot_type, SIMPLE_ABSOLUTE_WRIST_ORIGIN_ATTR_NAME
+                ),
+                {},
+            )
+            dimensions.add(retargeter._layout["output_dim"])
+            for hand, layout in retargeter._layout["hands"].items():
+                side = hand.name.removeprefix("HAND_").lower()
+                if side in layouts or side not in origins:
+                    raise ValueError(f"Missing or duplicate {side} wrist origin/layout")
+                if layout.get("wrist_rot_repr", "euler") != "euler":
+                    raise ValueError("Unsupported floating wrist representation")
+                order = layout["wrist_rot_order"]
+                if order not in {"xyz", "yaw_pitch_roll"}:
+                    raise ValueError("Unsupported floating wrist axis order")
+                signs = np.asarray(layout.get("wrist_rot_signs", (1, 1, 1)))
+                if signs.shape != (3,) or not np.isin(signs, [-1, 1]).all():
+                    raise ValueError("Unsupported floating wrist axis signs")
+                mapping = retargeter._dex_to_action_finger_indices.get(hand)
+                solver = retargeter._dex_retgt.get(hand)
+                if (
+                    solver is None
+                    or mapping is None
+                    or len(mapping) != len(layout["finger_indices"])
+                    or any(
+                        i is None
+                        or i < 0
+                        or i >= len(retargeter._dex_output_joint_names.get(hand, []))
+                        for i in mapping
+                    )
+                ):
+                    raise ValueError(
+                        f"Incomplete DexPilot finger mapping for {side} hand"
+                    )
+                layouts[side] = (
+                    list(layout["wrist_rot_indices"]),
+                    order,
+                    signs,
+                    ContinuousEulerXYZ(),
+                )
+        if set(layouts) != set(sides) or len(dimensions) != 1:
+            raise ValueError("Retargeting hands do not match the selected simulation")
+        self.layouts, self.dimension = layouts, dimensions.pop()
+
+    def reset(self):
+        for _, _, _, history in self.layouts.values():
+            history.reset()
+
+    def update(self, action):
+        from scipy.spatial.transform import Rotation
+
+        output = np.asarray(action).copy()
+        if output.shape != (self.dimension,) or not np.isfinite(output).all():
+            raise ValueError("DexVerse returned invalid hand commands")
+        for indices, order, signs, history in self.layouts.values():
+            angles = output[indices] / signs
+            if order == "yaw_pitch_roll":
+                angles = angles[::-1]
+            continuous = history.update(Rotation.from_euler("XYZ", angles).as_matrix())
+            output[indices] = (
+                continuous[::-1] if order == "yaw_pitch_roll" else continuous
+            ) * signs
+        return output
+
+
 def configure_virtual_wrist(robot, manifest, sides):
     """Remove artificial +/-pi stops only from the floating wrist joints."""
     import torch

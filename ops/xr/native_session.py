@@ -380,7 +380,7 @@ def main():
             "--dataset_dir",
             "live",
             "--teleop_retargeter",
-            "relative",
+            "absolute",
             "--retargeting_scheme",
             cfg.get("hand_bundle", {}).get("retargeting_scheme", "dexpilot"),
         ]

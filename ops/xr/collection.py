@@ -175,11 +175,7 @@ def run_loop(
 
         pose_validity = XRPoseValidityFlags
 
-    from wrist import (
-        ContinuousEulerXYZ,
-        configure_virtual_wrist,
-        install_relative_wrist_tracking,
-    )
+    from wrist import configure_virtual_wrist, DexVerseWristContinuity
 
     task = cfg.get("task", recorder._metadata.get("task"))
     success_term = collection_success_term(task, success_term)
@@ -199,17 +195,12 @@ def run_loop(
     connected_once = False
     raw_markers_visible = True
     tracked_sides = ["left", "right"] if cfg["hand"] == "both" else [cfg["hand"]]
-    targets = {}
     raw_data = {}
     get_raw = teleop._get_raw_data
     manifest = cfg.get("hand_manifest", {})
-    anatomical_wrist = manifest.get("retargeting_mode") == "finger_segments"
     robot = env.scene["robot"]
     configure_virtual_wrist(robot, manifest, tracked_sides)
-    anatomical_angles = ContinuousEulerXYZ()
-    reset_wrist_histories = [
-        install_relative_wrist_tracking(r) for r in teleop._retargeters
-    ]
+    wrist_commands = DexVerseWristContinuity(teleop._retargeters, tracked_sides)
     if manifest:
         marker_names = [
             manifest["palm"],
@@ -227,20 +218,6 @@ def run_loop(
         install_robot_point_display(
             retargeter, robot_points, lambda: phase not in {"ended", "error"}
         )
-    if anatomical_wrist:
-        from anatomy import palm_frame
-
-        if manifest["wrist_joints"] != [
-            "skynet_x",
-            "skynet_y",
-            "skynet_z",
-            "skynet_roll",
-            "skynet_pitch",
-            "skynet_yaw",
-        ]:
-            raise ValueError(
-                "Anatomical wrist control requires the imported six-axis wrist layout"
-            )
 
     def capture_raw():
         nonlocal raw_data
@@ -315,31 +292,9 @@ def run_loop(
         recorder.discard_episode()
         ns["handle_reset"](env)
         teleop.reset()
-        anatomical_angles.reset()
-        for reset_history in reset_wrist_histories:
-            reset_history()
+        wrist_commands.reset()
         success_count = 0
         start.reset()
-        robot = env.scene["robot"]
-        for side in tracked_sides:
-            # Imported palms retain their source name; native Shadow names differ by side.
-            if cfg.get("hand_bundle"):
-                name = cfg["hand_manifest"]["palm"]
-            else:
-                candidates = (
-                    ("rh_palm", "lh_palm")
-                    if side == "right"
-                    else ("lh_palm", "rh_palm")
-                )
-                name = next((n for n in candidates if n in robot.body_names), None)
-                if name is None:
-                    name = env.cfg.robot_config.palm_body_name
-            targets[side] = (
-                robot.data.body_pos_w[0, robot.body_names.index(name)]
-                .cpu()
-                .numpy()
-                .copy()
-            )
         phase, instruction = "ready", "Tap Start to begin"
         publish(True)
 
@@ -447,11 +402,7 @@ def run_loop(
                     else:
                         instruction = "Tap Start to begin"
                     if start.consume(tracking):
-                        for retargeter in teleop._retargeters:
-                            retargeter.calibrate_wrist_pose()
-                        for reset_history in reset_wrist_histories:
-                            reset_history()
-                        anatomical_angles.reset()
+                        wrist_commands.reset()
                         recorder.start_episode(
                             initial_state=env.scene.get_state(is_relative=True),
                             goal_pose=ns["_get_goal_pose_from_env"](env),
@@ -469,25 +420,21 @@ def run_loop(
                             s: p.tolist() for s, p in points.items()
                         }
                         recorder._active_episode["skynet_retargeting"] = dict(
-                            mode=manifest.get("retargeting_mode", "fingertips"),
-                            wrist="absolute_anatomical"
-                            if anatomical_wrist
-                            else "relative_calibrated",
+                            provider="dexverse",
+                            mode="dexpilot",
+                            wrist="absolute",
+                            wrist_continuity="equivalent_euler_angles",
                         )
                         phase, instruction = "recording", goal
                         publish(True)
-                        continue  # Recompute actions after wrist calibration before stepping physics.
+                        continue  # Begin simulation on the next tracked frame.
                     env.sim.render()
                 elif phase == "recording":
-                    if anatomical_wrist:
-                        p = points[manifest["side"]]
-                        pose = np.r_[
-                            p[0] - targets[manifest["side"]],
-                            anatomical_angles.update(palm_frame(p, manifest["side"])),
-                        ]
-                        action[:6] = torch.as_tensor(
-                            pose, device=action.device, dtype=action.dtype
-                        )
+                    action = torch.as_tensor(
+                        wrist_commands.update(action.detach().cpu().numpy()),
+                        device=action.device,
+                        dtype=action.dtype,
+                    )
                     if not torch.isfinite(action).all():
                         raise ValueError(
                             "Hand tracking produced an invalid robot action"

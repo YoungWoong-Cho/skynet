@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 from .database import canonical_json
+from .mesh_assets import bake_gltf_nodes
 from .hands import HandLibrary, ROOT, parse_urdf, joint_metadata
 
 _BUILD_LOCK = threading.RLock()
@@ -168,6 +169,9 @@ def build(robot, library=None, output_root=None):
         model_sha256=hashlib.sha256(raw).hexdigest(),
         assets=model["files"],
         builder_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        mesh_builder_sha256=hashlib.sha256(
+            (ROOT / "skynet_app/mesh_assets.py").read_bytes()
+        ).hexdigest(),
         runtime={k: hashlib.sha256(v).hexdigest() for k, v in runtime_files.items()},
     )
     digest = hashlib.sha256(canonical_json(recipe).encode()).hexdigest()
@@ -264,33 +268,6 @@ def build(robot, library=None, output_root=None):
                 low_pass_alpha=0.8,
                 ignore_mimic_joint=False,
             )
-        if spec.get("retargeting_mode") == "finger_segments":
-            chains = [
-                [name.format(side=spec["side"], s=spec["side"][0]) for name in chain]
-                for chain in spec["finger_chains"]
-            ]
-            if len(chains) != 5 or any(
-                len(chain) != 4
-                or any(n not in source_links for n in chain)
-                or chain[-1] != spec["tips"][i]
-                for i, chain in enumerate(chains)
-            ):
-                raise ValueError(
-                    "Finger-segment mapping does not match the stored hand links"
-                )
-            retarget.update(
-                normal_delta=0.0001,
-                target_origin_link_names=[
-                    mapping[n] for chain in chains for n in chain[:-1]
-                ],
-                target_task_link_names=[
-                    mapping[n] for chain in chains for n in chain[1:]
-                ],
-                target_link_human_indices=[
-                    [1 + 4 * f + j for f in range(5) for j in range(3)],
-                    [2 + 4 * f + j for f in range(5) for j in range(3)],
-                ],
-            )
         neutral = {
             mapping[j["name"]]: min(j["upper"], max(j["lower"], 0.0))
             for j in original_joints
@@ -337,7 +314,10 @@ def build(robot, library=None, output_root=None):
                     raise ValueError("Stored hand asset checksum changed: " + name)
                 dest = stage / asset_names[name]
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(original, dest)
+                if original.suffix.lower() == ".glb":
+                    dest.write_bytes(bake_gltf_nodes(original.read_bytes()))
+                else:
+                    shutil.copyfile(original, dest)
             for name, content in runtime_files.items():
                 (stage / name).write_bytes(content)
             files = {
@@ -356,7 +336,7 @@ def build(robot, library=None, output_root=None):
                 side=spec["side"],
                 collision_neighbor_depth=spec.get("collision_neighbor_depth", 2),
                 retargeting_scheme=spec["retargeting_scheme"],
-                retargeting_mode=spec.get("retargeting_mode", "fingertips"),
+                retargeting_mode="dexverse",
                 source_revision=spec["revision"],
                 name=spec["name"],
                 palm=mapping[original_root],

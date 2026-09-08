@@ -78,6 +78,40 @@ def filter_adjacent_collisions(urdf, usd, depth=2):
     stage.GetRootLayer().Save()
 
 
+def configure_mimic_constraints(usd, joints):
+    """Keep URDF mechanical couplings exact in the converted PhysX model."""
+    if not joints:
+        return
+    import math
+    from pxr import Usd, UsdPhysics
+
+    stage = Usd.Stage.Open(usd)
+    prims = {p.GetName(): p for p in stage.Traverse() if p.IsA(UsdPhysics.Joint)}
+    for joint in joints:
+        prim = prims.get(joint["name"])
+        reference = prims.get(joint["mimic"]["joint"])
+        if not prim or not reference:
+            raise ValueError("Converted hand is missing a coupled finger joint")
+        prefix = "physxMimicJoint:rot" + prim.GetAttribute("physics:axis").Get()
+        gearing = prim.GetAttribute(prefix + ":gearing")
+        targets = prim.GetRelationship(prefix + ":referenceJoint").GetTargets()
+        if not gearing or targets != [reference.GetPath()]:
+            raise ValueError("Simulator did not import the hand's mimic relationship")
+        # PhysX: q + gearing*q_reference + offset = 0, in degrees.
+        # URDF: q = multiplier*q_reference + offset, in radians.
+        gearing.Set(-float(joint["mimic"].get("multiplier", 1)))
+        prim.GetAttribute(prefix + ":offset").Set(
+            -math.degrees(float(joint["mimic"].get("offset", 0)))
+        )
+        # The importer adds a weak, underdamped spring; the source specifies a
+        # mechanical linkage. Zero frequency selects the rigid constraint.
+        prim.GetAttribute(prefix + ":naturalFrequency").Set(0.0)
+        prim.GetAttribute(prefix + ":dampingRatio").Set(0.0)
+        prim.GetAttribute("physics:lowerLimit").Set(math.degrees(joint["lower"]))
+        prim.GetAttribute("physics:upperLimit").Set(math.degrees(joint["upper"]))
+    stage.GetRootLayer().Save()
+
+
 def install(directory):
     root, m = read_bundle(directory)
     import isaaclab.sim as sim
@@ -97,7 +131,9 @@ def install(directory):
             usd_file_name="hand.usd",
             fix_base=True,
             merge_fixed_joints=False,
-            convert_mimic_joints_to_normal_joints=False,
+            # This Isaac Lab version forwards the misleadingly named option to
+            # URDF parse_mimic. True is required to create PhysX mimic constraints.
+            convert_mimic_joints_to_normal_joints=bool(m["mimic_joints"]),
             make_instanceable=False,
             self_collision=True,
             collision_from_visuals=False,
@@ -111,6 +147,7 @@ def install(directory):
             ),
         )
     )
+    configure_mimic_constraints(converter.usd_path, m["mimic_joints"])
     filter_adjacent_collisions(
         root / "simulation.urdf", converter.usd_path, m["collision_neighbor_depth"]
     )
@@ -205,91 +242,6 @@ def install(directory):
             ),
         )
 
-    # A headset's wrist axes need not follow the middle finger. Derive the
-    # imported hand's finger frame from the knuckles to avoid a shared yaw bias.
-    original_canonical = (
-        retargeting.SimpleRelativeRetargeter._convert_hand_to_canonical_joint_positions
-    )
-
-    def canonical(self, hand_data, hand=None):
-        if self.cfg.robot_type != m["robot"]:
-            return original_canonical(self, hand_data, hand)
-        import numpy as np
-        from anatomy import canonical_points
-
-        names = retargeting.DEX_RETARGETING_HAND_JOINT_NAMES
-        if not isinstance(hand_data, dict) or any(n not in hand_data for n in names):
-            return None
-        points = np.asarray([hand_data[n][:3] for n in names])
-        try:
-            return canonical_points(points, m["side"])
-        except ValueError:
-            return None  # The collection alignment gate prevents invalid tracking from recording.
-
-    retargeting.SimpleRelativeRetargeter._convert_hand_to_canonical_joint_positions = (
-        canonical
-    )
-
-    original_reference = retargeting.SimpleRelativeRetargeter._compute_dex_ref_value
-
-    def reference(self, solver, points):
-        if (
-            self.cfg.robot_type != m["robot"]
-            or m.get("retargeting_mode") != "finger_segments"
-        ):
-            return original_reference(self, solver, points)
-        import numpy as np
-        from anatomy import segment_targets
-
-        if not hasattr(solver, "_skynet_segment_lengths"):
-            optimizer = solver.optimizer
-            robot = optimizer.robot
-            neutral = np.array(
-                [m["neutral"].get(name, 0.0) for name in robot.dof_joint_names]
-            )
-            robot.compute_forward_kinematics(neutral)
-            solver._skynet_segment_lengths = np.array(
-                [
-                    np.linalg.norm(
-                        robot.get_link_pose(robot.get_link_index(end))[:3, 3]
-                        - robot.get_link_pose(robot.get_link_index(start))[:3, 3]
-                    )
-                    for start, end in zip(
-                        optimizer.origin_link_names, optimizer.task_link_names
-                    )
-                ]
-            )
-        return segment_targets(
-            points,
-            solver.optimizer.target_link_human_indices,
-            solver._skynet_segment_lengths,
-        )
-
-    retargeting.SimpleRelativeRetargeter._compute_dex_ref_value = reference
-
-    original_assign = retargeting.SimpleRelativeRetargeter._assign_hand_fingers
-
-    def assign(self, action, hand, finger_values):
-        if self.cfg.robot_type == m["robot"]:
-            mapping = self._dex_to_action_finger_indices.get(hand)
-            if (
-                mapping is None
-                or len(mapping) != len(fingers)
-                or any(
-                    index is None or index < 0 or index >= len(finger_values)
-                    for index in mapping
-                )
-            ):
-                raise ValueError("Imported hand has an incomplete finger joint mapping")
-        original_assign(self, action, hand, finger_values)
-        if self.cfg.robot_type == m["robot"]:
-            indices = self._layout["hands"][hand]["finger_indices"]
-            action[list(indices)] = bounded_fingers(
-                action[list(indices)], [m["finger_limits"][name] for name in fingers]
-            )
-
-    retargeting.SimpleRelativeRetargeter._assign_hand_fingers = assign
-
     original = base._get_tabletop_robot_setup_builders
     base._get_tabletop_robot_setup_builders = lambda: dict(
         original(), **{m["robot"]: builder}
@@ -309,6 +261,11 @@ def install(directory):
                 "finger_permutation": tuple(range(len(fingers))),
             }
         },
+    }
+    from dexverse.devices.wrist_origin import compute_wrist_joint_origin
+
+    module.SIMPLE_ABSOLUTE_WRIST_ORIGIN = {
+        m["side"]: compute_wrist_joint_origin(articulation, wrist[:3], wrist[3:])
     }
     module.SIMPLE_RELATIVE_DEX_RETARGETING = {
         "hands": {

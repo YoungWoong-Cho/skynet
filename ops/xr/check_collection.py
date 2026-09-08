@@ -34,9 +34,11 @@ try:
     from runtime import install, validate_environment
     import collection as collection_runtime
     from collection import run_loop
+    from dexverse.devices.retargeters.simple_absolute_retargeting import (
+        SimpleAbsoluteRetargeter,
+        SimpleAbsoluteRetargeterCfg,
+    )
     from dexverse.devices.retargeters.simple_relative_retargeting import (
-        SimpleRelativeRetargeter,
-        SimpleRelativeRetargeterCfg,
         DEX_RETARGETING_HAND_JOINT_NAMES,
     )
     from isaaclab.devices.device_base import DeviceBase
@@ -48,8 +50,8 @@ try:
     env.reset()
     validate_environment(env, manifest)
     hand = DeviceBase.TrackingTarget.HAND_RIGHT
-    retargeter = SimpleRelativeRetargeter(
-        SimpleRelativeRetargeterCfg(
+    retargeter = SimpleAbsoluteRetargeter(
+        SimpleAbsoluteRetargeterCfg(
             robot_type=manifest["robot"],
             bound_hand=hand,
             retargeting_scheme=manifest["retargeting_scheme"],
@@ -81,10 +83,7 @@ try:
     normalization = Rotation.from_euler("y", 90, degrees=True) * Rotation.from_euler(
         "x", -90, degrees=True
     )
-    # Deliberate 25-degree mismatch between wrist axes and actual finger heading.
-    quat = (Rotation.from_euler("z", 25, degrees=True) * normalization.inv()).as_quat()[
-        [3, 0, 1, 2]
-    ]
+    quat = normalization.inv().as_quat()[[3, 0, 1, 2]]
     neutral_wrist = (
         robot.data.body_pos_w[0, robot.body_names.index(manifest["palm"])]
         .cpu()
@@ -95,11 +94,6 @@ try:
         name: np.r_[human[i] + neutral_wrist, quat]
         for i, name in enumerate(DEX_RETARGETING_HAND_JOINT_NAMES)
     }
-    np.testing.assert_allclose(
-        retargeter._convert_hand_to_canonical_joint_positions(raw, hand),
-        human,
-        atol=1e-6,
-    )
     drawn_points = None
     draw = retargeter._canonical_markers.visualize
 
@@ -226,10 +220,12 @@ try:
                 preview_checks += 1
             if moving:
                 np.testing.assert_allclose(
-                    action[:3].cpu().numpy(), displacement, atol=1e-5
+                    action[:3].cpu().numpy(), start_offset + displacement, atol=1e-5
                 )
                 np.testing.assert_allclose(
-                    action[3:6].cpu().numpy(), [0.2, -0.15, 0.25], atol=1e-5
+                    action[3:6].cpu().numpy(),
+                    (wrist_motion * start_rotation).as_euler("XYZ"),
+                    atol=1e-5,
                 )
                 rotated_overlay_checked = True
             return action
@@ -303,7 +299,7 @@ try:
             ),
             atol=1e-5,
         )
-        assert episode["skynet_retargeting"]["wrist"] == "absolute_anatomical"
+        assert episode["skynet_retargeting"]["wrist"] == "absolute"
     first = pickle.loads((output / receipts[0]["path"]).read_bytes())["episodes"][0]
     assert np.max(np.ptp(first["actions"][:, 6:], axis=0)) > 0.03, (
         "Finger movement was frozen"
@@ -323,7 +319,7 @@ try:
                 episodes=result,
                 steps=steps,
                 phases=phase_history,
-                wrist_axis_bias_degrees=25,
+                retargeter="DexVerse absolute + DexPilot",
                 rotated_control_points_checked=rotated_overlay_checked,
                 absolute_wrist_position_checked=True,
                 wrist_position_errors_m=wrist_position_errors,
