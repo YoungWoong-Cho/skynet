@@ -12,7 +12,7 @@
     <script src="/static/hands-ui.js?v=20260907-imported-hands-2" defer></script>
     <script src="/static/live-review.js?v=20260909-review-only" defer></script>
     <script src="/static/live-conversion.js?v=20260909-data-refinement" defer></script>
-    <script src="/static/policy-exports.js?v=20260909-data-refinement" defer></script>
+    <script src="/static/policy-exports.js?v=20260909-policy-formats" defer></script>
     <script src="/static/live-xr.js?v=20260909-data-refinement" defer></script>
   </head>
   <body>
@@ -1792,16 +1792,18 @@
   <datalist id="data-format-suggestions"></datalist><datalist id="data-role-suggestions"><option value="training_data"></option><option value="evaluation_data"></option><option value="simulation_assets"></option></datalist>
     <dialog id="policy-export-dialog" class="app-dialog" aria-labelledby="policy-export-title">
       <div class="panel-heading"><h3 id="policy-export-title">Prepare for training</h3><button id="close-policy-export" data-dialog-close type="button" class="button button-outline">Close</button></div>
-      <form id="policy-export-form">
-        <div class="form-grid">
-          <div class="field"><label for="policy-export-name">Dataset name</label><input id="policy-export-name" maxlength="100" required></div>
-          <div class="field"><label for="policy-export-format">Policy</label><select id="policy-export-format" required></select><small id="policy-export-format-help" hidden></small></div>
-          <div class="field"><label for="preparation-validation">Validation episodes (%)</label><input id="preparation-validation" type="number" min="0" max="50" value="20" required></div>
-          <div class="field"><label for="preparation-seed">Split seed</label><input id="preparation-seed" type="number" min="0" max="2147483647" value="42" required></div>
+      <form id="policy-export-form" class="dialog-form">
+        <div class="dialog-body">
+          <div class="form-grid">
+            <div class="field"><label for="policy-export-name">Dataset name</label><input id="policy-export-name" maxlength="100" required></div>
+            <div class="field"><label for="policy-export-format">Policy</label><select id="policy-export-format" required></select><small id="policy-export-format-help" hidden></small></div>
+            <div class="field"><label for="preparation-validation">Validation episodes (%)</label><input id="preparation-validation" type="number" min="0" max="50" value="20" required></div>
+            <div class="field"><label for="preparation-seed">Split seed</label><input id="preparation-seed" type="number" min="0" max="2147483647" value="42" required></div>
+          </div>
+          <p id="policy-export-compatibility" role="status" class="inline-alert" hidden></p>
+          <p id="policy-export-error" role="alert" class="inline-alert" hidden></p>
+          <div class="form-actions"><button id="create-policy-export" type="submit" class="button button-accent">Prepare dataset</button></div>
         </div>
-        <p id="policy-export-compatibility" role="status" class="inline-alert" hidden></p>
-        <p id="policy-export-error" role="alert" class="inline-alert" hidden></p>
-        <div class="form-actions"><button id="create-policy-export" type="submit" class="button button-accent">Prepare dataset</button></div>
       </form>
     </dialog>
     <dialog id="data-import-detail-dialog" class="app-dialog" aria-labelledby="data-import-detail-title">

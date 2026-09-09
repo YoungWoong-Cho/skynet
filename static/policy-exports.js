@@ -156,13 +156,16 @@
             .resource
         : null;
       if (token !== generation || !dialog.open) return;
-      for (const policy of snapshot.policies)
+      for (const policy of snapshot.policies) {
+        const format = policy.container && !policy.name.toLowerCase().includes(policy.container.toLowerCase())
+          ? ` · ${policy.container}` : "";
         el("policy-export-format").add(
           new Option(
-            `${policy.name}${!policy.available ? " · unavailable" : !policy.trainable ? " · export only" : ""}`,
+            `${policy.name}${format}${!policy.available ? " · unavailable" : !policy.trainable ? " · export only" : ""}`,
             policy.id,
           ),
         );
+      }
       el("policy-export-name").value =
         resource?.metadata?.display_name || resource?.name || source.name;
       sourceNote();
