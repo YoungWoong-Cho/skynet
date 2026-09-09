@@ -9,6 +9,7 @@
     api("/api/data/exports" + path, options);
   const esc = escapeHtml;
   let snapshot = null,
+    registrySignature = null,
     resourceId = null,
     selectedResource = null,
     sourceSessionId = null;
@@ -29,7 +30,7 @@
     const hint = el("policy-export-format-help");
     hint.textContent = policy?.available && !policy.trainable ? policy.description : "";
     hint.hidden = !hint.textContent;
-    const dpMissingSplit =
+    const missingSplit =
       policy?.trainable &&
       (source?.episodes < 2 ||
         Number(el("preparation-validation").value) === 0);
@@ -41,8 +42,8 @@
         : !policy?.available
           ? policy?.description || "Choose an available policy."
           : missingImages ? "This format requires completed training images for every recording."
-          : dpMissingSplit
-            ? "Diffusion Policy needs at least two recordings and a nonzero validation split."
+          : missingSplit
+            ? "Training needs at least two recordings and a validation split."
             : "";
     error("policy-export-compatibility", message);
     el("create-policy-export").disabled =
@@ -50,7 +51,7 @@
       !source?.eligible ||
       !source.episodes ||
       !policy?.available ||
-      dpMissingSplit || missingImages;
+      missingSplit || missingImages;
   }
   const stageLabels = {
     QUEUED: "Queued",
@@ -97,24 +98,25 @@
       });
     return refreshPromise;
   }
+  async function updateSnapshot(value) {
+    snapshot = value;
+    renderHistory();
+    const signature = JSON.stringify(snapshot.exports.map(j => [
+      j.id, j.resource_id, j.version_id, j.bundle_id, j.state, j.locations,
+    ]));
+    // A dialog can observe completion before the poll does. Compare against the
+    // registry's last update, rather than the previous dialog/poll snapshot.
+    if (signature !== registrySignature) {
+      await loadDataRegistry(true);
+      registrySignature = signature;
+    }
+  }
   async function refreshNow() {
     clearTimeout(timer);
     try {
-      const firstLoad = !snapshot;
-      const previous = snapshot?.exports || [];
-      snapshot = await request();
-      renderHistory();
-      if (firstLoad) await loadDataRegistry(true);
+      await updateSnapshot(await request());
       if (dialog.open) sourceNote();
       if (detail.open && selectedResource) await renderDataset();
-      if (
-        snapshot.exports.some(
-          (j) =>
-            j.state === "READY" &&
-            previous.some((p) => p.id === j.id && p.state !== "READY"),
-        )
-      )
-        await loadDataRegistry(true);
       if (snapshot.exports.some((j) => !terminal(j)))
         timer = setTimeout(refresh, 3000);
     } catch (e) {
@@ -144,7 +146,7 @@
         throw new Error("Open preparation from a recording session.");
       const result = await request();
       if (token !== generation || !dialog.open) return;
-      snapshot = result;
+      await updateSnapshot(result);
       const source = snapshot.sessions.find((s) => s.id === sessionId);
       if (!source)
         throw new Error("This recording session is no longer available.");
@@ -229,7 +231,7 @@
     el("prepared-dataset-content").textContent = "Loading dataset…";
     SkynetDialog.open(detail);
     try {
-      snapshot = await request();
+      await updateSnapshot(await request());
       if (token === detailGeneration && detail.open) await renderDataset();
     } catch (e) {
       error("prepared-dataset-error", e.message);
@@ -263,7 +265,6 @@
           selectedResource = null;
         }
         await refresh();
-        await loadDataRegistry(true);
         showToast("Prepared data deleted. Original recordings kept.");
         return;
       }
@@ -336,7 +337,6 @@
       });
       SkynetDialog.close(dialog);
       await refresh();
-      await loadDataRegistry(true);
       await window.openPreparedDataset(job.resource_id);
     } catch (e) {
       error("policy-export-error", e.message);

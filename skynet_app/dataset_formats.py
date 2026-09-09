@@ -37,9 +37,9 @@ RECIPES = {
         format="xpolicylab-act-hdf5/v1",
         container="HDF5",
         contract="skynet.act-rgb-joints/v1",
-        adapter=None,
-        trainable=False,
-        description="ACT HDF5 episodes. Training in Skynet is not connected yet.",
+        adapter="xpolicylab-act",
+        trainable=True,
+        description="RGB and joint observations for ACT training.",
     ),
     "xpolicylab": dict(
         id="xpolicylab",
@@ -75,7 +75,7 @@ def catalog(database):
                     revision=XPL_COMMIT,
                     runtime="existing",
                     runtime_profile="skynet-dp",
-                    preset="dexverse-state/v1"
+                    preset="xpolicylab-act/v1" if entry["id"] == "act" else "dexverse-state/v1"
                     if entry["id"] == "dp-state"
                     else "rgb-joints/v2",
                 )

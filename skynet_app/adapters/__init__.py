@@ -2832,8 +2832,10 @@ def _builtin_manifest(
 
 def builtin_adapter_manifests() -> list[AdapterManifest]:
     from .dp_manifest import manifest as dp_manifest
+    from .act_manifest import manifest as act_manifest
     return [
         dp_manifest(),
+        act_manifest(),
         _builtin_manifest(
             "generic", "Custom structured command", None, ["custom"], None,
             input_fields=[

@@ -72,6 +72,7 @@ def test_rendered_readiness_job_requests_one_l40s_without_accepting_eula() -> No
     assert "#SBATCH --mem=64G" in script
     assert "#SBATCH --time=02:00:00" in script
     assert "#SBATCH --export=ALL" in script
+    assert 'export TMPDIR="$probe_root/tmp"' in script
     assert "#SBATCH --nodelist" not in script
     assert re.search(
         r"^export OMNI_KIT_ACCEPT_EULA=YES$", script, flags=re.MULTILINE

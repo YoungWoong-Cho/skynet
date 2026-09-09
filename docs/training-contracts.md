@@ -26,7 +26,8 @@ mappings remain the submission path; there is no separate DP submission system.
   and the existing tracking bridge.
 
 The conversion catalog advertises formats/contracts; it derives compatible
-adapters from registry declarations. ACT export does not imply ACT training support.
+adapters from registry declarations. DP and ACT have registered training adapters;
+the shared XPolicyLab HDF5 remains an intermediate export format.
 No arbitrary conversion to GR00T/OpenPI/Robomimic is claimed: those need their
 actual observation, action, embodiment and configuration mappings.
 
@@ -59,8 +60,55 @@ Original recordings remain immutable; converted versions, provenance, copies and
 reference-protected deletion use the existing dataset lifecycle.
 
 Existing jobs keep their pinned capsule. Changing from RGB to state changes the
-model architecture and requires a new run. Autonomous simulator evaluation is
-still not integrated; this change validates training and held-out loss.
+model architecture and requires a new run.
+
+## ACT and recorded-task evaluation
+
+ACT uses the pinned upstream CVAE Transformer, its L1/KL objective and AdamW.
+The registered HDF5 split and training-only normalization feed aligned RGB/joint
+samples and forward action chunks. Padding is masked; no one-frame action shift
+is applied. The versioned preset declares architecture and training settings.
+Best/latest model files, applied settings, loss logs and a final result are saved;
+the best checkpoint is registered for inference. ACT training resume is not
+advertised because these model checkpoints do not contain optimizer state.
+
+Both adapters expose the same DexVerse recorded-task evaluator. The evaluation
+suite binds its task from the immutable training bundle. Policy inference stays
+in the policy runtime and communicates with a separate Isaac runtime on the same
+allocated GPU. Evaluation checks source revisions, checkpoint/dataset checksums,
+joint order, action scale/offset, control rate and RGB camera calibration. It runs
+closed-loop episodes with the task's success criterion held for ten consecutive
+steps, records videos and publishes episode success and aggregate success rate.
+Completed episodes can be recovered from an identity-checked ledger.
+
+The simulator bridge currently reconstructs native DexVerse robot configurations.
+It does not reconstruct imported hand bundles or arbitrary scene overrides.
+Isaac evaluation requires the operator's existing license acceptance to be
+configured in the server environment (`OMNI_KIT_ACCEPT_EULA=YES`). Keep that
+operator setting outside source control; the local server can load it from its
+private `data/operator.env` file with `--env-file`. Readiness runs a GPU scene,
+reset, camera and video check. Each simulator process uses a private temporary
+directory so another cluster user's IsaacLab logs cannot block startup.
+
+Validation on 2026-09-09: browser-submitted two-epoch jobs 3796701 (DP state,
+51 real episodes) and 3796686 (ACT RGB, two real episodes) completed with losses
+and registered checkpoints. Full-session ACT preparation produced 51 episodes
+(41 train / 10 validation). GPU inference test 3796722 loaded both checkpoints,
+produced finite 16x28 / 50x28 action chunks and verified seeded resets.
+Browser-submitted ACT A40 training job 3800608 also completed at 2/2 epochs.
+Real simulator evaluations 3800601 (DP state) and 3800610 (ACT RGB) each completed
+one 1,200-step episode, published 1/1 progress and a task-success result, and
+produced a 20-second video loaded and scrubbed in the browser. Neither short-test
+checkpoint picked up the cube. These tests establish execution, not policy quality
+or benchmark success. DP RGB rollout is supported by the same bridge but was not
+part of these end-to-end tests. Backend regression tests: 525 passed; all live UI
+regression suites passed.
+
+GPU readiness passed on `heistotron`, and both rollouts passed on `consu`
+(NVIDIA driver 580.178.04). A readiness attempt on `voltron` with driver 610.57.04
+crashed inside the RTX renderer before scene creation. That node's runtime/driver
+issue remains unresolved; a successful readiness check on one node does not
+certify every cluster node. No cluster driver or node exclusions were changed.
 
 W&B uploads batch queued history samples without changing their steps or timestamps.
 Rate limits persist a retry delay across restarts. Reconciliation retries queued

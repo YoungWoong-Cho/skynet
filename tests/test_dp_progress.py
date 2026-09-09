@@ -148,7 +148,7 @@ def test_epoch_ingestion_and_wandb_publication_are_idempotent(tmp_path, monkeypa
     stage = db.create_stage(run["id"], stage_type="TRAIN", name="train")
     db.create_job_attempt(stage["id"], status="SUBMISSION_FAILED")
     attempt = db.create_job_attempt(
-        stage["id"], status="RUNNING", gateway="test", started_at="2026-01-01T00:00:00Z"
+        stage["id"], status="RUNNING", gateway="test", slurm_job_id="1234", started_at="2026-01-01T00:00:00Z"
     )
     calls = []
     content = "".join(json.dumps(epoch(i)) + "\n" for i in range(20))
@@ -178,12 +178,20 @@ def test_epoch_ingestion_and_wandb_publication_are_idempotent(tmp_path, monkeypa
     assert all(
         row["attempt_id"] == attempt["id"] and row["unit"] == "epoch" for row in samples
     )
-    assert service._publish_training_progress_tracking(run["id"]) == 20
+    # Completion must collect the final epoch even inside the live polling window.
+    content += json.dumps(epoch(20)) + "\n"
+    db.update_run(run["id"], status="SUCCEEDED")
+    db.update_job_attempt(attempt["id"], status="SUCCEEDED", finished_at="2026-01-01T00:01:00Z")
+    assert service._ingest_training_progress(db.get_run(run["id"])) == 1
+    reads = len(calls)
+    assert service._ingest_training_progress(db.get_run(run["id"])) == 0
+    assert len(calls) == reads
+    assert service._publish_training_progress_tracking(run["id"]) == 21
     assert service._publish_training_progress_tracking(run["id"]) == 0
     spool = tmp_path / "capsules" / run["id"] / "wandb-spool.jsonl"
     events = [json.loads(line) for line in spool.read_text().splitlines()]
-    assert len(events) == 20
-    assert events[-1]["payload"]["step"] == 20
+    assert len(events) == 21
+    assert events[-1]["payload"]["step"] == 21
     assert events[-1]["payload"]["metrics"]["validation/loss"] == 0.05
 
 

@@ -261,6 +261,32 @@ def test_imported_hand_mapping_uses_declared_virtual_joints():
     assert groups == [dict(side="left", wrist_indices=list(range(6)), finger_indices=[6, 7, 8])]
 
 
+@pytest.mark.parametrize("format, mode", [("dp-state", "state"), ("dp", "rgb"), ("act", "rgb")])
+def test_cluster_copy_checks_the_declared_observation_mode(setup, monkeypatch, format, mode):
+    service, session, _ = setup
+    job = service.create(session["id"], format, "Loader contract")
+    service.prepare(job["id"])
+    job = service.get(job["id"])
+    assert job["state"] == "READY"
+    receipt = dict(schema=f"skynet.{'act' if format == 'act' else 'dp'}-loader-validation/v1",
+                   manifest_sha256=job["manifest_sha256"], observation_mode=mode)
+    commands = []
+    def ssh(gateway, command, timeout):
+        commands.append(command)
+        if "--verify-only" in command:
+            return json.dumps(receipt)
+        return json.dumps(dict(verified=True, manifest_sha256=job["manifest_sha256"]))
+    service.cluster = SimpleNamespace(ssh=ssh, write_capsule_file=lambda *args: None)
+    monkeypatch.setattr("skynet_app.policy_exports.upload_capture", lambda *args, **kwargs: "/upload/dataset.zip")
+    location = service._transfer_host(job, "test-host")
+    assert location["kind"] == "cluster"
+    if format != "act":
+        assert f"--observation-mode {mode}" in commands[-1]
+    receipt["observation_mode"] = "state" if mode == "rgb" else "rgb"
+    with pytest.raises(ValueError, match="different dataset"):
+        service._transfer_host(job, "test-host")
+
+
 def test_missing_finished_artifact_can_be_regenerated(setup):
     service, session, _ = setup
     job = service.create(session["id"], "dp", "Missing")

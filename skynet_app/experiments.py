@@ -13,7 +13,7 @@ from pathlib import Path
 import urllib.parse
 from typing import Any, Iterable, Literal, Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer
 
 from .cluster_config import CLUSTER
 
@@ -893,7 +893,13 @@ def evaluation_task_catalog_sha256(tasks: list[str]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+class EvaluationDatasetTaskBinding(CanonicalModel):
+    role: str = Field(min_length=1, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    metadata_path: str = Field(min_length=1, pattern=r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+
+
 class EvaluationSuite(CanonicalModel):
+    dataset_task_binding: EvaluationDatasetTaskBinding | None = None
     schema_version: Literal[2]
     evaluator: str = Field(min_length=1, max_length=96)
     suite: str = Field(min_length=1, max_length=256)
@@ -917,6 +923,14 @@ class EvaluationSuite(CanonicalModel):
     notes: str = ""
     catalog_path: str | None = None
     catalog_sha256: str | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_without_absent_binding(self, handler):
+        result = handler(self)
+        # Existing immutable catalogs must retain their original content hashes.
+        if self.dataset_task_binding is None:
+            result.pop("dataset_task_binding", None)
+        return result
 
     @model_validator(mode="after")
     def validate_task_catalog(self) -> "EvaluationSuite":

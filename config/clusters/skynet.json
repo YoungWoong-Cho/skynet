@@ -48,6 +48,13 @@
           "path": "/coc/flash7/ycho420/repos/shared/IsaacLab/v2.3.2",
           "revision": "v2.3.2",
           "required": true
+        },
+        {
+          "kind": "directory",
+          "name": "DexVerse",
+          "path": "/coc/flash7/ycho420/repos/skynet-dexverse/30cc673e27684b9f10186fa6bea731aed246bc9f",
+          "revision": "30cc673e27684b9f10186fa6bea731aed246bc9f",
+          "required": true
         }
       ],
       "versions": {
@@ -59,6 +66,57 @@
         "python_version": "3.11",
         "distributions": {
           "isaacsim": "5.1.0"
+        },
+        "requires_gpu": true,
+        "platform_system": "Linux",
+        "required_distributions": [
+          "imageio",
+          "imageio-ffmpeg"
+        ],
+        "python_imports": [
+          "pinocchio",
+          "torch",
+          "gymnasium",
+          "imageio",
+          "isaaclab",
+          "dexverse.tasks"
+        ],
+        "gym_registrations": [],
+        "compute_attestation_path": "/coc/flash7/ycho420/envs/isaacsim-5.1.0_isaaclab-2.3.2_py311/.skynet/compute-readiness-v1.json",
+        "compute_smoke": {
+          "suite": "dexverse_recorded",
+          "adapter": "xpolicylab-dp",
+          "resources": {
+            "queue_policy": "normal",
+            "gpu_type": "a40",
+            "gpu_count": 1,
+            "cpus_per_task": 8,
+            "memory_gb": 48,
+            "time_limit": "00:10:00"
+          },
+          "capsule_asset": "adapter-support/dexverse_readiness.py",
+          "capsule_sha256": "281f7c8ccc5ffcc940a5973e5a874715a8d73dc9bcbd56df4381c2bd3bc7cd2f",
+          "argv": [
+            "{{runtime.python_executable}}",
+            "{{smoke.asset_path}}",
+            "--source-dir",
+            "{{runtime.source_dir}}",
+            "--source-revision",
+            "30cc673e27684b9f10186fa6bea731aed246bc9f",
+            "--output",
+            "{{smoke.result_path}}"
+          ],
+          "environment": {
+            "PYTHONPATH": "{{runtime.source_dir}}/source/dexverse"
+          },
+          "result_schema": "skynet.evaluator-readiness/v1",
+          "timeout_seconds": 500,
+          "required_checks": [
+            "environment_constructed",
+            "environment_reset",
+            "camera_rendered",
+            "media_nonempty"
+          ]
         }
       }
     },
@@ -190,8 +248,8 @@
       }
     },
     "skynet-dp": {
-      "label": "Diffusion Policy \u00b7 recorded demonstrations (Python 3.11)",
-      "description": "Isolated XPolicyLab DP runtime with a pinned recorded-data loader; simulation is not required.",
+      "label": "XPolicyLab \u00b7 DP and ACT (Python 3.11)",
+      "description": "Isolated policy runtime for registered DP and ACT datasets.",
       "backend": "existing",
       "environment_path": "/coc/flash7/ycho420/envs/skynet-dp-py311",
       "source_prerequisites": [

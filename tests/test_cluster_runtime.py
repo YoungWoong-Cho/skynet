@@ -405,3 +405,27 @@ def test_queue_reason_failure_is_visible_without_discarding_accounting(monkeypat
     assert records["11"]["State"] == "PENDING"
     assert "Live queue reason unavailable" in records["11"]["Reason"]
     assert "timed out" in records["11"]["Reason"]
+
+
+def test_unavailable_gpu_forecast_does_not_reject_a_valid_submission(tmp_path, monkeypatch):
+    """The controller can accept GPU jobs while its will-run RPC is unavailable."""
+    fake_bin = tmp_path / 'bin'
+    fake_bin.mkdir()
+    timeout = fake_bin / 'timeout'
+    monkeypatch.setattr(cluster_runtime, 'SLURM_BIN', str(fake_bin))
+    marker = tmp_path / 'job-must-not-run'
+    script = f'#!/bin/bash\ntouch {marker}\n'
+    for message, expected in [
+        ('allocation failure: Zero Bytes were transmitted or received', 0),
+        ('sbatch: error: Invalid generic resource specification', 1),
+    ]:
+        timeout.write_text('#!/bin/sh\nprintf "%s\\n" "' + message + '" >&2\nexit 1\n')
+        timeout.chmod(0o755)
+        client = RecordingClusterClient()
+        client.test_script(script, 'sky1')
+        _, command, _ = client.commands[-1]
+        result = subprocess.run(['bash', '-c', command], input=script, text=True, capture_output=True)
+        assert result.returncode == expected
+        assert not marker.exists()
+        if expected == 0:
+            assert 'submission will validate' in result.stdout

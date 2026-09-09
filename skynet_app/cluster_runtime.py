@@ -296,7 +296,11 @@ class ClusterClient:
             "if command -v timeout >/dev/null 2>&1; then "
             "set +e; output=$(timeout 10s sbatch --test-only \"$tmp\" 2>&1); rc=$?; set -e; "
             "if test $rc -eq 124; then printf '%s\\n' 'Slurm validation timed out after 10s. No job was submitted; retry when the controller responds.' >&2; exit 124; "
-            "elif test $rc -ne 0; then printf '%s\\n' \"$output\" >&2; exit $rc; "
+            "elif test $rc -ne 0; then "
+            "case \"$output\" in "
+            "*'allocation failure: Zero Bytes were transmitted or received'*) "
+            "printf '%s\\n' 'Slurm allocation forecast unavailable; submission will validate the request.' ;; "
+            "*) printf '%s\\n' \"$output\" >&2; exit $rc ;; esac; "
             "else printf '%s\\n' \"$output\"; fi; "
             "else sbatch --test-only \"$tmp\"; fi"
         )

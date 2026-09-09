@@ -1,6 +1,6 @@
 """DP declarations consumed by the ordinary adapter, data, and experiment UI."""
 
-from pathlib import Path
+from .xpolicy_manifest import support_files, progress_contract, evaluation
 
 from skynet_app.dataset_formats import RECIPES, XPL_COMMIT, XPL_REPOSITORY
 from skynet_app.training_contracts import DatasetRequirement, TrainingPreset
@@ -17,11 +17,8 @@ def manifest():
         AdapterRuntimePolicy,
         CommandTemplate,
         DataBundleInputBinding,
-        TrainingProgressContract,
-        TrainingProgressJsonlSource,
     )
 
-    support = Path(__file__).parent
     contracts = [RECIPES[k]["contract"] for k in ("dp-state", "dp")]
     fields = [
         AdapterInputField(
@@ -294,30 +291,8 @@ def manifest():
                 "train.seed",
             ],
             checkpoint_globs=["artifacts/checkpoints/*.ckpt"],
-            progress=TrainingProgressContract(
-                unit="epoch",
-                total_path="native.config.epochs",
-                starts_at_zero=True,
-                source=TrainingProgressJsonlSource(
-                    path="artifacts/logs.json.txt",
-                    completed_key="epoch",
-                    completed_offset=1,
-                    required_key="val_loss",
-                    metrics={
-                        "train_loss": "train/loss",
-                        "val_loss": "validation/loss",
-                        "lr": "train/learning_rate",
-                        "global_step": "training/global_step",
-                    },
-                ),
-            ),
-            capsule_files={
-                "adapter-support/skynet_dp_training.py": (
-                    support / "dp_training.py"
-                ).read_text(),
-                "adapter-support/artifacts.py": (
-                    support.parents[1] / "ops/datasets/artifacts.py"
-                ).read_text(),
-            },
+            progress=progress_contract(),
+            capsule_files=support_files('dp'),
         ),
+        evaluations=[evaluation('dp')],
     )

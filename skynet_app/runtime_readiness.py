@@ -33,6 +33,15 @@ def _content_sha256(value: Any) -> str:
 
 
 def suite_contract(config: Mapping[str, Any]) -> dict[str, Any]:
+    if binding := config.get("dataset_task_binding"):
+        # Runtime readiness verifies the pinned simulator and registration module.
+        # Each dataset's concrete task/robot contract is checked by its rollout.
+        # Binding a new dataset must not invalidate unchanged GPU runtime evidence.
+        base = dict(
+            config, tasks=[], task_options=[], task_catalog_sha256=_content_sha256([])
+        )
+        base.pop("dataset_task_binding")
+        return {**suite_contract(base), "dataset_task_binding": dict(binding)}
     options = config.get("task_options")
     if not isinstance(options, list):
         options = []
@@ -151,7 +160,7 @@ def build_readiness_contract(profile_id: str, suite_id: str) -> tuple[dict[str, 
     provenance = pinned_suite.get("task_catalog_provenance") or {}
     revision = str(provenance.get("revision") or "")
     for prerequisite in profile.source_prerequisites:
-        if prerequisite.kind == "git_checkout" and prerequisite.revision == revision:
+        if prerequisite.kind in {"git_checkout", "directory"} and prerequisite.revision == revision:
             source_dir = prerequisite.path
             break
     if not source_dir:
@@ -328,6 +337,8 @@ def render_readiness_sbatch(
         "fi",
         'probe_root="${SLURM_TMPDIR:-/tmp}/skynet-runtime-readiness-${SLURM_JOB_ID:-manual}"',
         'mkdir -p "$probe_root"',
+        'mkdir -p "$probe_root/tmp"',
+        'export TMPDIR="$probe_root/tmp"',
         f"printf '%s' {shlex.quote(encoded_driver)} | base64 --decode > \"$probe_root/runtime_readiness.py\"",
         f"printf '%s' {shlex.quote(encoded_hook)} | base64 --decode > \"$probe_root/evaluator-hook.py\"",
         f"printf '%s' {shlex.quote(encoded_contract)} | base64 --decode > \"$probe_root/contract.json\"",

@@ -246,7 +246,7 @@ def test_validation_requires_runtime_readiness_and_surfaces_blocker(monkeypatch)
     monkeypatch.setattr(
         service,
         "_resolve_evaluation_suite_selection",
-        lambda suite_id, environment, tasks: (suite, "isaac_sim", ["nutpouring"], {}),
+        lambda suite_id, environment, tasks, run=None: (suite, "isaac_sim", ["nutpouring"], {}),
     )
     observed = {}
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from skynet_app.evaluation_contracts import bind_suite_to_dataset
+
 import math
 import ipaddress
 import urllib.parse
@@ -7008,6 +7010,7 @@ class PipelineService:
                         run_updates=None if is_evaluation_stage else {"status": "SUCCEEDED", "completed_at": finished},
                     )
                     if not is_evaluation_stage:
+                        self._ingest_training_progress(self.database.get_run(row["run_id"]) or {})
                         self._finish_tracking(row["run_id"], "FINISHED")
                     updated += 1
                     continue
@@ -7292,7 +7295,8 @@ class PipelineService:
 
     def _ingest_training_progress(self, value: Mapping[str, Any]) -> int:
         status = str(value.get("status") or value.get("state") or "").upper()
-        if status not in _PROGRESS_RUNNING_STATES:
+        terminal_states = _PROGRESS_SUCCESS_STATES | _PROGRESS_FAILURE_STATES
+        if status not in _PROGRESS_RUNNING_STATES | terminal_states:
             return 0
         run = value if value.get("stages") and value.get("attempts") else self.database.get_run(
             str(value.get("id") or value.get("run_id") or "")
@@ -7313,13 +7317,19 @@ class PipelineService:
             if str(attempt.get("stage_id") or "") in train_stage_ids
         ]
         attempt = _latest_attempt(attempts)
-        if not attempt or str(attempt.get("status") or "").upper() not in _PROGRESS_RUNNING_STATES:
+        if not attempt:
+            return 0
+        attempt_status = str(attempt.get("status") or "").upper()
+        final_read = attempt_status in terminal_states and bool(attempt.get("slurm_job_id"))
+        if attempt_status not in _PROGRESS_RUNNING_STATES and not final_read:
             return 0
         attempt_id = str(attempt.get("id") or "")
         if not attempt_id:
             return 0
         source = contract.source
         jsonl = source.kind == "jsonl"
+        if final_read and not jsonl:
+            return 0
         path = (
             str(PurePosixPath(run["run_directory"]) / source.path)
             if jsonl and run.get("run_directory")
@@ -7328,9 +7338,13 @@ class PipelineService:
         if not isinstance(path, str) or not path:
             return 0
         throttle_key = f"{run['id']}:{attempt_id}"
+        final_key = (throttle_key, attempt.get("restart_count"), attempt.get("finished_at"))
+        final_reads = getattr(self, "_training_progress_final_reads", set())
+        if final_read and final_key in final_reads:
+            return 0
         monotonic_now = __import__("time").monotonic()
         last_reads = getattr(self, "_training_progress_last_reads", {})
-        if monotonic_now - float(last_reads.get(throttle_key, 0.0)) < source.poll_seconds:
+        if not final_read and monotonic_now - float(last_reads.get(throttle_key, 0.0)) < source.poll_seconds:
             return 0
         last_reads[throttle_key] = monotonic_now
         self._training_progress_last_reads = last_reads
@@ -7344,6 +7358,11 @@ class PipelineService:
             )
         except ClusterError:
             return 0
+        if final_read:
+            # Terminal structured logs are stable. Bypass the live poll throttle once,
+            # so short jobs and their final epoch reach both the UI and tracking.
+            final_reads.add(final_key)
+            self._training_progress_final_reads = final_reads
         records = parse_declared_training_progress(
             content, contract, resolved_spec=run.get("resolved_spec_json")
         )
@@ -8519,6 +8538,7 @@ class PipelineService:
         suite_id: str | None,
         environment: str | None,
         tasks: list[str],
+        run: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, str | None, list[str], dict[str, str]]:
         errors: dict[str, str] = {}
         normalized_suite_id = str(suite_id or "").strip()
@@ -8533,6 +8553,12 @@ class PipelineService:
         if suite is None:
             errors["suite_id"] = "Evaluation suite was not found."
             return None, None, [], errors
+
+        try:
+            suite = bind_suite_to_dataset(suite, (run or {}).get("resolved_spec_json") or {})
+        except ValueError as error:
+            errors["tasks"] = str(error)
+            return suite, str(suite["evaluator_adapter"]), [], errors
 
         canonical_environment = str(suite["evaluator_adapter"])
         requested_environment = str(environment or "").strip()
@@ -8886,7 +8912,7 @@ class PipelineService:
 
         suite, resolved_environment, resolved_tasks, suite_errors = (
             self._resolve_evaluation_suite_selection(
-                suite_id, environment, list(tasks or [])
+                suite_id, environment, list(tasks or []), run
             )
         )
         suite_config = suite["config_json"] if suite is not None else {}
@@ -8998,7 +9024,7 @@ class PipelineService:
             raise ValueError(busy_reason)
         suite, canonical_environment, tasks, suite_errors = (
             self._resolve_evaluation_suite_selection(
-                request.suite_id, request.environment, request.tasks
+                request.suite_id, request.environment, request.tasks, run
             )
         )
         if suite_errors:
@@ -9908,6 +9934,11 @@ def evaluation_suites(
     for row in service.database.list_evaluation_suites():
         if not runnable_for_current_evaluator(row):
             continue
+        if run_id is not None:
+            try:
+                row = bind_suite_to_dataset(row, spec_document or {})
+            except ValueError:
+                continue
         config = row["config_json"]
         suites.append({
             **row,

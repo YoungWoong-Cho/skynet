@@ -387,9 +387,14 @@ class PolicyExportService:
                 {key: value["format"] for key, value in RECIPES.items()}
             ),
             "images.py": (self.live.root / "ops/xr/images.py").read_text(),
-            "skynet_dp_training.py": (
-                self.live.root / "skynet_app/adapters/dp_training.py"
-            ).read_text(),
+            **{
+                name: (self.live.root / "skynet_app/adapters" / source).read_text()
+                for name, source in {
+                    "skynet_dp_training.py": "dp_training.py",
+                    "skynet_act_training.py": "act_training.py",
+                    "xpolicy_runtime.py": "xpolicy_runtime.py",
+                }.items()
+            },
         }
         converter_sha = fingerprint([frozen_files, provenance, runtime_lock])
         identity = fingerprint(
@@ -808,27 +813,41 @@ class PolicyExportService:
             raise ValueError(
                 "Training cluster verification did not match the prepared dataset"
             )
-        if job["format"] in {"dp", "dp-state"}:
+        if RECIPES[job["format"]]["trainable"]:
+            kind = "act" if job["format"] == "act" else "dp"
+            expected_mode = (
+                "rgb" if "rgb" in RECIPES[job["format"]]["observations"] else "state"
+            )
             self.update(
                 job["id"],
                 stage="CHECKING_LOADER",
-                detail="Checking the DP data loader on the training cluster",
+                detail="Checking the training data loader",
             )
             profile = CLUSTER.runtime_profiles["skynet-dp"]
             source = profile.source_prerequisites[0].path
-            self.cluster.write_capsule_file(
-                job["id"],
-                "adapter-support/skynet_dp_training.py",
-                (directory / "worker/skynet_dp_training.py").read_text(),
-                gateway,
-            )
-            self.cluster.write_capsule_file(
-                job["id"], "adapter-support/artifacts.py", script, gateway
-            )
+            for name in [
+                f"skynet_{kind}_training.py",
+                "artifacts.py",
+                *(["xpolicy_runtime.py"] if kind == "act" else []),
+            ]:
+                frozen = directory / "worker" / name
+                # Older export-only ACT copies predate the training integration.
+                if frozen.is_file():
+                    content = frozen.read_text()
+                else:
+                    filename = (
+                        "act_training.py" if name == "skynet_act_training.py" else name
+                    )
+                    content = (
+                        self.live.root / "skynet_app/adapters" / filename
+                    ).read_text()
+                self.cluster.write_capsule_file(
+                    job["id"], "adapter-support/" + name, content, gateway
+                )
             command = shlex.join(
                 [
                     str(profile.environment_path) + "/bin/python",
-                    f"{WORK_ROOT}/jobs/runs/{job['id']}/adapter-support/skynet_dp_training.py",
+                    f"{WORK_ROOT}/jobs/runs/{job['id']}/adapter-support/skynet_{kind}_training.py",
                     "--repository",
                     str(source),
                     "--revision",
@@ -841,19 +860,28 @@ class PolicyExportService:
                     f"{WORK_ROOT}/jobs/runs/{job['id']}/dataset-validation",
                     "--batch-size",
                     "1",
-                    "--observation-mode",
-                    "rgb" if job["format"] == "dp" else "state",
                     "--verify-only",
+                    *(["--observation-mode", expected_mode] if kind == "dp" else []),
                 ]
             )
             output = self.cluster.ssh(gateway, command, timeout=300)
             receipt = json.loads(output.strip().splitlines()[-1])
+            schemas = (
+                {"skynet.act-loader-validation/v1"}
+                if kind == "act"
+                else {
+                    "skynet.dp-loader-validation/v1",
+                    "skynet.dp-loader-validation/v2",
+                }
+            )
             if (
                 receipt.get("manifest_sha256") != version["manifest_sha256"]
-                or receipt.get("schema") not in {"skynet.dp-loader-validation/v1", "skynet.dp-loader-validation/v2"}
-                or (receipt.get("schema") == "skynet.dp-loader-validation/v2" and receipt.get("observation_mode") != ("rgb" if job["format"] == "dp" else "state"))
+                or receipt.get("schema") not in schemas
+                or receipt.get("observation_mode", "rgb") != expected_mode
             ):
-                raise ValueError("DP loader verification returned a different dataset")
+                raise ValueError(
+                    "Training loader verification returned a different dataset"
+                )
             self.update(job["id"], loader_validation=receipt)
         return self.database.record_data_location(
             version["id"],

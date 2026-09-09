@@ -43,7 +43,8 @@ for (const name of [
   if (brace >= 0) text = text.slice(0, brace + 3);
   w.eval(text);
 }
-w.loadDataRegistry = async () => {};
+const registryRefreshes = [];
+w.loadDataRegistry = async (force) => { registryRefreshes.push(force); };
 w.askUserDialog = async () => true;
 const options = {
   policies: [
@@ -228,6 +229,13 @@ try {
   el("close-policy-export").click();
   assert.equal(el("policy-export-dialog").open, false);
   assert.equal(el("policy-export-dialog").querySelector("details"), null);
+  const beforeReady = registryRefreshes.length;
+  options.exports[0].state = "READY";
+  options.exports[0].bundle_id = "new-cluster-bundle";
+  await w.openPreparedDataset("dataset");
+  assert.equal(registryRefreshes.length, beforeReady + 1, "opening a completed conversion refreshes the registry even before polling");
+  await w.openPreparedDataset("dataset");
+  assert.equal(registryRefreshes.length, beforeReady + 1, "unchanged data does not reload the registry");
   options.exports = [];
   resource.metadata = {};
   resource.versions = [{id: "imported", format: "lerobot-v2.0", status: "READY", path: "/cluster/imported", revision: "abc123", metadata: {episodes: 42}}];
