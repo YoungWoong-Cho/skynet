@@ -347,12 +347,12 @@
     );
     select.value = index >= 0 && index < count ? index : 0;
     select.parentElement.hidden = count < 2;
-    if (!dialog.open) dialog.showModal();
+    SkynetDialog.open(dialog);
     selectRecording(Number(select.value));
   };
   el("live-review-convert").onclick = () => {
-    dialog.close();
-    window.openCollectionConversion(reviewSession);
+    SkynetDialog.close(dialog);
+    window.openPolicyExport(reviewSession.id);
   };
   el("live-review-recording").onchange = (event) =>
     selectRecording(Number(event.target.value));
@@ -362,7 +362,6 @@
       video.pause();
     }
   });
-  el("live-review-close").onclick = () => dialog.close();
   dialog.addEventListener("close", () => {
     ++token;
     clearTimeout(timer);

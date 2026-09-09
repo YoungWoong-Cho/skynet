@@ -1,12 +1,18 @@
+# Historical state-only collection conversion
+
+The primary UI now uses the unified policy-aware preparation workflow described in [policy-data-exports.md](policy-data-exports.md). The endpoints below remain for existing state-only conversion history and API compatibility. They do not make a dataset compatible with a visual policy.
+
 # Teleoperation recordings → training dataset
 
-1. Open **Data → Collection → Teleoperate**, choose the hand and task, and start a session.
+This page describes the existing state-only Slurm conversion. For new synchronized RGB recordings and the XPolicyLab, DP, and ACT format choices in Resources, see [Policy data exports](policy-data-exports.md).
+
+1. Open **Data → Collect**, choose the hand and task, and start a session.
 2. In the headset, collect episodes and choose **End collection** when finished.
 3. Open **Recordings → Review recordings** and choose an episode to review.
-4. Choose **Convert for training**, name the dataset, optionally select a subset, then choose **Convert dataset**.
+4. Choose **Convert for training**, name the dataset, then choose **Convert dataset**. Every recording in that session is included automatically.
 5. Once converted, download the HDF5 file or open its registered dataset. No terminal command is required.
 
-Conversion runs on Slurm through the configured cluster gateway, preserving the collection's original hand, task, source revision and recorded controls. The Mac uploads checksum-verified cached recordings; uncached originals must first be copied from the collection host. No conversion runs on that host. It does not start training or evaluation. The old local hand/head tracking tools and offline training experiments are under **Setup**; JSONL motion files are not simulated task demonstrations.
+Conversion runs on Slurm through the configured cluster gateway, preserving the collection's original hand, task, source revision and recorded controls. The Mac uploads checksum-verified cached recordings; uncached originals must first be copied from the collection host. No conversion runs on that host. It does not start training or evaluation. The former local hand/head tracking and offline experiment sections have been removed from Collection. Their saved files and job records are preserved; JSONL motion files are not simulated task demonstrations.
 
 ## Output and compatibility
 
@@ -30,7 +36,7 @@ The launcher reuses `ClusterClient.submit_script`, its durable submission receip
 
 ## Recovery and limits
 
-- The app saves the request and converter source before starting the worker. Repeated identical requests recover the same conversion. Failed conversions can be retried; another selected subset creates a separate versioned result.
+- The app saves the request and converter source before starting the worker. Repeated identical requests recover the same conversion. Failed conversions can be retried. New conversion requests always include every recording; older browser requests containing recording selections are rejected with a reload message. Earlier partial test datasets remain available in the registry and are labelled partially converted in Collection, with a full-session conversion action.
 - The Slurm job continues after the browser closes or the web app restarts. The local monitor resumes status checks and downloads. Lost submission acknowledgements recover the same submission token rather than starting another job.
 - Slurm manages GPU allocation independently of live collection. Each recording is limited to 100 MB and each output artifact to 1 GB; larger inputs fail explicitly. Unsupported GPU capability fails before simulator startup.
 - Progress, queue reasons, job ID, connection failures, worker errors and logs are accessible from the conversion dialog. Publication requires both Slurm completion and verified output. Shared-storage visibility gets a bounded 120-second grace period; missing results never count as success. Downloads are size/checksum verified before registry publication.

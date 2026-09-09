@@ -34,6 +34,73 @@ from skynet_app.tracking import WandBSettings
 COMMIT = "e17cf98fe4bc234c564b37abc9e155f25e76d566"
 
 
+def test_retired_dexverse_preserves_pinned_experiments_and_collection(tmp_path):
+    from skynet_app.adapters import _builtin_manifest
+    from skynet_app.collection import CollectionService
+    from skynet_app.experiments import ExperimentSpec
+
+    database = Database(tmp_path / "retirement.db")
+    collection = CollectionService(database, FakeCluster())
+    collection_before = collection.store.adapter_by_key("dexverse-cloudxr")
+    assert collection_before is not None
+    service = PipelineService(database, FakeCluster())
+    assert "dexverse" not in {item["seed_key"] for item in database.list_adapter_registry()}
+
+    # Recreate an installation with two historical versions of the retired seed.
+    manifest = _builtin_manifest(
+        "dexverse", "DexVerse", "https://github.com/ycyao216/DexVerse", [], "conda"
+    ).model_dump(mode="json")
+    original = database.upsert_seed_adapter(
+        seed_key="dexverse", name="DexVerse", manifest=manifest
+    )
+    manifest["warnings"].append("Historical revision")
+    original = database.upsert_seed_adapter(
+        seed_key="dexverse", name="DexVerse", manifest=manifest
+    )
+    assert original["latest_version_number"] == 2
+    custom = database.clone_adapter(original["id"], name="Custom external trainer")
+    other_before = {
+        item["id"]: item for item in database.list_adapter_registry()
+        if item["id"] != original["id"]
+    }
+    source, _, _ = service._snapshot_adapter({
+        "repository": manifest["default_repository"],
+        "revision": COMMIT,
+        "adapter": "dexverse",
+        "adapter_id": original["id"],
+        "adapter_version": 1,
+    }, "dexverse")
+    spec = ExperimentSpec.model_validate({
+        "identity": {"project": "qa", "experiment": "retired-dexverse"},
+        "source": source,
+        "runtime": {"backend": "existing", "bootstrap_uv": False},
+        "resources": {"gpu": {"mode": "explicit", "count": 1}},
+        "train": {"checkpoint": {"auto_resume": False}},
+        "native": {"argv": ["python", "external_trainer.py"]},
+    })
+    plan_before = resolve_adapter_plan(spec)
+    assert plan_before.runnable
+
+    service._seed_registries()
+    archived = database.get_adapter(original["id"])
+    assert archived["archived_at"] is not None
+    assert archived["latest_version_number"] == 2
+    assert [item["manifest_sha256"] for item in archived["versions"]] == [
+        item["manifest_sha256"] for item in original["versions"]
+    ]
+    with pytest.raises(ValueError, match="archived"):
+        service._adapter_selection(original["id"])
+    assert resolve_adapter_plan(spec) == plan_before
+    assert service._snapshot_adapter(dict(source), "dexverse")[0] == source
+    assert collection.store.adapter_by_key("dexverse-cloudxr") == collection_before
+    assert database.get_adapter(custom["id"])["archived_at"] is None
+    assert {item["id"]: item for item in database.list_adapter_registry()} == other_before
+
+    service._seed_registries()
+    assert database.get_adapter(original["id"]) == archived
+    assert collection.store.adapter_by_key("dexverse-cloudxr") == collection_before
+
+
 def seed_repository_choices(service, slug):
     """Provide the exact cached metadata that real users obtain via Inspect.
 
@@ -642,6 +709,88 @@ def test_failed_wandb_binding_reopens_exact_same_run(monkeypatch):
 
         binding = database.list_tracking_bindings("run", run_id)[0]
         assert reopened == [(run_id, 2)]
+        assert binding["remote_id"] == run_id
+        assert binding["remote_url"] == remote_url
+        assert binding["status"] == "CONNECTED"
+        assert binding["last_error"] is None
+
+
+@pytest.mark.parametrize("missing", ["registry", "both", "error_record"])
+def test_wandb_retry_recovers_missing_binding(monkeypatch, missing):
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        database = Database(root / "skynet.db")
+        service = make_pipeline_service(database, FakeCluster())
+        experiment = service.create_experiment(canonical_spec())
+        run_id = experiment["runs"][0]["id"]
+        run = database.get_run(run_id)
+        spec = pipeline_api.ExperimentSpec.model_validate({
+            **run["resolved_spec_json"],
+            "tracking": {
+                "providers": [{
+                    "provider": "wandb",
+                    "enabled": True,
+                    "entity": "validated-team",
+                    "project": "pipeline",
+                }]
+            },
+        })
+        remote_url = f"https://wandb.ai/validated-team/pipeline/runs/{run_id}"
+        if missing == "error_record":
+            database.upsert_tracking_binding("wandb", "run", run_id, remote_id=None, remote_url=None, status="ERROR", metadata={}, last_error="Previous submission failed")
+        reopened, ensured = [], []
+        local = {"remote_id": run_id, "url": remote_url} if missing == "registry" else None
+
+        class ExactBindingWandB:
+            def __init__(self, _capsule, _settings):
+                pass
+
+            def ensure_experiment(self, entity, project):
+                assert (entity, project) == ("validated-team", "pipeline")
+                return SimpleNamespace(remote_id=f"{entity}/{project}", error=None)
+
+            def binding(self, local_run_id):
+                assert local_run_id == run_id
+                return local
+
+            def ensure_run(self, **kwargs):
+                nonlocal local
+                assert kwargs["local_run_id"] == run_id
+                ensured.append(run_id)
+                local = {"remote_id": run_id, "url": remote_url}
+                return SimpleNamespace(remote_id=run_id, error=None)
+
+            def reopen_run(self, local_run_id, attempt_number):
+                reopened.append((local_run_id, attempt_number))
+                return SimpleNamespace(remote_id=local_run_id, error=None)
+
+            def set_tags(self, local_run_id, tags):
+                assert local_run_id == run_id
+                assert tags["skynet.attempt_number"] == 2
+
+        monkeypatch.setattr(pipeline_api, "WandBBridge", ExactBindingWandB)
+        monkeypatch.setattr(
+            service,
+            "_wandb_settings",
+            lambda _provider=None: WandBSettings(
+                base_url="https://api.wandb.ai",
+                api_key="secret",
+                entity="validated-team",
+            ),
+        )
+
+        service._start_tracking(
+            spec,
+            run,
+            root / "capsules" / run_id,
+            "3752691",
+            providers=list(spec.tracking.providers),
+            continuation_attempt_number=2,
+        )
+
+        binding = database.list_tracking_bindings("run", run_id)[0]
+        assert reopened == ([(run_id, 2)] if missing == "registry" else [])
+        assert ensured == ([] if missing == "registry" else [run_id])
         assert binding["remote_id"] == run_id
         assert binding["remote_url"] == remote_url
         assert binding["status"] == "CONNECTED"

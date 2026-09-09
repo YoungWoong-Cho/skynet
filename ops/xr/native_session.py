@@ -22,7 +22,7 @@ COLLECTION_FILES = {}
 
 
 def write_collection_files(root):
-    required = {"collection.py", "anatomy.py", "wrist.py"}
+    required = {"collection.py", "anatomy.py", "wrist.py", "images.py", "render_images.py", "arrays.py"}
     if set(COLLECTION_FILES) != required:
         raise ValueError("Automatic collection runtime is incomplete in this session")
     source_root = root / "collector"
@@ -170,6 +170,86 @@ def server_address():
     return address
 
 
+
+def stream_sha256(stream):
+    """Hash bounded chunks on host Python 3.10 as well as the Isaac runtime."""
+    digest = hashlib.sha256()
+    for block in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(block)
+    return digest.hexdigest()
+
+
+def attach_rendered_images(root, validated):
+    """Bind separate rendering receipts to verified originals without rewriting them."""
+    path = root / "image-receipts.json"
+    if not path.exists():
+        return
+    if path.stat().st_size > 1_000_000:
+        raise ValueError("Image receipts exceed their size limit")
+    receipts = json.loads(path.read_text())
+    if not isinstance(receipts, dict) or set(receipts) - set(validated):
+        raise ValueError("Image receipts refer to an unknown recording")
+    for relative, image in receipts.items():
+        original = validated[relative]
+        if image.get("source_sha256") != original["sha256"]:
+            raise ValueError("Rendered images belong to a different original recording")
+        target = (root / image["path"]).resolve()
+        if not target.is_relative_to(root / "recordings") or target.suffix != ".hdf5":
+            raise ValueError("Invalid image recording path")
+        if not 0 < target.stat().st_size == image["size_bytes"] <= 4_000_000_000:
+            raise ValueError("Rendered image size differs from its receipt")
+        with target.open("rb") as stream:
+            digest = stream_sha256(stream)
+        if digest != image["sha256"] or image["steps"] != original["steps"]:
+            raise ValueError("Rendered images are incomplete or changed")
+        original["images"] = image
+
+
+def prepare_training_images(root, config, runtime, repo, env, publish, timeout=1800):
+    """Run only after all XR children exit, while the managed GPU lock is held."""
+    clean_env = {k: v for k, v in env.items() if k != "XR_RUNTIME_JSON"}
+    clean_env["ENABLE_CAMERAS"] = "1"
+    publish("RENDERING_IMAGES", server_ready=False, startup_stage="images",
+            detail="Headset session ended. Preparing training images from saved scene states")
+    process = None
+    try:
+        with (root / "images.log").open("w") as stream:
+            process = subprocess.Popen(
+                [str(runtime / "bin/python"), str(root / "collector/render_images.py"), str(config.resolve()), str(root)],
+                cwd=repo, env=clean_env, stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT,
+            )
+        deadline = time.monotonic() + timeout
+        previous = None
+        while process.poll() is None:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Training image preparation exceeded 30 minutes; original recordings are preserved")
+            progress = root / "image-progress.json"
+            if progress.exists():
+                if progress.stat().st_size > 8192:
+                    raise ValueError("Invalid image preparation progress")
+                value = json.loads(progress.read_text())
+                if value != previous:
+                    publish("RENDERING_IMAGES", server_ready=False, image_render_progress=value,
+                            detail=value.get("detail", "Preparing training images"))
+                    previous = value
+            time.sleep(1)
+        if process.returncode:
+            raise RuntimeError(simulation_failure(root / "images.log", "Training image preparation failed; original recordings are preserved"))
+        progress = json.loads((root / "image-progress.json").read_text())
+        if progress.get("state") != "READY" or progress.get("completed") != progress.get("total"):
+            raise ValueError("Training image preparation did not finish")
+        publish("RENDERING_IMAGES", server_ready=False, image_render_progress=progress,
+                detail="Verifying training images")
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path)
@@ -299,9 +379,22 @@ def main():
                     "Episode validation failed: " + result.stderr.strip()[-1500:]
                 )
             summary = json.loads(result.stdout)
+            if receipt.get("images"):
+                image = receipt["images"]
+                image_path = (root / image["path"]).resolve()
+                if not image_path.is_relative_to(root / "recordings") or image_path.suffix != ".hdf5":
+                    raise ValueError("Invalid image recording path")
+                if not 0 < image_path.stat().st_size == image["size_bytes"] <= 4_000_000_000:
+                    raise ValueError("Image recording size differs from its receipt")
+                with image_path.open("rb") as stream:
+                    digest = stream_sha256(stream)
+                if digest != image["sha256"] or image["steps"] != summary["steps"]:
+                    raise ValueError("Image recording is incomplete or changed")
             validated[relative] = dict(receipt, **summary)
+        attach_rendered_images(root, validated)
         status["recordings"] = list(validated)
         status["recording_checksums"] = {k: v["sha256"] for k, v in validated.items()}
+        status["recording_images"] = {k: v["images"] for k, v in validated.items() if v.get("images")}
         status["recording_summary"] = {
             "episodes": sum(v["episodes"] for v in validated.values()),
             "steps": sum(v["steps"] for v in validated.values()),
@@ -492,6 +585,12 @@ def main():
             for log in Path("/tmp").glob("cxr_*.log"):
                 if log.stat().st_uid == os.getuid() and log.stat().st_mtime >= started:
                     (root / log.name).write_bytes(log.read_bytes())
+            if cfg.get("image_capture") and validated and pending_result and pending_result[0] != "FAILED":
+                prepare_training_images(root, args.config, runtime, repo, env, publish)
+                refresh_saved()
+                if any(not v.get("images") for v in validated.values()):
+                    raise ValueError("Training images are missing for a saved episode")
+                pending_result[1]["detail"] = f"Collection ended. {len(validated)} episodes and their training images are ready."
             # Isaac creates nested logs in TMPDIR. Remove only this newly-created
             # private job directory, after both child processes have exited.
             shutil.rmtree(run)
@@ -499,7 +598,7 @@ def main():
             publish(
                 "FAILED",
                 server_ready=False,
-                detail="Session cleanup failed",
+                detail="Training image preparation failed; original recordings are preserved" if status.get("state") == "RENDERING_IMAGES" else "Session cleanup failed",
                 error=str(exc),
             )
             raise

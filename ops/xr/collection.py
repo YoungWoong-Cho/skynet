@@ -107,6 +107,8 @@ class EpisodeStore:
             episodes=1,
             steps=len(actions),
         )
+        if episode.get("skynet_images"):
+            receipt["images"] = episode["skynet_images"]
         self.receipts.append(receipt)
         atomic_json(self.root / "episodes.json", self.receipts)
         return receipt
@@ -201,6 +203,10 @@ def run_loop(
     robot = env.scene["robot"]
     configure_virtual_wrist(robot, manifest, tracked_sides)
     wrist_commands = DexVerseWristContinuity(teleop._retargeters, tracked_sides)
+    if cfg.get("image_capture"):
+        from images import training_image_request
+        recorder._metadata["skynet_training_images"] = training_image_request(cfg["image_recipe"])
+        recorder._metadata["skynet_step_dt"] = float(env.step_dt)
     if manifest:
         marker_names = [
             manifest["palm"],
@@ -425,6 +431,8 @@ def run_loop(
                             wrist="absolute",
                             wrist_continuity="equivalent_euler_angles",
                         )
+                        if cfg.get("image_capture"):
+                            recorder._active_episode["skynet_wall_times"] = []
                         phase, instruction = "recording", goal
                         publish(True)
                         continue  # Begin simulation on the next tracked frame.
@@ -439,6 +447,14 @@ def run_loop(
                         raise ValueError(
                             "Hand tracking produced an invalid robot action"
                         )
+                    if cfg.get("image_capture"):
+                        wall_times = recorder._active_episode["skynet_wall_times"]
+                        if len(wall_times) >= 6000:
+                            reset()
+                            phase, interrupted_since = "interrupted", now
+                            instruction = "Episode exceeded 100 seconds. Tap Start for a shorter demonstration."
+                            continue
+                        wall_times.append(time.time())
                     recorder.record_action(action.detach().clone())
                     result = env.step(action.repeat(env.num_envs, 1))
                     recorder.record_state(env.scene.get_state(is_relative=True))
@@ -486,6 +502,22 @@ def main():
     )
     app = ns["simulation_app"]
     try:
+        if cfg.get("image_capture"):
+            from images import camera_recipe
+            original_strip = ns["strip_camera_cfgs"]
+            # Capture the recipe before upstream's XR path removes all cameras.
+            def strip_cameras(env_cfg):
+                cfg["image_recipe"] = camera_recipe(env_cfg)
+                return original_strip(env_cfg)
+            ns["main"].__globals__["strip_camera_cfgs"] = strip_cameras
+            original_config = ns["create_environment_config"]
+            def create_config():
+                env_cfg, success = original_config()
+                if "image_recipe" not in cfg:
+                    cfg["image_recipe"] = camera_recipe(env_cfg)
+                env_cfg = ns["prune_stale_obs_refs"](original_strip(env_cfg))
+                return env_cfg, success
+            ns["main"].__globals__["create_environment_config"] = create_config
         if cfg.get("hand_bundle"):
             sys.path.insert(0, cfg["hand_bundle"]["root"])
             from runtime import install, validate_environment

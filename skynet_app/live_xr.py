@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import inspect
 import json
 from pathlib import Path
 import re
@@ -31,6 +32,7 @@ WORKER_STATES = TERMINAL | {
     "AWAITING_HEADSET",
     "COLLECTING",
     "STOPPING",
+    "RENDERING_IMAGES",
 }
 
 
@@ -173,7 +175,7 @@ class LiveXRService:
             return WorkstationClient(job["profile"])
         return self.cluster
 
-    def create(self, accepted_license=False, task=None, robot=None):
+    def create(self, accepted_license=False, task=None, robot=None, image_capture=False):
         if not self.consent(accepted_license)["accepted"]:
             raise ValueError(
                 "Accept the NVIDIA CloudXR license before starting a session"
@@ -186,6 +188,7 @@ class LiveXRService:
             profile["robot"] if robot is None else robot,
         )
         profile.update(
+            image_capture=image_capture,
             task=task_info["key"],
             robot=hand["key"],
             hand=hand["side"],
@@ -194,10 +197,14 @@ class LiveXRService:
             hand_name=hand["name"],
             instructions=task_info["instructions"],
         )
+        from .live_xr_review import ArrayUnpickler
         worker = (self.root / "ops/xr/native_session.py").read_text()
         sources = {
             "collection.py": (self.root / "ops/xr/collection.py").read_text(),
             "wrist.py": (self.root / "ops/xr/wrist.py").read_text(),
+            "images.py": (self.root / "ops/xr/images.py").read_text(),
+            "render_images.py": (self.root / "ops/xr/render_images.py").read_text(),
+            "arrays.py": "import pickle\nimport numpy as np\n" + inspect.getsource(ArrayUnpickler),
             "anatomy.py": (self.root / "ops/xr/hands/anatomy.py").read_text(),
         }
         worker = worker.replace(
@@ -213,6 +220,8 @@ class LiveXRService:
                         raise ValueError(
                             "A different live session is already running. Stop it before changing the hand or task."
                         )
+                    if bool(job["profile"].get("image_capture")) != image_capture:
+                        raise ValueError("Stop the current session before changing image capture.")
                     return job
             hand_bundle_path = None
             if hand.get("imported"):
@@ -367,7 +376,7 @@ class LiveXRService:
     @staticmethod
     def compile(job):
         p, root = job["profile"], job["root"]
-        minutes = p["duration_minutes"] + 5
+        minutes = p["duration_minutes"] + (35 if p.get("image_capture") else 5)
         directives = (
             []
             if p.get("execution") == "workstation"
@@ -505,6 +514,8 @@ print(json.dumps(value))
                             "recordings",
                             "recording_summary",
                             "recording_checksums",
+                            "recording_images",
+                            "image_render_progress",
                             "episode_phase",
                             "task_goal",
                             "startup_stage",
@@ -582,7 +593,7 @@ print(json.dumps(value))
         # Ask the worker to stop cleanly; cancellation covers sessions still queued.
         if (
             job["state"] == "PENDING"
-            or job["profile"].get("execution") == "workstation"
+            or (job["profile"].get("execution") == "workstation" and not job["profile"].get("image_capture"))
         ):
             transport.cancel(job["job_id"], job["gateway"])
         else:
@@ -607,6 +618,7 @@ print(json.dumps(value))
             "stdout.log",
             "output/cloudxr.log",
             "output/simulation.log",
+            "output/images.log",
         ):
             path = shlex.quote(job["root"] + "/" + name)
             parts.append(f"if test -f {path}; then tail -c 16000 {path}; fi")

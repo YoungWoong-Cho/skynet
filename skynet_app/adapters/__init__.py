@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from pathlib import PurePosixPath
 from typing import Any, Literal, Mapping
 
-from pydantic import Field, computed_field, field_serializer, field_validator, model_validator
+from pydantic import Field, computed_field, field_serializer, field_validator, model_serializer, model_validator
 
 from skynet_app.experiments import AdapterName, CanonicalModel, ExperimentSpec, canonical_sha256
 
@@ -187,13 +187,49 @@ class TrainingProgressLogSource(CanonicalModel):
         return self
 
 
+class TrainingProgressJsonlSource(CanonicalModel):
+    kind: Literal["jsonl"] = "jsonl"
+    path: str = Field(min_length=1, max_length=300)
+    completed_key: str = Field(min_length=1, max_length=100)
+    completed_offset: int = Field(default=0, ge=0, le=1)
+    required_key: str = Field(min_length=1, max_length=100)
+    metrics: dict[str, str] = Field(default_factory=dict, max_length=30)
+    tail_lines: int = Field(default=1000, ge=2, le=5000)
+    poll_seconds: int = Field(default=15, ge=2, le=300)
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if path.is_absolute() or any(part in {".", ".."} for part in value.split("/")) \
+                or any(char in value for char in ("\\", "\x00", "\n", "\r")):
+            raise ValueError("progress file must be relative to the run directory")
+        return value
+
+
 class TrainingProgressContract(CanonicalModel):
     schema_version: Literal["skynet.training-progress-source/v1"] = (
         "skynet.training-progress-source/v1"
     )
-    unit: Literal["step"] = "step"
-    total_path: Literal["train.max_steps"] = "train.max_steps"
-    source: TrainingProgressLogSource
+    unit: Literal["step", "epoch"] = "step"
+    total_path: Literal["train.max_steps", "native.config.epochs"] = "train.max_steps"
+    starts_at_zero: bool = False
+    source: TrainingProgressLogSource | TrainingProgressJsonlSource = Field(discriminator="kind")
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def legacy_log_source(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "kind" not in value:
+            return {"kind": "log_regex", **value}
+        return value
+
+    @model_serializer(mode="wrap")
+    def serialize_contract(self, handler):
+        document = handler(self)
+        if not self.starts_at_zero:
+            # Keep existing log-reader snapshots and fingerprints unchanged.
+            document.pop("starts_at_zero", None)
+        return document
 
 
 _RESERVED_CAPSULE_FILES = {
@@ -498,6 +534,7 @@ class EgoVerseAdapter(RepositoryAdapter):
 
 
 class DexVerseAdapter(RepositoryAdapter):
+    # Retained for saved experiment manifests; no longer seeded for new training.
     capabilities = AdapterCapabilities(
         name=AdapterName.DEXVERSE,
         runtime_backends={"conda", "apptainer", "existing"},
@@ -1478,7 +1515,8 @@ class DataBundleInputBinding(CanonicalModel):
     role: str = Field(min_length=1, max_length=128)
     position: int = Field(default=0, ge=0)
     formats: list[str] = Field(default_factory=list, max_length=32)
-    value_path: Literal["version.path", "mount_path"] = "version.path"
+    value_path: Literal["version.path", "mount_path", "location.path", "version.manifest_sha256"] = "version.path"
+    contract: str | None = None
 
     @field_validator("role")
     @classmethod
@@ -2645,6 +2683,7 @@ class ManifestAdapter(RepositoryAdapter):
             },
             environment=dict(command.environment),
             native_tracking=native_tracking,
+            capsule_files=dict(command.capsule_files),
             preparation_steps=preparation_steps,
             checkpoint_globs=list(command.checkpoint_globs),
             checkpoint_candidate_kind=command.checkpoint_candidate_kind,
@@ -2755,7 +2794,9 @@ def _builtin_manifest(
 
 
 def builtin_adapter_manifests() -> list[AdapterManifest]:
+    from .dp_manifest import manifest as dp_manifest
     return [
+        dp_manifest(),
         _builtin_manifest(
             "generic", "Custom structured command", None, ["custom"], None,
             input_fields=[
@@ -2853,71 +2894,6 @@ def builtin_adapter_manifests() -> list[AdapterManifest]:
                             ),
                         ],
                     ),
-                ),
-            ],
-        ),
-        _builtin_manifest(
-            "dexverse", "DexVerse", "https://github.com/ycyao216/DexVerse", [], "conda",
-            project_subdirectory="source/dexverse",
-            prerequisites=[
-                AdapterPrerequisite(
-                    id="python-3-11",
-                    kind="python",
-                    name="Python",
-                    version="3.11",
-                    description="Use Python 3.11 in a manually provisioned environment.",
-                ),
-                AdapterPrerequisite(
-                    id="isaac-sim-5-1-0",
-                    kind="simulator",
-                    name="NVIDIA Isaac Sim",
-                    version="5.1.0",
-                    description="Install Isaac Sim 5.1.0 before installing or running DexVerse.",
-                ),
-                AdapterPrerequisite(
-                    id="isaac-lab-v2-3-2",
-                    kind="framework",
-                    name="NVIDIA Isaac Lab",
-                    version="v2.3.2",
-                    source_repository="https://github.com/isaac-sim/IsaacLab",
-                    relative_path="../IsaacLab",
-                    relationship="sibling_checkout",
-                    description="Provision Isaac Lab v2.3.2 manually as a sibling checkout of DexVerse.",
-                ),
-                AdapterPrerequisite(
-                    id="dexverse-editable-install",
-                    kind="package",
-                    name="DexVerse Python package",
-                    install_mode="editable",
-                    relative_path="source/dexverse",
-                    description="Install the source/dexverse package in editable mode into the prepared environment.",
-                ),
-                AdapterPrerequisite(
-                    id="dexverse-huggingface-assets",
-                    kind="asset",
-                    name="DexVerse release assets",
-                    gated=True,
-                    source_repository="https://huggingface.co/datasets/dexverse/DexVerse_release",
-                    description="Accept the gated Hugging Face dataset terms and provision required robot, object, scene, and demonstration assets manually.",
-                ),
-            ],
-            warnings=[
-                "Conda is the upstream recommendation, but DexVerse provides no conda-lock file; select and provision Conda manually rather than treating it as reproducible auto-detection.",
-                "Isaac Lab must remain a separately versioned sibling checkout; Skynet does not clone or install that dependency automatically.",
-                "Gated Hugging Face assets require authorization and explicit provisioning before environments can run.",
-            ],
-            input_fields=[
-                AdapterInputField(
-                    path="native.argv", label="Pinned Isaac Lab trainer command", kind="string_list", required=True,
-                    help="DexVerse defines environments but no canonical trainer; provide a structured argv for a separately pinned runner.",
-                ),
-                AdapterInputField(
-                    path="native.resume_argv", label="Trainer resume arguments", kind="string_list",
-                    help="Required when checkpoint auto-resume is enabled for the selected external runner.",
-                ),
-                AdapterInputField(
-                    path="native.config.checkpoint_globs", label="Checkpoint globs", kind="string_list",
-                    default=["**/*.pt"], help="Native checkpoint discovery patterns used by the external runner.",
                 ),
             ],
         ),

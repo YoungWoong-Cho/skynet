@@ -44,12 +44,12 @@ Install the application and development dependencies:
 uv sync --group dev
 ```
 
-Start the local server:
+Start the local server. Restrict development reloads to source folders so saved conversion workers and run capsules do not restart active jobs:
 
 ```bash
 export SKYNET_SSH_HOSTS=sky1,sky2
 export SKYNET_DATABASE_PATH="$PWD/data/skynet.db"
-uv run uvicorn skynet_app.main:app --reload --host 127.0.0.1 --port 8080
+uv run uvicorn skynet_app.main:app --reload --reload-dir skynet_app --reload-dir ops --host 127.0.0.1 --port 8080
 ```
 
 Open `http://127.0.0.1:8080`. The generated API documentation is available at `http://127.0.0.1:8080/docs`.
@@ -149,7 +149,9 @@ The active, non-secret profile is returned by `GET /api/settings` and `GET /api/
 
 ## Versioned Adapter Registry
 
-The application seeds the seven compatibility adapters into SQLite, then treats adapters as database records rather than UI hardcoding. An adapter manifest declares repository matching metadata, allowed and recommended runtimes, capabilities, defaults, a structured training command template, checkpoint/resume behavior, evaluation metadata, warnings, and TODOs.
+The application seeds the six experiment adapters into SQLite, then treats adapters as database records rather than UI hardcoding. An adapter manifest declares repository matching metadata, allowed and recommended runtimes, capabilities, defaults, a structured training command template, checkpoint/resume behavior, evaluation metadata, warnings, and TODOs.
+
+The DexVerse experiment adapter is retired and existing seeded records are archived on startup. Its historical manifest handler remains available for saved experiments. DexVerse simulation and the separate `dexverse-cloudxr` collection registry are unaffected.
 
 Registry lifecycle semantics are:
 
@@ -539,7 +541,6 @@ For a read-only metadata and file-presence check, run `python skynet_app/adapter
 
 - Exact repository commits and dataset/asset revisions must exist and be readable from compute nodes.
 - The repository-specific adapters remain the authority for native hyperparameter semantics and checkpoint discovery.
-- DexVerse requires a selected external Isaac Lab training runner.
 - DexMimicGen delegates training to the compatible robomimic branch.
 - GET-Zero requires legacy Isaac Gym Preview 4 and may rely on W&B for orchestration.
 - Isaac Sim/Lab/Gym stacks are not guaranteed to work in a generic `uv` environment.
@@ -551,3 +552,5 @@ For a read-only metadata and file-presence check, run `python skynet_app/adapter
 - Single-node, homogeneous-GPU jobs are supported; mixed GPU types and multi-node training are not.
 - The console is currently single-user and trusted-network only.
 - Statistical reproducibility may be the strongest available guarantee for nondeterministic frameworks and simulators.
+
+Policy-aware dataset preparation and management are described in [Dataset preparation](docs/policy-data-exports.md). One dataset groups original revisions, prepared formats, verified local/cluster copies and experiment usage. DP supports training through the pinned XPolicyLab adapter; ACT and shared XPolicyLab HDF5 are export-only. All entry points use the same preparation workflow.

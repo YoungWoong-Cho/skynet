@@ -347,11 +347,8 @@
     );
     el("hand-export-message").textContent =
       "If your browser restricts file downloads, use Copy JSON.";
-    el("hand-export-dialog").showModal();
+    SkynetDialog.open(el("hand-export-dialog"));
   });
-  el("hand-export-close").addEventListener("click", () =>
-    el("hand-export-dialog").close(),
-  );
   el("hand-export-copy").addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(el("hand-export-json").value);

@@ -732,13 +732,19 @@ done
         *,
         lines: int = 500,
         max_bytes: int = 1_000_000,
+        contains: str | None = None,
     ) -> tuple[str, str]:
         path = self._remote_path(path)
         lines = max(1, min(lines, 5000))
         max_bytes = max(1024, min(max_bytes, 5_000_000))
+        reader = f"tail -n {lines} {shlex.quote(path)}"
+        if contains is not None:
+            if any(char in contains for char in ("\x00", "\n", "\r")):
+                raise ValueError("log filter must be one line")
+            reader = f"grep -F -- {shlex.quote(contains)} {shlex.quote(path)} | tail -n {lines}"
         command = (
             f"if test -f {shlex.quote(path)}; then "
-            f"tail -n {lines} {shlex.quote(path)} | tail -c {max_bytes}; "
+            f"{reader} | tail -c {max_bytes}; "
             "else printf '%s\\n' SKYNET_LOG_NOT_READY >&2; exit 44; fi"
         )
         return self.run_with_fallback(command, gateway, timeout=20)

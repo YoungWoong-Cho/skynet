@@ -35,7 +35,7 @@ def file_sha(path):
 
 
 def upload_capture(
-    cluster, path, run_id, digest, gateway, *, relative_path="original.jsonl"
+    cluster, path, run_id, digest, gateway, *, relative_path="original.jsonl", timeout=120
 ):
     """Bounded-memory upload; immutable destination and verified original bytes."""
     cluster.candidates(gateway)
@@ -72,7 +72,7 @@ def upload_capture(
                 stdin=stream,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=120,
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired as error:
             raise ClusterError(

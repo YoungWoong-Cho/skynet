@@ -11,6 +11,7 @@
     AWAITING_HEADSET: "Scene ready",
     COLLECTING: "Session in progress",
     STOPPING: "Stopping…",
+    RENDERING_IMAGES: "Preparing training images…",
   };
   const startingStates = new Set([
     "PREPARING",
@@ -88,6 +89,7 @@
       STOPPED: "Session stopped",
     };
     if (ended[session.state]) return ended[session.state];
+    if (session.state === "RENDERING_IMAGES") return session.detail || "Preparing training images…";
     if (session.stop_requested || session.state === "STOPPING")
       return "Stopping…";
     if (session.state === "PENDING") return "Waiting for GPU…";
@@ -105,7 +107,9 @@
       running || sessions.find((s) => s.id === focusedSession) || sessions[0];
     const pending = requestPending && !running;
     const failedRequest = !running && requestFailure;
-    panel.hidden = !session && !pending && !failedRequest;
+    const completed = session && ["CAPTURED", "STOPPED"].includes(session.state)
+      && !session.error && !session.connection_check_failed;
+    panel.hidden = !pending && !failedRequest && (!session || completed);
     if (panel.hidden) return;
     const shown = pending || failedRequest ? null : session;
     const profile = shown?.profile || {
@@ -358,7 +362,6 @@
         catch { error("Clipboard unavailable. Enter the displayed address in the headset."); }
       };
     }
-    el("live-xr-open-recordings").hidden = !sessions.some(s => s.recordings?.length);
     const active = !!running;
     if (catalog && running?.profile) {
       el("live-xr-hand").value = running.profile.robot;
@@ -376,7 +379,7 @@
     stop.disabled =
       !running?.job_id ||
       !!running.stop_requested ||
-      running.state === "STOPPING";
+      running.state === "STOPPING" || running.state === "RENDERING_IMAGES";
     stop.textContent =
       running?.stop_requested || running?.state === "STOPPING"
         ? "Stopping…"
@@ -400,8 +403,9 @@
     el("live-xr-start").disabled = active || submitting || !catalog;
     el("live-xr-hand").disabled = active || submitting || !catalog;
     el("live-xr-task").disabled = active || submitting || !catalog;
+    if (el("live-xr-images")) el("live-xr-images").disabled = active || submitting || !catalog;
     el("live-xr-start").textContent = active
-      ? running.stop_requested
+      ? running.state === "RENDERING_IMAGES" ? "Preparing training images…" : running.stop_requested
         ? "Stopping…"
         : (running.state === "PREPARING"
             ? stageLabels[running.startup_stage]
@@ -545,6 +549,7 @@
           accepted_license: el("live-xr-consent").checked,
           task: el("live-xr-task").value,
           robot: el("live-xr-hand").value,
+          image_capture: !!el("live-xr-images")?.checked,
         }),
       });
       requestPending = false;
@@ -562,7 +567,6 @@
     }
   };
   window.loadLiveXR = load;
-  el("live-xr-open-recordings").onclick = () => setCollectionView('recordings', {focus: true});
   document.addEventListener("visibilitychange", () => {
     if (visible()) load();
     else clearTimeout(timer);

@@ -1,6 +1,6 @@
 # Live DexVerse teleoperation
 
-Collection → Teleoperate starts a bounded GPU session on the configured workstation or Slurm cluster, displays that host's actual address, and exposes status, logs and Stop session. The current target is the RTX 4090 workstation `rl2-bonjour` at `10.88.3.52`. One active session is allowed per installation. Requests and license consent are saved in the local database. Submission uses durable receipts: a lost SSH acknowledgement is recovered without launching a second session. Startup refreshes small remote status records at most once per two seconds, then once per ten seconds after the scene is ready; it does not repeat asset validation. The top-level Cluster gateway selector applies to cluster workflows; the live target is shown separately on this page.
+Data → Collect starts a bounded GPU session on the configured workstation or Slurm cluster, displays that host's actual address, and exposes status, logs and Stop session. The current target is the RTX 4090 workstation `rl2-bonjour` at `10.88.3.52`. One active session is allowed per installation. Requests and license consent are saved in the local database. Submission uses durable receipts: a lost SSH acknowledgement is recovered without launching a second session. Startup refreshes small remote status records at most once per two seconds, then once per ten seconds after the scene is ready; it does not repeat asset validation. The top-level Cluster gateway selector applies to cluster workflows; the live target is shown separately on this page.
 
 The startup panel below **Start session** tracks the authenticated server connection, runtime check, hand files, streaming readiness and loaded hand/simulation. Completed milestones and the failed stage are saved with the session. A failure remains visible beside the controls after Start becomes available again, including after reloading the session link. Older sessions show their recorded error without invented milestones. Stream readiness comes from CloudXR's runtime markers; hand/simulation readiness requires the recorder's post-reset teleoperation marker. Ready means the scene can accept a headset connection, not that recording has started.
 
@@ -15,7 +15,7 @@ The startup panel below **Start session** tracks the authenticated server connec
 
 ## Imported hand adapters
 
-Open a stored model in **Hands**, choose its side, then choose **Use in simulation**. This opens Teleoperate with that exact hand selected. Choose one of the four tasks and start a session. Imported hands use their actual URDF visuals, collisions, masses, inertias, joint limits and mimic relationships; they do not load a Shadow model in their place.
+Open a stored model in **Hands**, choose its side, then choose **Use in simulation**. This opens Collect with that exact hand selected. Choose one of the four tasks and start a session. Imported hands use their actual URDF visuals, collisions, masses, inertias, joint limits and mimic relationships; they do not load a Shadow model in their place.
 
 | Model | Imported sides | Independent finger joints | Actions, including six wrist joints |
 | --- | --- | ---: | ---: |

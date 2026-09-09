@@ -1135,55 +1135,6 @@ function entityFrom(payload, key) {
   throw new Error(`Entity API response did not contain "${key}".`);
 }
 
-function askUserDialog(message, defaultValue = null) {
-  return new Promise((resolve) => {
-    const previousFocus = document.activeElement;
-    const dialog = document.createElement("dialog");
-    dialog.className = "action-dialog";
-    dialog.setAttribute("aria-label", defaultValue === null ? "Confirm action" : "Enter details");
-    const form = document.createElement("form");
-    form.method = "dialog";
-    const label = document.createElement("label");
-    label.textContent = message;
-    form.append(label);
-    let input = null;
-    if (defaultValue !== null) {
-      input = document.createElement("input");
-      input.value = defaultValue;
-      input.setAttribute("aria-label", message);
-      label.append(input);
-    }
-    const actions = document.createElement("div");
-    actions.className = "form-actions";
-    const cancel = document.createElement("button");
-    cancel.type = "button";
-    cancel.className = "button button-outline";
-    cancel.textContent = "Cancel";
-    cancel.addEventListener("click", () => dialog.close("cancel"));
-    const confirm = document.createElement("button");
-    confirm.type = "submit";
-    confirm.className = "button button-accent";
-    confirm.textContent = "Continue";
-    actions.append(cancel, confirm);
-    form.append(actions);
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
-      dialog.close("confirm");
-    });
-    dialog.append(form);
-    dialog.addEventListener("close", () => {
-      const accepted = dialog.returnValue === "confirm";
-      const result = input ? (accepted ? input.value : null) : accepted;
-      dialog.remove();
-      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
-      resolve(result);
-    }, { once: true });
-    document.body.append(dialog);
-    dialog.showModal();
-    (input || cancel).focus();
-  });
-}
-
 function dismissToast(toast) {
   if (toast?.parentElement !== elements.toast) return;
   toast.remove();
@@ -1191,6 +1142,19 @@ function dismissToast(toast) {
 }
 
 function showToast(message, isError = false) {
+  const modal = document.querySelector("dialog[data-panel-dialog][open]");
+  if (modal && isError) {
+    let notice = modal.querySelector(".dialog-notice");
+    if (!notice) {
+      notice = document.createElement("div");
+      notice.className = "dialog-notice inline-alert";
+      notice.setAttribute("role", "alert");
+      modal.querySelector(".panel-heading").after(notice);
+    }
+    showNotice(notice, message);
+    notice.scrollIntoView({block: "nearest"});
+    return;
+  }
   if (!isError) {
     elements.toast.querySelectorAll(".toast:not(.is-error)").forEach((toast) => toast.remove());
   }
@@ -2437,6 +2401,12 @@ function selectedExperimentDataBundle() {
   return dataBundleRows.find((bundle) => String(bundle.id || bundle.bundle_id) === String(id)) || null;
 }
 
+function datasetBindingValue(assignment, binding) {
+  return {"version.path": assignment.version?.path, "mount_path": assignment.mount_path,
+    "location.path": assignment.config?.location?.path,
+    "version.manifest_sha256": assignment.version?.manifest_sha256}[binding.value_path || "version.path"];
+}
+
 function resolveAdapterDataBinding(field) {
   const binding = field?.data_binding;
   if (!binding) return null;
@@ -2460,7 +2430,7 @@ function resolveAdapterDataBinding(field) {
       message: `Selected ${binding.role} format “${format || "undeclared"}” is incompatible; this adapter accepts ${formats.join(", ")}.`,
     };
   }
-  const value = binding.value_path === "mount_path" ? assignment.mount_path : assignment.version?.path;
+  const value = datasetBindingValue(assignment, binding);
   if (!value) {
     return { value: null, state: "error", message: `Selected bundle does not declare ${binding.value_path || "version.path"}.` };
   }
@@ -3268,7 +3238,7 @@ function remountActiveRunAttemptDisclosure() {
     activeRunAttemptDisclosure.launcher = launcher;
     setRunAttemptLauncherActive(launcher, true);
   }
-  mountRowDisclosure(elements.runAttemptDetail, launcher);
+  revealedPanelLaunchers.set(elements.runAttemptDetail, launcher);
 }
 
 function revealPanel(panel, { focusTarget = null, launcher = null, scroll = true } = {}) {
@@ -3278,15 +3248,17 @@ function revealPanel(panel, { focusTarget = null, launcher = null, scroll = true
   revealedPanelGenerations.set(panel, generation);
   const actualLauncher = launcher instanceof HTMLElement ? launcher : currentRevealLauncher();
   if (actualLauncher && actualLauncher !== panel && !panel.contains(actualLauncher)) revealedPanelLaunchers.set(panel, actualLauncher);
-  if ((activeDisclosure?.panel === panel && activeDisclosure.rowOwned) || panel === elements.runAttemptDetail) {
+  const modal = panel.closest("dialog[data-panel-dialog]");
+  if (!modal && ((activeDisclosure?.panel === panel && activeDisclosure.rowOwned) || panel === elements.runAttemptDetail)) {
     mountRowDisclosure(panel, actualLauncher);
   }
   panel.hidden = false;
+  if (modal) SkynetDialog.open(modal, {launcher: actualLauncher});
   window.requestAnimationFrame(() => {
       if (panel.hidden || revealedPanelGenerations.get(panel) !== generation) return;
       const tutorialOwnsViewport = document.body.classList.contains("has-active-tutorial");
       if (tutorialOwnsViewport) return;
-      if (scroll) {
+      if (scroll && !modal) {
         const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
         panel.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "nearest", inline: "nearest" });
       }
@@ -3304,6 +3276,8 @@ function hideRevealedPanel(panel, fallbackLauncher = null, { restoreFocus = true
   }
   revealedPanelGenerations.set(panel, (revealedPanelGenerations.get(panel) || 0) + 1);
   panel.hidden = true;
+  const modal = panel.closest("dialog[data-panel-dialog]");
+  if (modal) SkynetDialog.close(modal);
   if (panel === elements.dataBundlePreview) resetDataBundlePreviewMedia();
   unmountRowDisclosure(panel);
   if (panel === elements.evaluationDetail) stopEvaluationDetailPolling();
@@ -3348,7 +3322,7 @@ function disclosureTokenIsCurrent(panel, token) {
 }
 
 function setDisclosureLauncherActive(launcher, panel, token) {
-  if (!launcher) return;
+  if (!launcher || panel?.closest("dialog[data-panel-dialog]")) return;
   launcher.classList.add("disclosure-launcher");
   if (!disclosureLauncherSnapshots.has(launcher)) {
     disclosureLauncherSnapshots.set(launcher, {
@@ -3370,7 +3344,7 @@ function setDisclosureLauncherActive(launcher, panel, token) {
 }
 
 function restoreDisclosureLauncher(launcher, panel = null) {
-  if (!launcher) return;
+  if (!launcher || panel?.closest("dialog[data-panel-dialog]")) return;
   const snapshot = disclosureLauncherSnapshots.get(launcher);
   if (snapshot) {
     launcher.innerHTML = snapshot.html;
@@ -3405,6 +3379,7 @@ function closeDisclosurePanel(panel, fallbackLauncher = null) {
 }
 
 function toggleDisclosure(panel, revealKey, launcher, { rowOwned = false } = {}) {
+  if (panel?.closest("dialog[data-panel-dialog]")) rowOwned = false;
   if (!panel || !launcher || !revealKey) return { opened: true, token: null };
   const sameDisclosure = Boolean(
     activeDisclosure
@@ -3493,6 +3468,14 @@ function disclosureIntentForLauncher(launcher) {
 
 function initializeDisclosureLauncher(launcher, intent) {
   if (!launcher || !intent?.panel) return;
+  const modal = intent.panel.closest("dialog[data-panel-dialog]");
+  if (modal) {
+    launcher.classList.remove("disclosure-launcher");
+    launcher.removeAttribute("aria-expanded");
+    launcher.setAttribute("aria-haspopup", "dialog");
+    launcher.setAttribute("aria-controls", modal.id);
+    return;
+  }
   launcher.classList.add("disclosure-launcher");
   launcher.setAttribute("aria-controls", intent.panel.id);
   if (activeDisclosure?.launcher !== launcher) launcher.setAttribute("aria-expanded", "false");
@@ -3538,6 +3521,14 @@ function scheduleDisclosureLauncherSync() {
 }
 
 function installDisclosureBehavior() {
+  document.querySelectorAll("dialog[data-panel-dialog]").forEach(dialog => {
+    dialog.addEventListener("close", () => {
+      if (dialog.open) return;
+      const panel = dialog.querySelector(":scope > form, :scope > aside, :scope > section");
+      if (panel === elements.runAttemptDetail) closeRunAttemptDisclosure({restoreFocus: false, markDismissed: true});
+      else hideRevealedPanel(panel, null, {restoreFocus: false});
+    });
+  });
   const closeTargets = {
     "close-experiment-detail": elements.experimentDetail,
     "close-run-detail": elements.runDetail,
@@ -4881,6 +4872,7 @@ async function previewExperiment() {
     const shapeErrors = experimentPreviewShapeErrors(result);
     experimentPreviewScripts = runnableScripts;
     const variantSelect = document.querySelector("#experiment-preview-variant");
+    document.querySelector("#experiment-preview-variant-field").hidden = experimentPreviewScripts.length < 2;
     variantSelect.innerHTML = runnableScripts.map((_, index) => `<option value="${index}">Variant ${index + 1}</option>`).join("");
     variantSelect.disabled = !runnableScripts.length;
     renderSelectedExperimentScript();
@@ -5444,7 +5436,7 @@ function pinnedAdapterFromExperiment(source) {
   };
 }
 
-function installPinnedSourceRevision(source) {
+function installPinnedSourceRevision(source, origin = "experiment") {
   const repository = String(source.repository || "").trim();
   const revision = String(source.revision || "").trim();
   if (!repository || !revision) throw new Error("The experiment does not contain an exact repository and commit.");
@@ -5456,7 +5448,7 @@ function installPinnedSourceRevision(source) {
   sourceCommits = [{
     sha: revision,
     short_sha: revision.slice(0, 8),
-    subject: "Pinned by experiment revision",
+    subject: `Pinned by ${origin}`,
     author: "",
     timestamp: null,
   }];
@@ -5466,11 +5458,11 @@ function installPinnedSourceRevision(source) {
   elements.experimentBranch.value = "__pinned_experiment_commit__";
   elements.experimentBranch.disabled = false;
   elements.experimentBranch.dataset.pinnedCommit = "true";
-  elements.experimentRevision.innerHTML = `<option value="${escapeHtml(revision)}">${escapeHtml(revision.slice(0, 8))} / pinned experiment commit</option>`;
+  elements.experimentRevision.innerHTML = `<option value="${escapeHtml(revision)}">${escapeHtml(revision.slice(0, 8))} / pinned ${escapeHtml(origin)} commit</option>`;
   elements.experimentRevision.value = revision;
   elements.experimentRevision.disabled = false;
   updateSourceCommitMeta();
-  setSourceRefStatus("Exact commit restored from the experiment. Branch was not recorded; use Refresh refs only if you want to query the repository.");
+  setSourceRefStatus(`Exact commit restored from the ${origin}. Use Refresh refs to choose another repository revision.`);
 }
 
 function loadedSweepDefinition(sweep) {
@@ -6584,9 +6576,10 @@ function setRunAttemptLauncherActive(launcher, active) {
   if (!launcher) return;
   launcher.classList.add("disclosure-launcher");
   launcher.classList.toggle("is-active", active);
-  launcher.setAttribute("aria-controls", elements.runAttemptDetail.id);
+  launcher.setAttribute("aria-controls", "run-attempt-detail-dialog");
+  launcher.setAttribute("aria-haspopup", "dialog");
   launcher.setAttribute("aria-expanded", active ? "true" : "false");
-  launcher.textContent = active ? "Close" : "Detail";
+  launcher.textContent = "Detail";
   const row = launcher.closest("[data-attempt-row]");
   row?.classList.toggle("is-active", active);
 }
@@ -6775,6 +6768,7 @@ async function openRunAttemptDetail(attemptKey, launcher, {
     revealPanel(elements.runAttemptDetail, { focusTarget: elements.runAttemptDetailTitle, launcher });
   } else {
     elements.runAttemptDetail.hidden = false;
+    SkynetDialog.open(elements.runAttemptDetail.closest("dialog"), {launcher});
   }
   if (loadLogs) await loadRunAttemptLogs(record, token, { showLoading });
 }
@@ -6882,7 +6876,7 @@ function renderRunDetailContent(payload, id, { preserveAttempt = false } = {}) {
         {
           className: "row-actions",
           preserve: attemptActive,
-          html: `<button type="button" data-attempt-action="view" data-attempt-key="${escapeHtml(attemptKey)}" aria-controls="run-attempt-detail" aria-expanded="false">Detail</button>`,
+          html: `<button type="button" data-attempt-action="view" data-attempt-key="${escapeHtml(attemptKey)}" aria-controls="run-attempt-detail-dialog" aria-haspopup="dialog" aria-expanded="false">Detail</button>`,
         },
       ]);
       orderedAttemptRows.push(row);
@@ -8489,7 +8483,11 @@ function experimentBundleCompatibility(bundle, adapter = selectedAdapter()) {
       && Number(item?.position || 0) === Number(binding.position || 0)
     ));
     if (!assignment) return { compatible: false, message: `missing ${binding.role} role` };
-    if (String(assignment.version?.status || "").toUpperCase() !== "READY") {
+    const location = assignment.config?.location;
+    const locationReady = location?.kind === "cluster" && location?.status === "AVAILABLE" && location?.manifest_sha256 === assignment.version?.manifest_sha256;
+    if (binding.contract && (assignment.version?.metadata?.contract !== binding.contract || assignment.version?.metadata?.validation?.status !== "PASSED")) return {compatible:false, message:"Dataset has not passed this policy's data requirements."};
+    if (binding.value_path === "location.path" && !locationReady) return {compatible:false, message:"No verified copy on the training cluster."};
+    if (String(assignment.version?.status || "").toUpperCase() !== "READY" && !locationReady) {
       return { compatible: false, message: `${binding.role} is ${assignment.version?.status || "unverified"}; complete import or transfer to the cluster` };
     }
     if (assignment.version?.metadata?.storage_location === 'workstation') {
@@ -8500,7 +8498,7 @@ function experimentBundleCompatibility(bundle, adapter = selectedAdapter()) {
     if (formats.length && !formats.includes(format.toLowerCase())) {
       return { compatible: false, message: `format ${format || "undeclared"}` };
     }
-    const value = binding.value_path === "mount_path" ? assignment.mount_path : assignment.version?.path;
+    const value = datasetBindingValue(assignment, binding);
     if (!value) return { compatible: false, message: `missing ${binding.value_path || "version.path"}` };
   }
   return { compatible: true, message: "" };
@@ -8526,6 +8524,15 @@ async function loadDataBundles(force = false) {
   }
 }
 
+function dataVersionStatus(version) {
+  if (version?.metadata?.representation && version.metadata.representation !== "originals") {
+    const copies = version.locations || [];
+    return copies.some(l => l.kind === "cluster" && l.status === "AVAILABLE") ? "ON CLUSTER"
+      : copies.some(l => l.kind === "local" && l.status === "AVAILABLE") ? "ON THIS COMPUTER" : "COPY UNAVAILABLE";
+  }
+  return version?.status || "READY";
+}
+
 function renderDataResources() {
   elements.dataResourceCount.textContent = `${dataResourceRows.length} resource${dataResourceRows.length === 1 ? "" : "s"}`;
   elements.dataResourcesBody.innerHTML = dataResourceRows.length
@@ -8539,9 +8546,9 @@ function renderDataResources() {
         <td>${escapeHtml(resource.provider || "-")}</td>
         <td>${escapeHtml(versionCount)}</td>
         <td>${latest ? `${escapeHtml(shortId(latest.revision, 16))}<span class="secondary">${escapeHtml(latest.format || "-")}</span>` : '<span class="secondary">No versions</span>'}</td>
-        <td>${latest ? statusPill(latest.status || "READY") : '<span class="secondary">-</span>'}</td>
+        <td>${latest ? statusPill(dataVersionStatus(latest)) : '<span class="secondary">-</span>'}</td>
         <td>${escapeHtml(formatDate(resource.updated_at || resource.created_at))}</td>
-        <td class="row-actions data-resource-row-actions">${resource.provider === "huggingface" ? `<button type="button" data-resource-action="import" data-id="${escapeHtml(id)}">Import</button>` : ""}<button type="button" data-resource-action="version" data-id="${escapeHtml(id)}">Add version</button><button type="button" data-resource-action="edit" data-id="${escapeHtml(id)}">View / edit</button><button type="button" data-resource-action="archive" data-id="${escapeHtml(id)}">Archive</button></td>
+        <td class="row-actions data-resource-row-actions">${resource.metadata?.managed_dataset ? `<button type="button" data-resource-action="dataset" data-id="${escapeHtml(id)}">View dataset</button>` : ""}${resource.provider === "huggingface" ? `<button type="button" data-resource-action="import" data-id="${escapeHtml(id)}">Import</button>` : ""}<button type="button" data-resource-action="version" data-id="${escapeHtml(id)}">Add version</button><button type="button" data-resource-action="edit" data-id="${escapeHtml(id)}">View / edit</button><button type="button" data-resource-action="archive" data-id="${escapeHtml(id)}">Archive</button></td>
       </tr>`;
     }).join("")
     : emptyRow(8, "No source resources have been registered.");
@@ -8555,8 +8562,6 @@ function renderDataImports() {
   }
   elements.dataImportsBody.innerHTML = dataImportRows.map((item) => {
     const request = item.request || {};
-    const selected = String(selectedDataImportId || "") === String(item.id);
-    const cached = dataImportLogCache.get(String(item.id)) || {};
     const row = `<tr>
       <td><span class="node-name">${escapeHtml(request.subset || "-")}</span><span class="secondary">${escapeHtml(item.resource_id)}</span></td>
       <td><code>${escapeHtml(shortId(request.revision, 16))}</code><span class="secondary">${escapeHtml(request.format || "-")}</span></td>
@@ -8564,18 +8569,25 @@ function renderDataImports() {
       <td>${escapeHtml(item.slurm_job_id || "-")}<span class="secondary">${escapeHtml([item.gateway, item.node_list].filter(Boolean).join(" / ") || item.slurm_state || "-")}</span></td>
       <td>${escapeHtml(request.bundle_name || "-")}<span class="secondary">${escapeHtml(request.bundle_version || "-")}</span></td>
       <td>${escapeHtml(formatDate(item.updated_at || item.created_at))}</td>
-      <td class="row-actions"><button type="button" data-import-action="detail" data-id="${escapeHtml(item.id)}">${selected ? "Close" : "Detail"}</button></td>
+      <td class="row-actions"><button type="button" data-import-action="detail" data-id="${escapeHtml(item.id)}">Detail</button></td>
     </tr>`;
-    if (!selected) return row;
-    const error = item.error ? `<div class="notice notice-error">${escapeHtml(item.error)}</div>` : "";
-    const detail = `<tr class="row-disclosure-row"><td colspan="7"><div class="row-disclosure-body">
-      ${error}
-      <p>Logs are read through the import job’s recorded gateway (${escapeHtml(item.gateway || "auto")}). <button type="button" data-import-action="logs" data-id="${escapeHtml(item.id)}"${cached.loading ? " disabled" : ""}>${cached.loading ? "Loading logs..." : "Refresh logs"}</button></p>
-      <div class="meta-grid"><div><span>Result path</span><strong>${escapeHtml(item.result_path || "-")}</strong></div><div><span>Published version</span><strong>${escapeHtml(item.version_id || "-")}</strong></div><div><span>Bundle</span><strong>${escapeHtml(item.bundle_id || "-")}</strong></div></div>
-      <div class="attempt-log-grid"><section><div class="panel-heading"><h3>stdout</h3></div><pre class="log-view">${escapeHtml(cached.loading ? "Loading stdout..." : cached.stdout ?? "Click Refresh logs to load stdout.")}</pre></section><section><div class="panel-heading"><h3>stderr</h3></div><pre class="log-view">${escapeHtml(cached.loading ? "Loading stderr..." : cached.stderr ?? "Click Refresh logs to load stderr.")}</pre></section></div>
-    </div></td></tr>`;
-    return row + detail;
+    return row;
   }).join("");
+  renderDataImportDetail();
+}
+
+function renderDataImportDetail() {
+  const item = dataImportRows.find(item => String(item.id) === String(selectedDataImportId));
+  if (!item) return;
+  const cached = dataImportLogCache.get(String(item.id)) || {};
+  document.getElementById("data-import-detail-context").textContent = `${item.request?.subset || item.resource_id} · ${item.id}`;
+    const error = item.error ? `<div class="notice notice-error">${escapeHtml(item.error)}</div>` : "";
+    document.getElementById("data-import-detail-content").innerHTML = `
+      ${error}
+      <p>Logs are read through the import job’s recorded gateway (${escapeHtml(item.gateway || "auto")}). <button type="button" class="button button-outline" data-import-action="logs" data-id="${escapeHtml(item.id)}"${cached.loading ? " disabled" : ""}>${cached.loading ? "Loading logs..." : "Refresh logs"}</button></p>
+      <div class="key-value-grid"><div class="key-value"><span>Result path</span><strong>${escapeHtml(item.result_path || "-")}</strong></div><div class="key-value"><span>Published version</span><strong>${escapeHtml(item.version_id || "-")}</strong></div><div class="key-value"><span>Bundle</span><strong>${escapeHtml(item.bundle_id || "-")}</strong></div></div>
+      <div class="attempt-log-grid"><section><div class="panel-heading"><h3>stdout</h3></div><pre class="log-view">${escapeHtml(cached.loading ? "Loading stdout..." : cached.stdout ?? "Click Refresh logs to load stdout.")}</pre></section><section><div class="panel-heading"><h3>stderr</h3></div><pre class="log-view">${escapeHtml(cached.loading ? "Loading stderr..." : cached.stderr ?? "Click Refresh logs to load stderr.")}</pre></section></div>
+    `;
 }
 
 function selectDataResourceForImport(id, launcher = null) {
@@ -8621,20 +8633,17 @@ async function submitDataImport(event) {
   }
 }
 
-async function toggleDataImportDetail(id) {
-  if (String(selectedDataImportId || "") === String(id)) {
-    selectedDataImportId = null;
-    renderDataImports();
-    return;
-  }
+async function openDataImportDetail(id, launcher = null) {
   selectedDataImportId = id;
+  renderDataImportDetail();
+  SkynetDialog.open(document.getElementById("data-import-detail-dialog"), {launcher});
   await loadDataImportLogs(id);
 }
 
 async function loadDataImportLogs(id) {
   if (dataImportLogCache.get(String(id))?.loading) return;
   dataImportLogCache.set(String(id), { loading: true });
-  renderDataImports();
+  renderDataImportDetail();
   const load = async (stream) => {
     try {
       const response = await fetch(`/api/data/imports/${encodeURIComponent(id)}/logs?stream=${stream}&lines=500`);
@@ -8646,7 +8655,7 @@ async function loadDataImportLogs(id) {
   };
   const [stdout, stderr] = await Promise.all([load("stdout"), load("stderr")]);
   dataImportLogCache.set(String(id), { stdout, stderr });
-  if (String(selectedDataImportId || "") === String(id)) renderDataImports();
+  if (String(selectedDataImportId || "") === String(id)) renderDataImportDetail();
 }
 
 function renderDataVersions() {
@@ -8655,7 +8664,7 @@ function renderDataVersions() {
     ? dataVersionRows.map((version) => `<tr>
       <td><span class="node-name">${escapeHtml(dataVersionLabel(version))}</span><span class="secondary">${escapeHtml(version.id || version.version_id)}</span></td>
       <td>${escapeHtml(version.format || "-")}</td>
-      <td>${statusPill(version.status || "READY")}</td>
+      <td>${statusPill(dataVersionStatus(version))}</td>
       <td>${escapeHtml(formatDataBytes(version.size_bytes))}</td>
       <td class="wrap-cell"><code>${escapeHtml(version.path || "-")}</code></td>
       <td><code>${escapeHtml(shortId(version.manifest_sha256, 16))}</code></td>
@@ -9427,7 +9436,7 @@ function populateCollectionAdapterSelect(selectedId = "") {
   document.querySelector("#show-collection-session-form").disabled = !hasRunnable;
   document.querySelector("#collection-new-session-help").textContent = hasRunnable
     ? "Choose an adapter to fill its capture settings, then review and check setup."
-    : "Live cluster collection needs a configured collection adapter. For saved Vision Pro recordings, open the DexVerse cycles view.";
+    : "Live cluster collection needs a configured collection adapter. Open Recordings to review and convert saved simulation demonstrations.";
   const normalizedSelection = String(selectedId || "");
   if (normalizedSelection && active.some((adapter) => String(adapter.id || adapter.adapter_id) === normalizedSelection)) {
     elements.collectionSessionAdapter.value = normalizedSelection;
@@ -9586,8 +9595,6 @@ function renderCollectionSessions() {
 }
 
 async function loadCollection(force = false) {
-  if (typeof loadLocalCollection === "function") loadLocalCollection(force);
-  if (typeof loadCaptureCycles === "function") loadCaptureCycles();
   if (loadedTabs.has("collection") && !force) return;
   elements.refreshCollection.disabled = true;
   clearNotice(elements.collectionError);
@@ -10978,47 +10985,11 @@ function stampTutorialRecordRows() {
       const action = row.querySelector(`[${actionAttribute}][data-id]`);
       if (!action) continue;
       row.dataset[rowProperty] = action.dataset.id;
-      if (bodyId === "data-resources-body" && !row.querySelector('[data-resource-action="edit"]')) {
-        const cell = action.closest("td") || row.lastElementChild;
-        cell.classList.add("data-resource-row-actions");
-        for (const [name, label] of [["edit", "View / edit"], ["archive", "Archive"]]) {
-          const button = document.createElement("button");
-          button.type = "button";
-          button.dataset.resourceAction = name;
-          button.dataset.id = action.dataset.id;
-          button.textContent = label;
-          cell.append(button);
-        }
-      }
+
     }
   }
 }
 
-function ensureDataResourceCrudRows() {
-  for (const row of elements.dataResourcesBody.querySelectorAll("tr")) {
-    const sourceAction = row.querySelector("[data-resource-action][data-id]");
-    if (!sourceAction) continue;
-    const id = sourceAction.dataset.id;
-    const cell = sourceAction.closest("td") || row.lastElementChild;
-    if (!cell) continue;
-    cell.classList.add("data-resource-row-actions");
-    for (const [action, label] of [["edit", "View / edit"], ["archive", "Archive"]]) {
-      if (cell.querySelector(`[data-resource-action="${action}"][data-id="${CSS.escape(id)}"]`)) continue;
-      const button = document.createElement("button");
-      button.type = "button";
-      button.dataset.resourceAction = action;
-      button.dataset.id = id;
-      button.textContent = label;
-      cell.append(button);
-    }
-  }
-}
-
-function installDataResourceCrudRows() {
-  const observer = new MutationObserver(ensureDataResourceCrudRows);
-  observer.observe(elements.dataResourcesBody, { childList: true, subtree: true });
-  ensureDataResourceCrudRows();
-}
 
 function initializeTutorialRecordRows() {
   const bodies = ["data-resources-body", "collection-adapters-body", "experiments-body", "runs-body", "evaluations-body", "adapters-body"].map((id) => document.querySelector(`#${id}`)).filter(Boolean);
@@ -11093,7 +11064,7 @@ function prepareTutorialTarget(step) {
     const section = document.querySelector(selector);
     if (section?.hidden) {
       if (!tutorialState.revealed.has(section)) tutorialState.revealed.set(section, true);
-      section.hidden = false;
+      revealPanel(section, {scroll: false});
     }
   }
   if (step.details) {
@@ -11107,6 +11078,7 @@ function prepareTutorialTarget(step) {
   let target = null;
   try { target = document.querySelector(selector); } catch { target = null; }
   if (!target) return null;
+  SkynetDialog.placeGuide(elements.tutorialLayer, target);
   const collectionView = target.closest("[data-collection-view]");
   if (collectionView && typeof setCollectionView === "function") setCollectionView(collectionView.dataset.collectionView, {persist: false});
   let ancestor = target.parentElement;
@@ -11472,7 +11444,7 @@ function startTutorial(page, launcher) {
   tutorialState.launcher = launcher;
   tutorialState.originalFocus = document.activeElement;
   tutorialState.originalTab = activeTab;
-  tutorialState.originalCollectionView = document.querySelector("[data-collection-tab][aria-selected=true]")?.dataset.collectionTab;
+  tutorialState.originalCollectionView = document.querySelector("[data-data-tab][aria-selected=true]")?.dataset.dataTab;
   tutorialState.scrollX = window.scrollX;
   tutorialState.scrollY = window.scrollY;
   tutorialState.openedDetails = new Map();
@@ -11487,8 +11459,7 @@ function startTutorial(page, launcher) {
   ensureInteractiveTutorialControls();
   if (activeTab !== page) activateTab(page);
   document.body.classList.add("has-active-tutorial");
-  elements.tutorialLayer.hidden = false;
-  elements.tutorialLayer.setAttribute("aria-hidden", "false");
+  SkynetDialog.openGuide(elements.tutorialLayer);
   addTutorialRuntimeListeners();
   if (savedSession) showTutorialResumeChoice();
   else showTutorialStep(0, 1);
@@ -11519,7 +11490,7 @@ function endTutorial(completed = false) {
   clearTimeout(tutorialState.settleTimer);
   removeTutorialRuntimeListeners();
   [...tutorialState.revealed.keys()].reverse().forEach((section) => {
-    if (section.isConnected) section.hidden = true;
+    if (section.isConnected) hideRevealedPanel(section, null, {restoreFocus: false});
   });
   [...tutorialState.openedDetails.keys()].reverse().forEach((disclosure) => {
     if (disclosure.isConnected) disclosure.open = false;
@@ -11527,8 +11498,7 @@ function endTutorial(completed = false) {
   tutorialState.revealed.clear();
   tutorialState.openedDetails.clear();
   document.body.classList.remove("has-active-tutorial");
-  elements.tutorialLayer.hidden = true;
-  elements.tutorialLayer.setAttribute("aria-hidden", "true");
+  SkynetDialog.closeGuide(elements.tutorialLayer);
   elements.tutorialLayer.classList.remove("is-fallback");
   tutorialUi.confirmPanel.hidden = true;
   tutorialUi.resumePanel.hidden = true;
@@ -11564,7 +11534,7 @@ function initializeTutorials() {
   initializeTutorialRecordRows();
   for (const [page, tour] of Object.entries(tutorialTours)) {
     const panel = document.querySelector(`#${page}[data-tab-panel="${page}"]`);
-    const heading = panel?.querySelector(".page-heading");
+    const heading = ["collection", "datasets"].includes(page) ? document.querySelector("#data .page-heading") : panel?.querySelector(".page-heading");
     if (!heading) continue;
     let actions = heading.querySelector(":scope > .page-actions");
     if (!actions) {
@@ -11678,7 +11648,7 @@ function trackingLinksHtml(entity, { compact = false } = {}) {
   return `<span class="tracking-links${compact ? " is-compact" : ""}">${items.map((item) => {
     const provider = trackingProviderLabel(item.provider);
     const url = validTrackingUrl(item.url);
-    const label = item.label || provider;
+    const label = item.provider === "wandb" ? "W&B" : item.label || provider;
     const identity = url
       ? `<a class="tracking-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="Open ${escapeHtml(provider)}">${escapeHtml(label)}</a>`
       : `<strong>${escapeHtml(provider)}</strong>`;
@@ -12018,9 +11988,11 @@ function loadActiveTab(tab, force = false) {
   return Promise.resolve();
 }
 
-function activateTab(tab, updateHash = true) {
+function activateTab(tab, updateHash = true, requestedDataView = null) {
   const allowed = ["cluster", "experiments", "collection", "datasets", "runs", "evaluations", "adapters", "settings", "hands"];
-  const next = allowed.includes(tab) ? tab : "cluster";
+  const isData = ["data", "collection", "datasets"].includes(tab);
+  const dataView = isData ? requestedDataView || dataNavigation.viewForTab(tab) : null;
+  const next = isData ? dataView === "registry" ? "datasets" : "collection" : allowed.includes(tab) ? tab : "cluster";
   if (next !== activeTab) {
     elements.toast.replaceChildren();
     elements.toast.hidden = true;
@@ -12030,25 +12002,19 @@ function activateTab(tab, updateHash = true) {
   }
   activeTab = next;
   document.querySelectorAll("[data-tab-panel]").forEach((panel) => {
-    panel.hidden = panel.dataset.tabPanel !== next;
+    panel.hidden = panel.dataset.tabPanel === "data" ? !isData : panel.dataset.tabPanel !== next;
   });
+  if (isData) dataNavigation.render(dataView);
   document.querySelectorAll("[data-tab-target]").forEach((link) => {
-    const selected = link.dataset.tabGroup === "data"
-      ? next === "datasets" || next === "collection"
-      : link.dataset.dataView
-        ? link.dataset.tabTarget === next
-        : link.dataset.tabTarget === next;
+    const selected = link.dataset.tabGroup === "data" ? isData : link.dataset.tabTarget === next;
     link.classList.toggle("is-active", selected);
     if (link.getAttribute("role") === "tab") link.setAttribute("aria-selected", String(selected));
-    if (link.dataset.tabGroup === "data" && (next === "datasets" || next === "collection")) {
-      link.setAttribute("aria-controls", next);
-    }
-    if (link.dataset.dataView) {
-      if (selected) link.setAttribute("aria-current", "page");
-      else link.removeAttribute("aria-current");
-    }
   });
-  if (updateHash && location.hash !== `#${next}`) history.pushState(null, "", `#${next}`);
+  const destination = isData ? dataNavigation.url(dataView).href : new URL(`#${next}`, location.href).href;
+  if (location.href !== destination) {
+    if (updateHash) history.pushState(null, "", destination);
+    else if (isData) history.replaceState(null, "", destination);
+  }
   const loading = loadActiveTab(next);
   window.scrollTo({ top: 0, behavior: "instant" });
   return loading;
@@ -12061,10 +12027,9 @@ document.querySelectorAll("[data-tab-target]").forEach((link) => {
   });
 });
 
-window.addEventListener("hashchange", () => {
-  const hash = location.hash.slice(1);
-  activateTab(hash, false);
-});
+function restoreNavigation() { activateTab(location.hash.slice(1), false); }
+window.addEventListener("hashchange", restoreNavigation);
+window.addEventListener("popstate", restoreNavigation);
 
 function restoreSshGatewayPreference() {
   let savedGateway;
@@ -12342,6 +12307,7 @@ if (elements.showDataResourceForm) {
 elements.dataResourcesBody.addEventListener("click", (event) => {
   const button = event.target.closest("[data-resource-action]");
   if (!button) return;
+  if (button.dataset.resourceAction === "dataset") window.openPreparedDataset?.(button.dataset.id);
   if (button.dataset.resourceAction === "import") selectDataResourceForImport(button.dataset.id, button);
   if (button.dataset.resourceAction === "version") selectDataResourceForVersion(button.dataset.id, button);
   if (button.dataset.resourceAction === "edit") openDataResourceEditor(button.dataset.id, button);
@@ -12352,9 +12318,14 @@ elements.dataImportForm.addEventListener("submit", submitDataImport);
 elements.closeDataImportForm.addEventListener("click", () => hideRevealedPanel(elements.dataImportForm));
 elements.dataImportsBody.addEventListener("click", (event) => {
   const button = event.target.closest("[data-import-action]");
-  if (button?.dataset.importAction === "detail") toggleDataImportDetail(button.dataset.id);
-  if (button?.dataset.importAction === "logs") loadDataImportLogs(button.dataset.id);
+  if (button?.dataset.importAction === "detail") openDataImportDetail(button.dataset.id, button);
 });
+document.getElementById("data-import-detail-content").addEventListener("click", event => {
+  const button = event.target.closest('[data-import-action="logs"]');
+  if (button) loadDataImportLogs(button.dataset.id);
+});
+document.getElementById("data-import-detail-dialog").addEventListener("close", () => { selectedDataImportId = null; });
+
 elements.closeDataVersionForm.addEventListener("click", () => {
   hideRevealedPanel(elements.dataVersionForm);
 });
@@ -12474,12 +12445,42 @@ elements.validateAdapter.addEventListener("click", validateAdapterManifest);
 installStructuredEvaluationTaskOptions();
 installViewportFilterMenus();
 installLatestApiReadGuard();
-installDataResourceCrudRows();
 installDisclosureBehavior();
 initializeTutorials();
+dataNavigation.mountTutorial();
 updateExperimentFields();
 updateCollectionRegistrationFields();
 updateCollectionCapabilityEvidence(true);
 resetRuntimeInspection();
 const initialHash = location.hash.slice(1);
-activateTab(["cluster", "experiments", "collection", "datasets", "runs", "evaluations", "adapters", "settings", "hands"].includes(initialHash) ? initialHash : "cluster", false);
+activateTab(["data", "cluster", "experiments", "collection", "datasets", "runs", "evaluations", "adapters", "settings", "hands"].includes(initialHash) ? initialHash : "cluster", false);
+
+window.usePreparedDataset = async (job) => {
+  await activateTab("experiments");
+  await loadAdapters(true);
+  const setup = job.training_setup;
+  const adapter = adapterRows.find(a => adapterManifest(a).slug === setup?.adapter && !adapterArchived(a));
+  if (!adapter) throw new Error("The training adapter is unavailable. Restore it in Adapters.");
+  loadedExperimentCanonicalContext = null;
+  loadedExperimentAdapterSnapshot = null;
+  populateExperimentAdapters(adapterOptionId(adapter));
+  elements.experimentAdapter.value = adapterOptionId(adapter);
+  applySelectedAdapter({loadSource: false});
+  elements.experimentName.value = (job.name.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,70) || "recorded-dataset") + "-dp";
+  await loadDataBundles(true);
+  elements.experimentDataBundle.value = job.bundle_id;
+  populateExperimentDataBundles();
+  renderAdapterDeclaredFields();
+  invalidateExperimentPreview();
+  elements.experimentForm.scrollIntoView({block:"start"});
+  installPinnedSourceRevision(setup, "dataset preparation");
+  await inspectRepositoryRuntime();
+  const profile = runtimeProfiles.find(p => p.id === setup.runtime_profile);
+  if (profile) {
+    elements.experimentRuntime.value = profile.backend;
+    applyRuntimeSelection();
+    elements.experimentRuntimeProfileSelect.value = profile.id;
+    applyRuntimeProfileSelection();
+  }
+  showToast(profile ? "Dataset, policy, pinned source and runtime selected. Preview the training run when ready." : "Dataset and pinned policy selected. Choose an available training runtime, then preview.");
+};

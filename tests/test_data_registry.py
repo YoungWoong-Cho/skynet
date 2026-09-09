@@ -168,13 +168,13 @@ class DataRegistryTestCase(unittest.TestCase):
 
     def test_canonical_seed_advances_migrated_legacy_adapter(self) -> None:
         manifest = next(
-            item for item in builtin_adapter_manifests() if item.slug == "dexverse"
+            item for item in builtin_adapter_manifests() if item.slug == "dexmimicgen"
         )
         legacy_manifest = {
             "schema_version": "skynet.adapter/v1",
             "legacy_adapter_version": "1",
-            "repository": {"url": "https://github.com/ycyao216/DexVerse"},
-            "capabilities": {"name": "dexverse"},
+            "repository": {"url": "https://github.com/NVlabs/dexmimicgen"},
+            "capabilities": {"name": "dexmimicgen"},
             "parameter_schema": {"type": "object"},
         }
         adapter_key = new_id()
@@ -191,10 +191,10 @@ class DataRegistryTestCase(unittest.TestCase):
                 """,
                 (
                     new_id(),
-                    "dexverse",
+                    "dexmimicgen",
                     "1",
-                    "https://github.com/ycyao216/DexVerse",
-                    canonical_json({"name": "dexverse"}),
+                    "https://github.com/NVlabs/dexmimicgen",
+                    canonical_json({"name": "dexmimicgen"}),
                     canonical_json({"type": "object"}),
                     now,
                     now,
@@ -215,7 +215,7 @@ class DataRegistryTestCase(unittest.TestCase):
         )
 
         self.assertEqual(advanced["latest_version_number"], 2)
-        self.assertEqual(advanced["latest_version"]["manifest"]["slug"], "dexverse")
+        self.assertEqual(advanced["latest_version"]["manifest"]["slug"], "dexmimicgen")
         self.assertEqual(advanced["latest_version"]["created_by"], "__seed__")
 
 

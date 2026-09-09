@@ -90,7 +90,7 @@ test('submission handoff accepts the actual backend submitted array', () => {
   assert.equal(c.explicitlySubmittedTrainingRunRecords({ revision_number: 1, submitted: [{ run_id: 'new-run', status: 'FAILED' }] })[0].id, 'new-run');
 });
 test('bundle selection is unsupported without a declared binding', () => {
-  const c = load(['experimentBundleCompatibility'], { selectedAdapter: () => ({}), declaredAdapterInputFields: () => [] });
+  const c = load(['datasetBindingValue', 'experimentBundleCompatibility'], { selectedAdapter: () => ({}), declaredAdapterInputFields: () => [] });
   assert.equal(c.experimentBundleCompatibility({}).compatible, false);
 });
 
@@ -116,7 +116,7 @@ test('structured API errors retain their explanation and field location', () => 
 });
 
 test('bundle compatibility rejects local files and extra unconsumed data', () => {
-  const c = load(['experimentBundleCompatibility'], { selectedAdapter: () => ({}), declaredAdapterInputFields: () => [{data_binding: {role:'training_data', position:0, formats:['lerobot-v2.0']}}] });
+  const c = load(['datasetBindingValue', 'experimentBundleCompatibility'], { selectedAdapter: () => ({}), declaredAdapterInputFields: () => [{data_binding: {role:'training_data', position:0, formats:['lerobot-v2.0']}}] });
   const assignment = {role:'training_data', position:0, version:{format:'lerobot-v2.0',path:'/cluster/data',status:'READY'}};
   assert.equal(c.experimentBundleCompatibility({assignments:[assignment]}).compatible, true);
   assert.match(c.experimentBundleCompatibility({assignments:[{...assignment,version:{...assignment.version,metadata:{storage_location:'workstation'}}}]}).message, /collection workstation/);
@@ -173,12 +173,24 @@ test('queue waits are explained separately from failed attempts', () => {
 });
 
 
-test('entering Collection refreshes recordings and cycle history even when adapter data is cached', async () => {
+test('Collection refresh loads its adapter registry and sessions without starting work', async () => {
   const calls = [];
-  const c = load(['loadCollection'], {loadedTabs: new Set(['collection']),
-    loadLocalCollection: force => calls.push(['recordings', force]),
-    loadCaptureCycles: () => calls.push(['cycles']),
+  const loadedTabs = new Set();
+  const c = load(['loadCollection'], {
+    loadedTabs,
+    elements: {refreshCollection: {}, collectionError: {}},
+    clearNotice: () => {},
+    api: async path => { calls.push(path); return {adapters: [], templates: [], sessions: []}; },
+    listFrom: (payload, keys) => payload[keys[0]],
+    renderCollectionAdapters: () => {},
+    renderCollectionSessions: () => {},
   });
   await c.loadCollection();
-  assert.deepEqual(calls, [['recordings', false], ['cycles']]);
+  assert.deepEqual(calls, ['/api/collection/adapters?include_archived=true', '/api/collection/sessions?limit=250']);
+  assert.ok(loadedTabs.has('collection'));
+  assert.equal(c.elements.refreshCollection.disabled, false);
+  await c.loadCollection();
+  assert.equal(calls.length, 2);
+  await c.loadCollection(true);
+  assert.equal(calls.length, 4);
 });

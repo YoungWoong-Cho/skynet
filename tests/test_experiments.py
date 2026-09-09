@@ -1194,7 +1194,7 @@ def test_builtin_manifests_declare_native_inputs_and_manifest_owned_tutorial_val
     assert openpi.tutorial_value == "debug"
     assert "native.config.config_name" in manifests["openpi"].train.required_values
     assert {"native.argv", "native.resume_argv"} <= paths["generic"]
-    assert {"native.argv", "native.resume_argv"} <= paths["dexverse"]
+    assert "dexverse" not in manifests
     assert {
         "native.config.training_config",
         "native.config.robomimic_revision",

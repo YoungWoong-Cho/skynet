@@ -5,15 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Skynet Slurm experiment and evaluation console.">
     <title>Skynet / Experiment Console</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260908-collection-conversion">
-    <script src="/static/app.js?v=20260908-collection-conversion" defer></script>
-    <script src="/static/local-capture.js?v=20260908-collection-conversion" defer></script>
-    <script src="/static/capture-processing.js?v=20260908-collection-conversion" defer></script>
-    <script src="/static/collection-ui.js?v=20260908-collection-conversion" defer></script>
+    <link rel="stylesheet" href="/static/styles.css?v=20260908-preparation-v2">
+    <script src="/static/dialogs.js?v=20260909-data" defer></script>
+    <script src="/static/collection-ui.js?v=20260909-data" defer></script>
+    <script src="/static/app.js?v=20260908-preparation-v2" defer></script>
     <script src="/static/hands-ui.js?v=20260907-imported-hands-2" defer></script>
-    <script src="/static/live-review.js?v=20260908-collection-conversion" defer></script>
-    <script src="/static/live-conversion.js?v=20260908-conversion" defer></script>
-    <script src="/static/live-xr.js?v=20260908-collection-conversion" defer></script>
+    <script src="/static/live-review.js?v=20260908-preparation-v2" defer></script>
+    <script src="/static/live-conversion.js?v=20260908-preparation-v2" defer></script>
+    <script src="/static/policy-exports.js?v=20260908-preparation-v2" defer></script>
+    <script src="/static/live-xr.js?v=20260908-clean-session" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -24,7 +24,7 @@
 
       <nav class="tab-nav" role="tablist" aria-label="Primary navigation">
         <a href="#cluster" class="is-active" data-tab-target="cluster" role="tab" aria-selected="true" aria-controls="cluster">Cluster</a>
-        <a id="nav-data" href="#datasets" data-tab-target="datasets" data-tab-group="data" role="tab" aria-selected="false" aria-controls="datasets collection">Data</a>
+        <a id="nav-data" href="#data" data-tab-target="data" data-tab-group="data" role="tab" aria-selected="false" aria-controls="data">Data</a>
         <a href="#experiments" data-tab-target="experiments" role="tab" aria-selected="false" aria-controls="experiments">Experiments</a>
         <a href="#runs" data-tab-target="runs" role="tab" aria-selected="false" aria-controls="runs">Training Runs</a>
         <a href="#evaluations" data-tab-target="evaluations" role="tab" aria-selected="false" aria-controls="evaluations">Evaluations</a>
@@ -134,8 +134,8 @@
         <div class="section-shell workspace-page">
           <div class="page-heading"><div><h1>Hands</h1><p class="secondary">Explore robot hand models, adjust their joints, and save poses.</p></div><button id="hands-refresh" class="button button-outline" type="button">Refresh</button></div>
           <div id="hands-error" class="inline-alert" role="alert" hidden></div>
-          <dialog id="hand-export-dialog" class="collection-video-dialog" aria-labelledby="hand-export-title">
-            <div class="panel-heading"><h2 id="hand-export-title">Export hand pose</h2><button id="hand-export-close" class="button button-outline" type="button">Close export</button></div>
+          <dialog id="hand-export-dialog" class="app-dialog" aria-labelledby="hand-export-title">
+            <div class="panel-heading"><h3 id="hand-export-title">Export hand pose</h3><button id="hand-export-close" data-dialog-close class="button button-outline" type="button">Close export</button></div>
             <p>Save the joint values with this model’s exact source version. Angles use radians; sliding joints use meters.</p>
             <label for="hand-export-json">Pose JSON</label><textarea id="hand-export-json" rows="14" readonly></textarea>
             <div class="form-actions"><button id="hand-export-copy" class="button button-outline" type="button">Copy JSON</button><a id="hand-export-download" class="button button-accent" download>Download JSON</a></div>
@@ -500,10 +500,11 @@
               <div id="experiment-preview-panel" hidden>
                 <div id="experiment-preview-meta" class="preview-meta"></div>
                 <ul id="experiment-preview-warnings" class="preview-blockers" aria-label="Preview warnings" hidden></ul>
-                <label for="experiment-preview-variant">Script variant</label>
-                <select id="experiment-preview-variant"></select>
+                <div id="experiment-preview-variant-field" hidden><label for="experiment-preview-variant">Script variant</label>
+                <select id="experiment-preview-variant"></select></div>
+                <details class="collection-disclosure"><summary>Script options</summary>
                 <label><input id="experiment-preview-full" type="checkbox"> Show full embedded script payloads</label>
-                <button id="experiment-preview-download" class="button button-outline" type="button">Download exact script</button>
+                <button id="experiment-preview-download" class="button button-outline" type="button">Download exact script</button></details>
                 <div id="experiment-preview-blockers" class="preview-blockers" role="alert" hidden>
                   <strong>Blocked variants</strong>
                   <ul id="experiment-preview-blocker-list"></ul>
@@ -664,37 +665,7 @@
                             </div>
                           </div>
 
-                          <section id="run-attempt-detail" class="row-disclosure inline-drawer run-attempt-disclosure" hidden>
-                            <div class="panel-heading row-disclosure-heading">
-                              <div>
-                                <h3 id="run-attempt-detail-title">Attempt</h3>
-                              </div>
-                            </div>
-                            <div class="row-disclosure-body">
-                              <div id="run-attempt-detail-meta" class="key-value-grid"></div>
-                              <div id="run-attempt-detail-tracking" class="tracking-detail-strip" hidden></div>
-                              <section class="attempt-hyperparameters" aria-labelledby="run-attempt-hyperparameters-title">
-                                <h3 id="run-attempt-hyperparameters-title">Common hyperparameters</h3>
-                                <div id="run-attempt-hyperparameters" class="key-value-grid"></div>
-                              </section>
-                              <div class="attempt-log-grid">
-                                <section>
-                                  <div class="log-heading">
-                                    <h3>stdout</h3>
-                                    <span id="run-attempt-stdout-status" class="quiet-label"></span>
-                                  </div>
-                                  <pre class="log-view"><code id="run-attempt-stdout-log">Select an attempt to load stdout.</code></pre>
-                                </section>
-                                <section>
-                                  <div class="log-heading">
-                                    <h3>stderr</h3>
-                                    <span id="run-attempt-stderr-status" class="quiet-label"></span>
-                                  </div>
-                                  <pre class="log-view"><code id="run-attempt-stderr-log">Select an attempt to load stderr.</code></pre>
-                                </section>
-                              </div>
-                            </div>
-                          </section>
+                          
                         </div>
                       </section>
           </section>
@@ -907,30 +878,28 @@
         </div>
       </section>
 
-      <section id="collection" class="tab-panel" data-tab-panel="collection" role="tabpanel" hidden>
+      <section id="data" class="tab-panel" data-tab-panel="data" role="tabpanel" hidden>
         <div class="section-shell workspace-page">
           <div class="page-heading">
-            <div class="page-title-row data-page-title">
-              <h1>Data</h1>
-              <nav class="data-subnav" aria-label="Data sections">
-                <a href="#datasets" data-tab-target="datasets" data-data-view="registry" aria-controls="datasets">Dataset Registry</a>
-                <a href="#collection" class="is-active" data-tab-target="collection" data-data-view="collection" aria-controls="collection" aria-current="page">Collection</a>
-              </nav>
-            </div>
+            <h1>Data</h1>
             <div class="page-actions">
-              <button class="button button-outline" type="button" data-collection-go="setup" data-collection-guide="record">How to record</button>
+              <button class="button button-outline" type="button" data-collection-go="setup" data-collection-guide="record">Help</button>
               <button id="refresh-collection" class="button button-outline" type="button">Refresh</button>
+              <button id="refresh-data-registry" class="button button-outline" type="button" hidden>Refresh</button>
             </div>
           </div>
+          <nav class="data-subnav collection-view-nav" role="tablist" aria-label="Data views">
+            <button id="data-tab-setup" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="collection-view-setup" data-data-tab="setup">Setup</button>
+            <button id="data-tab-collect" type="button" role="tab" aria-selected="true" aria-controls="collection-view-live" data-data-tab="collect">Collect</button>
+            <button id="data-tab-recording" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="collection-view-recordings" data-data-tab="recording">Recording <span id="collection-library-total"></span></button>
+            <button id="data-tab-registry" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="datasets" data-data-tab="registry">Registry</button>
+          </nav>
+          <section id="collection" data-tab-panel="collection" hidden>
+          
 
           <div id="collection-error" class="inline-alert" role="alert" hidden></div>
-          <nav class="data-subnav collection-view-nav" role="tablist" aria-label="Collection views">
-            <button id="collection-tab-live" type="button" role="tab" aria-selected="true" aria-controls="collection-view-live" data-collection-tab="live">Teleoperate</button>
-            <button id="collection-tab-recordings" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="collection-view-recordings" data-collection-tab="recordings">Recordings <span id="collection-library-total"></span></button>
-            <button id="collection-tab-setup" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="collection-view-setup" data-collection-tab="setup">Setup</button>
-          </nav>
-          <div id="local-capture-error" class="inline-alert" role="alert" hidden></div>
-          <div id="collection-view-recordings" data-collection-view="recordings" role="tabpanel" aria-labelledby="collection-tab-recordings">
+          
+          <div id="collection-view-recordings" data-collection-view="recordings" role="tabpanel" aria-labelledby="data-tab-recording">
             <section class="panel table-panel">
               <div class="panel-heading"><h2>Recordings</h2><span id="simulation-recordings-count" class="quiet-label" role="status">Loading…</span></div>
               <div class="collection-filter-row"><div class="toolbar"><input id="simulation-recordings-search" type="search" aria-label="Find simulation recordings" placeholder="Filter hand, task or date"></div></div>
@@ -938,7 +907,7 @@
               <div class="table-scroll"><table class="simulation-recordings-table"><thead><tr><th>Session</th><th>Recordings</th><th>Dataset</th><th>Actions</th></tr></thead><tbody id="simulation-recordings-body"><tr class="empty-row"><td colspan="4">Loading recordings…</td></tr></tbody></table></div>
             </section>
           </div>
-          <div id="collection-view-live" data-collection-view="live" role="tabpanel" aria-labelledby="collection-tab-live" hidden>
+          <div id="collection-view-live" data-collection-view="live" role="tabpanel" aria-labelledby="data-tab-collect" hidden>
             <section class="panel table-panel">
               <div class="panel-heading"><h2>New session</h2><span id="live-xr-target" class="quiet-label">Loading server…</span></div>
               <div class="live-xr-intro">
@@ -947,6 +916,8 @@
                     <div class="field"><label for="live-xr-hand">Simulated hand</label><select id="live-xr-hand" required disabled><option value="">Loading hands…</option></select></div>
                     <div class="field"><label for="live-xr-task">Task</label><select id="live-xr-task" required disabled><option value="">Loading tasks…</option></select></div>
                   </div>
+                  <label class="check-field"><input id="live-xr-images" type="checkbox" checked>Capture training images (three scene views)</label>
+                  <p class="collection-section-help">Records exact scene states, then prepares matching RGB images after the headset session ends. Wait for image preparation before exporting.</p>
                   <p id="live-xr-selection-note" class="collection-section-help" role="status"></p>
                   <label id="live-xr-consent-field" class="check-field"><input id="live-xr-consent" type="checkbox">I accept the <a id="live-xr-eula" href="https://developer.download.nvidia.com/cloudxr/EULA/NVIDIA_CloudXR_GA_License_without_Data_Collection_25Feb2025.pdf" target="_blank" rel="noreferrer">NVIDIA CloudXR license</a>.</label>
                   <div class="form-actions"><button id="live-xr-start" class="button button-accent" type="submit">Start session</button><button id="live-xr-stop" class="button button-outline" type="button" disabled>Stop session</button></div>
@@ -957,9 +928,7 @@
                   <ol id="live-xr-progress-steps" aria-label="Startup steps"></ol>
                   <p id="live-xr-progress-error" class="inline-alert" role="alert" hidden></p>
                 </section>
-                <p class="live-xr-keypoint-legend"><span><i class="keypoint-dot keypoint-red" aria-hidden="true"></i>Red: human</span><span><i class="keypoint-dot keypoint-blue" aria-hidden="true"></i>Blue: robot</span></p>
                 <p id="live-xr-address" class="live-xr-address" hidden></p>
-                <button type="button" id="live-xr-open-recordings" class="text-button" hidden>Review saved recordings →</button>
                 <p id="live-xr-message" role="status">Loading live sessions…</p>
                 <p id="live-xr-error" class="inline-alert" role="alert" hidden></p>
               </div>
@@ -970,40 +939,10 @@
               <div class="table-scroll"><table><thead><tr><th>Session</th><th>Status</th><th>Server address</th><th>Actions</th></tr></thead><tbody id="live-xr-sessions"><tr class="empty-row"><td colspan="4">Loading…</td></tr></tbody></table></div>
             </section>
             </details>
-            <details id="live-xr-help" class="collection-disclosure">
-              <summary>Headset instructions</summary>
-              <div class="live-xr-help-body">
-                <ol class="live-xr-steps">
-                  <li>Open <strong>Isaac XR Teleop</strong>. Enter the session’s server address, then choose <strong>Connect</strong>.</li>
-                  <li>Keep your hand(s) visible and tap Start in the headset to begin recording.</li>
-                  <li><span id="live-xr-task-instructions">Choose a task to see its goal.</span></li>
-                  <li>Success saves the episode and resets the scene. Tap <strong>Start</strong> for the next episode. Use <strong>Review recordings</strong> to play a saved episode.</li>
-                </ol>
-                <p><strong>Restart episode</strong> discards the unfinished attempt. <strong>End collection</strong> or <strong>Stop session</strong> ends collection and keeps saved episodes.</p>
-                <ul id="live-xr-unavailable"></ul>
-                <a href="/api/collection/live/guide" target="_blank" rel="noreferrer">Setup and troubleshooting ↗</a>
-              </div>
-            </details>
           </div>
-          <dialog id="conversion-dialog" class="collection-video-dialog" aria-labelledby="conversion-title">
-            <div class="panel-heading"><h3 id="conversion-title">Convert for training</h3><button id="conversion-close" class="button button-outline" type="button">Close</button></div>
-            <p id="conversion-context" class="secondary"></p>
-            <p id="conversion-route" class="secondary"></p>
-            <form id="conversion-form">
-              <div class="field"><label for="conversion-name">Dataset name</label><input id="conversion-name" maxlength="100" required></div>
-              <p>HDF5 · State observations and actions</p>
-              <details id="conversion-selection"><summary id="conversion-selection-summary">All recordings</summary><div class="form-actions"><button type="button" id="conversion-select-all" class="text-button">Select all</button><button type="button" id="conversion-select-none" class="text-button">Clear selection</button></div><div id="conversion-recordings" class="conversion-recordings"></div></details>
-              <div class="form-actions"><button id="conversion-submit" class="button button-accent" type="submit">Convert dataset</button></div>
-            </form>
-            <p id="conversion-status" role="status"></p><progress id="conversion-progress" hidden></progress>
-            <p id="conversion-error" class="inline-alert" role="alert" hidden></p>
-            <div id="conversion-result" hidden><p id="conversion-summary"></p><p>Saved at <code id="conversion-path" style="overflow-wrap:anywhere"></code></p><div class="form-actions"><a id="conversion-download" class="button button-accent" download>Download HDF5</a><button id="conversion-registry" class="button button-outline" type="button">View in dataset registry</button></div><details><summary>Dataset details</summary><pre id="conversion-details"></pre><a id="conversion-manifest" download>Download manifest</a></details></div>
-            <details><summary>Training compatibility</summary><p>Use a trainer that accepts DexVerse state HDF5. GR00T and OpenPI require a different dataset format. New conversions are stored on the Slurm cluster and can also be downloaded here.</p></details>
-            <div class="form-actions"><button id="conversion-new" type="button" class="button button-outline" hidden>Convert another selection</button><button id="conversion-retry" type="button" class="button button-outline" hidden>Retry conversion</button><button id="conversion-refresh" type="button" class="button button-outline" hidden>Refresh status</button><a id="conversion-logs" class="text-button" target="_blank" rel="noreferrer" hidden>Conversion log ↗</a></div>
-          </dialog>
-          <dialog id="live-review-dialog" class="collection-video-dialog" aria-labelledby="live-review-title">
-            <div class="panel-heading"><div><h3 id="live-review-title">Review recordings</h3><p id="live-review-context" class="secondary"></p></div><button id="live-review-close" class="button button-outline" type="button">Close review</button></div>
-            <div class="form-actions"><button id="live-review-convert" class="button button-outline" type="button">Convert for training</button></div>
+          <dialog id="live-review-dialog" class="app-dialog" aria-labelledby="live-review-title">
+            <div class="panel-heading"><div><h3 id="live-review-title">Review recordings</h3><p id="live-review-context" class="secondary"></p></div><button id="live-review-close" data-dialog-close class="button button-outline" type="button">Close review</button></div>
+            <div class="form-actions"><button id="live-review-convert" class="button button-outline" type="button">Prepare for training</button></div>
             <div class="field"><label for="live-review-recording">Recording</label><select id="live-review-recording"></select></div>
             <p id="live-review-status" role="status">Loading recording…</p>
             <button id="live-review-retry" class="button button-outline" type="button" hidden>Retry download</button>
@@ -1024,180 +963,22 @@
               </details>
             </div>
           </dialog>
-          <div id="collection-view-setup" data-collection-view="setup" role="tabpanel" aria-labelledby="collection-tab-setup" hidden>
-            <section class="panel collection-setup-card"><div class="panel-heading"><h2>Vision Pro teleoperation</h2></div><div class="collection-disclosure-body"><ol><li>Open Isaac XR Teleop on Vision Pro.</li><li>In Teleoperate, choose a hand and task, then start a session.</li><li>Connect to the displayed server address. Use Start, Restart and End collection in the headset.</li><li>Open Recordings to review episodes and convert them for training.</li></ol><a class="text-button" href="/api/collection/live/guide" target="_blank" rel="noreferrer">Setup and troubleshooting ↗</a></div></section>
-            <details id="collection-tracking-tools" class="collection-disclosure"><summary>Local tracking files <span id="collection-tracking-total" class="collection-summary-note"></span></summary>
-              <p class="collection-section-help">Hand/head motion only. These files do not contain simulated task demonstrations.</p>
-            <section id="collection-recordings" class="panel table-panel">
-              <div class="panel-heading panel-heading-tools">
-                <div>
-                  <h2 id="local-capture-heading">Local tracking files</h2>
-                </div>
-                <div class="panel-heading-actions">
-                  <span id="local-capture-count" class="quiet-label" role="status">Loading…</span>
-                  <button id="show-collection-import" class="button button-accent disclosure-launcher" type="button" aria-controls="collection-import-drawer" aria-expanded="false">Import recording</button>
-                </div>
-              </div>
-              <div class="collection-filter-row">
-                <div class="toolbar"><input id="local-capture-search" type="search" aria-label="Find a recording" placeholder="Filter task, date or ID"></div>
-                <label class="check-field"><input id="local-capture-review" type="checkbox">Needs review only</label>
-              </div>
-              <div id="collection-import-drawer" class="inline-drawer row-disclosure" hidden>
-                <div class="panel-heading row-disclosure-heading">
-                  <h2 id="collection-import-title">Import recording</h2>
-                  <button id="close-collection-import" class="text-button disclosure-close" type="button">Close</button>
-                </div>
-                <form id="local-capture-import" class="dense-form">
-                  <fieldset class="form-section">
-                    <p class="collection-section-help">AirDrop a saved recording from Skynet Capture to this Mac, then choose the file below.</p>
-                    <div class="field"><label for="local-capture-file">Tracking file (.jsonl, up to 512 MB)</label><input id="local-capture-file" type="file" accept=".jsonl,application/x-ndjson" required></div>
-                    <p id="local-capture-import-status" class="collection-section-help" role="status">Choose a .jsonl file to import. Your original will be preserved on this Mac.</p>
-                  </fieldset>
-                  <div class="form-actions"><button id="local-capture-upload" class="button button-accent" type="submit" disabled>Import recording</button></div>
-                </form>
-              </div>
-              <div class="table-scroll"><table><thead><tr><th>Recording</th><th>Length</th><th>Tracking quality</th><th>Actions</th></tr></thead><tbody id="local-capture-body"><tr class="empty-row"><td colspan="4">Loading recordings…</td></tr></tbody></table></div>
-              <div class="collection-table-footer">
-                <a class="text-button" href="#datasets">Open dataset registry</a>
-                <details><summary>Storage location</summary><p id="local-capture-storage" class="secondary"></p></details>
+          <div id="collection-view-setup" data-collection-view="setup" role="tabpanel" aria-labelledby="data-tab-setup" hidden>
+            <section id="vision-pro-guide" class="panel collection-setup-card" aria-labelledby="vision-pro-guide-title">
+              <div class="panel-heading"><h2 id="vision-pro-guide-title" tabindex="-1">Vision Pro teleoperation</h2></div>
+              <div class="collection-disclosure-body">
+                <ol class="live-xr-steps">
+                  <li>In <strong>Collect</strong>, choose a hand and task. Enable <strong>Capture training images</strong> for visual policy training, then choose <strong>Start session</strong>.</li>
+                  <li>Open <strong>Isaac XR Teleop</strong> on Vision Pro. Enter the displayed server address and choose <strong>Connect</strong>.</li>
+                  <li>Keep your hand(s) visible and tap <strong>Start</strong> in the headset. Follow the selected task’s goal: <span id="live-xr-task-instructions">Choose a task in Collect to see its goal.</span></li>
+                  <li>Success saves the episode and resets the scene. Tap <strong>Start</strong> for another episode. <strong>Restart episode</strong> discards the unfinished attempt.</li>
+                  <li>Choose <strong>End collection</strong> in the headset or <strong>Stop session</strong> in Skynet. Pending saves finish and unfinished attempts are discarded. If training images are enabled, wait for <strong>Preparing training images</strong> to finish after the headset session closes.</li>
+                  <li>Open <strong>Recording</strong> to review saved episodes. For visual policy data, use <strong>Recording → Prepare for training</strong> and choose a training format.</li>
+                </ol>
+                <ul id="live-xr-unavailable"></ul>
+                <a class="text-button" href="/api/collection/live/guide" target="_blank" rel="noreferrer">Setup and troubleshooting ↗</a>
               </div>
             </section>
-            </details>
-            <details id="collection-legacy-cycles" class="collection-disclosure"><summary>Offline experiments &amp; history <span id="collection-cycle-total" class="collection-summary-note"></span></summary>
-            <section class="panel table-panel" aria-labelledby="collection-roles-title">
-              <div class="panel-heading"><div>
-                <h2 id="collection-roles-title">How the parts work together</h2>
-                <p class="collection-section-help">Saved recording → Skynet → DexVerse simulation → dataset → training → evaluation.</p>
-              </div></div>
-              <div class="table-scroll">
-                <table class="collection-role-table" aria-labelledby="collection-roles-title">
-                  <thead><tr><th scope="col">Component</th><th scope="col">Role in this workflow</th></tr></thead>
-                  <tbody>
-                    <tr><td class="wrap-cell"><strong>Skynet Capture on Vision Pro</strong></td><td class="wrap-cell">Uses Apple ARKit to record hand and head tracking locally on the headset. You transfer the saved file to your Mac and import it into Skynet.</td></tr>
-                    <tr><td class="wrap-cell"><strong>Isaac Sim / Isaac Lab</strong></td><td class="wrap-cell">Provides physics, rendering and the simulator framework on the GPU server.</td></tr>
-                    <tr><td class="wrap-cell"><strong>DexVerse</strong></td><td class="wrap-cell">Defines simulated robot hands, objects, tasks and success conditions. Maps human hand movements to robot controls.</td></tr>
-                    <tr><td class="wrap-cell"><strong>Skynet</strong></td><td class="wrap-cell">Connects recording import, replay in DexVerse, dataset storage, training and evaluation through this web UI.</td></tr>
-                  </tbody>
-                </table>
-              </div>
-              <div class="collection-table-footer"><span class="collection-section-help">This cycle uses a saved local recording. For immersive control inside the task, open Teleoperate.</span></div>
-            </section>
-            <section id="collection-dexverse-setup" class="panel collection-setup-card"><div class="panel-heading"><div><h2>Offline experiment setup</h2>
-              <p class="collection-section-help">Offline recordings are motion tests: completing a cycle does not mean the robot achieved the task.</p></div></div>
-              <button id="capture-cycle-setup" type="button" class="button button-outline">Check / configure DexVerse</button>
-              <p id="capture-cycle-setup-message" class="collection-section-help" role="status">Uses the saved pipeline on sky2. The dashboard gateway selector does not change this route.</p>
-              <p><a href="/api/collection/processing/guide" target="_blank" rel="noopener">Setup and dataset guide</a></p>
-              <details><summary>DexVerse simulation setup</summary><p>DexVerse records robot actions and scene states inside Isaac Sim. Saved-recording replay needs a compatible NVIDIA GPU host, Isaac Sim 5.1.0, Isaac Lab 2.3.2 and robot assets. Live headset teleoperation additionally needs CloudXR and a compatible client. This cannot run on the Mac’s GPU.</p><p>The patched CloudXR 5.0.1 client builds and runs on the tested visionOS 2.5 headset. Streaming additionally requires a reachable GPU server; headset installation alone does not verify this connection. Local human tracking requires validated retargeting and simulation before it becomes a robot demonstration.</p><p><a href="https://isaac-sim.github.io/IsaacLab/v2.3.2/source/how-to/cloudxr_teleoperation.html" target="_blank" rel="noreferrer">Official Isaac Lab CloudXR setup guide</a>. The adapter below lists the remaining host, stream, and calibration requirements.</p></details>
-            </section>
-            <section id="collection-cycle-composer" class="panel table-panel" aria-labelledby="collection-cycle-title">
-              <div class="panel-heading"><div>
-                <h2 id="collection-cycle-title">Offline tracking experiment</h2>
-                <p class="collection-section-help">Simulation → dataset → training → evaluation.</p>
-              </div></div>
-              <form id="capture-cycle-form" class="dense-form">
-                <fieldset class="form-section">
-                  <p class="collection-section-help">Shadow right hand · Pick up stick · state-based behavior cloning. Other robot/model combinations, including GR00T and pi0.5, are unsupported here.</p>
-                  <div class="field"><label for="capture-cycle-recording">Imported recording</label><select id="capture-cycle-recording" required aria-describedby="capture-cycle-selection"></select></div>
-                  <div id="capture-cycle-selection" class="collection-selected-recording" aria-live="polite">Loading recordings…</div>
-                  <details class="collection-inline-details"><summary>Cycle settings <span id="capture-cycle-settings-summary" class="collection-summary-note">100 epochs · 1 trial · seed 0</span></summary>
-                    <div class="collection-settings-grid">
-                      <div class="field"><label for="capture-cycle-epochs">Training epochs</label><input id="capture-cycle-epochs" type="number" value="100" min="1" max="1000" required></div>
-                      <div class="field"><label for="capture-cycle-episodes">Evaluation trials</label><input id="capture-cycle-episodes" type="number" value="1" min="1" max="20" required></div>
-                      <div class="field"><label for="capture-cycle-seed">Scene seed</label><input id="capture-cycle-seed" type="number" value="0" min="0" max="2147483627" required></div>
-                    </div>
-                    <p class="collection-section-help">An epoch is one training pass. The seed controls object placement; change it to start a new cycle. Identical settings reopen the existing cycle.</p>
-                  </details>
-                </fieldset>
-                <div class="form-actions collection-cycle-actions">
-                  <button id="capture-cycle-start" type="submit" class="button button-accent" disabled>Run offline experiment (trains and evaluates)</button>
-                  <span class="collection-section-help collection-run-cost">Uses 1 GPU on sky2 · independent of the toolbar gateway</span>
-                  <p class="collection-section-help">The same recording and settings reopen a saved cycle. Change the scene seed for a new attempt.</p>
-                  <p id="capture-cycle-message" class="collection-section-help" role="status"></p>
-                  <button class="text-button" type="button" data-collection-go="setup" data-collection-guide="dexverse">DexVerse setup and supported combinations</button>
-                </div>
-              </form>
-            </section>
-            <section class="panel table-panel collection-history" aria-labelledby="capture-history-heading">
-              <div class="panel-heading"><div><h2 id="capture-history-heading">Cycle history</h2><p class="collection-section-help">Pipeline completion and task success are reported separately.</p></div></div>
-              <p id="capture-cycle-history-error" class="inline-alert" role="alert" hidden></p>
-              <div class="table-scroll"><table class="collection-cycle-table"><thead><tr><th>Cycle</th><th>State</th><th>Simulation &amp; dataset</th><th>Training</th><th>Evaluation</th><th>Actions</th></tr></thead><tbody id="capture-cycle-jobs" aria-live="polite"><tr class="empty-row"><td colspan="6">Loading cycles…</td></tr></tbody></table></div>
-              <dialog id="capture-cycle-preview" class="collection-video-dialog" aria-labelledby="capture-cycle-preview-title"><div class="panel-heading"><div><h3 id="capture-cycle-preview-title">Replay</h3><p id="capture-cycle-preview-context"></p></div><button id="capture-cycle-close-preview" class="button button-outline" type="button">Close video</button></div><video id="capture-cycle-video" controls playsinline preload="metadata"></video><p id="capture-cycle-video-status" role="status">Loading video…</p><button id="capture-cycle-video-retry" type="button" class="button button-outline" hidden>Retry video</button></dialog>
-            </section>
-            </details>
-            <details class="collection-disclosure"><summary>Install the local tracking recorder</summary>
-            <section id="collection-headset-guide" class="panel collection-setup-card">
-              <div class="panel-heading"><div><h2>Apple Vision Pro</h2><p class="collection-section-help">Local hand and head tracking. No NVIDIA GPU is needed to record.</p></div></div>
-              <div class="collection-disclosure-body collection-guide">
-                <p>Requires visionOS 2.0 or newer and a Mac with Xcode. Captures hand joints and head poses; camera images, object states and robot actions are not recorded.</p>
-                <details id="collection-install-instructions" name="vision-pro-guide">
-                  <summary>Install and pair the headset</summary>
-                  <div class="headset-install-guide">
-                    <p class="collection-section-help">One-time setup. Follow the steps in order, switching devices where indicated. Use a physical Vision Pro; the simulator cannot provide real hand tracking.</p>
-                    <ol class="headset-setup-steps">
-                      <li>
-                        <div class="headset-step-heading"><h3>Open the recorder project</h3><span class="quiet-label">On your Mac</span></div>
-                        <p><a href="/api/collection/local/client-source" download>Download Skynet Capture for Xcode</a> and unzip it.</p>
-                        <p>Open <strong>SkynetCapture.xcodeproj</strong> from the extracted folder.</p>
-                      </li>
-                      <li>
-                        <div class="headset-step-heading"><h3>Set up app signing</h3><span class="quiet-label">On your Mac</span></div>
-                        <p>In Xcode, select <strong>SkynetCapture → Signing &amp; Capabilities</strong>.</p>
-                        <p>Choose your Apple team. Enter a unique <strong>Bundle Identifier</strong>, such as <code>your.name.skynetcapture</code>.</p>
-                      </li>
-                      <li>
-                        <div class="headset-step-heading"><h3>Make the headset discoverable</h3><span class="quiet-label">On Vision Pro</span></div>
-                        <p>Wear and unlock the headset. Connect it and your Mac to the <strong>same private Wi-Fi network</strong>.</p>
-                        <p>Open <strong>Settings → General → Remote Devices</strong> and leave that screen open.</p>
-                      </li>
-                      <li>
-                        <div class="headset-step-heading"><h3>Pair it with Xcode</h3><span class="quiet-label">On your Mac</span></div>
-                        <p>Open <strong>Xcode → Window → Devices and Simulators</strong>.</p>
-                        <p>Select your Vision Pro and pair it. Enter the verification code displayed on the headset.</p>
-                      </li>
-                      <li>
-                        <div class="headset-step-heading"><h3>Enable Developer Mode</h3><span class="quiet-label">On Vision Pro</span></div>
-                        <p>Open <strong>Settings → Privacy &amp; Security → Developer Mode</strong> and turn it on.</p>
-                        <p>Accept the restart. After restarting, confirm <strong>Turn On</strong>, then unlock the headset.</p>
-                      </li>
-                      <li>
-                        <div class="headset-step-heading"><h3>Install and open Skynet Capture</h3><span class="quiet-label">On your Mac</span></div>
-                        <p>In Xcode, select your Vision Pro as the run destination, then click <strong>Run</strong>.</p>
-                        <p>Keep the headset worn, unlocked, and connected while Xcode prepares it. The first connection can take several minutes.</p>
-                        <p class="secondary">Ready when: Skynet Capture opens on your Vision Pro.</p>
-                      </li>
-                    </ol>
-                    <div class="headset-setup-support">
-                      <h3>Need help?</h3>
-                      <details>
-                        <summary>The headset does not appear in Xcode</summary>
-                        <p>Keep <strong>Remote Devices</strong> open on the unlocked headset. Check that both devices are on the same private Wi-Fi network.</p>
-                        <p>If it still does not appear, try another private network. Some networks block local device discovery.</p>
-                      </details>
-                      <details>
-                        <summary>Xcode reports an untrusted developer certificate</summary>
-                        <p>On Vision Pro, open <strong>Settings → General → VPN &amp; Device Management</strong>.</p>
-                        <p>Select the Developer App certificate for your Apple account and tap <strong>Trust</strong>. Return to Xcode on your Mac and click <strong>Run</strong> again.</p>
-                      </details>
-                      <details id="collection-setup-check-results">
-                        <summary>Check setup requirements</summary>
-                        <p>This check detects the Mac and Xcode. Signing, pairing, and tracking permissions still need to be confirmed on your devices.</p>
-                        <button id="local-capture-refresh" class="button button-outline" type="button">Check setup</button>
-                        <div id="local-capture-checks" aria-live="polite">Checking this computer…</div>
-                      </details>
-                    </div>
-                    <div class="headset-setup-next">
-                      <button class="button button-outline" type="button" data-collection-go="setup" data-collection-guide="record">Next: record and transfer a file</button>
-                    </div>
-                  </div>
-                </details>
-                <details id="collection-record-instructions" name="vision-pro-guide" open><summary>Record, save and transfer a file</summary>
-                  <ol><li>Open Skynet Capture, enter a task name, then choose <strong>Start recording</strong>. Allow hand tracking and keep your hands visible; recording starts automatically when a hand and your head are tracked.</li><li>Perform the movement, then choose <strong>Stop and save</strong>. Start with about 10 seconds. Tracking closes automatically after saving.</li><li>Under Saved on this headset, choose <strong>Share</strong> beside a recording, then AirDrop or Save to Files to transfer it to this Mac. The original stays on the headset.</li></ol>
-                  <p>Leaving the app or interrupting tracking during recording marks it as interrupted. Stop and save first to create a completed recording.</p>
-                </details>
-              </div>
-            </section>
-            </details>
-
 <details id="collection-advanced" class="collection-disclosure">
  <summary>Additional collection adapters <span class="collection-summary-note">Advanced · <span id="collection-adapter-count">Loading…</span> · <span id="collection-session-count">Loading…</span></span></summary>
  <div class="collection-disclosure-body">
@@ -1424,23 +1205,9 @@
 </details>
 </div>
 
-        </div>
-      </section>
-
-      <section id="datasets" class="tab-panel" data-tab-panel="datasets" role="tabpanel" hidden>
-        <div class="section-shell workspace-page">
-          <div class="page-heading">
-            <div class="page-title-row data-page-title">
-              <h1>Data</h1>
-              <nav class="data-subnav" aria-label="Data sections">
-                <a href="#datasets" class="is-active" data-tab-target="datasets" data-data-view="registry" aria-controls="datasets" aria-current="page">Dataset Registry</a>
-                <a href="#collection" data-tab-target="collection" data-data-view="collection" aria-controls="collection">Collection</a>
-              </nav>
-            </div>
-            <div class="page-actions">
-              <button id="refresh-data-registry" class="button button-outline" type="button">Refresh</button>
-            </div>
-          </div>
+        </section>
+          <section id="datasets" data-tab-panel="datasets" role="tabpanel" aria-labelledby="data-tab-registry" hidden>
+          
 
           <div id="data-registry-error" class="inline-alert" role="alert" hidden></div>
 
@@ -1464,16 +1231,20 @@
                 </tbody>
               </table>
             </div>
-            <form id="data-resource-form" class="dense-form registry-action-form inline-drawer row-disclosure" hidden>
-              <div class="panel-heading row-disclosure-heading">
+            <section id="policy-export-history" class="dense-form" hidden aria-label="Dataset preparation">
+              <div class="panel-heading"><h3>Dataset preparation</h3><button id="refresh-policy-exports" type="button" class="text-button">Refresh</button></div>
+              <div id="policy-export-jobs" role="status"></div>
+            </section>
+            <dialog id="data-resource-form-dialog" class="app-dialog" data-panel-dialog aria-labelledby="data-resource-form-title"><form id="data-resource-form" class="dialog-form" hidden>
+              <div class="panel-heading">
                 <div>
-                  <h2>Register a source resource</h2>
+                  <h3 id="data-resource-form-title">Register a source resource</h3>
                 </div>
                 <div class="panel-heading-actions">
-                  <button id="close-data-resource-form" class="text-button disclosure-close" type="button">Close</button>
+                  <button id="close-data-resource-form" class="button button-outline" type="button">Close</button>
                 </div>
               </div>
-              <div class="row-disclosure-body">
+              <div class="dialog-body">
                 <input id="data-resource-id" type="hidden">
                 <div class="form-grid">
                   <div class="field">
@@ -1503,18 +1274,18 @@
                   <button id="create-data-resource" class="button button-accent" type="submit">Register resource</button>
                 </div>
               </div>
-            </form>
-            <form id="data-version-form" class="dense-form registry-action-form inline-drawer row-disclosure" hidden>
-              <div class="panel-heading row-disclosure-heading">
+            </form></dialog>
+            <dialog id="data-version-form-dialog" class="app-dialog" data-panel-dialog aria-labelledby="data-version-resource-label"><form id="data-version-form" class="dialog-form" hidden>
+              <div class="panel-heading">
                 <div>
-                  <h2 id="data-version-resource-label">Resource version</h2>
+                  <h3 id="data-version-resource-label">Resource version</h3>
                   <p class="registry-section-help">A version identifies one exact, unchanged set of files. Imports normally publish it automatically; use this form for a manual publication.</p>
                 </div>
                 <div class="panel-heading-actions">
-                  <button id="close-data-version-form" class="text-button disclosure-close" type="button">Close</button>
+                  <button id="close-data-version-form" class="button button-outline" type="button">Close</button>
                 </div>
               </div>
-              <div class="row-disclosure-body">
+              <div class="dialog-body">
                 <input id="data-version-resource-id" type="hidden">
                 <div class="form-grid">
                   <div class="field"><label for="data-version-revision">Upstream revision</label><input id="data-version-revision" placeholder="Full commit or provider revision" required></div>
@@ -1527,18 +1298,18 @@
                 </div>
                 <div class="form-actions"><button id="create-data-version" class="button button-accent" type="submit">Create immutable version</button></div>
               </div>
-            </form>
-            <form id="data-import-form" class="dense-form registry-action-form inline-drawer row-disclosure" hidden>
-              <div class="panel-heading row-disclosure-heading">
+            </form></dialog>
+            <dialog id="data-import-form-dialog" class="app-dialog" data-panel-dialog aria-labelledby="data-import-resource-label"><form id="data-import-form" class="dialog-form" hidden>
+              <div class="panel-heading">
                 <div>
-                  <h2 id="data-import-resource-label">Import from Hugging Face</h2>
+                  <h3 id="data-import-resource-label">Import from Hugging Face</h3>
                   <p class="registry-section-help">Downloads one exact dataset directory through Slurm, verifies its files, publishes an immutable version, and creates its bundle.</p>
                 </div>
                 <div class="panel-heading-actions">
-                  <button id="close-data-import-form" class="text-button disclosure-close" type="button">Close</button>
+                  <button id="close-data-import-form" class="button button-outline" type="button">Close</button>
                 </div>
               </div>
-              <div class="row-disclosure-body">
+              <div class="dialog-body">
                 <input id="data-import-resource-id" type="hidden">
                 <div class="form-grid">
                   <div class="field span-2"><label for="data-import-revision">Exact Hugging Face revision</label><input id="data-import-revision" minlength="40" maxlength="40" pattern="[A-Fa-f0-9]{40}" placeholder="40-character commit SHA" required><small>Mutable names such as main are rejected.</small></div>
@@ -1552,7 +1323,7 @@
                 </div>
                 <div class="form-actions"><button id="submit-data-import" class="button button-accent" type="submit">Submit import job</button></div>
               </div>
-            </form>
+            </form></dialog>
           </section>
 
           <section class="panel table-panel registry-section">
@@ -1606,16 +1377,16 @@
                 <tbody id="data-derivations-body"><tr class="empty-row"><td colspan="5">No derivations loaded.</td></tr></tbody>
               </table>
             </div>
-            <form id="data-derivation-form" class="dense-form registry-action-form row-disclosure inline-drawer" hidden>
-              <div class="panel-heading row-disclosure-heading">
+            <dialog id="data-derivation-form-dialog" class="app-dialog" data-panel-dialog aria-labelledby="data-derivation-form-title"><form id="data-derivation-form" class="dialog-form" hidden>
+              <div class="panel-heading">
                 <div>
-                  <h2>Record a derivation</h2>
+                  <h3 id="data-derivation-form-title">Record a derivation</h3>
                 </div>
                 <div class="panel-heading-actions">
-                  <button id="close-data-derivation-form" class="text-button disclosure-close" type="button">Close</button>
+                  <button id="close-data-derivation-form" class="button button-outline" type="button">Close</button>
                 </div>
               </div>
-              <div class="row-disclosure-body">
+              <div class="dialog-body">
                 <div class="form-grid">
                   <div class="field span-2"><label for="data-derivation-output">Output version</label><select id="data-derivation-output" required disabled><option value="">No versions loaded</option></select></div>
                   <div class="field span-2"><label for="data-derivation-inputs">Inputs / JSON</label><textarea id="data-derivation-inputs" rows="4" required placeholder='[{"version_id":"...","role":"source","position":0}]'></textarea></div>
@@ -1626,7 +1397,7 @@
                 </div>
                 <div class="form-actions"><button id="create-data-derivation" class="button button-accent" type="submit">Record lineage</button></div>
               </div>
-            </form>
+            </form></dialog>
           </section>
 
           <section class="panel table-panel registry-section" id="data-bundle-create-details">
@@ -1647,17 +1418,17 @@
                 <tbody id="data-bundles-body"><tr class="empty-row"><td colspan="5">No bundles loaded.</td></tr></tbody>
               </table>
             </div>
-            <aside id="data-bundle-preview" class="row-disclosure inline-drawer dataset-preview" hidden>
-              <div class="panel-heading row-disclosure-heading">
+            <dialog id="data-bundle-preview-dialog" class="app-dialog" data-panel-dialog aria-labelledby="data-bundle-preview-title"><aside id="data-bundle-preview" class="dataset-preview" hidden>
+              <div class="panel-heading">
                 <div>
-                  <h2 id="data-bundle-preview-title">Dataset preview</h2>
+                  <h3 id="data-bundle-preview-title">Dataset preview</h3>
                   <p id="data-bundle-preview-status" class="registry-section-help">Choose a bundle to inspect its immutable dataset contents.</p>
                 </div>
                 <div class="panel-heading-actions">
-                  <button id="close-data-bundle-preview" class="text-button disclosure-close" type="button">Close</button>
+                  <button id="close-data-bundle-preview" class="button button-outline" type="button">Close</button>
                 </div>
               </div>
-              <div class="row-disclosure-body dataset-preview-stack">
+              <div class="dialog-body dataset-preview-stack">
                 <div id="data-bundle-preview-summary" class="key-value-grid"></div>
 
                 <section class="dataset-preview-section">
@@ -1727,17 +1498,17 @@
 
                 <div id="data-bundle-preview-warnings" class="dataset-preview-warnings" hidden></div>
               </div>
-            </aside>
-            <form id="data-bundle-form" class="dense-form registry-action-form row-disclosure inline-drawer" hidden>
-              <div class="panel-heading row-disclosure-heading">
+            </aside></dialog>
+            <dialog id="data-bundle-form-dialog" class="app-dialog" data-panel-dialog aria-labelledby="data-bundle-form-title"><form id="data-bundle-form" class="dialog-form" hidden>
+              <div class="panel-heading">
                 <div>
-                  <h2>Create an immutable bundle</h2>
+                  <h3 id="data-bundle-form-title">Create an immutable bundle</h3>
                 </div>
                 <div class="panel-heading-actions">
-                  <button id="close-data-bundle-form" class="text-button disclosure-close" type="button">Close</button>
+                  <button id="close-data-bundle-form" class="button button-outline" type="button">Close</button>
                 </div>
               </div>
-              <div class="row-disclosure-body">
+              <div class="dialog-body">
                 <div class="form-grid">
                   <div class="field span-2"><label for="data-bundle-name">Bundle name</label><input id="data-bundle-name" placeholder="dexverse-training" required></div>
                   <div class="field span-2"><label for="data-bundle-version">Bundle version</label><input id="data-bundle-version" placeholder="v1 or exact release identifier" required></div>
@@ -1745,13 +1516,14 @@
                   <div class="field span-2"><label for="data-bundle-version-picker">Registered dataset version</label><select id="data-bundle-version-picker"><option value="">Choose a version</option></select></div>
                   <div class="field"><label for="data-bundle-role-picker">Use as</label><select id="data-bundle-role-picker"><option value="training_data">Training data</option><option value="evaluation_data">Evaluation data</option><option value="simulation_assets">Simulation assets</option></select></div>
                   <div class="field"><label for="data-bundle-mount-picker">Relative mount path</label><input id="data-bundle-mount-picker" placeholder="data/train"></div>
-                  <div class="span-4"><button id="add-data-bundle-assignment" type="button">Add version to bundle</button><p>Choose a registered version and its role, then add it below. Format compatibility is checked against the training adapter when you prepare an experiment. A bundle does not convert data or install a simulator.</p></div>
+                  <div class="span-4"><button id="add-data-bundle-assignment" class="button button-outline" type="button">Add version to bundle</button><p>Choose a registered version and its role, then add it below. Format compatibility is checked against the training adapter when you prepare an experiment. A bundle does not convert data or install a simulator.</p></div>
                   <div class="field span-4"><label for="data-bundle-assignments">Selected assignments / editable JSON</label><textarea id="data-bundle-assignments" rows="7" required placeholder='[{"role":"training_data","version_id":"...","mount_path":"data/train","required":true,"position":0}]'></textarea><small>Assign roles such as <code>simulation_assets</code>, <code>training_data</code>, and <code>evaluation_data</code>. Each assignment pins one immutable version.</small></div>
                 </div>
                 <div class="form-actions"><button id="create-data-bundle" class="button button-accent" type="submit">Create bundle</button></div>
               </div>
-            </form>
+            </form></dialog>
           </section>
+        </section>
         </div>
       </section>
 
@@ -2022,13 +1794,13 @@
       <div id="tutorial-blocker-right" class="tutorial-blocker" aria-hidden="true"></div>
       <div id="tutorial-blocker-bottom" class="tutorial-blocker" aria-hidden="true"></div>
       <div id="tutorial-spotlight" class="tutorial-spotlight" aria-hidden="true"></div>
-      <section id="tutorial-dialog" class="tutorial-dialog" role="dialog" aria-modal="true" aria-labelledby="tutorial-title" aria-describedby="tutorial-instruction" tabindex="-1">
-        <div class="tutorial-dialog-header">
-          <span id="tutorial-page" class="tutorial-page-label"></span>
-          <button id="tutorial-exit" class="text-button" type="button" aria-label="Exit tutorial">Exit</button>
+      <section id="tutorial-dialog" class="app-dialog tutorial-dialog" role="dialog" aria-modal="true" aria-labelledby="tutorial-title" aria-describedby="tutorial-instruction" tabindex="-1">
+        <div class="panel-heading">
+          <div><h3 id="tutorial-title"></h3><p id="tutorial-page" class="tutorial-page-label"></p></div>
+          <button id="tutorial-exit" class="button button-outline" type="button" aria-label="Exit tutorial">Exit</button>
         </div>
         <p id="tutorial-progress" class="tutorial-progress" role="status" aria-live="polite"></p>
-        <h2 id="tutorial-title"></h2>
+        
         <p id="tutorial-instruction" class="tutorial-instruction"></p>
         <div class="tutorial-session-meta">
           <span id="tutorial-token"></span>
@@ -2060,5 +1832,73 @@
       <span>SKYNET / SLURM EXPERIMENT CONSOLE</span>
       <span>LOCAL OPERATOR TOOL / NO AUTH LAYER</span>
     </footer>
-  <datalist id="data-format-suggestions"></datalist><datalist id="data-role-suggestions"><option value="training_data"></option><option value="evaluation_data"></option><option value="simulation_assets"></option></datalist></body>
+  <datalist id="data-format-suggestions"></datalist><datalist id="data-role-suggestions"><option value="training_data"></option><option value="evaluation_data"></option><option value="simulation_assets"></option></datalist>
+    <dialog id="policy-export-dialog" class="app-dialog" aria-labelledby="policy-export-title">
+      <div class="panel-heading"><h3 id="policy-export-title">Prepare for training</h3><button id="close-policy-export" data-dialog-close type="button" class="button button-outline">Close</button></div>
+      <form id="policy-export-form">
+        <div class="form-grid">
+          <div class="field"><label for="policy-export-name">Dataset name</label><input id="policy-export-name" maxlength="100" required></div>
+          <div class="field"><label for="policy-export-format">Policy</label><select id="policy-export-format" required></select></div>
+        </div>
+        <p id="policy-export-compatibility" role="status" class="inline-alert" hidden></p>
+        <details class="collection-disclosure"><summary>Preparation settings</summary>
+          <div class="form-grid">
+            <div class="field"><label for="preparation-validation">Validation episodes (%)</label><input id="preparation-validation" type="number" min="0" max="50" value="20" required></div>
+            <div class="field"><label for="preparation-seed">Split seed</label><input id="preparation-seed" type="number" min="0" max="2147483647" value="42" required></div>
+          </div>
+        </details>
+        <p id="policy-export-error" role="alert" class="inline-alert" hidden></p>
+        <div class="form-actions"><button id="create-policy-export" type="submit" class="button button-accent">Prepare dataset</button></div>
+      </form>
+    </dialog>
+    <dialog id="data-import-detail-dialog" class="app-dialog" aria-labelledby="data-import-detail-title">
+      <div class="panel-heading"><div><h3 id="data-import-detail-title">Import job details</h3><p id="data-import-detail-context"></p></div><button type="button" data-dialog-close class="button button-outline">Close</button></div>
+      <div id="data-import-detail-content"></div>
+    </dialog>
+    <dialog id="prepared-dataset-dialog" class="app-dialog" aria-labelledby="prepared-dataset-title">
+      <div class="panel-heading">
+        <div>
+          <h3 id="prepared-dataset-title">Dataset</h3>
+          <p id="prepared-dataset-context" class="secondary"></p>
+        </div>
+        <button id="close-prepared-dataset" data-dialog-close type="button" class="button button-outline">Close</button>
+      </div>
+      <p id="prepared-dataset-error" class="inline-alert" role="alert" hidden></p>
+      <div id="prepared-dataset-content"></div>
+    </dialog>
+  <dialog id="run-attempt-detail-dialog" class="app-dialog" data-panel-dialog aria-labelledby="run-attempt-detail-title">
+                          <section id="run-attempt-detail" hidden>
+                            <div class="panel-heading">
+                              <div>
+                                <h3 id="run-attempt-detail-title">Attempt</h3>
+                              </div>
+                              <button type="button" class="button button-outline" data-dialog-close>Close</button>
+                            </div>
+                            <div class="dialog-body">
+                              <div id="run-attempt-detail-meta" class="key-value-grid"></div>
+                              <div id="run-attempt-detail-tracking" class="tracking-detail-strip" hidden></div>
+                              <section class="attempt-hyperparameters" aria-labelledby="run-attempt-hyperparameters-title">
+                                <h3 id="run-attempt-hyperparameters-title">Common hyperparameters</h3>
+                                <div id="run-attempt-hyperparameters" class="key-value-grid"></div>
+                              </section>
+                              <div class="attempt-log-grid">
+                                <section>
+                                  <div class="log-heading">
+                                    <h3>stdout</h3>
+                                    <span id="run-attempt-stdout-status" class="quiet-label"></span>
+                                  </div>
+                                  <pre class="log-view"><code id="run-attempt-stdout-log">Select an attempt to load stdout.</code></pre>
+                                </section>
+                                <section>
+                                  <div class="log-heading">
+                                    <h3>stderr</h3>
+                                    <span id="run-attempt-stderr-status" class="quiet-label"></span>
+                                  </div>
+                                  <pre class="log-view"><code id="run-attempt-stderr-log">Select an attempt to load stderr.</code></pre>
+                                </section>
+                              </div>
+                            </div>
+                          </section>
+                          </dialog>
+</body>
 </html>

@@ -417,6 +417,18 @@ CREATE TABLE IF NOT EXISTS data_resource_versions (
     UNIQUE(resource_id, revision, format)
 );
 
+CREATE TABLE IF NOT EXISTS data_locations (
+    id TEXT PRIMARY KEY,
+    version_id TEXT NOT NULL REFERENCES data_resource_versions(id) ON DELETE RESTRICT,
+    kind TEXT NOT NULL,
+    host TEXT NOT NULL,
+    path TEXT NOT NULL,
+    manifest_sha256 TEXT NOT NULL,
+    status TEXT NOT NULL,
+    verified_at TEXT NOT NULL,
+    UNIQUE(version_id, host, path)
+);
+
 CREATE TABLE IF NOT EXISTS data_derivations (
     id TEXT PRIMARY KEY,
     output_version_id TEXT NOT NULL UNIQUE REFERENCES data_resource_versions(id) ON DELETE RESTRICT,
@@ -3657,6 +3669,7 @@ class Database:
         result = cls._decode(row) if isinstance(row, sqlite3.Row) else dict(row)
         assert result is not None
         result["metadata"] = result.pop("metadata_json", {})
+        result["locations"] = [dict(item) for item in connection.execute("SELECT * FROM data_locations WHERE version_id=? ORDER BY kind, host", (result["id"],)).fetchall()]
         if include_resource:
             resource_row = connection.execute(
                 "SELECT * FROM data_resources WHERE id = ?", (result["resource_id"],)
@@ -3819,6 +3832,250 @@ class Database:
             ).fetchone()
             assert row is not None
             return self._public_data_version(connection, row, include_resource=True)
+
+    def record_data_location(self, version_id, *, kind, host, path, manifest_sha256, status="AVAILABLE"):
+        version = self.get_data_resource_version(version_id)
+        if version is None or version["manifest_sha256"] != manifest_sha256:
+            raise ValueError("Location must reference the exact registered dataset")
+        with self.transaction() as connection:
+            connection.execute("""INSERT INTO data_locations VALUES (?,?,?,?,?,?,?,?)
+                ON CONFLICT(version_id, host, path) DO UPDATE SET
+                status=excluded.status, verified_at=excluded.verified_at""",
+                (new_id(), version_id, kind, host, path, manifest_sha256, status, utc_now()))
+            return dict(connection.execute("SELECT * FROM data_locations WHERE version_id=? AND host=? AND path=?", (version_id, host, path)).fetchone())
+
+    def delete_prepared_dataset(self, resource_id, cleanup, *, identifier=None):
+        """Delete a managed dataset only after its generated copies are removed.
+
+        One write transaction prevents an experiment pin racing cleanup. Immutable
+        delete triggers are restored in that same transaction; rollback restores
+        them too. Ordinary registry operations cannot use this exception.
+        """
+        failure = None
+        with self.transaction() as c:
+            resource = c.execute(
+                "SELECT * FROM data_resources WHERE id=?", (resource_id,)
+            ).fetchone()
+            if resource is None:
+                raise KeyError("Dataset not found")
+            if (resource["provider"], resource["namespace"]) != (
+                "collection",
+                "datasets",
+            ) or not json.loads(resource["metadata_json"]).get("managed_dataset"):
+                raise ValueError(
+                    "Only prepared collection datasets can be deleted here"
+                )
+            versions = [
+                dict(v)
+                for v in c.execute(
+                    "SELECT * FROM data_resource_versions WHERE resource_id=?",
+                    (resource_id,),
+                )
+            ]
+            jobs = [
+                json.loads(r[0])
+                for r in c.execute(
+                    "SELECT payload_json FROM policy_exports WHERE json_extract(payload_json, '$.resource_id')=?",
+                    (resource_id,),
+                )
+            ]
+            if identifier is not None:
+                selected = next((j for j in jobs if j["id"] == identifier), None)
+                if selected is None:
+                    raise KeyError("Prepared format not found")
+                version_id = selected.get("version_id")
+                versions = [v for v in versions if v["id"] == version_id]
+                jobs = [
+                    j
+                    for j in jobs
+                    if j["id"] == identifier
+                    or (version_id and j.get("version_id") == version_id)
+                ]
+            if any(
+                j["state"] not in {"READY", "FAILED", "DELETE_FAILED"} for j in jobs
+            ):
+                raise ValueError(
+                    "Wait for dataset preparation to finish before deleting it"
+                )
+            version_ids = {v["id"] for v in versions}
+            checksums = {v["manifest_sha256"] for v in versions}
+            for v in c.execute(
+                "SELECT id, manifest_sha256 FROM data_resource_versions",
+            ):
+                if v["id"] not in version_ids and v["manifest_sha256"] in checksums:
+                    raise ValueError(
+                        "These files are shared with another registered dataset"
+                    )
+            bundles = []
+            for row in c.execute(
+                "SELECT DISTINCT b.* FROM data_bundles b JOIN data_bundle_assignments a ON a.bundle_id=b.id JOIN data_resource_versions v ON v.id=a.version_id WHERE v.resource_id=?",
+                (resource_id,),
+            ):
+                assignments = list(
+                    c.execute(
+                        "SELECT version_id FROM data_bundle_assignments WHERE bundle_id=?",
+                        (row["id"],),
+                    )
+                )
+                if not any(a[0] in version_ids for a in assignments):
+                    continue
+                metadata = json.loads(row["metadata_json"])
+                if (
+                    not metadata.get("prepared_dataset")
+                    or metadata.get("resource_id") != resource_id
+                    or any(a[0] not in version_ids for a in assignments)
+                ):
+                    raise ValueError(
+                        "This dataset is used by a bundle; remove that reference first"
+                    )
+                bundles.append(dict(row))
+            references = (
+                version_ids
+                | checksums
+                | ({resource_id} if identifier is None else set())
+                | {b["id"] for b in bundles}
+                | {b["manifest_sha256"] for b in bundles}
+            )
+            references.update(v["path"] for v in versions)
+            locations = [
+                dict(r)
+                for r in c.execute(
+                    "SELECT l.* FROM data_locations l JOIN data_resource_versions v ON v.id=l.version_id WHERE v.resource_id=?",
+                    (resource_id,),
+                )
+            ]
+            locations = [l for l in locations if l["version_id"] in version_ids]
+            references.update(l["path"] for l in locations)
+
+            # Check both requested and resolved inputs, including direct paths.
+            def references_dataset(value):
+                if isinstance(value, str):
+                    return value in references or any(
+                        value.startswith(path.rstrip("/") + "/")
+                        for path in references
+                        if path.startswith("/")
+                    )
+                if isinstance(value, dict):
+                    return any(references_dataset(v) for v in value.values())
+                return isinstance(value, list) and any(
+                    references_dataset(v) for v in value
+                )
+
+            for table, column in [
+                ("experiment_revisions", "requested_spec_json"),
+                ("variants", "resolved_spec_json"),
+            ]:
+                for row in c.execute(f"SELECT {column} FROM {table}"):
+                    if references_dataset(json.loads(row[0])):
+                        raise ValueError(
+                            "This dataset is used by an experiment and cannot be deleted"
+                        )
+            for row in c.execute(
+                "SELECT i.input_version_id, d.output_version_id FROM data_derivation_inputs i JOIN data_derivations d ON d.id=i.derivation_id"
+            ):
+                if row[0] in version_ids and row[1] not in version_ids:
+                    raise ValueError("Another dataset was derived from this dataset")
+            if any(
+                (identifier is None and row["resource_id"] == resource_id)
+                or row["version_id"] in version_ids
+                or row["bundle_id"] in {b["id"] for b in bundles}
+                for row in c.execute(
+                    "SELECT resource_id, version_id, bundle_id FROM data_imports"
+                )
+            ):
+                raise ValueError("This dataset is referenced by an import job")
+            try:
+                cleanup(jobs, versions, locations)
+            except Exception as exc:
+                # Filesystem deletions cannot roll back. Keep records for retry,
+                # but make every affected copy and bundle unavailable to training.
+                failure = exc
+                for job in jobs:
+                    job.update(
+                        state="DELETE_FAILED",
+                        training_ready=False,
+                        error=str(exc),
+                        updated_at=utc_now(),
+                    )
+                    c.execute(
+                        "UPDATE policy_exports SET payload_json=? WHERE id=?",
+                        (canonical_json(job), job["id"]),
+                    )
+                for location in locations:
+                    c.execute(
+                        "UPDATE data_locations SET status='REMOVED' WHERE id=?",
+                        (location["id"],),
+                    )
+                for bundle in bundles:
+                    c.execute(
+                        "UPDATE data_bundles SET archived_at=? WHERE id=?",
+                        (utc_now(), bundle["id"]),
+                    )
+            else:
+                trigger_names = [
+                    f"{table}_no_delete"
+                    for table in (
+                        "data_resource_versions",
+                        "data_derivations",
+                        "data_derivation_inputs",
+                        "data_bundle_assignments",
+                    )
+                ]
+                triggers = [
+                    c.execute(
+                        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+                        (name,),
+                    ).fetchone()[0]
+                    for name in trigger_names
+                ]
+                for name in trigger_names:
+                    c.execute(f"DROP TRIGGER {name}")
+                for bundle in bundles:
+                    c.execute(
+                        "DELETE FROM data_bundle_assignments WHERE bundle_id=?",
+                        (bundle["id"],),
+                    )
+                    c.execute("DELETE FROM data_bundles WHERE id=?", (bundle["id"],))
+                for v in versions:
+                    c.execute(
+                        "DELETE FROM data_derivation_inputs WHERE derivation_id IN (SELECT id FROM data_derivations WHERE output_version_id=?)",
+                        (v["id"],),
+                    )
+                for v in versions:
+                    c.execute(
+                        "DELETE FROM data_derivations WHERE output_version_id=?",
+                        (v["id"],),
+                    )
+                    c.execute(
+                        "DELETE FROM data_locations WHERE version_id=?", (v["id"],)
+                    )
+                for version_id in version_ids:
+                    c.execute(
+                        "DELETE FROM data_resource_versions WHERE id=?", (version_id,)
+                    )
+                for job in jobs:
+                    c.execute("DELETE FROM policy_exports WHERE id=?", (job["id"],))
+                if identifier is None:
+                    c.execute("DELETE FROM data_resources WHERE id=?", (resource_id,))
+                for trigger in triggers:
+                    c.execute(trigger)
+        if failure:
+            raise ValueError(
+                f"Dataset deletion is incomplete. Retry Delete dataset. {failure}"
+            ) from failure
+        return {"deleted": True, "resource_id": resource_id}
+
+    def data_version_usage(self, manifest_sha256):
+        with self.connection() as connection:
+            return [dict(row) for row in connection.execute("""
+                SELECT DISTINCT e.id AS experiment_id, e.name, er.revision_number, r.id AS run_id, r.status AS run_status
+                FROM experiment_revisions er JOIN experiments e ON e.id=er.experiment_id
+                LEFT JOIN variants v ON v.experiment_revision_id=er.id
+                LEFT JOIN runs r ON r.variant_id=v.id
+                JOIN json_each(er.requested_spec_json, '$.data.bundle.assignments') assignment
+                WHERE json_extract(assignment.value, '$.version.manifest_sha256')=?
+                ORDER BY e.name, er.revision_number
+            """, (manifest_sha256,)).fetchall()]
 
     def get_data_resource_version(self, version_id: str) -> dict[str, Any] | None:
         with self.connection() as connection:
@@ -4093,6 +4350,9 @@ class Database:
             assignment = cls._decode(assignment_row)
             assert assignment is not None
             assignment["config"] = assignment.pop("config_json", {})
+            frozen = next((item for item in result["manifest"]["assignments"] if item["role"] == assignment["role"] and item["position"] == assignment["position"]), None)
+            if frozen is not None:
+                assignment["config"] = frozen.get("config", {})
             version_row = connection.execute(
                 "SELECT * FROM data_resource_versions WHERE id = ?", (assignment["version_id"],)
             ).fetchone()
@@ -4118,12 +4378,20 @@ class Database:
             raise KeyError(f"Data resource version not found: {assignment['version_id']}")
         version = cls._public_data_version(connection, version_row, include_resource=True)
         resource = version.pop("resource")
+        config = dict(assignment.get("config") or {})
+        if config.get("location_id"):
+            location = connection.execute("SELECT * FROM data_locations WHERE id=? AND version_id=?", (config["location_id"], assignment["version_id"])).fetchone()
+            if location is None or location["status"] != "AVAILABLE" or location["kind"] != "cluster":
+                raise ValueError("Dataset copy is not verified on the training cluster")
+            config["location"] = dict(location)
+        elif config.get("location"):
+            raise ValueError("Choose a registered location_id; a location receipt cannot be supplied manually")
         return {
             "role": assignment["role"],
             "position": assignment["position"],
             "mount_path": assignment.get("mount_path"),
             "required": bool(assignment.get("required", True)),
-            "config": dict(assignment.get("config") or {}),
+            "config": config,
             "resource": {
                 key: resource[key]
                 for key in ("provider", "namespace", "name", "kind")

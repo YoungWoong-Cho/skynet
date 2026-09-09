@@ -108,7 +108,7 @@ def test_evaluation_readiness_rejects_busy_run_before_expensive_probe(tmp_path):
 def test_homepage_revalidates_and_versions_changed_assets(tmp_path, monkeypatch):
     from skynet_app import main
     monkeypatch.setattr(main, 'STATIC_ROOT', tmp_path)
-    assets = ('app.js', 'local-capture.js', 'capture-processing.js', 'collection-ui.js', 'styles.css')
+    assets = ('app.js', 'collection-ui.js', 'live-xr.js', 'live-conversion.js', 'styles.css')
     (tmp_path / 'index.html').write_text(''.join(f'<script src="/static/{name}?v=old"></script>' for name in assets))
     for name in assets:
         (tmp_path / name).write_text('first')

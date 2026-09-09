@@ -1,8 +1,8 @@
-# Offline local tracking experiment
+# Offline local tracking experiment (historical)
 
-For simulation demonstrations collected in the headset, use **Data → Collection → Recordings → Convert for training**. See [teleoperation dataset conversion](collection-conversion.md).
+For simulation demonstrations collected in the headset, use **Data → Collection → Recordings → Prepare for training**. See [dataset preparation](policy-data-exports.md).
 
-This older workflow is under **Data → Collection → Setup → Offline experiments & history**. Choose an imported local tracking recording, check the setup, and run the offline experiment. One cluster GPU is used. It automatically trains and evaluates; it is separate from converting a saved teleoperation dataset.
+The local tracking import, offline experiment controls, history panel and recorder installer have been removed from the Collection UI. This document describes the historical workflow and its preserved artifacts. The underlying APIs and shared upload, simulator and conversion helpers remain available; live collection and dataset conversion do not depend on these panels.
 
 The implemented combination is **Vision Pro right-hand tracking → floating Shadow right hand → Dexverse-PickUpStick-v0 → Skynet state-based behavior cloning**. It runs with the existing visionOS 2.5 recorder. Saved-file processing does not use CloudXR.
 
@@ -20,7 +20,7 @@ A cycle can complete with **zero successful task trials**. A hand-movement recor
 
 ## Setup and recovery
 
-The **Check / configure DexVerse** button verifies the pinned source files, links the existing verified asset bundle, and checks the existing runtime packages. It never replaces a shared Python runtime or overwrites source files that differ from the pinned revision. Setup is safe to repeat.
+The legacy setup endpoint verifies the pinned source files, links the existing verified asset bundle, and checks the existing runtime packages. It never replaces a shared Python runtime or overwrites source files that differ from the pinned revision. Setup is safe to repeat.
 
 The operator configuration is `config/capture_pipelines.json`:
 
@@ -36,11 +36,11 @@ The equivalent operator command is:
 .venv/bin/python -m skynet_app.capture_processing.setup
 ```
 
-Source is pinned to DexVerse commit `30cc673e27684b9f10186fa6bea731aed246bc9f`. The default runtime and asset paths refer to the already configured Skynet cluster. Another installation must supply its own compatible paths. Missing packages/assets produce a setup error; the button does not claim to install an NVIDIA GPU, Isaac Sim, or licensed components on the Mac.
+Source is pinned to DexVerse commit `30cc673e27684b9f10186fa6bea731aed246bc9f`. The default runtime and asset paths refer to the already configured Skynet cluster. Another installation must supply its own compatible paths. Missing packages/assets produce a setup error; the setup endpoint does not claim to install an NVIDIA GPU, Isaac Sim, or licensed components on the Mac.
 
 The first launch on a GPU can spend several minutes compiling shaders. Subsequent launches reuse the simulator cache. Each job requests one GPU, four CPU cores, 48 GB RAM and a 30-minute limit. Use short recordings and modest evaluation counts for this first pipeline.
 
-Repeated clicks with identical recording bytes, parameters and pipeline source reopen the same request. If the network drops during submission, the original submission token and exact script are used for recovery. An uncertain acknowledgement is not shown as a failed job and does not automatically create another job. Finished attempts and their artifacts are immutable; use another scene seed or an updated pipeline version for a new attempt.
+Repeated API requests with identical recording bytes, parameters and pipeline source reopen the same request. If the network drops during submission, the original submission token and exact script are used for recovery. An uncertain acknowledgement is not shown as a failed job and does not automatically create another job. Finished attempts and their artifacts are immutable; use another scene seed or an updated pipeline version for a new attempt.
 
 ## Dataset contract
 

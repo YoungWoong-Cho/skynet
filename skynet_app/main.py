@@ -17,6 +17,7 @@ from .local_capture_api import router as local_capture_router
 from .hands_api import router as hands_router
 from .live_xr_api import router as live_xr_router
 from .live_xr_api import conversions as live_conversions
+from .policy_exports_api import router as policy_exports_router, service as policy_exports
 from .pipeline_api import router as pipeline_router
 from .pipeline_api import service as pipeline_service
 
@@ -68,9 +69,11 @@ INIT_COMMAND = "mkdir -p " + " ".join(
 async def lifespan(_: FastAPI):
     pipeline_service.start()
     live_conversions.start()
+    policy_exports.start()
     try:
         yield
     finally:
+        policy_exports.stop()
         live_conversions.stop()
         pipeline_service.stop()
 
@@ -481,5 +484,6 @@ app.include_router(collection_router)
 app.include_router(local_capture_router)
 app.include_router(hands_router)
 app.include_router(live_xr_router)
+app.include_router(policy_exports_router)
 app.include_router(capture_processing_router)
 app.mount("/static", StaticFiles(directory=STATIC_ROOT), name="static")

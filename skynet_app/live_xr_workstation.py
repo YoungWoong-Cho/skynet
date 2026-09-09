@@ -84,7 +84,7 @@ else:
             "--service-type=exec",
             "--remain-after-exit",
             "--property=RuntimeMaxSec="
-            + str((self.profile["duration_minutes"] + 5) * 60),
+            + str((self.profile["duration_minutes"] + (35 if self.profile.get("image_capture") else 5)) * 60),
             "--property=TimeoutStopSec=35",
             "--property=KillMode=mixed",
             "--property=Restart=no",

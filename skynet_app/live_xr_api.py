@@ -1,7 +1,7 @@
 from typing import Literal
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse, FileResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 from .collection_api import service as collection
 from .cluster_runtime import ClusterError
 from .live_xr import LiveXRService
@@ -22,6 +22,7 @@ class StartRequest(BaseModel):
     accepted_license: bool = False
     task: str | None = None
     robot: str | None = None
+    image_capture: bool = False
 
 
 def checked(call, *args):
@@ -59,7 +60,7 @@ def overview():
 @router.post("/sessions", status_code=202)
 def start(request: StartRequest):
     return checked(
-        service.create, request.accepted_license, request.task, request.robot
+        service.create, request.accepted_license, request.task, request.robot, request.image_capture
     )
 
 
@@ -102,12 +103,20 @@ def guide():
 class ConversionRequest(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
     name: str
-    indices: list[int] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def no_selection(cls, value):
+        if isinstance(value, dict) and "indices" in value:
+            raise ValueError(
+                "Conversion includes every recording. Reload the page and try again."
+            )
+        return value
 
 
 @router.post("/sessions/{identifier}/conversions", status_code=202)
 def convert_session(identifier: str, request: ConversionRequest):
-    return checked(conversions.create, identifier, request.name, request.indices)
+    return checked(conversions.create, identifier, request.name)
 
 
 @router.get("/conversions/{identifier}")

@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/XPolicyLab/XPolicyLab",
+  "commit": "9c98a3aaf02d05c6f9999a5a0a7a42090555ddf3",
+  "files": {
+    "utils/process_data.py": "908bda4af9dba36eb1efc4b45ab3ec0beacb5066a5a1a56515fb14a2ac538b66",
+    "utils/load_file.py": "488590d76084f419a36c2fb3e658eeb240ae554678899e9f2ce0cc10da5c4b57",
+    "policy/DP/diffusion_policy/process_data.py": "ad39f770def1b305860e040c14489e6be7e30a7cfc405fe66640a6d11caf0789",
+    "policy/ACT/detr/process_data.py": "f226cbfd5ebfd2acec6e68a5bc4b2295621599fed55d1ac08b73dd96c8607c79",
+    "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+  }
+}

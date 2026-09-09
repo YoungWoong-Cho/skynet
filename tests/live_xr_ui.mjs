@@ -112,6 +112,7 @@ try {
     JSON.parse(requests[2].options.body).task,
     "Dexverse-PickCube-v0",
   );
+  assert.equal(JSON.parse(requests[2].options.body).image_capture, true);
   requests[2].resolve(job);
   await flush();
   requests[1].resolve({ sessions: [], license: { accepted: true }, catalog });
@@ -176,9 +177,7 @@ try {
     get("live-xr-target").textContent,
     /test-workstation · 30 min limit/,
   );
-  assert.equal(get("live-xr-progress-steps").hidden, true);
-  assert.equal(stages().length, 0);
-  assert.match(get("live-xr-progress-title").textContent, /Session ended/);
+  assert.equal(get("live-xr-progress").hidden, true);
   let reviewed;
   window.openLiveReview = (...args) => {
     reviewed = args;
@@ -246,6 +245,14 @@ try {
   assert.equal(get("live-xr-progress-title").textContent, "Could not start");
   assert.match(get("live-xr-progress-error").textContent, /Hand files missing/);
   assert.ok(stages().every((step) => step.textContent.endsWith("Not started")));
+  window.loadLiveXR();
+  requests.at(-1).resolve({ sessions: [{ ...job, state: "RENDERING_IMAGES", stop_requested: true, server_ready: false, detail: "Preparing images for episode 1 of 2" }], license: { accepted: true }, catalog });
+  await flush();
+  assert.equal(get("live-xr-start").disabled, true);
+  assert.equal(get("live-xr-stop").disabled, true);
+  assert.equal(get("live-xr-start").textContent, "Preparing training images…");
+  assert.equal(get("live-xr-progress-title").textContent, "Preparing images for episode 1 of 2");
+  assert.equal(get("live-xr-address").hidden, true);
   console.log(
     "Live UI: selection, progress milestones, persistent failures, stale responses, and review passed.",
   );

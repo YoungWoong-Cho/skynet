@@ -76,23 +76,59 @@ def conversion(tmp_path, monkeypatch):
     return service, session, calls
 
 
-def test_selection_is_immutable_and_duplicate_clicks_recover_same_job(conversion):
+def test_entire_session_is_immutable_and_duplicate_clicks_recover_same_job(conversion):
     service, session, calls = conversion
-    job = service.create("session", "Cube", [1, 0])
+    job = service.create("session", "Cube")
     assert job["indices"] == [0, 1]
-    assert service.create("session", "Different name", [0, 1])["id"] == job["id"]
+    assert service.create("session", "Different name")["id"] == job["id"]
     assert len(service.list()) == 1
-    assert service.create("session", "One recording", [0])["id"] != job["id"]
+    assert job["scope"] == "all_recordings"
     assert job["sources"][0]["sha256"] == "a" * 64
     assert calls.count(job["id"]) == 2
 
 
-@pytest.mark.parametrize("selection", [[], [0, 0], [-1], [2], [True], [0.5]])
-def test_invalid_recording_selection_never_starts_work(conversion, selection):
-    service, _, calls = conversion
-    with pytest.raises(ValueError, match="valid recordings"):
-        service.create("session", "Cube", selection)
+def test_all_51_recordings_are_frozen_in_the_conversion_request(conversion):
+    service, session, _ = conversion
+    session["recordings"] = [f"recordings/episode-{i}.pkl" for i in range(51)]
+    session["recording_checksums"] = {
+        path: str(i % 10) * 64 for i, path in enumerate(session["recordings"])
+    }
+    job = service.create("session", "All recordings")
+    request = json.loads((service.root / job["id"] / "request.json").read_text())
+    assert job["indices"] == list(range(51))
+    assert len(request["sources"]) == len(request["staged_sources"]) == 51
+    assert [s["index"] for s in request["sources"]] == list(range(51))
+
+
+def test_oversized_session_is_rejected_without_omitting_recordings(conversion):
+    service, session, calls = conversion
+    session["recordings"] = [f"recordings/{i}.pkl" for i in range(1001)]
+    with pytest.raises(ValueError, match="no recordings were omitted"):
+        service.create("session", "Cube")
     assert calls == []
+
+
+def test_api_rejects_selection_and_always_converts_the_session(
+    conversion, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("SKYNET_DATABASE_PATH", str(tmp_path / "api.sqlite"))
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from skynet_app import live_xr_api as api
+
+    service, _, calls = conversion
+    monkeypatch.setattr(api, "conversions", service)
+    app = FastAPI()
+    app.include_router(api.router)
+    client = TestClient(app)
+    url = "/api/collection/live/sessions/session/conversions"
+    rejected = client.post(url, json={"name": "Cube", "indices": [0]})
+    assert rejected.status_code == 422
+    assert "every recording" in rejected.text
+    assert calls == []
+    accepted = client.post(url, json={"name": "Cube"})
+    assert accepted.status_code == 202
+    assert accepted.json()["indices"] == [0, 1]
 
 
 def test_active_collection_and_unverified_source_cannot_convert(conversion):

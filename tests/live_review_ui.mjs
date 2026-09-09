@@ -77,6 +77,7 @@ const data = {
   ],
 };
 try {
+  window.eval(await readFile(new URL("../static/dialogs.js", import.meta.url), "utf8"));
   window.eval(
     await readFile(
       new URL("../static/live-review.js", import.meta.url),

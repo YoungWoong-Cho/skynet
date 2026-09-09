@@ -174,21 +174,18 @@ class LiveConversionService:
             )
         return value
 
-    def create(self, session_id, name, indices=None):
+    def create(self, session_id, name):
         session = self.live.get(session_id)
         if session["state"] not in TERMINAL:
             raise ValueError("End collection before converting its saved recordings")
         files = session.get("recordings", [])
         if not files:
             raise ValueError("This session has no saved recordings")
-        indices = list(range(len(files))) if indices is None else indices
-        if (
-            not indices
-            or len(indices) > 1000
-            or len(indices) != len(set(indices))
-            or any(type(i) is not int or not 0 <= i < len(files) for i in indices)
-        ):
-            raise ValueError("Choose 1–1000 valid recordings, without duplicates")
+        if len(files) > 1000:
+            raise ValueError(
+                "Conversion supports up to 1000 recordings per session; no recordings were omitted"
+            )
+        indices = list(range(len(files)))
         name = name.strip()
         if not name or len(name) > 100 or any(ord(c) < 32 for c in name):
             raise ValueError("Dataset name must be 1–100 characters")
@@ -243,6 +240,7 @@ class LiveConversionService:
                 dataset_root=f"{WORK_ROOT}/datasets/derivatives/dexverse-live/{session_id}/{identifier}",
                 created_at=utc_now(),
                 indices=sorted(indices),
+                scope="all_recordings",
             )
             directory = self.root / identifier
             directory.mkdir(parents=True, exist_ok=True)

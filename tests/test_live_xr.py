@@ -64,7 +64,7 @@ def service(tmp_path, monkeypatch):
         (root / "ops/xr/native_session.py").read_text()
     )
     (tmp_path / "ops/xr/hands").mkdir()
-    for name in ("collection.py", "hands/anatomy.py", "wrist.py"):
+    for name in ("collection.py", "hands/anatomy.py", "wrist.py", "images.py", "render_images.py"):
         (tmp_path / "ops/xr" / name).write_text((root / "ops/xr" / name).read_text())
     service = LiveXRService(Database(tmp_path / "db.sqlite"), Cluster(), root=tmp_path)
     monkeypatch.setattr(service, "dispatch", lambda _: None)
@@ -95,6 +95,9 @@ def test_frozen_session_extracts_the_complete_collection_runtime(service, tmp_pa
         "collection.py",
         "anatomy.py",
         "wrist.py",
+        "images.py",
+        "render_images.py",
+        "arrays.py",
     }
     assert (entry.parent / "anatomy.py").read_text() == (
         service.root / "ops/xr/hands/anatomy.py"
@@ -347,3 +350,14 @@ def test_worker_failure_keeps_specific_error_after_process_exits(service):
     assert failed["error"] == "Selected hand has a missing palm body"
     assert failed["stream_ready_at"] == 100
     assert not failed.get("scene_ready_at")
+
+
+def test_image_capture_is_frozen_and_cannot_change_an_active_session(service):
+    job = service.create(True, image_capture=True)
+    assert job["profile"]["image_capture"] is True
+    ns = {"__name__": "test_image_capsule"}
+    exec(compile(service.get(job["id"])["worker"], "runner.py", "exec"), ns)
+    assert "class ImageRecorder" in ns["COLLECTION_FILES"]["images.py"]
+    assert service.create(image_capture=True)["id"] == job["id"]
+    with pytest.raises(ValueError, match="image capture"):
+        service.create(image_capture=False)

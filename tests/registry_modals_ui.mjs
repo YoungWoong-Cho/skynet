@@ -1,0 +1,50 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {JSDOM} from 'jsdom';
+const w = new JSDOM(await readFile(new URL('../static/index.html', import.meta.url),'utf8'), {runScripts:'outside-only', pretendToBeVisual:true, url:'http://localhost:8080/?data_view=registry#data'}).window;
+const observers=[]; const NativeObserver=w.MutationObserver;
+w.MutationObserver=class extends NativeObserver {constructor(callback){super(callback);observers.push(this);}};
+const el=id=>w.document.getElementById(id);
+w.fetch = () => new Promise(()=>{});
+w.scrollTo = w.HTMLElement.prototype.scrollIntoView = () => {};
+w.matchMedia = () => ({matches:false,addEventListener(){},removeEventListener(){}});
+w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
+w.HTMLDialogElement.prototype.close=function(value=''){if(this.open){this.returnValue=value;this.open=false;this.dispatchEvent(new w.Event('close'));}};
+const flush = async()=>{for(let i=0;i<3;i++)await new Promise(r=>setImmediate(r));};
+try {
+  for(const file of ['dialogs.js','collection-ui.js','app.js']) w.eval((await readFile(new URL('../static/'+file,import.meta.url),'utf8')) + (file==='app.js' ? '\nwindow.setRegistryTestData=(resources,imports=[])=>{dataResourceRows=resources;dataImportRows=imports;renderDataResources();renderDataImports();};' : ''));
+  w.setRegistryTestData([{id:'resource',provider:'local',namespace:'test',name:'Example',kind:'demonstrations'}]);
+  for(const [launch,panel] of [['show-data-resource-form','data-resource-form'],['show-data-derivation-form','data-derivation-form'],['show-data-bundle-form','data-bundle-form']]) {
+    el(launch).click();
+    assert.equal(el(panel+'-dialog').open,true,panel);
+    assert.equal(el(panel).closest('tr'),null);
+    assert.equal(el(launch).textContent.includes('Close'),false);
+    el('close-'+panel).click();
+    assert.equal(el(panel+'-dialog').open,false);
+    assert.equal(el(panel).hidden,true);
+  }
+  el('data-resources-body').querySelector('[data-resource-action="version"]').click();
+  assert.equal(el('data-version-form-dialog').open,true);
+  assert.equal(el('data-version-resource-id').value,'resource');
+  assert.equal(w.document.querySelectorAll('tr.row-disclosure-companion').length,0);
+  el('close-data-version-form').click();
+  el('show-data-derivation-form').click();
+  w.showToast('A meaningful validation error',true);
+  assert.match(el('data-derivation-form-dialog').querySelector('[role="alert"]').textContent,/meaningful/);
+  el('close-data-derivation-form').click();
+  let resolveEdit;
+  w.api=()=>new Promise(resolve=>{resolveEdit=resolve;});
+  el('data-resources-body').querySelector('[data-resource-action="edit"]').click();
+  w.activateTab('experiments');
+  resolveEdit({resource:{id:'resource',description:'late'}}); await flush();
+  assert.equal(el('data-resource-form-dialog').open,false,'late edit response must not reopen a closed workflow');
+  w.activateTab('datasets');
+  w.setRegistryTestData([], [{id:'import',resource_id:'resource',state:'SUCCEEDED',gateway:'sky1',request:{subset:'demo'}}]);
+  el('data-imports-body').querySelector('button').click();
+  assert.equal(el('data-import-detail-dialog').open,true);
+  assert.equal(el('data-imports-body').querySelectorAll('tr').length,1);
+  assert.ok(el('data-import-detail-content').querySelector('[data-import-action="logs"]'));
+  el('data-import-detail-dialog').querySelector('[data-dialog-close]').click();
+  assert.equal(el('data-import-detail-dialog').open,false);
+  console.log('Registry modals: existing form actions, row stability, closing, local errors, stale edit cancellation and import details passed.');
+} catch(error) {console.error(error); process.exitCode=1;} finally {for(const observer of observers)observer.disconnect(); await flush(); w.close();}

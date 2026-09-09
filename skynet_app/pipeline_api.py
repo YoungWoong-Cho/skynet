@@ -226,7 +226,7 @@ def _progress_payload(
     }
 
 
-def _resolved_training_max_steps(value: Any) -> int | None:
+def _resolved_training_total(value: Any, path: str) -> int | None:
     if isinstance(value, str):
         try:
             value = json.loads(value)
@@ -234,10 +234,11 @@ def _resolved_training_max_steps(value: Any) -> int | None:
             return None
     if not isinstance(value, Mapping):
         return None
-    train = value.get("train")
-    if not isinstance(train, Mapping):
-        return None
-    total = _progress_integer(train.get("max_steps"))
+    for key in path.split("."):
+        if not isinstance(value, Mapping):
+            return None
+        value = value.get(key)
+    total = _progress_integer(value)
     return total if total and total > 0 else None
 
 
@@ -282,8 +283,9 @@ def _declared_elapsed_seconds(value: str, elapsed_format: str | None) -> int | N
 
 
 def parse_declared_training_progress(
-    content: str, contract: TrainingProgressContract | Mapping[str, Any]
-) -> list[dict[str, int | None]]:
+    content: str, contract: TrainingProgressContract | Mapping[str, Any],
+    *, resolved_spec: Any = None,
+) -> list[dict[str, Any]]:
     """Normalize bounded adapter-declared log matches; no adapter grammar lives here."""
     resolved = (
         contract
@@ -291,6 +293,38 @@ def parse_declared_training_progress(
         else TrainingProgressContract.model_validate(contract)
     )
     source = resolved.source
+    if source.kind == "jsonl":
+        total = _resolved_training_total(resolved_spec, resolved.total_path)
+        if total is None:
+            return []
+        records = []
+        for line in content.splitlines(keepends=True):
+            # A live writer may still be writing the final record.
+            if not line.endswith("\n"):
+                continue
+            try:
+                row = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(row, dict) or source.required_key not in row:
+                continue
+            completed = _progress_integer(row.get(source.completed_key))
+            if completed is None:
+                continue
+            completed += source.completed_offset
+            if completed > total:
+                continue
+            metrics = {
+                target: float(value)
+                for key, target in source.metrics.items()
+                if isinstance((value := row.get(key)), (int, float))
+                and not isinstance(value, bool) and math.isfinite(value)
+            }
+            records.append({
+                "completed": completed, "total": total,
+                "elapsed_seconds": None, "metrics": metrics,
+            })
+        return records
     pattern = re.compile(source.pattern)
     records: list[dict[str, int | None]] = []
     for line in content.splitlines():
@@ -314,6 +348,55 @@ def parse_declared_training_progress(
     return records
 
 
+def _training_progress_contract(
+    run: Mapping[str, Any],
+) -> tuple[TrainingProgressContract, str] | None:
+    for stage in run.get("stages") or []:
+        if str(stage.get("stage_type") or "").upper() != "TRAIN":
+            continue
+        resolved = stage.get("resolved_config_json") or {}
+        if isinstance(resolved, str):
+            try:
+                resolved = json.loads(resolved)
+            except json.JSONDecodeError:
+                resolved = {}
+        plan = resolved.get("plan") if isinstance(resolved, Mapping) else None
+        progress = plan.get("progress") if isinstance(plan, Mapping) else None
+        if progress:
+            try:
+                return TrainingProgressContract.model_validate(progress), "pinned_plan"
+            except Exception:
+                return None
+
+    spec = run.get("resolved_spec_json") or {}
+    if isinstance(spec, str):
+        try:
+            spec = json.loads(spec)
+        except ValueError:
+            spec = {}
+    source = spec.get("source") if isinstance(spec, Mapping) else None
+    manifest = source.get("adapter_manifest") if isinstance(source, Mapping) else None
+    train = manifest.get("train") if isinstance(manifest, Mapping) else None
+    progress = train.get("progress") if isinstance(train, Mapping) else None
+    if progress:
+        try:
+            return TrainingProgressContract.model_validate(progress), "pinned_manifest"
+        except ValueError:
+            return None
+
+    # Compatibility observer for active jobs created before the optional
+    # progress field existed. Adapter-specific grammar remains in the
+    # adapter declaration; the pipeline core still consumes one contract.
+    adapter_name = str(run.get("adapter_name") or "")
+    if not adapter_name:
+        return None
+    for manifest in builtin_adapter_manifests():
+        if manifest.slug == adapter_name and manifest.train.progress is not None:
+            return manifest.train.progress, "builtin_compatibility"
+    return None
+
+
+
 def training_progress_summary(
     run: Mapping[str, Any],
     *,
@@ -324,7 +407,7 @@ def training_progress_summary(
     resolved_spec: Any = None,
     now: datetime | str | None = None,
 ) -> dict[str, Any]:
-    """Build an ETA only from persisted step evidence in the current attempt."""
+    """Build an ETA from persisted completed-work evidence in this attempt."""
     clock = _progress_now(now)
     status = str(run.get("status") or run.get("state") or "").upper()
     attempt_rows = list(attempts if attempts is not None else run.get("attempts") or [])
@@ -338,7 +421,10 @@ def training_progress_summary(
         else run.get("progress_samples") or []
     )
     spec = resolved_spec if resolved_spec is not None else run.get("resolved_spec_json")
-    total = _resolved_training_max_steps(spec)
+    declared = _training_progress_contract({**run, "resolved_spec_json": spec})
+    contract = declared[0] if declared else None
+    unit = contract.unit if contract else "step"
+    total = _resolved_training_total(spec, contract.total_path if contract else "train.max_steps")
     current_attempt = _latest_attempt(attempt_rows)
     current_attempt_id = str(current_attempt.get("id")) if current_attempt and current_attempt.get("id") else None
     current_restart_count = _progress_integer((current_attempt or {}).get("restart_count")) or 0
@@ -353,7 +439,7 @@ def training_progress_summary(
 
     samples: list[tuple[datetime, int, str | None]] = []
     checkpoint_by_id: dict[str, Mapping[str, Any]] = {}
-    for checkpoint in checkpoint_rows:
+    for checkpoint in checkpoint_rows if unit == "step" else []:
         checkpoint_id = checkpoint.get("id")
         if checkpoint_id:
             checkpoint_by_id[str(checkpoint_id)] = checkpoint
@@ -371,13 +457,14 @@ def training_progress_summary(
             step is not None
             and recorded is not None
             and producer
+            and sample.get("unit", "step") == unit
             and (
                 str(producer) != current_attempt_id
                 or sample_restart_count == current_restart_count
             )
         ):
             samples.append((recorded, step, str(producer)))
-    for metric in metric_rows:
+    for metric in metric_rows if unit == "step" else []:
         if metric.get("evaluation_id") is not None:
             continue
         name = str(metric.get("name") or "").strip().lower()
@@ -402,6 +489,11 @@ def training_progress_summary(
         if checkpoint is not None and baseline_step is not None and started_at is not None:
             baseline = (started_at, baseline_step, current_attempt_id)
             baseline_observed_at = _progress_timestamp(checkpoint.get("created_at"))
+    elif contract and contract.starts_at_zero and started_at and current_restart_count == 0:
+        # Only adapters declaring a fresh, zero-based loop may use attempt start.
+        # The rate still requires a measured completed-work sample.
+        baseline = (started_at, 0, current_attempt_id)
+        baseline_observed_at = started_at
 
     current_samples: list[tuple[datetime, int, str | None]] = []
     if current_attempt is not None:
@@ -428,7 +520,7 @@ def training_progress_summary(
     common = {
         "completed": completed,
         "total": total,
-        "unit": "step",
+        "unit": unit,
         "observed_at": observed_at,
         "elapsed_seconds": elapsed,
     }
@@ -1333,6 +1425,11 @@ class PipelineService:
         # payload predates AdapterManifest. Preserve them for history, but never
         # expose an invalid manifest as a runnable choice for a new experiment.
         for record in self.database.list_adapter_registry(include_archived=False):
+            # Retire only the seeded experiment adapter. Collection adapters use
+            # a separate registry; saved experiment versions remain resolvable.
+            if record.get("seed_key") in {"dexverse", "builtin:dexverse"}:
+                self.database.archive_adapter(str(record["id"]))
+                continue
             if not str(record.get("seed_key") or "").startswith("builtin:"):
                 continue
             try:
@@ -1967,7 +2064,15 @@ class PipelineService:
                 raise ValueError(
                     f"{field.path}: selected data bundle role {binding.role} has no version snapshot"
                 )
-            if str(version.get("status") or "").upper() != "READY":
+            location = (assignment.get("config") or {}).get("location", {})
+            if binding.contract:
+                metadata = version.get("metadata") or {}
+                if metadata.get("contract") != binding.contract or metadata.get("validation", {}).get("status") != "PASSED":
+                    raise ValueError(f"{field.path}: this dataset has not passed the adapter's {binding.contract} data contract")
+            location_ready = (location.get("status") == "AVAILABLE" and location.get("kind") == "cluster" and location.get("manifest_sha256") == version.get("manifest_sha256"))
+            if binding.value_path == "location.path" and not location_ready:
+                raise ValueError("Choose a verified training-cluster copy of this dataset")
+            if str(version.get("status") or "").upper() != "READY" and not location_ready:
                 raise ValueError(f"Selected {binding.role} is {version.get('status') or 'unverified'}, not ready on the cluster. Complete its import or transfer before training.")
             if (version.get("metadata") or {}).get("storage_location") == "workstation":
                 raise ValueError(
@@ -1982,11 +2087,12 @@ class PipelineService:
                     f"{field.path}: selected {binding.role} format {actual_format} is incompatible; "
                     f"accepted formats: {', '.join(binding.formats)}"
                 )
-            bound_value = (
-                version.get("path")
-                if binding.value_path == "version.path"
-                else assignment.get("mount_path")
-            )
+            bound_value = {
+                "version.path": version.get("path"),
+                "mount_path": assignment.get("mount_path"),
+                "location.path": location.get("path"),
+                "version.manifest_sha256": version.get("manifest_sha256"),
+            }[binding.value_path]
             if isinstance(bound_value, str) and bound_value:
                 if present and value not in (None, "", bound_value):
                     raise ValueError(
@@ -6054,7 +6160,39 @@ class PipelineService:
                     )
                     bridge = WandBBridge(LOCAL_CAPSULE_ROOT / local_run_id, settings)
                     project_result = bridge.ensure_experiment(entity, project)
-                    if continuation_attempt_number is None:
+                    existing = next((
+                        item for item in self.database.list_tracking_bindings("run", local_run_id)
+                        if item["provider"] == "wandb"
+                    ), {})
+                    local_binding = bridge.binding(local_run_id)
+                    metadata = existing.get("metadata_json") or {}
+                    expected_url = (
+                        f"{wandb_web_base(settings.base_url)}/"
+                        f"{urllib.parse.quote(entity, safe='')}/"
+                        f"{urllib.parse.quote(project, safe='')}/runs/"
+                        f"{urllib.parse.quote(local_run_id, safe='')}"
+                    )
+                    # A failed submission can have an attempt number without ever
+                    # creating a tracking run. Missing records are not mismatches.
+                    comparisons = [
+                        (existing.get("remote_id"), local_run_id),
+                        (existing.get("remote_url"), expected_url),
+                        (metadata.get("entity"), entity),
+                        (metadata.get("project"), project),
+                        (str(metadata.get("endpoint") or "").rstrip("/"),
+                         str(settings.public_dict()["base_url"] or "").rstrip("/")),
+                        ((local_binding or {}).get("remote_id"), local_run_id),
+                        ((local_binding or {}).get("url"), expected_url),
+                    ]
+                    if any(saved and saved != expected for saved, expected in comparisons):
+                        raise TrackingRequestError(
+                            "This run uses a different W&B account or project. Restore its original W&B connection."
+                        )
+                    if not local_binding:
+                        if existing.get("remote_id"):
+                            raise TrackingRequestError(
+                                "W&B history is missing from this computer. Reconnect W&B for this run."
+                            )
                         created = bridge.ensure_run(
                             entity=entity,
                             project=project,
@@ -6067,48 +6205,10 @@ class PipelineService:
                             tags=tags,
                             config=params,
                         )
+                    elif continuation_attempt_number is not None:
+                        created = bridge.reopen_run(local_run_id, continuation_attempt_number)
                     else:
-                        provider_bindings = [
-                            item
-                            for item in self.database.list_tracking_bindings(
-                                "run", local_run_id
-                            )
-                            if item["provider"] == "wandb"
-                        ]
-                        existing_binding = (
-                            provider_bindings[0]
-                            if len(provider_bindings) == 1
-                            else None
-                        )
-                        local_binding = bridge.binding(local_run_id)
-                        metadata = (
-                            existing_binding.get("metadata_json")
-                            if existing_binding else {}
-                        ) or {}
-                        expected_url = (
-                            f"{wandb_web_base(settings.base_url)}/"
-                            f"{urllib.parse.quote(entity, safe='')}/"
-                            f"{urllib.parse.quote(project, safe='')}/runs/"
-                            f"{urllib.parse.quote(local_run_id, safe='')}"
-                        )
-                        if (
-                            not existing_binding
-                            or existing_binding.get("remote_id") != local_run_id
-                            or existing_binding.get("remote_url") != expected_url
-                            or not local_binding
-                            or local_binding.get("remote_id") != local_run_id
-                            or local_binding.get("url") != expected_url
-                            or metadata.get("entity") != entity
-                            or metadata.get("project") != project
-                            or str(metadata.get("endpoint") or "").rstrip("/")
-                            != str(settings.public_dict()["base_url"] or "").rstrip("/")
-                        ):
-                            raise TrackingRequestError(
-                                "cannot resume W&B tracking without one exact pinned run binding"
-                            )
-                        created = bridge.reopen_run(
-                            local_run_id, continuation_attempt_number
-                        )
+                        created = project_result
                     bridge.set_tags(local_run_id, tags)
                     if continuation_attempt_number is None:
                         bridge.log_params(local_run_id, params)
@@ -7145,36 +7245,6 @@ class PipelineService:
             None,
         )
 
-    @staticmethod
-    def _training_progress_contract(
-        run: Mapping[str, Any],
-    ) -> tuple[TrainingProgressContract, str] | None:
-        for stage in run.get("stages") or []:
-            if str(stage.get("stage_type") or "").upper() != "TRAIN":
-                continue
-            resolved = stage.get("resolved_config_json") or {}
-            if isinstance(resolved, str):
-                try:
-                    resolved = json.loads(resolved)
-                except json.JSONDecodeError:
-                    resolved = {}
-            plan = resolved.get("plan") if isinstance(resolved, Mapping) else None
-            progress = plan.get("progress") if isinstance(plan, Mapping) else None
-            if progress:
-                try:
-                    return TrainingProgressContract.model_validate(progress), "pinned_plan"
-                except Exception:
-                    return None
-
-        # Compatibility observer for active jobs created before the optional
-        # progress field existed. Adapter-specific grammar remains in the
-        # adapter declaration; the pipeline core still consumes one contract.
-        adapter_name = str(run.get("adapter_name") or "")
-        for manifest in builtin_adapter_manifests():
-            if manifest.slug == adapter_name and manifest.train.progress is not None:
-                return manifest.train.progress, "builtin_compatibility"
-        return None
-
     def _ingest_training_progress(self, value: Mapping[str, Any]) -> int:
         status = str(value.get("status") or value.get("state") or "").upper()
         if status not in _PROGRESS_RUNNING_STATES:
@@ -7184,7 +7254,7 @@ class PipelineService:
         )
         if not run:
             return 0
-        declared = self._training_progress_contract(run)
+        declared = _training_progress_contract(run)
         if declared is None:
             return 0
         contract, declaration_origin = declared
@@ -7204,7 +7274,12 @@ class PipelineService:
         if not attempt_id:
             return 0
         source = contract.source
-        path = attempt.get(f"{source.stream}_path")
+        jsonl = source.kind == "jsonl"
+        path = (
+            str(PurePosixPath(run["run_directory"]) / source.path)
+            if jsonl and run.get("run_directory")
+            else attempt.get(f"{source.stream}_path") if not jsonl else None
+        )
         if not isinstance(path, str) or not path:
             return 0
         throttle_key = f"{run['id']}:{attempt_id}"
@@ -7220,17 +7295,20 @@ class PipelineService:
                 attempt.get("gateway") or "auto",
                 lines=source.tail_lines,
                 max_bytes=1_000_000,
+                **({"contains": json.dumps(source.required_key)} if jsonl else {}),
             )
         except ClusterError:
             return 0
-        records = parse_declared_training_progress(content, contract)
-        expected_total = _resolved_training_max_steps(run.get("resolved_spec_json"))
+        records = parse_declared_training_progress(
+            content, contract, resolved_spec=run.get("resolved_spec_json")
+        )
+        expected_total = _resolved_training_total(run.get("resolved_spec_json"), contract.total_path)
         if expected_total is not None:
             records = [record for record in records if record["total"] == expected_total]
         if not records:
             return 0
 
-        segment: list[dict[str, int | None]] = []
+        segment: list[dict[str, Any]] = []
         for record in records:
             if segment:
                 previous = segment[-1]
@@ -7241,9 +7319,9 @@ class PipelineService:
                     segment = []
             segment.append(record)
         latest = segment[-1]
-        candidates = [latest]
+        candidates = segment if jsonl else [latest]
         if (
-            source.elapsed_format is not None
+            not jsonl and source.elapsed_format is not None
             and segment[0]["completed"] != latest["completed"]
         ):
             candidates.insert(0, segment[0])
@@ -7273,12 +7351,14 @@ class PipelineService:
                 restart_count=restart_count,
                 completed=completed,
                 total=int(record["total"]),
+                unit=contract.unit,
                 source_kind=source.kind,
                 evidence={
                     "declaration_origin": declaration_origin,
-                    "stream": source.stream,
+                    "stream": "file" if jsonl else source.stream,
                     "path": path,
                     "elapsed_seconds": elapsed,
+                    **({"metrics": record["metrics"]} if jsonl else {}),
                 },
                 recorded_at=_progress_iso(recorded_at),
             )
@@ -7312,6 +7392,13 @@ class PipelineService:
         evidence = sample.get("evidence") or sample.get("evidence_json") or {}
         if isinstance(evidence, Mapping) and evidence.get("elapsed_seconds") is not None:
             metrics["training/elapsed_seconds"] = float(evidence["elapsed_seconds"])
+        if isinstance(evidence, Mapping) and isinstance(evidence.get("metrics"), Mapping):
+            metrics.update({
+                str(key): float(value)
+                for key, value in evidence["metrics"].items()
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value)
+            })
         return metrics
 
     def _publish_training_progress_tracking(
@@ -9626,7 +9713,10 @@ def inspect_source(
                     service.source_metadata.put(
                         "inspection", repository, pinned_parameters, cached_payload
                     )
-            return service.source_metadata.response(entry, cache_hit=True)
+            result = service.source_metadata.response(entry, cache_hit=True)
+            # Repository contents are pinned, but operator runtime profiles can change.
+            result["runtime_profiles"] = service.runtime_profiles(gateway)
+            return result
 
         commit = service.source_discovery.resolve_revision(
             repository, requested_revision, gateway
