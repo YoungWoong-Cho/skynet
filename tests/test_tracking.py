@@ -140,6 +140,7 @@ class FakeWandBBridge(WandBBridge):
         self.states: list[str] = []
         self.graphql_calls: list[tuple[str, dict[str, Any]]] = []
         self.history_rows: list[dict[str, Any]] = []
+        self.system_rows: list[dict[str, Any]] = []
         super().__init__(
             run_capsule,
             settings or WandBSettings(api_key=api_key, entity="team", auto_flush=True),
@@ -148,6 +149,10 @@ class FakeWandBBridge(WandBBridge):
     def _append_history_rows(self, run, rows):
         self.history_rows.extend(dict(row) for row in rows)
         run["history_offset"] = int(run.get("history_offset") or 0) + len(rows)
+
+    def _append_system_rows(self, run, rows):
+        self.system_rows.extend(dict(row) for row in rows)
+        run["events_offset"] = int(run.get("events_offset") or 0) + len(rows)
 
     def _graphql(self, query: str, variables: Mapping[str, Any]) -> dict[str, Any]:
         self.graphql_calls.append((query, dict(variables)))

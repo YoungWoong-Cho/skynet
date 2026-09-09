@@ -1327,6 +1327,16 @@ class WandBBridge:
     def set_tags(self, local_run_id: str, tags: Mapping[str, Any]) -> TrackingResult:
         return self._enqueue("set_tags", {"local_run_id": local_run_id, "tags": tags})
 
+    def log_system_metrics(
+        self, local_run_id: str, metrics: Mapping[str, float | int], *,
+        timestamp_ms: int, runtime_seconds: float, idempotency_key: str,
+    ) -> TrackingResult:
+        return self._enqueue("log_system_metrics", {
+            "local_run_id": local_run_id, "metrics": metrics,
+            "timestamp_ms": timestamp_ms, "runtime_seconds": runtime_seconds,
+            "idempotency_key": idempotency_key,
+        })
+
     def log_artifact_link(
         self,
         local_run_id: str,
@@ -1371,7 +1381,7 @@ class WandBBridge:
             return {
                 str(payload["idempotency_key"])
                 for event in self._events_unlocked()
-                if event.get("operation") == "log_metrics"
+                if event.get("operation") in {"log_metrics", "log_system_metrics"}
                 and isinstance((payload := event.get("payload")), Mapping)
                 and payload.get("idempotency_key")
             }
@@ -1406,15 +1416,16 @@ class WandBBridge:
             while index < len(pending):
                 batch = [pending[index]]
                 event = batch[0]
-                if event.get("operation") == "log_metrics":
+                if event.get("operation") in {"log_metrics", "log_system_metrics"}:
+                    operation = event["operation"]
                     run_id = event["payload"].get("local_run_id")
                     for following in pending[index + 1:index + 100]:
-                        if (following.get("operation") != "log_metrics"
+                        if (following.get("operation") != operation
                                 or following["payload"].get("local_run_id") != run_id):
                             break
                         batch.append(following)
                     if len(batch) > 1:
-                        event = {"operation": "log_metrics_batch", "payload": {
+                        event = {"operation": operation + "_batch", "payload": {
                             "local_run_id": run_id, "samples": [item["payload"] for item in batch]}}
                 attempted += len(batch)
                 try:
@@ -1493,6 +1504,7 @@ class WandBBridge:
                 "summary": dict(existing.get("summary") or {}),
                 "tags": merged_tags,
                 "history_offset": int(existing.get("history_offset") or 0),
+                "events_offset": int(existing.get("events_offset") or 0),
                 **({"state": existing["state"]} if existing.get("state") else {}),
             }
             return
@@ -1511,6 +1523,17 @@ class WandBBridge:
             ])
             for sample in samples:
                 run["summary"].update(dict(sample.get("metrics") or {}))
+        elif operation in {"log_system_metrics", "log_system_metrics_batch"}:
+            samples = payload["samples"] if operation.endswith("_batch") else [payload]
+            # W&B's system stream has its own cursor and clock, independent of
+            # training steps. Native SDK runs retain ownership of their stream.
+            self._append_system_rows(run, [
+                {**{"system." + key: value for key, value in sample["metrics"].items()},
+                 "_wandb": True, "_timestamp": sample["timestamp_ms"] / 1000.0,
+                 "_runtime": max(0.0, float(sample["runtime_seconds"]))}
+                for sample in samples
+            ])
+            return
         elif operation == "set_tags":
             run["tags"].update(dict(payload.get("tags") or {}))
         elif operation == "artifact_link":
@@ -1575,7 +1598,13 @@ class WandBBridge:
 
     def _append_history_rows(self, run: dict[str, Any], rows: Sequence[Mapping[str, Any]]) -> None:
         """Upload queued samples together while retaining each step and timestamp."""
-        offset = int(run.get("history_offset") or 0)
+        self._append_stream_rows(run, rows, "wandb-history.jsonl", "history_offset")
+
+    def _append_system_rows(self, run: dict[str, Any], rows: Sequence[Mapping[str, Any]]) -> None:
+        self._append_stream_rows(run, rows, "wandb-events.jsonl", "events_offset")
+
+    def _append_stream_rows(self, run, rows, filename, offset_key):
+        offset = int(run.get(offset_key) or 0)
         lines = [json.dumps(sanitize(row), sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
                  for row in rows]
         entity = urllib.parse.quote(str(run["entity"]), safe="")
@@ -1589,7 +1618,7 @@ class WandBBridge:
         body = json.dumps(
             {
                 "files": {
-                    "wandb-history.jsonl": {
+                    filename: {
                         "offset": offset,
                         "content": lines,
                     }
@@ -1619,13 +1648,13 @@ class WandBBridge:
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")[:2000]
             raise TrackingRequestError(
-                f"W&B history returned HTTP {error.code}: {detail}",
+                f"W&B {filename} returned HTTP {error.code}: {detail}",
                 status_code=error.code,
                 retry_after=_retry_after_seconds((error.headers or {}).get("Retry-After")),
             ) from error
         except (urllib.error.URLError, TimeoutError, OSError) as error:
-            raise TrackingRequestError(f"W&B history transport unavailable: {error}") from error
-        run["history_offset"] = offset + len(lines)
+            raise TrackingRequestError(f"W&B {filename} transport unavailable: {error}") from error
+        run[offset_key] = offset + len(lines)
 
     @staticmethod
     def _wandb_config(

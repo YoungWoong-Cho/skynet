@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from skynet_app.evaluation_contracts import bind_suite_to_dataset
+from skynet_app.gpu_tracking import sync_gpu_statistics
 
 import math
 import ipaddress
@@ -6833,6 +6834,7 @@ class PipelineService:
                 current_run = self.database.get_run(training_run_id)
                 if current_run:
                     self._ingest_training_progress(current_run)
+                    sync_gpu_statistics(self, current_run, LOCAL_CAPSULE_ROOT)
                 self._publish_training_progress_tracking(training_run_id)
             _, statuses = self.cluster.job_statuses([row["slurm_job_id"] for row in rows])
             updated = 0
@@ -8015,6 +8017,7 @@ class PipelineService:
             providers=providers,
             include_native=central_authoritative,
         )
+        sync_gpu_statistics(self, run, LOCAL_CAPSULE_ROOT, force=True)
         metrics, links = self._final_tracking_payload(
             self.database.get_run(run_id) or run
         )

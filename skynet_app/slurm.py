@@ -5,7 +5,7 @@ import hashlib
 import json
 import re
 import shlex
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from textwrap import dedent
 from typing import Any, Literal, Mapping
 
@@ -799,7 +799,18 @@ def main():
     (capsule_dir / "state").mkdir(parents=True, exist_ok=True)
     (capsule_dir / "state" / "effective-argv.json").write_text(json.dumps(argv, indent=2) + "\n")
     child = subprocess.Popen(argv, cwd=project_dir, start_new_session=True)
-    return_code = child.wait()
+    sampler = None
+    if stage == "train" and os.environ.get("SLURM_JOB_ID"):
+        try:
+            from gpu_metrics import GPUSampler
+            sampler = GPUSampler(run_dir / "state" / "gpu-stats" / os.environ["SLURM_JOB_ID"]).start()
+        except Exception as error:
+            print(f"GPU statistics unavailable: {type(error).__name__}", file=sys.stderr)
+    try:
+        return_code = child.wait()
+    finally:
+        if sampler is not None:
+            sampler.stop()
     if stage == "train":
         snapshot_checkpoints(run_dir, project_dir, execution, final=return_code == 0)
     return return_code
@@ -1031,6 +1042,7 @@ def _execution_files(
         ) + "\n",
         "execution.json": json.dumps(execution, indent=2, sort_keys=True) + "\n",
         "runtime-wrapper.py": RUNNER_SOURCE,
+        "gpu_metrics.py": Path(__file__).with_name("gpu_metrics.py").read_text(),
         "adapter-plan.json": json.dumps(plan.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
     }
     if spec.source.adapter_manifest is not None:

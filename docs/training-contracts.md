@@ -114,3 +114,21 @@ W&B uploads batch queued history samples without changing their steps or timesta
 Rate limits persist a retry delay across restarts. Reconciliation retries queued
 metrics even after training finishes, so an upload delay does not require rerunning
 training.
+
+GPU statistics use the shared training runner. New capsules freeze a dependency-free
+collector that samples allocated NVIDIA GPUs every 15 seconds and stores JSONL
+under `state/gpu-stats/<slurm-job-id>/<node>.jsonl`. CUDA device identifiers take
+precedence over Slurm GRES indices, which can differ on this cluster. Collection
+failures do not stop training. Existing running capsules can be sampled about once
+a minute through a bounded, overlapping Slurm step without restarting the trainer.
+
+The W&B bridge publishes utilization, memory, power, temperature and clock readings
+to the System stream, with independent offsets and the existing durable queue and
+rate-limit retry behavior. Native W&B adapters retain ownership of their SDK's
+System stream. Collection does not change batch size or other training settings.
+
+Validation on 2026-09-09: all four A40s in training job 3802587 produced real GPU
+samples, and an authenticated W&B System-history read returned the stored readings.
+The in-app browser was not signed in to W&B, so chart display was not visually
+verified. GPU collection, stream separation, retry, replay and existing training
+progress regression checks passed (78 tests).
