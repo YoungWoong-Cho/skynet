@@ -10153,7 +10153,7 @@ const interactiveTutorialTours = {
       { id: "max-steps", selector: "#hp-max-steps", gate: "field", title: "Keep the first run short", instruction: "Use a small maximum step count while validating the pipeline.", useValue: () => "10", validate: tutorialPositiveNumber },
       { id: "resource-policy", selector: "#resource-policy", gate: "field", title: "Choose resource policy", instruction: "Change or confirm automatic allocation unless you have a reason to pin hardware.", useValue: () => "auto", validate: tutorialNonEmpty },
       { id: "preview", selector: "#experiment-preview-button", gate: "action", title: "Generate the real preview", instruction: "Click Preview. This performs only POST /api/experiments/preview and must return a canonical script before the tour advances.", request: { method: "POST", path: "/api/experiments/preview", success: tutorialHasExperimentPreview } },
-      { id: "save-boundary", selector: "#experiments .page-heading h1", title: "Saving is outside this tutorial", instruction: "The verified preview is the safe endpoint. Saving creates a permanent experiment with no cleanup API, and submitting can launch Slurm, so neither action is part of this tutorial." },
+      { id: "save-boundary", selector: "#experiment-workspace .page-heading h1", title: "Saving is outside this tutorial", instruction: "The verified preview is the safe endpoint. Saving creates a permanent experiment with no cleanup API, and submitting can launch Slurm, so neither action is part of this tutorial." },
     ],
   },
   datasets: {
@@ -10932,7 +10932,7 @@ function ensureInteractiveTutorialControls() {
 function showTutorialResumeChoice() {
   invalidateTutorialGate();
   tutorialState.index = -1;
-  tutorialState.target = document.querySelector(`#${tutorialState.page} .page-heading h1`);
+  tutorialState.target = workspaceHeading(tutorialState.page)?.querySelector("h1");
   tutorialState.target?.setAttribute("data-tutorial-active-target", "true");
   elements.tutorialPage.textContent = tutorialTours[tutorialState.page].title;
   elements.tutorialProgress.textContent = "Saved tutorial session";
@@ -11260,7 +11260,7 @@ function showTutorialUnavailableStep(step, index) {
   tutorialState.target?.removeAttribute("data-tutorial-active-target");
   tutorialState.index = index;
   const snapshot = { sessionGeneration: tutorialState.sessionGeneration, gateGeneration: tutorialState.gateGeneration, stepId: step.id };
-  tutorialState.target = document.querySelector(`#${tutorialState.page} .page-heading h1`);
+  tutorialState.target = workspaceHeading(tutorialState.page)?.querySelector("h1");
   tutorialState.target?.setAttribute("data-tutorial-active-target", "true");
   elements.tutorialPage.textContent = tutorialTours[tutorialState.page].title;
   elements.tutorialProgress.textContent = `Step ${index + 1} of ${tutorialTours[tutorialState.page].steps.length}`;
@@ -11561,7 +11561,7 @@ function endTutorial(completed = false) {
   if (activeTab !== originalTab) activateTab(originalTab);
   window.scrollTo({ left: scrollX, top: scrollY, behavior: "auto" });
   window.requestAnimationFrame(() => {
-    const fallback = document.querySelector(`#${page} .page-heading h1`);
+    const fallback = workspaceHeading(page)?.querySelector("h1");
     const focusTarget = launcher?.isConnected ? launcher : (originalFocus?.isConnected ? originalFocus : fallback);
     if (focusTarget instanceof HTMLElement) focusTarget.focus({ preventScroll: true });
   });
@@ -11576,11 +11576,16 @@ function endTutorial(completed = false) {
   tutorialState.ownedVerified = new Map();
 }
 
+function workspaceHeading(page) {
+  const workspace = ["collection", "datasets"].includes(page) ? "data"
+    : ["experiments", "adapters"].includes(page) ? "experiment-workspace" : page;
+  return document.querySelector(`#${workspace} .page-heading`);
+}
+
 function initializeTutorials() {
   initializeTutorialRecordRows();
   for (const [page, tour] of Object.entries(tutorialTours)) {
-    const panel = document.querySelector(`#${page}[data-tab-panel="${page}"]`);
-    const heading = ["collection", "datasets"].includes(page) ? document.querySelector("#data .page-heading") : panel?.querySelector(".page-heading");
+    const heading = workspaceHeading(page);
     if (!heading) continue;
     let actions = heading.querySelector(":scope > .page-actions");
     if (!actions) {
@@ -12029,11 +12034,15 @@ function loadActiveTab(tab, force = false) {
   return Promise.resolve();
 }
 
-function activateTab(tab, updateHash = true, requestedDataView = null) {
+function activateTab(tab, updateHash = true, requestedView = null) {
   const allowed = ["cluster", "experiments", "collection", "datasets", "runs", "evaluations", "adapters", "settings", "hands"];
   const isData = ["data", "collection", "datasets"].includes(tab);
-  const dataView = isData ? requestedDataView || dataNavigation.viewForTab(tab) : null;
-  const next = isData ? dataView === "registry" ? "datasets" : "collection" : allowed.includes(tab) ? tab : "cluster";
+  const isExperiments = ["experiments", "adapters"].includes(tab);
+  const navigation = isData ? dataNavigation : isExperiments ? experimentNavigation : null;
+  const view = navigation ? requestedView || navigation.viewForTab(tab) : null;
+  const next = isData ? view === "registry" ? "datasets" : "collection"
+    : isExperiments ? view === "adapters" ? "adapters" : "experiments"
+    : allowed.includes(tab) ? tab : "cluster";
   if (next !== activeTab) {
     elements.toast.replaceChildren();
     elements.toast.hidden = true;
@@ -12043,18 +12052,22 @@ function activateTab(tab, updateHash = true, requestedDataView = null) {
   }
   activeTab = next;
   document.querySelectorAll("[data-tab-panel]").forEach((panel) => {
-    panel.hidden = panel.dataset.tabPanel === "data" ? !isData : panel.dataset.tabPanel !== next;
+    panel.hidden = panel.dataset.tabPanel === "data" ? !isData
+      : panel.dataset.tabPanel === "experiment-workspace" ? !isExperiments
+      : panel.dataset.tabPanel !== next;
   });
-  if (isData) dataNavigation.render(dataView);
+  navigation?.render(view);
   document.querySelectorAll("[data-tab-target]").forEach((link) => {
-    const selected = link.dataset.tabGroup === "data" ? isData : link.dataset.tabTarget === next;
+    const selected = link.dataset.tabGroup === "data" ? isData
+      : link.dataset.tabGroup === "experiments" ? isExperiments
+      : link.dataset.tabTarget === next;
     link.classList.toggle("is-active", selected);
     if (link.getAttribute("role") === "tab") link.setAttribute("aria-selected", String(selected));
   });
-  const destination = isData ? dataNavigation.url(dataView).href : new URL(`#${next}`, location.href).href;
+  const destination = navigation ? navigation.url(view).href : new URL(`#${next}`, location.href).href;
   if (location.href !== destination) {
     if (updateHash) history.pushState(null, "", destination);
-    else if (isData) history.replaceState(null, "", destination);
+    else if (navigation) history.replaceState(null, "", destination);
   }
   const loading = loadActiveTab(next);
   window.scrollTo({ top: 0, behavior: "instant" });
@@ -12502,7 +12515,7 @@ const initialHash = location.hash.slice(1);
 activateTab(["data", "cluster", "experiments", "collection", "datasets", "runs", "evaluations", "adapters", "settings", "hands"].includes(initialHash) ? initialHash : "cluster", false);
 
 window.usePreparedDataset = async (job) => {
-  await activateTab("experiments");
+  await activateTab("experiments", true, "submit");
   await loadAdapters(true);
   const setup = job.training_setup;
   const adapter = adapterRows.find(a => adapterManifest(a).slug === setup?.adapter && !adapterArchived(a));

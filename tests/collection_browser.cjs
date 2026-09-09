@@ -14,7 +14,7 @@ function page(view = 'live') {
   w.scrollTo = w.HTMLElement.prototype.scrollIntoView = () => {};
   w.stopClusterAutoRefresh = w.closeActiveDisclosure = w.resetRunAttemptContext = () => {};
   w.eval('var activeTab = "cluster"; var activeRunAttemptDisclosure = null; var elements = {toast: document.getElementById("toast")};');
-  w.eval(readFileSync(join(__dirname, '../static/collection-ui.js'), 'utf8'));
+  w.eval(readFileSync(join(__dirname, '../static/workspace-navigation.js'), 'utf8'));
   const source = readFileSync(join(__dirname, '../static/app.js'), 'utf8');
   const start = source.indexOf('function activateTab('), end = source.indexOf('function restoreSshGatewayPreference(', start);
   w.eval(source.slice(start,end));

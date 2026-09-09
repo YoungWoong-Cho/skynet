@@ -17,7 +17,7 @@ const flush=async()=>{for(let i=0;i<5;i++)await new Promise(r=>setImmediate(r));
 const base={id:'eval',run_id:'run',status:'RUNNING',suite_name:'dexverse_recorded'};
 const episodes=[{id:'ep-a',task:'cube',episode_index:0,seed:0,status:'SUCCEEDED',success:false,video_path:'/videos/a.mp4'}, {id:'ep-b',task:'stick',episode_index:0,seed:1,status:'PENDING',success:null}];
 try {
- for(const file of ['dialogs.js','collection-ui.js','app.js']) w.eval(await readFile(new URL('../static/'+file,import.meta.url),'utf8')+(file==='app.js'?'\nwindow.setupEvaluationTest=rows=>{activeTab="evaluations";evaluationRows=rows;renderEvaluations();};window.prepareEvaluationSubmission=()=>{evaluationTargetValidationState={pending:false,valid:true,signature:evaluationTargetSignature()};};':''));
+ for(const file of ['dialogs.js','workspace-navigation.js','app.js']) w.eval(await readFile(new URL('../static/'+file,import.meta.url),'utf8')+(file==='app.js'?'\nwindow.setupEvaluationTest=rows=>{activeTab="evaluations";evaluationRows=rows;renderEvaluations();};window.prepareEvaluationSubmission=()=>{evaluationTargetValidationState={pending:false,valid:true,signature:evaluationTargetSignature()};};':''));
  let resolveDetail; const logReplies=[];
  w.api=url=>url.includes('/logs') ? new Promise(resolve=>logReplies.push(resolve)) : new Promise(resolve=>{resolveDetail=resolve;});
  w.setupEvaluationTest([base]);

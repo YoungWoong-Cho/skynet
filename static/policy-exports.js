@@ -247,7 +247,7 @@
         return await window.openPreparedDataset(data.preparedResource);
       if (data.preparationExperiment) {
         SkynetDialog.close(detail);
-        await activateTab("experiments");
+        await activateTab("experiments", true, "submit");
         await loadExperimentConfiguration(
           data.preparationExperiment,
           Number(data.revision),

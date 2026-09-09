@@ -224,7 +224,7 @@ body:has(#collection:not([hidden])) #nav-data::after {
   font-weight: 700;
 }
 
-.data-subnav {
+.workspace-subnav {
   display: inline-flex;
   min-width: 0;
   overflow-x: auto;
@@ -234,10 +234,10 @@ body:has(#collection:not([hidden])) #nav-data::after {
   scrollbar-width: none;
 }
 
-.data-subnav::-webkit-scrollbar { display: none; }
-.data-subnav button { border: 0; background: transparent; cursor: pointer; }
+.workspace-subnav::-webkit-scrollbar { display: none; }
+.workspace-subnav button { border: 0; background: transparent; cursor: pointer; }
 
-.data-subnav :is(a, button) {
+.workspace-subnav :is(a, button) {
   flex: 0 0 auto;
   padding: 6px 10px;
   color: var(--muted);
@@ -247,11 +247,11 @@ body:has(#collection:not([hidden])) #nav-data::after {
   white-space: nowrap;
 }
 
-.data-subnav :is(a, button) + :is(a, button) { border-left: 1px solid var(--line); }
-.data-subnav :is(a, button):hover { color: var(--ink); background: var(--surface-soft); }
-.data-subnav a.is-active,
-.data-subnav a[aria-current="page"],
-.data-subnav button[aria-selected="true"] {
+.workspace-subnav :is(a, button) + :is(a, button) { border-left: 1px solid var(--line); }
+.workspace-subnav :is(a, button):hover { color: var(--ink); background: var(--surface-soft); }
+.workspace-subnav a.is-active,
+.workspace-subnav a[aria-current="page"],
+.workspace-subnav button[aria-selected="true"] {
   color: var(--ink);
   background: var(--yellow);
 }
@@ -1566,7 +1566,7 @@ footer {
   .page-heading { align-items: flex-start; flex-direction: column; gap: 10px; }
   .page-title-row { width: 100%; }
   .data-page-title { align-items: flex-start; flex-direction: column; gap: 8px; }
-  .data-subnav { max-width: 100%; }
+  .workspace-subnav { max-width: 100%; }
   .cluster-actions { width: 100%; justify-content: space-between; }
   .freshness { justify-items: start; }
   .form-grid,
@@ -1631,8 +1631,8 @@ footer {
 
 /* Collection uses the same table panels, headers, toolbars, row actions and
    form drawers as the registry. Only workflow-specific arrangement lives here. */
-.collection-view-nav { max-width: 100%; margin: 0 0 14px; }
-.collection-view-nav button { display: flex; align-items: center; gap: 6px; }
+.workspace-view-nav { max-width: 100%; margin: 0 0 14px; }
+.workspace-view-nav button { display: flex; align-items: center; gap: 6px; }
 #collection :is(button, summary, a):focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
 .collection-filter-row { display: flex; align-items: center; flex-wrap: wrap; gap: 7px 14px; padding: 8px 14px; border-bottom: 1px solid var(--line); }
 .collection-filter-row .toolbar { width: auto; }

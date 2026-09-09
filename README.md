@@ -66,7 +66,7 @@ The tests use temporary databases and mocked transports where appropriate. Clust
 
 1. Open the cluster dashboard and select one or more partitions to filter the job queue.
 2. Confirm the account capacity, GPU users, free GPU segments, pending reasons, and gateway health.
-3. Open **Adapters** to review, clone, edit, or validate the versioned repository adapter that will compile the workload.
+3. Open **Experiments → Adapters** to review, clone, edit, or validate the versioned repository adapter that will compile the workload.
 4. Open **Experiments**, select a repository branch and exact commit, then choose automatic or explicit runtime resolution and provide resources, hyperparameters, checkpoint policy, sweep axes, and evaluation plan.
 5. Preview the resolved variants and canonical `sbatch` before submission.
 6. Submit the experiment. A logical run may contain multiple Slurm attempts after preemption, timeout, or node failure.

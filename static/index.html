@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Skynet Slurm experiment and evaluation console.">
     <title>Skynet / Experiment Console</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260909-data-refinement">
+    <link rel="stylesheet" href="/static/styles.css?v=experiment-tabs-20260909-data-refinement">
     <script src="/static/dialogs.js?v=20260909-data" defer></script>
-    <script src="/static/collection-ui.js?v=20260909-data" defer></script>
-    <script src="/static/app.js?v=20260909-data-refinement" defer></script>
+    <script src="/static/workspace-navigation.js?v=20260909-experiment-tabs" defer></script>
+    <script src="/static/app.js?v=20260909-experiment-tabs" defer></script>
     <script src="/static/hands-ui.js?v=20260907-imported-hands-2" defer></script>
     <script src="/static/live-review.js?v=20260909-review-only" defer></script>
     <script src="/static/live-conversion.js?v=20260909-data-refinement" defer></script>
@@ -25,11 +25,10 @@
       <nav class="tab-nav" role="tablist" aria-label="Primary navigation">
         <a href="#cluster" class="is-active" data-tab-target="cluster" role="tab" aria-selected="true" aria-controls="cluster">Cluster</a>
         <a id="nav-data" href="#data" data-tab-target="data" data-tab-group="data" role="tab" aria-selected="false" aria-controls="data">Data</a>
-        <a href="#experiments" data-tab-target="experiments" role="tab" aria-selected="false" aria-controls="experiments">Experiments</a>
+        <a href="#experiments" data-tab-target="experiments" data-tab-group="experiments" role="tab" aria-selected="false" aria-controls="experiment-workspace">Experiments</a>
         <a href="#runs" data-tab-target="runs" role="tab" aria-selected="false" aria-controls="runs">Training Runs</a>
         <a href="#evaluations" data-tab-target="evaluations" role="tab" aria-selected="false" aria-controls="evaluations">Evaluations</a>
         <a href="#hands" data-tab-target="hands" role="tab" aria-selected="false" aria-controls="hands">Hands</a>
-        <a href="#adapters" data-tab-target="adapters" role="tab" aria-selected="false" aria-controls="adapters">Adapters</a>
         <a href="#settings" data-tab-target="settings" role="tab" aria-selected="false" aria-controls="settings">Settings</a>
       </nav>
 
@@ -159,7 +158,7 @@
         </div>
       </section>
 
-      <section id="experiments" class="tab-panel" data-tab-panel="experiments" role="tabpanel" hidden>
+      <section id="experiment-workspace" class="tab-panel" data-tab-panel="experiment-workspace" hidden>
         <div class="section-shell workspace-page">
           <div class="page-heading">
             <div class="page-title-row">
@@ -168,9 +167,15 @@
             </div>
             <div class="page-actions">
               <button id="refresh-experiments" class="button button-outline" type="button">Refresh</button>
+              <button id="refresh-adapters" class="button button-outline" type="button" hidden>Refresh</button>
             </div>
           </div>
 
+          <nav class="workspace-subnav workspace-view-nav" role="tablist" aria-label="Experiment views">
+            <button id="experiment-tab-submit" type="button" role="tab" aria-selected="true" aria-controls="experiments" data-experiment-tab="submit">Submit</button>
+            <button id="experiment-tab-adapters" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="adapters" data-experiment-tab="adapters">Adapters</button>
+          </nav>
+          <section id="experiments" data-tab-panel="experiments" role="tabpanel" aria-labelledby="experiment-tab-submit">
           <div id="experiments-error" class="inline-alert" role="alert" hidden></div>
 
           <div class="workspace-grid workspace-grid-composer">
@@ -560,6 +565,125 @@
                       </section>
           </section>
 
+          </section>
+          <section id="adapters" data-tab-panel="adapters" role="tabpanel" aria-labelledby="experiment-tab-adapters" hidden>
+          <div id="adapters-error" class="inline-alert" role="alert" hidden></div>
+
+          <section class="panel table-panel adapter-index-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>Adapters</h2>
+              </div>
+              <div>
+                <span id="adapter-count" class="quiet-label">Not loaded</span>
+                <button id="add-adapter" class="button button-accent disclosure-launcher" type="button" aria-controls="adapter-editor" aria-expanded="false">Add adapter</button>
+              </div>
+            </div>
+            <div class="table-scroll tall-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Adapter</th>
+                    <th>Version</th>
+                    <th>Status</th>
+                    <th>Repository</th>
+                    <th>Runtime detection</th>
+                    <th>Updated</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="adapters-body">
+                  <tr class="empty-row"><td colspan="7">Open this tab to load adapters.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          <form id="adapter-editor" class="dense-form adapter-editor inline-drawer row-disclosure" hidden>
+            <div class="panel-heading row-disclosure-heading">
+              <div>
+                <span id="adapter-editor-mode" class="quiet-label">create</span>
+                <h2 id="adapter-editor-title">Adapter</h2>
+              </div>
+              <div class="panel-heading-actions">
+                <span id="adapter-editor-status" class="quiet-label"></span>
+                <button id="close-adapter-editor" class="text-button disclosure-close" type="button">Close</button>
+              </div>
+            </div>
+            <div class="row-disclosure-body">
+              <fieldset class="form-section">
+                <legend>Identity</legend>
+                <div class="form-grid">
+                  <div class="field span-2">
+                    <label for="adapter-editor-slug">Adapter key</label>
+                    <input id="adapter-editor-slug" pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" maxlength="96" required>
+                    <small>Immutable after creation; database IDs are treated as opaque.</small>
+                  </div>
+                  <div class="field span-2">
+                    <label for="adapter-editor-name">Display name</label>
+                    <input id="adapter-editor-name" maxlength="128" required>
+                  </div>
+                </div>
+              </fieldset>
+
+              <fieldset class="form-section">
+                <legend>Manifest</legend>
+                <div class="form-grid">
+                  <div class="field span-4">
+                    <label for="adapter-manifest">JSON manifest</label>
+                    <textarea id="adapter-manifest" class="manifest-editor" rows="22" spellcheck="false" required></textarea>
+                    <small>Editing an existing adapter creates a new immutable version; prior experiments retain their snapshot.</small>
+                  </div>
+                  <div class="field span-4">
+                    <label for="adapter-description">Registry description</label>
+                    <input id="adapter-description" maxlength="240" placeholder="Purpose and compatibility notes for this adapter">
+                  </div>
+                  <div class="field span-4">
+                    <label for="adapter-change-note">Version change note</label>
+                    <input id="adapter-change-note" maxlength="240" placeholder="Why this immutable version was created">
+                    <small>Stored with the version and shown in its history.</small>
+                  </div>
+                </div>
+              </fieldset>
+
+              <fieldset class="form-section">
+                <legend>Validate against repository</legend>
+                <div class="form-grid">
+                  <div class="field span-2">
+                    <label for="adapter-validation-repository">Repository URL</label>
+                    <input id="adapter-validation-repository" type="url" placeholder="https://github.com/organization/repository">
+                  </div>
+                  <div class="field span-2">
+                    <label for="adapter-validation-revision">Branch, tag, or commit SHA</label>
+                    <input id="adapter-validation-revision" placeholder="main or exact SHA">
+                  </div>
+                  <small class="span-4">Draft edits are validated without saving. Read-only versions also retain a saved validation record.</small>
+                  <pre id="adapter-validation-report" class="validation-report span-4" hidden></pre>
+                </div>
+              </fieldset>
+
+              <div class="form-actions">
+                <button id="edit-adapter" class="button button-outline" type="button">Edit</button>
+                <button id="validate-adapter" class="button button-outline" type="button">Validate</button>
+                <button id="save-adapter" class="button button-accent" type="submit">Save adapter</button>
+              </div>
+
+              <section id="adapter-version-section" class="adapter-version-section" hidden>
+                <div class="panel-heading">
+                  <div>
+
+                    <h3>Versions</h3>
+                  </div>
+                </div>
+                <div class="table-scroll">
+                  <table>
+                    <thead><tr><th>Version</th><th>Manifest hash</th><th>Change note</th><th>Created</th></tr></thead>
+                    <tbody id="adapter-versions-body"></tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+          </form>
+          </section>
+          </section>
         </div>
       </section>
 
@@ -852,7 +976,7 @@
               <button id="refresh-data-registry" class="button button-outline" type="button" hidden>Refresh</button>
             </div>
           </div>
-          <nav class="data-subnav collection-view-nav" role="tablist" aria-label="Data views">
+          <nav class="workspace-subnav workspace-view-nav" role="tablist" aria-label="Data views">
             <button id="data-tab-setup" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="collection-view-setup" data-data-tab="setup">Setup</button>
             <button id="data-tab-collect" type="button" role="tab" aria-selected="true" aria-controls="collection-view-live" data-data-tab="collect">Collect</button>
             <button id="data-tab-recording" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="collection-view-recordings" data-data-tab="recording">Recording <span id="collection-library-total"></span></button>
@@ -1487,136 +1611,6 @@
             </form></dialog>
           </section>
         </section>
-        </div>
-      </section>
-
-      <section id="adapters" class="tab-panel" data-tab-panel="adapters" role="tabpanel" hidden>
-        <div class="section-shell workspace-page">
-          <div class="page-heading">
-            <div>
-              <h1>Adapter Registry</h1>
-            </div>
-            <div class="page-actions">
-              <button id="refresh-adapters" class="button button-outline" type="button">Refresh</button>
-            </div>
-          </div>
-
-          <div id="adapters-error" class="inline-alert" role="alert" hidden></div>
-
-          <section class="panel table-panel adapter-index-panel">
-            <div class="panel-heading">
-              <div>
-                <h2>Adapters</h2>
-              </div>
-              <div>
-                <span id="adapter-count" class="quiet-label">Not loaded</span>
-                <button id="add-adapter" class="button button-accent disclosure-launcher" type="button" aria-controls="adapter-editor" aria-expanded="false">Add adapter</button>
-              </div>
-            </div>
-            <div class="table-scroll tall-table">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Adapter</th>
-                    <th>Version</th>
-                    <th>Status</th>
-                    <th>Repository</th>
-                    <th>Runtime detection</th>
-                    <th>Updated</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody id="adapters-body">
-                  <tr class="empty-row"><td colspan="7">Open this tab to load adapters.</td></tr>
-                </tbody>
-              </table>
-            </div>
-          <form id="adapter-editor" class="dense-form adapter-editor inline-drawer row-disclosure" hidden>
-            <div class="panel-heading row-disclosure-heading">
-              <div>
-                <span id="adapter-editor-mode" class="quiet-label">create</span>
-                <h2 id="adapter-editor-title">Adapter</h2>
-              </div>
-              <div class="panel-heading-actions">
-                <span id="adapter-editor-status" class="quiet-label"></span>
-                <button id="close-adapter-editor" class="text-button disclosure-close" type="button">Close</button>
-              </div>
-            </div>
-            <div class="row-disclosure-body">
-              <fieldset class="form-section">
-                <legend>Identity</legend>
-                <div class="form-grid">
-                  <div class="field span-2">
-                    <label for="adapter-editor-slug">Adapter key</label>
-                    <input id="adapter-editor-slug" pattern="[A-Za-z0-9][A-Za-z0-9_.-]*" maxlength="96" required>
-                    <small>Immutable after creation; database IDs are treated as opaque.</small>
-                  </div>
-                  <div class="field span-2">
-                    <label for="adapter-editor-name">Display name</label>
-                    <input id="adapter-editor-name" maxlength="128" required>
-                  </div>
-                </div>
-              </fieldset>
-
-              <fieldset class="form-section">
-                <legend>Manifest</legend>
-                <div class="form-grid">
-                  <div class="field span-4">
-                    <label for="adapter-manifest">JSON manifest</label>
-                    <textarea id="adapter-manifest" class="manifest-editor" rows="22" spellcheck="false" required></textarea>
-                    <small>Editing an existing adapter creates a new immutable version; prior experiments retain their snapshot.</small>
-                  </div>
-                  <div class="field span-4">
-                    <label for="adapter-description">Registry description</label>
-                    <input id="adapter-description" maxlength="240" placeholder="Purpose and compatibility notes for this adapter">
-                  </div>
-                  <div class="field span-4">
-                    <label for="adapter-change-note">Version change note</label>
-                    <input id="adapter-change-note" maxlength="240" placeholder="Why this immutable version was created">
-                    <small>Stored with the version and shown in its history.</small>
-                  </div>
-                </div>
-              </fieldset>
-
-              <fieldset class="form-section">
-                <legend>Validate against repository</legend>
-                <div class="form-grid">
-                  <div class="field span-2">
-                    <label for="adapter-validation-repository">Repository URL</label>
-                    <input id="adapter-validation-repository" type="url" placeholder="https://github.com/organization/repository">
-                  </div>
-                  <div class="field span-2">
-                    <label for="adapter-validation-revision">Branch, tag, or commit SHA</label>
-                    <input id="adapter-validation-revision" placeholder="main or exact SHA">
-                  </div>
-                  <small class="span-4">Draft edits are validated without saving. Read-only versions also retain a saved validation record.</small>
-                  <pre id="adapter-validation-report" class="validation-report span-4" hidden></pre>
-                </div>
-              </fieldset>
-
-              <div class="form-actions">
-                <button id="edit-adapter" class="button button-outline" type="button">Edit</button>
-                <button id="validate-adapter" class="button button-outline" type="button">Validate</button>
-                <button id="save-adapter" class="button button-accent" type="submit">Save adapter</button>
-              </div>
-
-              <section id="adapter-version-section" class="adapter-version-section" hidden>
-                <div class="panel-heading">
-                  <div>
-
-                    <h3>Versions</h3>
-                  </div>
-                </div>
-                <div class="table-scroll">
-                  <table>
-                    <thead><tr><th>Version</th><th>Manifest hash</th><th>Change note</th><th>Created</th></tr></thead>
-                    <tbody id="adapter-versions-body"></tbody>
-                  </table>
-                </div>
-              </section>
-            </div>
-          </form>
-          </section>
         </div>
       </section>
 
