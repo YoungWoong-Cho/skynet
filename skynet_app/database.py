@@ -2515,6 +2515,11 @@ class Database:
         status: str = "AVAILABLE",
         metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Register a checkpoint once, including concurrent finalization retries.
+
+        Replaying the same receipt preserves its ID and evaluation references.
+        A different receipt at an existing path is still an integrity error.
+        """
         values = {
             "id": new_id(), "run_id": run_id, "produced_by_attempt_id": produced_by_attempt_id,
             "training_step": training_step, "checkpoint_type": checkpoint_type, "path": path,
@@ -2525,6 +2530,19 @@ class Database:
             "pruned_at": None,
         }
         with self.transaction() as connection:
+            existing = connection.execute(
+                "SELECT * FROM checkpoints WHERE run_id = ? AND path = ?",
+                (run_id, path),
+            ).fetchone()
+            if existing is not None:
+                receipt_fields = values.keys() - {
+                    "id", "created_at", "is_selected_for_inference",
+                }
+                if any(existing[key] != values[key] for key in receipt_fields):
+                    raise sqlite3.IntegrityError(
+                        "checkpoint path is already registered with a different receipt"
+                    )
+                values["id"] = existing["id"]
             if is_selected_for_inference:
                 connection.execute(
                     """
@@ -2534,7 +2552,13 @@ class Database:
                     """,
                     (run_id,),
                 )
-            self._insert(connection, "checkpoints", values)
+            if existing is None:
+                self._insert(connection, "checkpoints", values)
+            elif is_selected_for_inference:
+                connection.execute(
+                    "UPDATE checkpoints SET is_selected_for_inference = 1 WHERE id = ?",
+                    (existing["id"],),
+                )
             result = self._row_by_id(connection, "checkpoints", values["id"])
         assert result is not None
         return result

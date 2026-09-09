@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import tempfile
+import sqlite3
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from skynet_app.database import Database
@@ -125,6 +128,58 @@ class DatabaseTestCase(unittest.TestCase):
 
         self.assertEqual(claimed["status"], "SUBMITTING")
         self.assertIsNone(duplicate)
+
+    def test_checkpoint_registration_is_atomic_across_database_instances(self) -> None:
+        databases = [self.database, Database(self.database.path)]
+        barrier = threading.Barrier(2)
+        receipt = {
+            "checkpoint_type": "INFERENCE", "path": "/checkpoints/latest.ckpt",
+            "sha256": "a" * 64, "size_bytes": 123,
+            "is_selected_for_inference": True, "metadata": {"final": True},
+        }
+
+        def register(database):
+            barrier.wait(timeout=10)
+            return database.create_checkpoint(self.run["id"], **receipt)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first, second = list(pool.map(register, databases))
+        self.assertEqual(first, second)
+        self.assertEqual(self.database.list_checkpoints(self.run["id"]), [first])
+
+    def test_repeated_checkpoint_preserves_references_and_rejects_changed_receipt(self) -> None:
+        receipt = {
+            "checkpoint_type": "INFERENCE", "path": "/checkpoints/latest.ckpt",
+            "sha256": "a" * 64, "size_bytes": 123,
+            "is_selected_for_inference": True, "metadata": {"final": True},
+        }
+        first = self.database.create_checkpoint(self.run["id"], **receipt)
+        evaluation = self.database.create_evaluation(
+            self.run["id"], checkpoint_id=first["id"],
+            evaluator_adapter="libero", evaluator_version="1",
+            suite_name="libero_10", suite_version="1",
+            tasks=["pick_up_cube"], seeds=[42], episodes_per_task=1,
+        )
+        second = self.database.create_checkpoint(
+            self.run["id"], **{**receipt, "path": "/checkpoints/best.ckpt"}
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "different receipt"):
+            self.database.create_checkpoint(
+                self.run["id"], **{**receipt, "sha256": "b" * 64}
+            )
+        self.assertEqual(
+            [c["id"] for c in self.database.list_checkpoints(self.run["id"])
+             if c["is_selected_for_inference"]], [second["id"]]
+        )
+        repeated = self.database.create_checkpoint(self.run["id"], **receipt)
+        self.assertEqual(repeated, first)
+        self.assertEqual(
+            self.database.get_evaluation(evaluation["id"])["checkpoint_id"], first["id"]
+        )
+        self.assertEqual(
+            [c["id"] for c in self.database.list_checkpoints(self.run["id"])
+             if c["is_selected_for_inference"]], [first["id"]]
+        )
 
     def test_evaluation_suite_and_episode_resume_ledger(self) -> None:
         suite = self.database.register_evaluation_suite(

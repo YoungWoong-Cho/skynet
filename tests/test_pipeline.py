@@ -5,6 +5,7 @@ import hashlib
 import json
 import sqlite3
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -1093,6 +1094,52 @@ def _declare_checkpoint_output(database, run_id):
     resolved = stage["resolved_config_json"]
     resolved["plan"]["checkpoint_globs"] = ["checkpoints/*.ckpt"]
     database.update_stage(stage["id"], resolved_config_json=resolved)
+
+
+@pytest.mark.parametrize("concurrent", [False, True])
+def test_reconcile_repeated_checkpoint_finalization_succeeds(tmp_path, monkeypatch, concurrent):
+    database = Database(tmp_path / "skynet.db")
+    cluster = FakeCluster()
+    service = make_pipeline_service(database, cluster)
+    monkeypatch.setattr(pipeline_api, "LOCAL_CAPSULE_ROOT", tmp_path / "capsules")
+    experiment = service.create_experiment(canonical_spec())
+    service.submit_experiment(experiment["id"])
+    run_id = experiment["runs"][0]["id"]
+    _declare_checkpoint_output(database, run_id)
+    attempt_id = database.get_run(run_id)["attempts"][0]["id"]
+    cluster.log_content = json.dumps({
+        "path": f"/coc/flash7/ycho420/jobs/runs/{run_id}/checkpoints/step-1.ckpt",
+        "final": True, "size_bytes": 12345, "file_count": 1,
+        "is_directory": False, "sha256": "a" * 64,
+    })
+    cluster.state = "COMPLETED"
+    if concurrent:
+        # Separate services and connections model two server processes, each
+        # holding a stale RUNNING/SUBMITTED snapshot before either finalizes.
+        other = make_pipeline_service(Database(database.path), cluster)
+        barrier = threading.Barrier(2)
+        job_statuses = cluster.job_statuses
+
+        def simultaneous_completion(*args, **kwargs):
+            barrier.wait(timeout=10)
+            return job_statuses(*args, **kwargs)
+
+        monkeypatch.setattr(cluster, "job_statuses", simultaneous_completion)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            reports = list(pool.map(lambda worker: worker.reconcile(), [service, other]))
+        assert all(report["updated"] == 1 for report in reports)
+    else:
+        # A process can exit after registration but before updating run state.
+        checkpoint = service._capture_checkpoint(run_id, attempt_id, required=True)
+        service = make_pipeline_service(Database(database.path), cluster)
+        service.reconcile()
+        assert database.get_run(run_id)["checkpoints"][0] == checkpoint
+    run = database.get_run(run_id)
+    assert run["status"] == run["stages"][0]["status"] == run["attempts"][0]["status"] == "SUCCEEDED"
+    assert len(run["attempts"]) == len(run["checkpoints"]) == 1
+    assert run["checkpoints"][0]["is_selected_for_inference"]
+    assert not any(event["event_type"] == "CHECKPOINT_FINALIZATION_FAILED" for event in run["events"])
+    assert cluster.submit_count == 1
 
 
 def test_reconcile_fails_run_when_declared_checkpoint_marker_is_missing(monkeypatch):
