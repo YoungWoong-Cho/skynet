@@ -27,15 +27,17 @@
     const policy = recipe(el("policy-export-format").value);
     const source = snapshot?.sessions.find((s) => s.id === sourceSessionId);
     const dpMissingSplit =
-      policy?.id === "dp" &&
+      policy?.trainable &&
       (source?.episodes < 2 ||
         Number(el("preparation-validation").value) === 0);
+    const missingImages = policy?.observations?.includes("rgb") && source?.images < source?.episodes;
     const message = !source
       ? "Loading recordings…"
       : !source.eligible
         ? source.reason || "This session is not ready for preparation."
         : !policy?.available
           ? policy?.description || "Choose an available policy."
+          : missingImages ? "This format requires completed training images for every recording."
           : dpMissingSplit
             ? "Diffusion Policy needs at least two recordings and a nonzero validation split."
             : "";
@@ -45,7 +47,7 @@
       !source?.eligible ||
       !source.episodes ||
       !policy?.available ||
-      dpMissingSplit;
+      dpMissingSplit || missingImages;
   }
   const stageLabels = {
     QUEUED: "Queued",

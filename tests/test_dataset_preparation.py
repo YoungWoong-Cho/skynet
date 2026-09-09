@@ -263,6 +263,10 @@ def test_declarative_dp_plan_includes_frozen_training_files():
             }
         },
     )
+    document = spec.model_dump(mode="python")
+    PipelineService._apply_training_preset(document, manifest)
+    PipelineService._apply_manifest_input_defaults(document, manifest)
+    spec = type(spec).model_validate(document)
     plan = ManifestAdapter(manifest).resolve(spec)
     assert not plan.blockers
     assert plan.capsule_files == manifest.train.capsule_files

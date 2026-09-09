@@ -139,7 +139,7 @@ def test_rejects_ineligible_sources_before_dispatch(setup, mutation, message):
     with pytest.raises(ValueError, match=message):
         service.create(session["id"], "dp", "Test")
     assert service.list() == []
-    assert not service.options()["sessions"][0]["eligible"]
+    assert service.options()["sessions"][0]["eligible"] == (mutation == "missing_images")
 
 
 def test_checksum_failure_does_not_register_a_version_and_can_retry(setup):
@@ -232,7 +232,7 @@ def test_export_api_validates_formats_and_exposes_downloads(setup, monkeypatch):
     app = FastAPI()
     app.include_router(api.router)
     client = TestClient(app)
-    assert len(client.get("/api/data/exports").json()["formats"]) == 3
+    assert len(client.get("/api/data/exports").json()["formats"]) == 4
     body = dict(session_id=session["id"], format="dp", name="API export")
     assert client.post("/api/data/exports", json=dict(body, format="any-policy")).status_code == 409
     for removed in ({"target": "local"}, {"selections": [{"session_id": session["id"], "indices": [0]}]}):

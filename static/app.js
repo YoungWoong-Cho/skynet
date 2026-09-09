@@ -2261,6 +2261,10 @@ function resolvedCommonHyperparameterDefault(
   repositoryDefaults,
   manifestSection = "hyperparameters",
 ) {
+  const command = adapterManifest(adapter)?.train || {};
+  const control = document.getElementById(adapterFieldControlId("native.config.training_preset"));
+  const preset = (command.presets || []).find(p => JSON.stringify(p.id) === control?.value) || (command.presets || []).find(p => p.id === command.default_preset);
+  if (preset?.values && Object.prototype.hasOwnProperty.call(preset.values, path)) return {value:preset.values[path], origin:"preset", preset, adapter};
   const repositoryDefault = repositoryDefaults.get(path);
   if (repositoryDefault) return repositoryDefault;
   if (!adapter) return null;
@@ -2293,6 +2297,7 @@ function repositoryDefaultProvenance(record) {
 }
 
 function adapterDefaultProvenance(record) {
+  if (record.origin === "preset") return `Preset: ${record.preset.name} (${record.preset.id}).`;
   const adapter = record.adapter || {};
   const version = adapterVersion(adapter);
   const manifestHash = firstValue(
@@ -2430,6 +2435,17 @@ function resolveAdapterDataBinding(field) {
       message: `Selected ${binding.role} format “${format || "undeclared"}” is incompatible; this adapter accepts ${formats.join(", ")}.`,
     };
   }
+  let contracts = binding.contracts?.length ? binding.contracts : binding.contract ? [binding.contract] : [];
+  if (binding.contract_selector && binding.contract_choices) {
+    const control = document.getElementById(adapterFieldControlId(binding.contract_selector));
+    const field = declaredAdapterInputFields(selectedAdapter()).find(f => f.path === binding.contract_selector);
+    const selected = control && field ? parseAdapterDeclaredValue(control, field).value : field?.default;
+    contracts = binding.contract_choices[selected] || contracts;
+  }
+  const metadata = assignment.version?.metadata || {};
+  if (contracts.length && (!contracts.includes(metadata.contract) || metadata.validation?.status !== "PASSED")) {
+    return {value:null, state:"error", message:"Dataset does not satisfy the selected observation requirements."};
+  }
   const value = datasetBindingValue(assignment, binding);
   if (!value) {
     return { value: null, state: "error", message: `Selected bundle does not declare ${binding.value_path || "version.path"}.` };
@@ -2530,6 +2546,28 @@ function captureAdapterDeclaredValues() {
   });
 }
 
+function applyTrainingPreset(identifier) {
+  const command = adapterManifest(selectedAdapter())?.train || {};
+  const preset = (command.presets || []).find(item => item.id === identifier);
+  if (!preset) return;
+  const fields = adapterInputFields();
+  const values = adapterDeclaredScopeValues(renderedAdapterDeclaredScope, true);
+  for (const [path, value] of Object.entries({...preset.values, "native.config.training_preset": identifier})) {
+    const field = fields.find(item => item.path === path);
+    const control = field ? document.getElementById(adapterFieldControlId(path)) : null;
+    if (control) {
+      setAdapterFieldControlValue(control, field, value);
+      values?.set(path, {kind: field.kind, raw: adapterFieldRawValue(control), touched: true});
+    } else {
+      const common = COMMON_HYPERPARAMETER_DEFAULT_FIELDS.find(item => item.path === path);
+      if (common) elements[common.control].value = String(value);
+    }
+  }
+  renderAdapterDeclaredFields();
+  validateAdapterDeclaredFields({focus:false, notify:false});
+  invalidateExperimentPreview();
+}
+
 function renderAdapterDeclaredFields(adapter = selectedAdapter()) {
   captureAdapterDeclaredValues();
   const scope = adapterDeclaredScope(adapter);
@@ -2596,7 +2634,9 @@ function renderAdapterDeclaredFields(adapter = selectedAdapter()) {
       (field.choices || []).forEach((choice) => {
         const option = document.createElement("option");
         option.value = JSON.stringify(choice);
-        option.textContent = typeof choice === "string" ? choice : JSON.stringify(choice);
+        option.textContent = field.path === "native.config.training_preset"
+          ? (adapterManifest(adapter)?.train?.presets || []).find(p => p.id === choice)?.name || choice
+          : typeof choice === "string" ? choice : JSON.stringify(choice);
         control.append(option);
       });
       if (!field.choices?.length && field.choice_source) control.disabled = true;
@@ -2615,6 +2655,8 @@ function renderAdapterDeclaredFields(adapter = selectedAdapter()) {
         control.type = field.sensitive ? "password" : "text";
       }
     }
+    if (field.minimum != null) control.min = field.minimum;
+    if (field.maximum != null) control.max = field.maximum;
     control.id = id;
     control.dataset.adapterInputPath = field.path;
     control.dataset.adapterInputKind = field.kind;
@@ -2641,7 +2683,8 @@ function renderAdapterDeclaredFields(adapter = selectedAdapter()) {
 
     const help = document.createElement("small");
     help.id = `${id}-help`;
-    const fieldHelp = field.help || `Manifest path: ${field.path}`;
+    const currentPreset = (adapterManifest(adapter)?.train?.presets || []).find(p => JSON.stringify(p.id) === control.value);
+    const fieldHelp = currentPreset?.description || field.help || `Manifest path: ${field.path}`;
     const baseHelp = field.sensitive
       ? `${fieldHelp} Masked on this screen only. The submitted value is included in the experiment metadata and reproducibility specification; do not enter credentials.`
       : fieldHelp;
@@ -2687,6 +2730,13 @@ function parseAdapterDeclaredValue(control, field) {
     else value = raw;
     if (field.kind === "integer" && !Number.isInteger(value)) throw new Error("must be an integer");
     if (field.kind === "number" && !Number.isFinite(value)) throw new Error("must be a finite number");
+    if (field.minimum != null && value < field.minimum) throw new Error(`minimum is ${field.minimum}`);
+    if (field.maximum != null && value > field.maximum) throw new Error(`maximum is ${field.maximum}`);
+    if (field.maximum_path) {
+      const bound = document.getElementById(adapterFieldControlId(field.maximum_path));
+      const limit = Number(bound?.value);
+      if (bound?.value && Number.isFinite(limit) && value > limit) throw new Error(`cannot exceed ${limit}`);
+    }
     if (field.kind === "string_list" && !value.length) return { present: false, value: null };
     return { present: true, value };
   } catch (error) {
@@ -6569,6 +6619,11 @@ function renderRunAttemptMetadata(record) {
   elements.runAttemptHyperparameters.innerHTML = commonHyperparameters.length
     ? keyValueHtml(commonHyperparameters.map(([label, entry]) => [label, commonHyperparameterLabel(entry)]))
     : "";
+  if (record.adapter_settings && Object.keys(record.adapter_settings).length) {
+    elements.runAttemptHyperparameters.insertAdjacentHTML("beforeend", keyValueHtml(
+      Object.entries(record.adapter_settings).map(([path, value]) => [path.replace(/^native\.(config|overrides)\./, "").replaceAll("_", " "), displayCommonHyperparameterDefault(value)])
+    ));
+  }
   if (commonHyperparameters.length) renderCommonHyperparameterResolution(record);
 }
 
@@ -12141,7 +12196,7 @@ elements.experimentRevision.addEventListener("change", () => {
 elements.experimentWorkdir.addEventListener("change", () => inspectRepositoryRuntime());
 elements.adapterDeclaredFieldsGrid.addEventListener("input", (event) => {
   const control = event.target.closest("[data-adapter-input-path]");
-  if (!control || !event.isTrusted) return;
+  if (!control) return;
   const values = adapterDeclaredScopeValues(renderedAdapterDeclaredScope, true);
   if (control.dataset.adapterInputSensitive === "true") values?.delete(control.dataset.adapterInputPath);
   else values?.set(control.dataset.adapterInputPath, { kind: control.dataset.adapterInputKind, raw: adapterFieldRawValue(control), touched: true });
@@ -12150,10 +12205,15 @@ elements.adapterDeclaredFieldsGrid.addEventListener("input", (event) => {
 });
 elements.adapterDeclaredFieldsGrid.addEventListener("change", (event) => {
   const control = event.target.closest("[data-adapter-input-path]");
-  if (!control || !event.isTrusted) return;
+  if (!control) return;
+  if (control.dataset.adapterInputPath === "native.config.training_preset") {
+    applyTrainingPreset(JSON.parse(control.value));
+    return;
+  }
   const values = adapterDeclaredScopeValues(renderedAdapterDeclaredScope, true);
   if (control.dataset.adapterInputSensitive === "true") values?.delete(control.dataset.adapterInputPath);
   else values?.set(control.dataset.adapterInputPath, { kind: control.dataset.adapterInputKind, raw: adapterFieldRawValue(control), touched: true });
+  if (adapterInputFields().some(f => f.data_binding?.contract_selector === control.dataset.adapterInputPath)) renderAdapterDeclaredFields();
   validateAdapterDeclaredFields({ focus: false, notify: false });
   renderCommonHyperparameterDefaults();
 });
@@ -12466,11 +12526,12 @@ window.usePreparedDataset = async (job) => {
   populateExperimentAdapters(adapterOptionId(adapter));
   elements.experimentAdapter.value = adapterOptionId(adapter);
   applySelectedAdapter({loadSource: false});
-  elements.experimentName.value = (job.name.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,70) || "recorded-dataset") + "-dp";
+  elements.experimentName.value = (job.name.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,70) || "recorded-dataset") + "-" + String(job.format || setup.adapter).replace(/[^a-z0-9-]+/g,"-");
   await loadDataBundles(true);
   elements.experimentDataBundle.value = job.bundle_id;
   populateExperimentDataBundles();
   renderAdapterDeclaredFields();
+  if (setup.preset) applyTrainingPreset(setup.preset);
   invalidateExperimentPreview();
   elements.experimentForm.scrollIntoView({block:"start"});
   installPinnedSourceRevision(setup, "dataset preparation");

@@ -1,50 +1,67 @@
-"""Skynet integration for the pinned XPolicyLab DP policy and training loop.
+"""Frozen DP runtime: shared state/RGB loading and one explicit training loop.
 
-This file is frozen into each run capsule. Dataset selection, normalization and
-checkpoint placement are adapted; the upstream model and optimizer loop remain
-unchanged. Image batches stream from Zarr instead of copying all RGB into RAM.
+Uses the pinned XPolicyLab encoder/U-Net and DDPM implementation. Actions start
+at the current observation, so a chunk of 16 means 16 future commands, even
+when the observation history is longer than one frame.
 """
 
 import argparse
+import copy
 import json
-from pathlib import Path
-import sys
+import math
 import subprocess
+import sys
+from pathlib import Path
+
+CAMERAS = {
+    "head_cam": "head_camera",
+    "left_cam": "left_camera",
+    "right_cam": "right_camera",
+}
 
 
 def configure_repository(repository):
-    root = Path(repository).resolve()
-    policy = root / "policy/DP"
-    if not (policy / "diffusion_policy/workspace/robotworkspace.py").is_file():
+    root = Path(repository).resolve() / "policy/DP"
+    if not (root / "diffusion_policy/workspace/robotworkspace.py").is_file():
         raise ValueError("Select the pinned XPolicyLab repository with policy/DP")
-    sys.path.insert(0, str(policy))
-    return policy
+    sys.path.insert(0, str(root))
+    return root
 
 
-# Hydra imports this module by name from the frozen capsule after main has
-# established the repository import path.
 def dataset_class():
     import numpy as np
     import torch
     import zarr
-    from diffusion_policy.dataset.robot_image_dataset import RobotImageDataset
     from diffusion_policy.common.replay_buffer import ReplayBuffer
     from diffusion_policy.common.sampler import SequenceSampler
-    from diffusion_policy.model.common.normalizer import LinearNormalizer
-    from diffusion_policy.common.normalize_util import get_image_range_normalizer
+    from diffusion_policy.dataset.base_dataset import BaseImageDataset
+    from diffusion_policy.model.common.normalizer import (
+        LinearNormalizer,
+        SingleFieldLinearNormalizer,
+    )
 
-    class RecordedDataset(RobotImageDataset):
+    class RecordedDataset(BaseImageDataset):
         def __init__(
             self,
             zarr_path,
             manifest_path,
-            batch_size=1,
-            horizon=8,
-            pad_before=2,
-            pad_after=5,
+            observation_mode="state",
+            n_obs_steps=2,
+            horizon=16,
             **_,
         ):
-            self.replay_buffer = ReplayBuffer(zarr.open_group(str(zarr_path), mode="r"))
+            group = zarr.open_group(str(zarr_path), mode="r")
+            self.replay_buffer = ReplayBuffer(group)
+            self.keys = [
+                "state",
+                "action",
+                *(CAMERAS.values() if observation_mode == "rgb" else []),
+            ]
+            for key in self.keys:
+                if key not in group["data"]:
+                    raise ValueError("Missing required observation: " + key)
+            self.n_obs_steps, self.horizon = n_obs_steps, horizon
+            self.sequence_length = horizon + n_obs_steps - 1
             manifest = json.loads(Path(manifest_path).read_text())
             split = manifest["split"]
             count = self.replay_buffer.n_episodes
@@ -54,23 +71,29 @@ def dataset_class():
                 or not split["validation"]
             ):
                 raise ValueError(
-                    "DP requires a disjoint, complete training/validation episode split"
+                    "Training requires disjoint, complete train/validation episode splits"
                 )
             self.train_mask = np.zeros(count, dtype=bool)
             self.train_mask[split["train"]] = True
-            self.horizon, self.pad_before, self.pad_after = (
-                horizon,
-                pad_before,
-                pad_after,
-            )
-            self.batch_size = batch_size
-            self.sampler = SequenceSampler(
+            self.sampler = self.make_sampler(self.train_mask)
+
+        def make_sampler(self, mask):
+            return SequenceSampler(
                 self.replay_buffer,
-                horizon,
-                pad_before,
-                pad_after,
-                episode_mask=self.train_mask,
+                self.sequence_length,
+                self.n_obs_steps - 1,
+                self.horizon - 1,
+                episode_mask=mask,
+                keys=self.keys,
             )
+
+        def get_validation_dataset(self):
+            result = copy.copy(self)
+            result.sampler = self.make_sampler(~self.train_mask)
+            return result
+
+        def __len__(self):
+            return len(self.sampler)
 
         def __getitem__(self, index):
             if isinstance(index, (int, np.integer)):
@@ -84,61 +107,301 @@ def dataset_class():
                 for k in samples[0]
             }
 
+        def postprocess(self, batch, device):
+            obs = {
+                "agent_pos": batch["state"][:, : self.n_obs_steps].to(device).float()
+            }
+            for name, key in CAMERAS.items():
+                if key in self.keys:
+                    obs[name] = (
+                        batch[key][:, : self.n_obs_steps].to(device).float() / 255.0
+                    )
+            start = self.n_obs_steps - 1
+            return {
+                "obs": obs,
+                "action": batch["action"][:, start : start + self.horizon]
+                .to(device)
+                .float(),
+            }
+
         def get_normalizer(self, mode="limits", **kwargs):
             ends = self.replay_buffer.episode_ends[:]
             starts = np.r_[0, ends[:-1]]
-            data = {}
-            for key, output in (("action", "action"), ("state", "agent_pos")):
-                data[output] = np.concatenate(
+            data = {
+                out: np.concatenate(
                     [
                         self.replay_buffer[key][int(starts[i]) : int(ends[i])]
                         for i in np.flatnonzero(self.train_mask)
                     ]
                 )
+                for key, out in [("state", "agent_pos"), ("action", "action")]
+            }
             normalizer = LinearNormalizer()
-            normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
-            for key in ("head_cam", "left_cam", "right_cam"):
-                normalizer[key] = get_image_range_normalizer()
+            normalizer.fit(data, last_n_dims=1, mode=mode, **kwargs)
+            for name, key in CAMERAS.items():
+                if key in self.keys:
+                    # Pixels already lie in [0,1]. ImageNet normalization is applied
+                    # exactly once, by MultiImageObsEncoder.
+                    normalizer[name] = SingleFieldLinearNormalizer.create_identity()
             return normalizer
 
     return RecordedDataset
-
-
-def workspace_class():
-    from diffusion_policy.workspace.robotworkspace import RobotWorkspace
-
-    class TrainingWorkspace(RobotWorkspace):
-        def save_checkpoint(self, path=None, **kwargs):
-            # Upstream requests policy/DP/checkpoints; redirect into the run capsule.
-            name = Path(path).name if path else "latest.ckpt"
-            kwargs["use_thread"] = False
-            return super().save_checkpoint(
-                Path(self.output_dir) / "checkpoints" / name, **kwargs
-            )
-
-    return TrainingWorkspace
 
 
 def RecordedDataset(**kwargs):
     return dataset_class()(**kwargs)
 
 
-def main():
+def StateEncoder(dimension):
+    import torch.nn as nn
+
+    class Encoder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.Sequential(
+                nn.Linear(dimension, 256), nn.ReLU(), nn.Linear(256, 128), nn.ReLU()
+            )
+
+        def output_shape(self):
+            return (128,)
+
+        def forward(self, obs):
+            return self.layers(obs["agent_pos"])
+
+    return Encoder()
+
+
+def FutureActionPolicy(**kwargs):
+    from diffusion_policy.policy.diffusion_unet_image_policy import (
+        DiffusionUnetImagePolicy,
+    )
+
+    class Policy(DiffusionUnetImagePolicy):
+        def predict_action(self, obs_dict):
+            result = super().predict_action(obs_dict)
+            result["action"] = result["action_pred"][:, : self.n_action_steps]
+            return result
+
+    return Policy(**kwargs)
+
+
+def workspace_class():
+    import torch
+    from diffusion_policy.common.json_logger import JsonLogger
+    from diffusion_policy.common.pytorch_util import optimizer_to
+    from diffusion_policy.model.common.lr_scheduler import get_scheduler
+    from diffusion_policy.workspace.robotworkspace import RobotWorkspace
+    from hydra.utils import instantiate
+    from torch.utils.data import DataLoader
+
+    class TrainingWorkspace(RobotWorkspace):
+        def save_checkpoint(self, path=None, **kwargs):
+            kwargs["use_thread"] = False
+            return super().save_checkpoint(
+                Path(self.output_dir)
+                / "checkpoints"
+                / (Path(path).name if path else "latest.ckpt"),
+                **kwargs,
+            )
+
+        def run(self):
+            cfg = self.cfg
+            dataset = instantiate(cfg.task.dataset)
+            normalizer = dataset.get_normalizer()
+            device = torch.device(cfg.training.device)
+            for model in (self.model, self.ema_model):
+                model.set_normalizer(normalizer)
+                model.to(device)
+            optimizer_to(self.optimizer, device)
+            generator = torch.Generator().manual_seed(cfg.training.seed)
+            train = DataLoader(
+                dataset,
+                batch_size=cfg.dataloader.batch_size,
+                shuffle=True,
+                num_workers=cfg.dataloader.num_workers,
+                generator=generator,
+            )
+            validation = DataLoader(
+                dataset.get_validation_dataset(),
+                batch_size=cfg.val_dataloader.batch_size,
+                num_workers=cfg.val_dataloader.num_workers,
+            )
+            accumulation = cfg.training.gradient_accumulate_every
+            batches = min(len(train), cfg.training.max_train_steps or len(train))
+            updates = math.ceil(batches / accumulation) * cfg.training.num_epochs
+            scheduler = get_scheduler(
+                cfg.training.lr_scheduler,
+                self.optimizer,
+                num_warmup_steps=cfg.training.lr_warmup_steps,
+                num_training_steps=updates,
+            )
+            best, stale = float("inf"), 0
+            self.stop_reason = "max_epochs"
+            with JsonLogger(str(Path(self.output_dir) / "logs.json.txt")) as logger:
+                for epoch in range(cfg.training.num_epochs):
+                    self.epoch = epoch
+                    self.model.train()
+                    self.optimizer.zero_grad(set_to_none=True)
+                    loss_sum, examples = 0.0, 0
+                    window_examples = 0
+                    for index, raw in enumerate(train):
+                        batch = dataset.postprocess(raw, device)
+                        size = len(batch["action"])
+                        loss = self.model.compute_loss(batch)
+                        if not torch.isfinite(loss):
+                            raise ValueError("Training produced a nonfinite loss")
+                        (loss * size).backward()
+                        window_examples += size
+                        loss_sum += loss.item() * size
+                        examples += size
+                        if (index + 1) % accumulation == 0 or index + 1 == batches:
+                            for parameter in self.model.parameters():
+                                if parameter.grad is not None:
+                                    parameter.grad.div_(window_examples)
+                            torch.nn.utils.clip_grad_norm_(
+                                self.model.parameters(),
+                                cfg.training.gradient_clip,
+                                error_if_nonfinite=True,
+                            )
+                            self.optimizer.step()
+                            self.optimizer.zero_grad(set_to_none=True)
+                            scheduler.step()
+                            self.global_step += 1
+                            window_examples = 0
+                            with torch.no_grad():
+                                for target, source in zip(
+                                    self.ema_model.parameters(), self.model.parameters()
+                                ):
+                                    target.lerp_(source, 1 - cfg.training.ema_decay)
+                                for target, source in zip(
+                                    self.ema_model.buffers(), self.model.buffers()
+                                ):
+                                    target.copy_(source)
+                        if index + 1 >= batches:
+                            break
+                    self.ema_model.eval()
+                    val_sum, val_examples = 0.0, 0
+                    # Keep diffusion noise fixed across epochs for comparable held-out loss.
+                    devices = [device.index or 0] if device.type == "cuda" else []
+                    with torch.random.fork_rng(devices=devices), torch.no_grad():
+                        torch.manual_seed(cfg.training.seed + 1)
+                        for index, raw in enumerate(validation):
+                            batch = dataset.postprocess(raw, device)
+                            loss = self.ema_model.compute_loss(batch)
+                            if not torch.isfinite(loss):
+                                raise ValueError("Validation produced a nonfinite loss")
+                            val_sum += loss.item() * len(batch["action"])
+                            val_examples += len(batch["action"])
+                            if (
+                                cfg.training.max_val_steps
+                                and index + 1 >= cfg.training.max_val_steps
+                            ):
+                                break
+                    val_loss = val_sum / val_examples
+                    improved = val_loss < best
+                    if improved:
+                        best, stale = val_loss, 0
+                    else:
+                        stale += 1
+                    stopping = (
+                        cfg.training.early_stopping_patience > 0
+                        and stale >= cfg.training.early_stopping_patience
+                    )
+                    if stopping:
+                        self.stop_reason = "early_stopping"
+                    record = dict(
+                        epoch=epoch,
+                        global_step=self.global_step,
+                        train_loss=loss_sum / examples,
+                        val_loss=val_loss,
+                        lr=self.optimizer.param_groups[0]["lr"],
+                        best_val_loss=best,
+                        early_stopping=stopping,
+                    )
+                    logger.log(record)
+                    print(json.dumps(record), flush=True)
+                    self.epoch = epoch + 1
+                    if improved:
+                        self.save_checkpoint("best.ckpt")
+                    self.save_checkpoint()
+                    if stopping:
+                        break
+
+    return TrainingWorkspace
+
+
+def arguments():
     parser = argparse.ArgumentParser()
+    for key in ("revision", "dataset", "manifest-sha", "output"):
+        parser.add_argument("--" + key, required=True)
     parser.add_argument("--repository", default=".")
-    parser.add_argument("--revision", required=True)
-    parser.add_argument("--dataset", required=True)
-    parser.add_argument("--manifest-sha", required=True)
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--learning-rate", type=float, default=1e-4)
-    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--observation-mode", choices=["state", "rgb"], default="state")
+    parser.add_argument("--training-preset", default="dexverse-state/v1")
+    parser.add_argument(
+        "--lr-schedule", choices=["constant", "cosine"], default="constant"
+    )
+    for key, default in {
+        "batch-size": 256,
+        "epochs": 300,
+        "seed": 42,
+        "observation-steps": 2,
+        "action-steps": 16,
+        "diffusion-steps": 100,
+        "inference-steps": 20,
+        "gradient-accumulation": 1,
+        "num-workers": 0,
+        "early-stopping-patience": 20,
+        "warmup-steps": 0,
+    }.items():
+        parser.add_argument("--" + key, type=int, default=default)
+    for key, default in {
+        "learning-rate": 1e-4,
+        "weight-decay": 1e-4,
+        "gradient-clip": 1.0,
+        "ema-decay": 0.995,
+    }.items():
+        parser.add_argument("--" + key, type=float, default=default)
     parser.add_argument("--verify-only", action="store_true")
-    parser.add_argument("--max-train-steps", type=int)
-    parser.add_argument("--inference-steps", type=int, default=100)
+    parser.add_argument(
+        "--max-train-steps",
+        type=int,
+        help="Bound each epoch for isolated runtime smoke checks",
+    )
     args = parser.parse_args()
+    if any(
+        getattr(args, k) < 1
+        for k in [
+            "batch_size",
+            "epochs",
+            "observation_steps",
+            "action_steps",
+            "diffusion_steps",
+            "inference_steps",
+            "gradient_accumulation",
+        ]
+    ):
+        parser.error("Counts must be positive")
+    if (
+        args.action_steps not in [4, 8, 16, 32, 64]
+        or args.inference_steps > args.diffusion_steps
+    ):
+        parser.error(
+            "Action chunk must be 4/8/16/32/64; inference steps cannot exceed training diffusion steps"
+        )
+    if (
+        args.num_workers < 0
+        or args.early_stopping_patience < 0
+        or args.warmup_steps < 0
+        or not 0 <= args.ema_decay < 1
+        or args.gradient_clip <= 0
+    ):
+        parser.error("Invalid worker, stopping, warmup, EMA, or clipping setting")
+    return args
+
+
+def main():
+    args = arguments()
     revision = subprocess.check_output(
         ["git", "-C", args.repository, "rev-parse", "HEAD"], text=True
     ).strip()
@@ -147,20 +410,21 @@ def main():
     policy_dir = configure_repository(args.repository)
     import numpy as np
     import torch
+    from artifacts import digest, verify
     from hydra import compose, initialize_config_dir
     from omegaconf import OmegaConf
-    from artifacts import verify, digest
 
-    root = Path(args.dataset)
+    root, output = Path(args.dataset), Path(args.output)
     manifest = verify(root, args.manifest_sha)
+    contracts = [
+        "skynet.dp-rgb-joints/v1",
+        *(["skynet.dp-joints/v1"] if args.observation_mode == "state" else []),
+    ]
     if (
-        manifest.get("contract") != "skynet.dp-rgb-joints/v1"
+        manifest.get("contract") not in contracts
         or manifest["format"] != "xpolicylab-dp-zarr/v1"
     ):
-        raise ValueError("Dataset does not satisfy the recorded RGB/joint DP contract")
-    if args.batch_size < 1 or args.epochs < 1:
-        raise ValueError("Batch size and epochs must be positive")
-    output = Path(args.output)
+        raise ValueError("Dataset does not satisfy the selected observation contract")
     output.mkdir(parents=True, exist_ok=True)
     OmegaConf.register_new_resolver("eval", eval, replace=True)
     with initialize_config_dir(
@@ -169,73 +433,123 @@ def main():
         cfg = compose(config_name="robot_dp")
     OmegaConf.set_struct(cfg, False)
     dim = len(manifest["policy_to_source_indices"])
+    cfg.horizon, cfg.n_obs_steps, cfg.n_action_steps = (
+        args.action_steps,
+        args.observation_steps,
+        args.action_steps,
+    )
     cfg.task.shape_meta = {
         "action": {"shape": [dim]},
-        "obs": {
-            key: {"shape": [3, 240, 320], "type": "rgb"}
-            for key in ("head_cam", "left_cam", "right_cam")
-        },
+        "obs": {"agent_pos": {"shape": [dim], "type": "low_dim"}},
     }
-    cfg.task.shape_meta.obs.agent_pos = {"shape": [dim], "type": "low_dim"}
-    cfg.task.name = "recorded_demonstrations"
+    if args.observation_mode == "rgb":
+        for key in CAMERAS:
+            cfg.task.shape_meta.obs[key] = {"shape": [3, 240, 320], "type": "rgb"}
+    else:
+        cfg.policy.obs_encoder = {
+            "_target_": "skynet_dp_training.StateEncoder",
+            "dimension": dim,
+        }
+    cfg.policy._target_ = "skynet_dp_training.FutureActionPolicy"
+    cfg.policy.num_inference_steps = args.inference_steps
+    cfg.policy.noise_scheduler.num_train_timesteps = args.diffusion_steps
+    cfg.task.name = "registered_demonstrations"
     cfg.task.dataset = {
         "_target_": "skynet_dp_training.RecordedDataset",
         "zarr_path": str(root / "dataset/demonstrations.zarr"),
         "manifest_path": str(root / "manifest.json"),
-        "batch_size": args.batch_size,
-        "horizon": 8,
-        "pad_before": 2,
-        "pad_after": 5,
+        "observation_mode": args.observation_mode,
+        "n_obs_steps": args.observation_steps,
+        "horizon": args.action_steps,
     }
-    cfg.dataloader.batch_size = args.batch_size
-    cfg.val_dataloader.batch_size = 1
-    cfg.training.seed = args.seed
-    cfg.training.device = args.device
-    cfg.training.num_epochs = args.epochs
-    cfg.training.resume = False
-    cfg.training.checkpoint_every = 1
-    cfg.training.val_every = 1
-    cfg.training.max_train_steps = args.max_train_steps
-    cfg.training.max_val_steps = 1 if args.max_train_steps else None
-    cfg.policy.num_inference_steps = args.inference_steps
-    cfg.optimizer.lr = args.learning_rate
-    # Skynet forwards JsonLogger metrics to the selected tracking provider.
+    cfg.dataloader = {
+        "batch_size": args.batch_size,
+        "num_workers": args.num_workers,
+        "shuffle": True,
+        "drop_last": False,
+    }
+    cfg.val_dataloader = {
+        "batch_size": min(args.batch_size, 32),
+        "num_workers": args.num_workers,
+        "shuffle": False,
+        "drop_last": False,
+    }
+    for key, value in {
+        "seed": args.seed,
+        "device": args.device,
+        "num_epochs": args.epochs,
+        "resume": False,
+        "checkpoint_every": 1,
+        "val_every": 1,
+        "max_train_steps": args.max_train_steps,
+        "max_val_steps": 1 if args.max_train_steps else None,
+        "gradient_accumulate_every": args.gradient_accumulation,
+        "gradient_clip": args.gradient_clip,
+        "ema_decay": args.ema_decay,
+        "early_stopping_patience": args.early_stopping_patience,
+        "lr_scheduler": args.lr_schedule,
+        "lr_warmup_steps": args.warmup_steps,
+        "use_ema": True,
+    }.items():
+        cfg.training[key] = value
+    cfg.ema = {"decay": args.ema_decay, "schedule": "fixed_per_optimizer_update"}
+    cfg.optimizer.lr, cfg.optimizer.weight_decay = args.learning_rate, args.weight_decay
     cfg.logging.mode = "disabled"
+    cfg.skynet = {
+        "training_preset": args.training_preset,
+        "effective_batch_size": args.batch_size * args.gradient_accumulation,
+        "action_alignment": "current observation then future commands",
+        "image_normalization": (
+            "uint8 / 255 then ImageNet once" if args.observation_mode == "rgb" else None
+        ),
+    }
     OmegaConf.resolve(cfg)
     dataset = RecordedDataset(
         **{k: v for k, v in cfg.task.dataset.items() if k != "_target_"}
     )
-    validation = dataset.get_validation_dataset()
-    if len(dataset) < args.batch_size or not len(validation):
+    if not len(dataset) or not len(dataset.get_validation_dataset()):
         raise ValueError(
-            "Too few training sequences for this batch size; reduce the batch size or select more episodes"
+            "Training and validation must each contain at least one sequence"
         )
     sample = dataset.postprocess(dataset[np.array([0])], torch.device("cpu"))
     for key, value in sample["obs"].items():
-        expected = tuple(cfg.task.shape_meta.obs[key].shape)
-        if tuple(value.shape[2:]) != expected or not torch.isfinite(value).all():
-            raise ValueError("DP data loader returned invalid observations: " + key)
+        if (
+            tuple(value.shape[2:]) != tuple(cfg.task.shape_meta.obs[key].shape)
+            or not torch.isfinite(value).all()
+        ):
+            raise ValueError("Invalid observations: " + key)
     if (
-        tuple(sample["action"].shape) != (1, 8, dim)
+        tuple(sample["action"].shape) != (1, args.action_steps, dim)
         or not torch.isfinite(sample["action"]).all()
     ):
-        raise ValueError("DP data loader returned invalid actions")
+        raise ValueError("Invalid action sequences")
     dataset.get_normalizer()
     receipt = dict(
-        schema="skynet.dp-loader-validation/v1",
+        schema="skynet.dp-loader-validation/v2",
         manifest_sha256=args.manifest_sha,
         source_revision=manifest["source_revision"],
         split=manifest["split"],
         train_sequences=len(dataset),
-        validation_sequences=len(validation),
-        observation_shapes={
-            key: list(value.shape) for key, value in sample["obs"].items()
-        },
+        validation_sequences=len(dataset.get_validation_dataset()),
+        observation_shapes={k: list(v.shape) for k, v in sample["obs"].items()},
         action_shape=list(sample["action"].shape),
         normalization="training_episodes_only",
+        observation_mode=args.observation_mode,
     )
     (output / "dataset-validation.json").write_text(json.dumps(receipt, indent=2))
     OmegaConf.save(cfg, output / "training-config.yaml")
+    (output / "applied-settings.json").write_text(
+        json.dumps(
+            dict(
+                schema="skynet.applied-settings/v1",
+                settings=vars(args),
+                effective_batch_size=args.batch_size * args.gradient_accumulation,
+                manifest_sha256=args.manifest_sha,
+                repository_revision=revision,
+            ),
+            indent=2,
+        )
+    )
     if args.verify_only:
         print(json.dumps(receipt))
         return
@@ -244,13 +558,14 @@ def main():
     checkpoint = workspace.save_checkpoint()
     (output / "training-result.json").write_text(
         json.dumps(
-            {
-                "manifest_sha256": args.manifest_sha,
-                "checkpoint": checkpoint,
-                "checkpoint_sha256": digest(checkpoint),
-                "global_step": workspace.global_step,
-                "epochs": workspace.epoch,
-            },
+            dict(
+                manifest_sha256=args.manifest_sha,
+                checkpoint=checkpoint,
+                checkpoint_sha256=digest(checkpoint),
+                global_step=workspace.global_step,
+                epochs=workspace.epoch,
+                stop_reason=workspace.stop_reason,
+            ),
             indent=2,
         )
     )

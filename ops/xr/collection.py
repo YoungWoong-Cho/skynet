@@ -203,6 +203,9 @@ def run_loop(
     robot = env.scene["robot"]
     configure_virtual_wrist(robot, manifest, tracked_sides)
     wrist_commands = DexVerseWristContinuity(teleop._retargeters, tracked_sides)
+    from images import state_metadata
+    _, recorder._metadata["skynet_state_metadata"] = state_metadata(env, cfg)
+    recorder._metadata["skynet_step_dt"] = float(env.step_dt)
     if cfg.get("image_capture"):
         from images import training_image_request
         recorder._metadata["skynet_training_images"] = training_image_request(cfg["image_recipe"])

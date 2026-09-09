@@ -4,6 +4,7 @@ DP/ACT schemas and resize conventions follow the unmodified converters in xpolic
 All output is built in a private job directory and published only after validation.
 """
 
+from contextlib import contextmanager
 import hashlib
 import io
 import json
@@ -138,6 +139,43 @@ def validate(source, h5):
     return meta, n, order
 
 
+@contextmanager
+def source_data(source, visual):
+    if sha256(source["recording"]) != source["sha256"]:
+        raise ValueError("Source checksum verification failed")
+    payload, episode = raw_episode(source["recording"])
+    metadata = payload.get("skynet_state_metadata")
+    if visual or not metadata:
+        if not source.get("images"):
+            raise ValueError("This older recording has no joint-layout metadata. Use its prepared dataset or finish its existing image extraction. New recordings save state metadata without images.")
+        if sha256(source["images"]) != source["image_sha256"]:
+            raise ValueError("Source checksum verification failed")
+        with h5py.File(source["images"], "r") as src:
+            meta, n, order = validate(source, src)
+            yield meta, n, order, src
+        return
+    meta = metadata
+    actions = np.asarray(episode["actions"])
+    names = meta["action_joint_names"]
+    if (actions.ndim != 2 or actions.shape[1] != len(names) or len(set(names)) != len(names)
+            or len(episode["states"]) != len(actions) + 1 or episode["num_steps"] != len(actions)
+            or not 0 < len(actions) <= 6000 or payload["robot_type"] != meta["robot"] or payload["task"] != meta["task"]):
+        raise ValueError("Invalid joint state/action alignment")
+    ids = [meta["robot_joint_names"].index(name) for name in names]
+    states = np.stack([np.asarray(v["articulation"]["robot"]["joint_position"])[0, ids] for v in episode["states"][:-1]])
+    if states.shape != actions.shape or not np.isfinite(states).all() or not np.isfinite(actions).all():
+        raise ValueError("Nonfinite or misaligned state/action data")
+    from images import joint_layout
+    groups = joint_layout(names, meta["hand"], [names[i] for g in meta["groups"] for i in g["wrist_indices"]])
+    if groups != meta["groups"]:
+        raise ValueError("Joint mapping differs from the declared layout")
+    order = [i for g in groups for i in g["wrist_indices"] + g["finger_indices"]]
+    dt = meta["step_dt"]
+    if not isinstance(dt, (int, float)) or not np.isfinite(dt) or dt <= 0:
+        raise ValueError("Invalid control timing")
+    yield meta, len(actions), order, dict(state=states, action=actions, timestamps=np.arange(len(actions)) * dt)
+
+
 def split(values, groups):
     result = {}
     for g in groups:
@@ -151,9 +189,10 @@ def split(values, groups):
 
 
 def export(request):
-    import cv2
-
     kind = request["format"]
+    visual = kind != "dp-state"
+    if visual:
+        import cv2
     if kind not in FORMATS:
         raise ValueError("Unsupported export format")
     output = Path(request["output"])
@@ -167,13 +206,9 @@ def export(request):
         "split", {"train": list(range(len(request["sources"]))), "validation": []}
     )
     for index, source in enumerate(request["sources"]):
-        if (
-            sha256(source["recording"]) != source["sha256"]
-            or sha256(source["images"]) != source["image_sha256"]
-        ):
-            raise ValueError("Source checksum verification failed")
-        with h5py.File(source["images"], "r") as src:
-            meta, n, order = validate(source, src)
+        with source_data(source, visual) as (meta, n, order, src):
+            if not visual:
+                meta = {k: v for k, v in meta.items() if k not in {"cameras", "color_space", "image_recipe_sha256", "render_mode", "source_sha256"}}
             calibration = {k: v for k, v in meta.items() if k != "source_sha256"}
             if common is not None and common != calibration:
                 raise ValueError(
@@ -203,7 +238,7 @@ def export(request):
             if index in selection["train"]:
                 for key in packed:
                     training_values[key].append(packed[key])
-            if kind == "dp":
+            if kind in {"dp", "dp-state"}:
                 import zarr
 
                 if dp is None:
@@ -217,7 +252,7 @@ def export(request):
                             dtype="f4",
                             compressor=compressor,
                         )
-                    for key in ("head_camera", "left_camera", "right_camera"):
+                    for key in (("head_camera", "left_camera", "right_camera") if visual else []):
                         dp.create_dataset(
                             "data/" + key,
                             shape=(0, 3, 240, 320),
@@ -231,7 +266,7 @@ def export(request):
                 for key in packed:
                     dp["data/" + key].append(packed[key])
                 for slot, key in zip(
-                    SLOTS, ["head_camera", "left_camera", "right_camera"]
+                    SLOTS if visual else [], ["head_camera", "left_camera", "right_camera"]
                 ):
                     target = dp["data/" + key]
                     target.resize(total + n, 3, 240, 320)
@@ -284,7 +319,7 @@ def export(request):
                     index=index,
                     steps=n,
                     sha256=source["sha256"],
-                    image_sha256=source["image_sha256"],
+                    image_sha256=source.get("image_sha256"),
                     session_id=source.get("session_id"),
                     source_index=source["index"],
                 )
@@ -346,7 +381,7 @@ def export(request):
                 indent=2,
             )
         )
-    readme = f"""Skynet visual policy dataset ({FORMATS[kind]})
+    readme = f"""Skynet policy dataset ({FORMATS[kind]})
 
 {len(episodes)} successful episodes, {total} synchronized control steps.
 The original commands are preserved. Bimanual vectors are reordered left then right;
@@ -369,6 +404,8 @@ Do not replace your existing robot registry files wholesale.
 This export does not install or launch a policy trainer. Custom robot/action/camera
 configuration is required; it does not imply compatibility with every pretrained policy.
 """
+    if not visual:
+        readme = f"Skynet state/action dataset ({FORMATS[kind]}). {len(episodes)} episodes, {total} steps.\nNo images are required. State is pre-action joint position; action is the original raw joint command.\nUse manifest.json for robot layout, action scale/offset, joint order, timing and split.\nThis is joint-state training, not a reproduction of task-specific benchmark observations.\n"
     (output / "README.txt").write_text(readme)
     provenance = json.loads(
         (Path(__file__).parent / "xpolicylab/provenance.json").read_text()
@@ -378,7 +415,8 @@ configuration is required; it does not imply compatibility with every pretrained
         episodes=episodes,
         steps=total,
         capture=common,
-        camera_slots=SLOTS,
+        camera_slots=SLOTS if visual else {},
+        observations=["state", "rgb"] if visual else ["state"],
         policy_to_source_indices=order,
         upstream=provenance,
         implementation="skynet-streaming-v1",

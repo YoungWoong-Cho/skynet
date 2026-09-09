@@ -2007,6 +2007,28 @@ class PipelineService:
         current.setdefault(parts[-1], copy.deepcopy(value))
 
     @classmethod
+    def _apply_training_preset(cls, canonical, manifest):
+        from .training_contracts import selected_preset
+        preset = selected_preset(canonical, manifest.train)
+        if preset is None:
+            return canonical
+        explicit = set((canonical.get("intent") or {}).get("explicit_parameters") or [])
+        cls._set_missing_canonical_path(canonical, "native.config.training_preset", preset.id)
+        for path, value in preset.values.items():
+            present, current = cls._manifest_input_lookup(canonical, path)
+            if path.startswith("train."):
+                if any(path == item or path.startswith(item + ".") for item in explicit):
+                    continue
+                parent = canonical
+                parts = path.split(".")
+                for part in parts[:-1]:
+                    parent = parent.setdefault(part, {})
+                parent[parts[-1]] = copy.deepcopy(value)
+            elif not present or current is None:
+                cls._set_missing_canonical_path(canonical, path, value)
+        return canonical
+
+    @classmethod
     def _apply_manifest_input_defaults(
         cls, canonical: dict[str, Any], manifest: AdapterManifest
     ) -> dict[str, Any]:
@@ -2019,6 +2041,10 @@ class PipelineService:
     def _apply_manifest_data_bindings(
         cls, canonical: dict[str, Any], manifest: AdapterManifest
     ) -> dict[str, Any]:
+        cls._apply_training_preset(canonical, manifest)
+        for field in manifest.train.input_fields:
+            if field.default is not None:
+                cls._set_missing_canonical_path(canonical, field.path, field.default)
         bundle = (canonical.get("data") or {}).get("bundle")
         assignments = bundle.get("assignments") if isinstance(bundle, Mapping) else None
         if not isinstance(assignments, list):
@@ -2065,10 +2091,10 @@ class PipelineService:
                     f"{field.path}: selected data bundle role {binding.role} has no version snapshot"
                 )
             location = (assignment.get("config") or {}).get("location", {})
-            if binding.contract:
-                metadata = version.get("metadata") or {}
-                if metadata.get("contract") != binding.contract or metadata.get("validation", {}).get("status") != "PASSED":
-                    raise ValueError(f"{field.path}: this dataset has not passed the adapter's {binding.contract} data contract")
+            from .training_contracts import data_contract_error
+            error = data_contract_error(binding, version.get("metadata") or {}, canonical)
+            if error:
+                raise ValueError(f"{field.path}: {error}")
             location_ready = (location.get("status") == "AVAILABLE" and location.get("kind") == "cluster" and location.get("manifest_sha256") == version.get("manifest_sha256"))
             if binding.value_path == "location.path" and not location_ready:
                 raise ValueError("Choose a verified training-cluster copy of this dataset")
@@ -2121,6 +2147,13 @@ class PipelineService:
     def _validate_manifest_input_fields(
         cls, canonical: Mapping[str, Any], manifest: AdapterManifest
     ) -> None:
+        if manifest.train.strict_native_config:
+            declared = {field.path.removeprefix("native.config.").split(".")[0] for field in manifest.train.input_fields if field.path.startswith("native.config.")}
+            unknown = set((canonical.get("native") or {}).get("config") or {}) - declared
+            if (canonical.get("native") or {}).get("overrides"):
+                raise ValueError("This adapter only accepts its declared training settings")
+            if unknown:
+                raise ValueError("Unsupported adapter settings: " + ", ".join(sorted(unknown)))
         for field in manifest.train.input_fields:
             present, value = cls._manifest_input_lookup(canonical, field.path)
             missing = not present or value is None or value == "" or value == []
@@ -2132,6 +2165,14 @@ class PipelineService:
                 raise ValueError(
                     f"{field.path}: expected {field.kind}, got {type(value).__name__}"
                 )
+            if field.minimum is not None and value < field.minimum:
+                raise ValueError(f"{field.label}: minimum is {field.minimum:g}")
+            if field.maximum is not None and value > field.maximum:
+                raise ValueError(f"{field.label}: maximum is {field.maximum:g}")
+            if field.maximum_path:
+                _, limit = cls._manifest_input_lookup(canonical, field.maximum_path)
+                if limit is not None and value > limit:
+                    raise ValueError(f"{field.label} cannot exceed {field.maximum_path}")
             if field.choices:
                 allowed = {canonical_sha256(choice) for choice in field.choices}
                 if canonical_sha256(value) not in allowed:
@@ -10479,8 +10520,13 @@ def _resolve_effective_common_hyperparameters(
     provenance: dict[str, Any] = {}
     for key, (canonical_path, manifest_field) in _COMMON_HYPERPARAMETER_FIELDS.items():
         present, spec_value = _mapping_path(spec, canonical_path)
-        if (
-            _path_is_explicit(spec, canonical_path)
+        native_field = next((f for f in train_manifest.get("input_fields") or [] if f.get("canonical_path") == canonical_path), None)
+        if native_field and _mapping_path(spec, native_field["path"])[0]:
+            values[key] = copy.deepcopy(_mapping_path(spec, native_field["path"])[1])
+            provenance[key] = {"status": "resolved", "source": "adapter_input", "canonical_path": canonical_path, "evidence": {"input_path": native_field["path"]}}
+        elif (
+            (not train_manifest.get("strict_canonical_inputs") or _canonical_path_supported(canonical_path, supported))
+            and _path_is_explicit(spec, canonical_path)
             and present
             and spec_value is not None
         ):
@@ -10491,6 +10537,10 @@ def _resolve_effective_common_hyperparameters(
                 "canonical_path": canonical_path,
                 "evidence": {"resolved_spec_sha256": resolved_spec_sha256},
             }
+        elif (preset := next((p for p in train_manifest.get("presets") or [] if p.get("id") == (spec.get("native", {}).get("config", {}).get("training_preset") or train_manifest.get("default_preset"))), None)) and canonical_path in preset.get("values", {}):
+            values[key] = copy.deepcopy(spec_value if present else preset["values"][canonical_path])
+            provenance[key] = {"status":"resolved", "source":"training_preset", "canonical_path":canonical_path,
+                               "evidence":{"preset":preset["id"], "adapter_manifest_sha256":manifest_sha256}}
         elif canonical_path in repository_values:
             value, provenance_source, evidence = repository_values[canonical_path]
             values[key] = value
@@ -10529,6 +10579,7 @@ def _resolve_effective_common_hyperparameters(
             }
     return {
         "schema_version": "skynet.common-hyperparameters/v1",
+        "adapter_settings": {f["path"]: _mapping_path(spec, f["path"])[1] for f in train_manifest.get("input_fields") or [] if not f.get("data_binding") and _mapping_path(spec, f["path"])[0]},
         "values": values,
         "provenance": provenance,
     }
@@ -10831,6 +10882,7 @@ def get_run(run_id: str) -> dict[str, Any]:
         common = _attempt_common_hyperparameter_contract(
             run, attempt, receipt_event
         )
+        attempt["adapter_settings"] = common.get("adapter_settings", {})
         attempt["common_hyperparameters"] = common["values"]
         attempt["common_hyperparameter_provenance"] = common["provenance"]
         attempt["common_hyperparameters_schema_version"] = common["schema_version"]

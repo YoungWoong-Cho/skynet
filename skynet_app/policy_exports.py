@@ -99,7 +99,7 @@ class PolicyExportService:
                     process.terminate()
         self.executor.shutdown(wait=True, cancel_futures=True)
 
-    def sources(self, session, indices=None):
+    def sources(self, session, indices=None, *, require_images=True):
         if session["state"] not in TERMINAL:
             raise ValueError("End the collection session before preparing its dataset")
         recordings = session.get("recordings", [])
@@ -116,6 +116,13 @@ class PolicyExportService:
         for index in sorted(indices):
             name = recordings[index]
             image = session.get("recording_images", {}).get(name)
+            if not require_images and not image:
+                self.reviews.source(session["id"], index)
+                checksum = session.get("recording_checksums", {}).get(name, "")
+                if not re.fullmatch(r"[a-f0-9]{64}", checksum):
+                    raise ValueError("Recording checksum is missing")
+                result.append(dict(session_id=session["id"], index=index, path=name, sha256=checksum, image_size_bytes=0))
+                continue
             if not image:
                 raise ValueError(
                     "This session has no completed training images. Wait for image preparation, or collect a new session with training images enabled."
@@ -245,7 +252,7 @@ class PolicyExportService:
         for session in self.live.list():
             resource = None
             try:
-                sources = self.sources(session)
+                sources = self.sources(session, require_images=False)
                 reason = None
                 with self.lock:
                     resource = self.dataset(session, create=False)
@@ -266,7 +273,7 @@ class PolicyExportService:
                             if (resource or {}).get("archived_at")
                             else None
                         ),
-                        images=len(sources),
+                        images=len(session.get("recording_images") or {}),
                         resource_id=(resource or {}).get("id"),
                     )
                 )
@@ -341,7 +348,8 @@ class PolicyExportService:
         for selection in sorted(selections, key=lambda s: s["session_id"]):
             sources.extend(
                 self.sources(
-                    self.live.get(selection["session_id"]), selection.get("indices")
+                    self.live.get(selection["session_id"]), selection.get("indices"),
+                    require_images="rgb" in RECIPES[format]["observations"]
                 )
             )
         if (
@@ -354,7 +362,7 @@ class PolicyExportService:
                 "The selection contains duplicate recordings; select each episode once"
             )
         split = self.split(sources, validation_percent, seed)
-        if format == "dp" and not split["validation"]:
+        if RECIPES[format]["trainable"] and not split["validation"]:
             raise ValueError(
                 "DP training needs at least two episodes and a non-zero validation split"
             )
@@ -379,6 +387,7 @@ class PolicyExportService:
             "formats.json": canonical_json(
                 {key: value["format"] for key, value in RECIPES.items()}
             ),
+            "images.py": (self.live.root / "ops/xr/images.py").read_text(),
             "skynet_dp_training.py": (
                 self.live.root / "skynet_app/adapters/dp_training.py"
             ).read_text(),
@@ -566,20 +575,21 @@ class PolicyExportService:
                 for item in job["sources"]:
                     session = self.live.get(item.get("session_id", job["session_id"]))
                     recording = self.root / "sources" / (item["sha256"] + ".pkl")
-                    images = self.root / "sources" / (item["image_sha256"] + ".hdf5")
+                    images = self.root / "sources" / (item["image_sha256"] + ".hdf5") if item.get("image_sha256") else None
                     self.download(
                         session, item["path"], recording, item["sha256"], 100_000_000
                     )
-                    self.download(
-                        session,
-                        item["image_path"],
-                        images,
-                        item["image_sha256"],
-                        4_000_000_000,
-                        item["image_size_bytes"],
-                    )
+                    if images is not None:
+                        self.download(
+                            session,
+                            item["image_path"],
+                            images,
+                            item["image_sha256"],
+                            4_000_000_000,
+                            item["image_size_bytes"],
+                        )
                     sources.append(
-                        dict(item, recording=str(recording), images=str(images))
+                        dict(item, recording=str(recording), images=str(images) if images else None)
                     )
                 # This directory belongs only to this job. Failed partial output is never registered.
                 if (directory / "output").exists():
@@ -600,7 +610,7 @@ class PolicyExportService:
                 self.update(
                     identifier,
                     stage="CONVERTING",
-                    detail="Preparing synchronized images and actions",
+                    detail="Converting the selected observations and actions",
                 )
                 with (directory / "export.log").open("w") as log:
                     process = subprocess.Popen(
@@ -799,7 +809,7 @@ class PolicyExportService:
             raise ValueError(
                 "Training cluster verification did not match the prepared dataset"
             )
-        if job["format"] == "dp":
+        if job["format"] in {"dp", "dp-state"}:
             self.update(
                 job["id"],
                 stage="CHECKING_LOADER",
@@ -832,6 +842,8 @@ class PolicyExportService:
                     f"{WORK_ROOT}/jobs/runs/{job['id']}/dataset-validation",
                     "--batch-size",
                     "1",
+                    "--observation-mode",
+                    "rgb" if job["format"] == "dp" else "state",
                     "--verify-only",
                 ]
             )
@@ -839,7 +851,8 @@ class PolicyExportService:
             receipt = json.loads(output.strip().splitlines()[-1])
             if (
                 receipt.get("manifest_sha256") != version["manifest_sha256"]
-                or receipt.get("schema") != "skynet.dp-loader-validation/v1"
+                or receipt.get("schema") not in {"skynet.dp-loader-validation/v1", "skynet.dp-loader-validation/v2"}
+                or (receipt.get("schema") == "skynet.dp-loader-validation/v2" and receipt.get("observation_mode") != ("rgb" if job["format"] == "dp" else "state"))
             ):
                 raise ValueError("DP loader verification returned a different dataset")
             self.update(job["id"], loader_validation=receipt)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from abc import ABC, abstractmethod
 from pathlib import PurePosixPath
@@ -9,6 +10,8 @@ from typing import Any, Literal, Mapping
 from pydantic import Field, computed_field, field_serializer, field_validator, model_serializer, model_validator
 
 from skynet_app.experiments import AdapterName, CanonicalModel, ExperimentSpec, canonical_sha256
+
+from skynet_app.training_contracts import DatasetRequirement, TrainingPreset
 
 from .groot_isaaclab_bridge import GROOT_ISAACLAB_BRIDGE_SOURCE
 from .groot_robocasa_bridge import GROOT_ROBOCASA_BRIDGE_SOURCE
@@ -1517,6 +1520,9 @@ class DataBundleInputBinding(CanonicalModel):
     formats: list[str] = Field(default_factory=list, max_length=32)
     value_path: Literal["version.path", "mount_path", "location.path", "version.manifest_sha256"] = "version.path"
     contract: str | None = None
+    contracts: list[str] = Field(default_factory=list)
+    contract_selector: str | None = None
+    contract_choices: dict[str, list[str]] = Field(default_factory=dict)
 
     @field_validator("role")
     @classmethod
@@ -1553,6 +1559,10 @@ class AdapterInputField(CanonicalModel):
     data_binding: DataBundleInputBinding | None = None
     help: str = Field(default="", max_length=1000)
     tutorial_value: Any | None = None
+    minimum: float | None = None
+    maximum: float | None = None
+    maximum_path: str | None = None
+    canonical_path: str | None = None
     sensitive: bool = Field(
         default=False,
         deprecated=True,
@@ -1574,7 +1584,7 @@ class AdapterInputField(CanonicalModel):
         if kind == "integer":
             return isinstance(value, int) and not isinstance(value, bool)
         if kind == "number":
-            return isinstance(value, (int, float)) and not isinstance(value, bool)
+            return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
         if kind == "boolean":
             return isinstance(value, bool)
         if kind == "string_list":
@@ -1679,6 +1689,11 @@ class RepositoryArgumentValidation(CanonicalModel):
 
 
 class CommandTemplate(CanonicalModel):
+    data_requirements: DatasetRequirement | None = None
+    presets: list[TrainingPreset] = Field(default_factory=list)
+    default_preset: str | None = None
+    strict_canonical_inputs: bool = False
+    strict_native_config: bool = False
     argv: list[str] = Field(default_factory=list)
     static_args: list[str] = Field(default_factory=list)
     parameter_flags: dict[str, ArgumentBinding] = Field(default_factory=dict)
@@ -2023,6 +2038,9 @@ class AdapterManifest(CanonicalModel):
                     f"capabilities {self.capabilities.minimum_gpus}-"
                     f"{self.capabilities.maximum_gpus}"
                 )
+        preset_ids = [p.id for p in self.train.presets]
+        if len(preset_ids) != len(set(preset_ids)) or (self.train.default_preset and self.train.default_preset not in preset_ids):
+            raise ValueError("Training presets require unique IDs and a declared default")
         supported = set(self.train.supported_canonical_fields)
         declared_defaults = {
             "train.learning_rate": self.defaults.hyperparameters.learning_rate,
@@ -2066,7 +2084,10 @@ def canonical_adapter_manifest(value: AdapterManifest | dict[str, Any]) -> dict[
                 for key, child in item.items()
                 if not (
                     (key == "companion_arguments" and child == [])
-                    or (key == "argument_validation" and child is None)
+                    or (key in {"argument_validation", "data_requirements", "default_preset", "contract_selector", "minimum", "maximum", "maximum_path", "canonical_path"} and child is None)
+                    or (key in {"presets", "contracts"} and child == [])
+                    or (key == "contract_choices" and child == {})
+                    or (key in {"strict_canonical_inputs", "strict_native_config"} and child is False)
                 )
             }
         if isinstance(item, list):
@@ -2358,18 +2379,17 @@ def _unsupported_canonical_train_overrides(
 
     blockers: list[str] = []
     for path in _CANONICAL_TRAIN_OVERRIDE_PATHS:
-        if not spec.intent.is_explicit(path):
-            continue
         value = _path_value(actual, path)
         expected = _path_value(baseline, path)
-        if canonical_sha256(value) == canonical_sha256(expected):
+        if not spec.intent.is_explicit(path) and (not manifest.train.strict_canonical_inputs or canonical_sha256(value) == canonical_sha256(expected)):
+            continue
+        if not manifest.train.strict_canonical_inputs and canonical_sha256(value) == canonical_sha256(expected):
             continue
         if _canonical_path_is_supported(path, supported):
             continue
         blockers.append(
             f"adapter {manifest.slug} does not map canonical value {path}="
-            f"{_serialize_override(value)}; leave it at the declared default or add "
-            "a versioned adapter mapping"
+            f"{_serialize_override(value)}; remove this override or choose a supported setting"
         )
     return blockers
 
@@ -2701,6 +2721,21 @@ class ManifestAdapter(RepositoryAdapter):
         )
 
 
+def _builtin_data_requirements(slug):
+    declarations = {
+        "dexmimicgen": ("dataset", ["configured_observations"], "configured_robot_actions", "Robomimic HDF5 with a matching robot and environment configuration; no collection converter is registered."),
+        "egoverse": ("dataset", ["configured_observations"], "configured_actions", "The selected EgoVerse configuration defines the observation and action layout; no collection converter is registered."),
+        "groot": ("dataset", ["rgb", "state", "language"], "embodiment_actions", "GR00T LeRobot data with an embodiment mapping. The GR1 bridge cannot consume arbitrary hand joint commands."),
+        "openpi": ("dataset", ["rgb", "state", "language"], "configured_robot_actions", "LeRobot data and matching normalization. The LIBERO bridge requires state[8], actions[7], and a wrist camera."),
+        "get_zero": ("simulation", ["simulation_observations"], "simulation_actions", "Simulation and distillation workflows use task configuration and rollout data, not a teleoperation dataset."),
+        "generic": ("custom", [], None, "Declare dataset bindings, observation and action requirements for the selected trainer before choosing a converter."),
+    }
+    if slug not in declarations:
+        return None
+    mode, observations, actions, description = declarations[slug]
+    return DatasetRequirement(mode=mode, observations=observations, action_representation=actions, description=description)
+
+
 def _builtin_manifest(
     slug: str,
     display_name: str,
@@ -2763,6 +2798,8 @@ def _builtin_manifest(
         ),
         prerequisites=prerequisites or [],
         train=CommandTemplate(
+            strict_canonical_inputs=True,
+            data_requirements=_builtin_data_requirements(slug),
             argv=argv or [],
             resume_argv=resume_argv or [],
             input_fields=input_fields or [],

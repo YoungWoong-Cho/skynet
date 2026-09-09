@@ -1,15 +1,28 @@
 """Versioned conversion recipes and the training contracts they satisfy.
 
-Format names, compatibility explanations and UI choices are defined here only.
+Format names and conversion outputs are defined here. Training requirements
+and supported settings belong to the versioned adapter declarations.
 An adapter can consume a recipe by declaring its contract in a data binding.
 """
 
 XPL_COMMIT = "9c98a3aaf02d05c6f9999a5a0a7a42090555ddf3"
 XPL_REPOSITORY = "https://github.com/XPolicyLab/XPolicyLab"
 RECIPES = {
+    "dp-state": dict(
+        id="dp-state",
+        name="Diffusion Policy · state",
+        format="xpolicylab-dp-zarr/v1",
+        container="Zarr",
+        contract="skynet.dp-joints/v1",
+        adapter="xpolicylab-dp",
+        trainable=True,
+        observations=["state"],
+        description="Joint states and commands; no images required.",
+    ),
     "dp": dict(
         id="dp",
-        name="Diffusion Policy",
+        name="Diffusion Policy · RGB",
+        observations=["state", "rgb"],
         format="xpolicylab-dp-zarr/v1",
         container="Zarr",
         contract="skynet.dp-rgb-joints/v1",
@@ -20,6 +33,7 @@ RECIPES = {
     "act": dict(
         id="act",
         name="ACT",
+        observations=["state", "rgb"],
         format="xpolicylab-act-hdf5/v1",
         container="HDF5",
         contract="skynet.act-rgb-joints/v1",
@@ -30,6 +44,7 @@ RECIPES = {
     "xpolicylab": dict(
         id="xpolicylab",
         name="XPolicyLab demonstrations",
+        observations=["state", "rgb"],
         format="xpolicylab-demonstrations/v1",
         container="HDF5",
         contract="skynet.xpl-rgb-joints/v1",
@@ -38,26 +53,21 @@ RECIPES = {
         description="Prepare shared demonstrations for another XPolicyLab converter; additional policy requirements still apply.",
     ),
 }
-ADAPTER_REQUIREMENTS = {
-    "dexmimicgen": "Requires a Robomimic dataset and a matching robot/environment configuration. A converter for these recordings is not available yet.",
-    "egoverse": "Requires the selected EgoVerse configuration's observation and action layout. A converter for these recordings is not available yet.",
-    "groot": "Requires GR00T LeRobot data and an embodiment mapping. The current GR1 bridge cannot consume Shadow joint commands.",
-    "openpi": "Requires LeRobot data and matching normalization. The current LIBERO bridge expects state[8], actions[7] and a wrist camera; these recordings have another robot/camera layout.",
-    "get_zero": "The current simulation and distillation workflows do not consume these teleoperation recordings.",
-    "generic": "This adapter must declare its trainer's data contract before Skynet can select a converter.",
-}
 
 
 def catalog(database):
     adapters = [a for a in database.list_adapter_registry() if not a.get("archived_at")]
-    active = {
-        (a.get("latest_version") or {}).get("manifest", {}).get("slug", a.get("slug"))
-        for a in adapters
-    }
+    manifests = {(a.get("latest_version") or {}).get("manifest", {}).get("slug", a.get("slug")): (a.get("latest_version") or {}).get("manifest", {}) for a in adapters}
     entries = [dict(value, available=True) for value in RECIPES.values()]
     for entry in entries:
+        entry["compatible_adapters"] = [slug for slug, manifest in manifests.items() if any(
+            entry["format"] in binding.get("formats", [])
+            and entry["contract"] in (binding.get("contracts") or [binding.get("contract")])
+            for field in manifest.get("train", {}).get("input_fields", [])
+            if (binding := field.get("data_binding"))
+        )]
         if entry["adapter"]:
-            entry["trainable"] = entry["adapter"] in active
+            entry["trainable"] = entry["adapter"] in entry["compatible_adapters"]
             if entry["trainable"]:
                 entry["training_setup"] = dict(
                     adapter=entry["adapter"],
@@ -65,6 +75,9 @@ def catalog(database):
                     revision=XPL_COMMIT,
                     runtime="existing",
                     runtime_profile="skynet-dp",
+                    preset="dexverse-state/v1"
+                    if entry["id"] == "dp-state"
+                    else "rgb-joints/v2",
                 )
             else:
                 entry["description"] += (
@@ -84,9 +97,11 @@ def catalog(database):
                 name=manifest.get("display_name") or adapter.get("name") or slug,
                 available=False,
                 trainable=False,
-                description=ADAPTER_REQUIREMENTS.get(
-                    slug,
-                    "No converter is registered for this adapter's declared data contract.",
+                description=(
+                    manifest.get("train", {}).get("data_requirements") or {}
+                ).get(
+                    "description",
+                    "No converter is registered for this adapter’s declared data contract.",
                 ),
             )
         )

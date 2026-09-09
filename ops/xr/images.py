@@ -122,34 +122,39 @@ class ImageWriter:
         self.temp.unlink(missing_ok=True)
 
 
+def state_metadata(env, profile):
+    robot = env.scene["robot"]
+    names, terms, scales, offsets = [], {}, [], []
+    for name in env.action_manager.active_terms:
+        term = env.action_manager.get_term(name)
+        if type(term).__name__ != "JointPositionAction" or term.cfg.asset_name != "robot":
+            raise ValueError("State capture supports named joint-position actions only: " + name)
+        joint_names = list(term._joint_names)
+        terms[name] = joint_names
+        names.extend(joint_names)
+        for key, target in [("_scale", scales), ("_offset", offsets)]:
+            value = array(getattr(term, key))
+            target.extend(np.broadcast_to(value, (1, len(joint_names)))[0].tolist())
+    ids = [robot.joint_names.index(n) for n in names]
+    metadata = dict(
+        robot=profile["robot"], task=profile["task"], hand=profile["hand"],
+        source_revision=profile["source_revision"], action_joint_names=names, robot_joint_names=list(robot.joint_names),
+        action_terms=terms, action_scale=scales, action_offset=offsets,
+        action_semantics="raw_joint_position_command; target = action * scale + offset",
+        groups=joint_layout(names, profile["hand"], profile.get("hand_manifest", {}).get("wrist_joints")),
+        step_dt=float(env.step_dt), alignment="image and state before action; simulation time excludes tracking pauses",
+        color_space="RGB", cameras={k: dict(sensor=v, mount="fixed_scene", width=256, height=256) for k, v in CAMERAS.items()},
+    )
+    return ids, metadata
+
+
 class ImageRecorder:
     def __init__(self, root, env, profile, retargeters):
         # Fail before recording if the runtime is missing HDF5 support.
         import h5py  # noqa: F401
         self.root, self.env, self.retargeters = root, env, retargeters
         self.writer = None
-        robot = env.scene["robot"]
-        names, terms, scales, offsets = [], {}, [], []
-        for name in env.action_manager.active_terms:
-            term = env.action_manager.get_term(name)
-            if type(term).__name__ != "JointPositionAction" or term.cfg.asset_name != "robot":
-                raise ValueError("Image export supports named joint-position actions only: " + name)
-            joint_names = list(term._joint_names)
-            terms[name] = joint_names
-            names.extend(joint_names)
-            for key, target in [("_scale", scales), ("_offset", offsets)]:
-                value = array(getattr(term, key))
-                target.extend(np.broadcast_to(value, (1, len(joint_names)))[0].tolist())
-        self.ids = [robot.joint_names.index(n) for n in names]
-        self.metadata = dict(
-            robot=profile["robot"], task=profile["task"], hand=profile["hand"],
-            source_revision=profile["source_revision"], action_joint_names=names, robot_joint_names=list(robot.joint_names),
-            action_terms=terms, action_scale=scales, action_offset=offsets,
-            action_semantics="raw_joint_position_command; target = action * scale + offset",
-            groups=joint_layout(names, profile["hand"], profile.get("hand_manifest", {}).get("wrist_joints")),
-            step_dt=float(env.step_dt), alignment="image and state before action; simulation time excludes tracking pauses",
-            color_space="RGB", cameras={k: dict(sensor=v, mount="fixed_scene", width=256, height=256) for k, v in CAMERAS.items()},
-        )
+        self.ids, self.metadata = state_metadata(env, profile)
 
     def begin(self):
         self.discard()
