@@ -128,6 +128,11 @@ def manifests():
                 kind="integer",
                 default=value,
                 minimum=minimum,
+                help={
+                    "validation_every": "Epochs between validation runs.",
+                    "train_batches": "Maximum training batches per epoch.",
+                    "validation_batches": "Maximum batches per validation run.",
+                }.get(key, ""),
                 canonical_path="train.max_epochs" if key == "epochs" else None,
             )
             for key, label, value, minimum in settings
