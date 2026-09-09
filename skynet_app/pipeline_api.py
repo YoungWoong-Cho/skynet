@@ -2175,6 +2175,8 @@ class PipelineService:
                     raise ValueError(f"{field.label} cannot exceed {field.maximum_path}")
             if field.choices:
                 allowed = {canonical_sha256(choice) for choice in field.choices}
+                if field.path == "native.config.training_preset" and manifest.train.presets:
+                    allowed.add(canonical_sha256("custom"))
                 if canonical_sha256(value) not in allowed:
                     raise ValueError(
                         f"{field.path}: value is not one of the declared choices"
@@ -6735,6 +6737,8 @@ class PipelineService:
                 "tracking_bindings_repaired": 0,
             }
         try:
+            # Completed jobs can still have metrics waiting on a rate-limit cooldown.
+            self._flush_tracking_provider("wandb", limit=10)
             repairs = self.database.repair_workflow_state_invariants()
             recovered_submissions = 0
             with self.database.connection() as connection:
@@ -7482,7 +7486,7 @@ class PipelineService:
                     )
                 elif name == "wandb":
                     bridge = WandBBridge(
-                        LOCAL_CAPSULE_ROOT / run_id, self._wandb_settings(provider)
+                        LOCAL_CAPSULE_ROOT / run_id, replace(self._wandb_settings(provider), auto_flush=False)
                     )
                 else:
                     raise ValueError(f"unsupported tracking provider: {name}")
@@ -7507,6 +7511,10 @@ class PipelineService:
                     )
                     emitted.add(idempotency_key)
                     published += 1
+                if name == "wandb":
+                    report = bridge.drain_spool()
+                    if report.errors:
+                        raise TrackingRequestError(report.errors[0])
             except Exception as error:
                 self._tracking_failure(name, run, error)
         return published

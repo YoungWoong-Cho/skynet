@@ -13,6 +13,8 @@ mappings remain the submission path; there is no separate DP submission system.
   remain responsible for their exact repository configuration and robot layout.
 - `train.presets` pins a versioned set of defaults and its reference. The selected
   preset is retained in the experiment; user overrides remain explicit.
+- Editing a preset value switches the form to Custom. The submitted custom values
+  stay explicit; choosing a preset restores its defaults.
 - Typed input bounds and cross-field limits reject invalid settings before launch.
   Current built-ins reject unsupported canonical overrides even if their values
   happen to equal generic schema defaults. Historical pinned versions preserve
@@ -59,3 +61,8 @@ reference-protected deletion use the existing dataset lifecycle.
 Existing jobs keep their pinned capsule. Changing from RGB to state changes the
 model architecture and requires a new run. Autonomous simulator evaluation is
 still not integrated; this change validates training and held-out loss.
+
+W&B uploads batch queued history samples without changing their steps or timestamps.
+Rate limits persist a retry delay across restarts. Reconciliation retries queued
+metrics even after training finishes, so an upload delay does not require rerunning
+training.

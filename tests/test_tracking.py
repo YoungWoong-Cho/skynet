@@ -145,20 +145,9 @@ class FakeWandBBridge(WandBBridge):
             settings or WandBSettings(api_key=api_key, entity="team", auto_flush=True),
         )
 
-    def _append_history(
-        self,
-        run: dict[str, Any],
-        metrics: Mapping[str, Any],
-        *,
-        step: int,
-        timestamp_ms: int,
-    ) -> None:
-        self.history_rows.append({
-            **dict(metrics),
-            "_step": step,
-            "_timestamp": timestamp_ms / 1000.0,
-        })
-        run["history_offset"] = int(run.get("history_offset") or 0) + 1
+    def _append_history_rows(self, run, rows):
+        self.history_rows.extend(dict(row) for row in rows)
+        run["history_offset"] = int(run.get("history_offset") or 0) + len(rows)
 
     def _graphql(self, query: str, variables: Mapping[str, Any]) -> dict[str, Any]:
         self.graphql_calls.append((query, dict(variables)))

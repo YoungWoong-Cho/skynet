@@ -67,9 +67,6 @@ const elements = {
   adapterDeclaredFieldsStatus: document.querySelector("#adapter-declared-fields-status"),
   adapterDeclaredFieldsError: document.querySelector("#adapter-declared-fields-error"),
   resourcePolicy: document.querySelector("#resource-policy"),
-  experimentNodeMode: document.querySelector("#experiment-node-mode"),
-  experimentNodeField: document.querySelector("#experiment-node-field"),
-  experimentNodeName: document.querySelector("#experiment-node-name"),
   gpuMode: document.querySelector("#gpu-mode"),
   experimentGpuCount: document.querySelector("#experiment-gpu-count"),
   experimentGpuType: document.querySelector("#experiment-gpu-type"),
@@ -1256,13 +1253,16 @@ function shortId(value, size = 12) {
 }
 
 function stateClass(state) {
-  const normalized = String(state || "").toLowerCase();
+  const normalized = String(state || "").toLowerCase().replaceAll("_", " ");
+  if (/fail|error|cancel|unavailable|missing|invalid|incomplete|attention|blocked/.test(normalized)) return "is-failed";
+  if (["local", "on this computer", "recorded", "original recordings saved"].includes(normalized)) return "is-local";
+  if (["ready", "prepared", "on cluster", "available", "images ready"].includes(normalized) || /prepared formats?$/.test(normalized)) return "is-running";
+  if (/converting|fetching|validating|transferring|verifying|checking/.test(normalized)) return "is-pending";
   if (normalized.includes("idle")) return "is-idle";
   if (normalized.includes("mixed")) return "is-mixed";
   if (normalized.includes("running")) return "is-running";
-  if (normalized.includes("complete") || normalized.includes("success")) return "is-running";
+  if (normalized.includes("complete") || normalized.includes("success") || normalized.includes("succeed")) return "is-running";
   if (normalized.includes("pending") || normalized.includes("queue")) return "is-pending";
-  if (normalized.includes("fail") || normalized.includes("error") || normalized.includes("cancel")) return "is-failed";
   if (normalized.includes("preempt") || normalized.includes("pause")) return "is-preempted";
   return "is-other";
 }
@@ -2263,7 +2263,8 @@ function resolvedCommonHyperparameterDefault(
 ) {
   const command = adapterManifest(adapter)?.train || {};
   const control = document.getElementById(adapterFieldControlId("native.config.training_preset"));
-  const preset = (command.presets || []).find(p => JSON.stringify(p.id) === control?.value) || (command.presets || []).find(p => p.id === command.default_preset);
+  const preset = (command.presets || []).find(p => JSON.stringify(p.id) === control?.value)
+    || (!control?.value ? (command.presets || []).find(p => p.id === command.default_preset) : null);
   if (preset?.values && Object.prototype.hasOwnProperty.call(preset.values, path)) return {value:preset.values[path], origin:"preset", preset, adapter};
   const repositoryDefault = repositoryDefaults.get(path);
   if (repositoryDefault) return repositoryDefault;
@@ -2310,10 +2311,7 @@ function adapterDefaultProvenance(record) {
 
 function commonHyperparameterDefaultText(record) {
   if (!record) return "Default: not declared.";
-  const provenance = record.origin === "repository"
-    ? repositoryDefaultProvenance(record)
-    : adapterDefaultProvenance(record);
-  return `Default: ${displayCommonHyperparameterDefault(record.value)}. ${provenance}`;
+  return `Default: ${displayCommonHyperparameterDefault(record.value)}.`;
 }
 
 function renderCommonHyperparameterDefaults(adapter = selectedAdapter()) {
@@ -2356,6 +2354,7 @@ function renderCommonHyperparameterDefaults(adapter = selectedAdapter()) {
       control.placeholder = placeholderText;
     }
     status.textContent = statusText;
+    status.title = sourceRecord ? (sourceRecord.origin === "repository" ? repositoryDefaultProvenance(sourceRecord) : adapterDefaultProvenance(sourceRecord)) : "";
     status.dataset.defaultSource = sourceRecord?.origin || "not-declared";
   });
 }
@@ -2376,7 +2375,9 @@ function clearRepositoryInputOptions({ render = false } = {}) {
 }
 
 function adapterInputFields(adapter = selectedAdapter()) {
-  const fields = declaredAdapterInputFields(adapter);
+  const fields = declaredAdapterInputFields(adapter).map(field =>
+    field.path === "native.config.training_preset" && adapterManifest(adapter)?.train?.presets?.length
+      ? {...field, choices: [...new Set([...(field.choices || []), "custom"])]} : field);
   const options = activeRepositoryInputOptions(adapter);
   return fields.map((field) => {
     const discovered = options?.get(field.path) || null;
@@ -2450,7 +2451,7 @@ function resolveAdapterDataBinding(field) {
   if (!value) {
     return { value: null, state: "error", message: `Selected bundle does not declare ${binding.value_path || "version.path"}.` };
   }
-  return { value: String(value), state: "complete", message: `Derived from ${bundle.name}@${bundle.version}, role ${binding.role}.` };
+  return { value: String(value), state: "complete", message: "From the selected dataset." };
 }
 
 function adapterManifestFingerprint(manifest) {
@@ -2549,7 +2550,14 @@ function captureAdapterDeclaredValues() {
 function applyTrainingPreset(identifier) {
   const command = adapterManifest(selectedAdapter())?.train || {};
   const preset = (command.presets || []).find(item => item.id === identifier);
-  if (!preset) return;
+  if (!preset) {
+    if (identifier === "custom") {
+      captureAdapterDeclaredValues();
+      renderCommonHyperparameterDefaults();
+      invalidateExperimentPreview();
+    }
+    return;
+  }
   const fields = adapterInputFields();
   const values = adapterDeclaredScopeValues(renderedAdapterDeclaredScope, true);
   for (const [path, value] of Object.entries({...preset.values, "native.config.training_preset": identifier})) {
@@ -2566,6 +2574,41 @@ function applyTrainingPreset(identifier) {
   renderAdapterDeclaredFields();
   validateAdapterDeclaredFields({focus:false, notify:false});
   invalidateExperimentPreview();
+}
+
+function updateTrainingPresetLabel() {
+  const fields = adapterInputFields();
+  const presetField = fields.find(f => f.path === "native.config.training_preset");
+  const control = presetField && document.getElementById(adapterFieldControlId(presetField.path));
+  const preset = (adapterManifest(selectedAdapter())?.train?.presets || [])
+    .find(p => JSON.stringify(p.id) === control?.value);
+  if (!preset) return;
+  const commonControls = [];
+  const matches = Object.entries(preset.values).map(([path, expected]) => {
+    const field = fields.find(f => f.path === path);
+    const input = field && document.getElementById(adapterFieldControlId(path));
+    if (input) {
+      const parsed = parseAdapterDeclaredValue(input, field);
+      return !parsed.error && JSON.stringify(parsed.present ? parsed.value : field.default) === JSON.stringify(expected);
+    }
+    const definition = COMMON_HYPERPARAMETER_DEFAULT_FIELDS.find(f => f.path === path);
+    if (!definition) return true;
+    const inputCommon = elements[definition.control];
+    commonControls.push([inputCommon, expected]);
+    const raw = inputCommon.value;
+    const value = raw === "" || raw === definition.defaultOption ? expected
+      : typeof expected === "number" ? Number(raw) : raw;
+    return JSON.stringify(value) === JSON.stringify(expected);
+  }).every(Boolean);
+  if (matches) return;
+  // Preserve inherited values before switching off preset defaults.
+  for (const [input, value] of commonControls) {
+    if (!input.value || input.value === "adapter-default") input.value = String(value);
+  }
+  setAdapterFieldControlValue(control, presetField, "custom");
+  adapterDeclaredScopeValues(renderedAdapterDeclaredScope, true)?.set(presetField.path,
+    {kind: presetField.kind, raw: control.value, touched: true});
+  renderCommonHyperparameterDefaults();
 }
 
 function renderAdapterDeclaredFields(adapter = selectedAdapter()) {
@@ -2635,7 +2678,7 @@ function renderAdapterDeclaredFields(adapter = selectedAdapter()) {
         const option = document.createElement("option");
         option.value = JSON.stringify(choice);
         option.textContent = field.path === "native.config.training_preset"
-          ? (adapterManifest(adapter)?.train?.presets || []).find(p => p.id === choice)?.name || choice
+          ? (choice === "custom" ? "Custom" : (adapterManifest(adapter)?.train?.presets || []).find(p => p.id === choice)?.name || choice)
           : typeof choice === "string" ? choice : JSON.stringify(choice);
         control.append(option);
       });
@@ -2684,7 +2727,9 @@ function renderAdapterDeclaredFields(adapter = selectedAdapter()) {
     const help = document.createElement("small");
     help.id = `${id}-help`;
     const currentPreset = (adapterManifest(adapter)?.train?.presets || []).find(p => JSON.stringify(p.id) === control.value);
-    const fieldHelp = currentPreset?.description || field.help || `Manifest path: ${field.path}`;
+    const fieldHelp = field.path === "native.config.training_preset"
+      ? "Choose a preset or customize its values."
+      : currentPreset?.description || field.help || "";
     const baseHelp = field.sensitive
       ? `${fieldHelp} Masked on this screen only. The submitted value is included in the experiment metadata and reproducibility specification; do not enter credentials.`
       : fieldHelp;
@@ -2704,7 +2749,9 @@ function renderAdapterDeclaredFields(adapter = selectedAdapter()) {
       help.textContent = [baseHelp, status, warnings].filter(Boolean).join(" ");
       help.dataset.discoveryState = choiceDiscovery?.complete && field.choices?.length ? "complete" : "error";
     } else {
-      help.textContent = [baseHelp, field._dataBindingResolution?.message].filter(Boolean).join(" ");
+      help.textContent = field._dataBindingResolution?.state === "complete"
+        ? field._dataBindingResolution.message
+        : [baseHelp, field._dataBindingResolution?.message].filter(Boolean).join(" ");
       if (field._dataBindingResolution) help.dataset.discoveryState = field._dataBindingResolution.state;
     }
     wrapper.append(help);
@@ -2965,8 +3012,6 @@ function applySelectedAdapter({ loadSource = true } = {}) {
   setManifestDefault(elements.resourceMemory, manifestDefault(manifest, "resources", "memory_gb"));
   setManifestDefault(elements.resourceTime, manifestDefault(manifest, "resources", "time_limit"));
   setManifestDefault(elements.resourcePolicy, manifestDefault(manifest, "resources", "queue_policy"));
-  setManifestDefault(elements.experimentNodeMode, manifestDefault(manifest, "resources", "node_mode"));
-  setManifestDefault(elements.experimentNodeName, manifestDefault(manifest, "resources", "node"));
   setManifestDefault(elements.gpuMode, manifestDefault(manifest, "resources", "gpu_mode"));
   setManifestDefault(elements.experimentGpuCount, firstValue(
     manifestDefault(manifest, "resources", "gpu_count"),
@@ -4724,8 +4769,8 @@ function experimentPayload() {
       account: preservedResources.account || "rl2-lab",
       ...(preservedResources.partition ? { partition: preservedResources.partition } : {}),
       queue_policy: elements.resourcePolicy.value,
-      node_mode: elements.experimentNodeMode.value,
-      node: elements.experimentNodeMode.value === "manual" ? elements.experimentNodeName.value.trim() : null,
+      node_mode: "auto",
+      node: null,
       gpu_mode: elements.gpuMode.value,
       gpus_per_node: elements.gpuMode.value === "manual" ? numberOrNull(elements.experimentGpuCount) : null,
       gpu_type: elements.experimentGpuType.value,
@@ -4818,9 +4863,6 @@ function validateExperiment({ notify = true, batchValidation = null } = {}) {
         ? "an Apptainer image path/reference"
         : "a pinned runtime input";
     return reject(`The manual ${runtimeDisplayName(runtime.value)} runtime requires ${requirement}.`);
-  }
-  if (elements.experimentNodeMode.value === "manual" && !elements.experimentNodeName.value.trim()) {
-    return reject("A node name is required for manual placement.");
   }
   if (elements.checkpointMode.value !== "none" && !elements.checkpointPath.value.trim()) {
     return reject("A checkpoint path or run ID is required.");
@@ -5699,9 +5741,6 @@ async function hydrateExperimentConfiguration(spec, request) {
     setLoadedSelectValue(elements.gateway, resources.gateway, "SSH gateway");
   }
   setLoadedSelectValue(elements.resourcePolicy, resources.queue_policy, "Queue policy");
-  const node = resources.node && typeof resources.node === "object" ? resources.node : {};
-  setLoadedSelectValue(elements.experimentNodeMode, node.mode || "auto", "Node placement");
-  setLoadedControlValue(elements.experimentNodeName, node.name);
   const gpu = resources.gpu && typeof resources.gpu === "object" ? resources.gpu : {};
   const gpuMode = gpu.mode === "explicit" ? "manual" : gpu.mode || "auto";
   setLoadedSelectValue(elements.gpuMode, gpuMode, "GPU allocation");
@@ -5779,6 +5818,7 @@ async function hydrateExperimentConfiguration(spec, request) {
 
   renderAdapterDeclaredFields();
   hydrateLoadedNativeSpec(nativeSpec);
+  updateTrainingPresetLabel();
   loadedExperimentCanonicalContext = {
     tracking: { ...tracking, providers },
     checkpoint: { ...checkpoint },
@@ -8603,7 +8643,7 @@ function renderDataResources() {
         <td>${latest ? `${escapeHtml(shortId(latest.revision, 16))}<span class="secondary">${escapeHtml(latest.format || "-")}</span>` : '<span class="secondary">No versions</span>'}</td>
         <td>${latest ? statusPill(dataVersionStatus(latest)) : '<span class="secondary">-</span>'}</td>
         <td>${escapeHtml(formatDate(resource.updated_at || resource.created_at))}</td>
-        <td class="row-actions data-resource-row-actions">${resource.metadata?.managed_dataset ? `<button type="button" data-resource-action="dataset" data-id="${escapeHtml(id)}">View dataset</button>` : ""}${resource.provider === "huggingface" ? `<button type="button" data-resource-action="import" data-id="${escapeHtml(id)}">Import</button>` : ""}<button type="button" data-resource-action="version" data-id="${escapeHtml(id)}">Add version</button><button type="button" data-resource-action="edit" data-id="${escapeHtml(id)}">View / edit</button><button type="button" data-resource-action="archive" data-id="${escapeHtml(id)}">Archive</button></td>
+        <td class="row-actions data-resource-row-actions"><button type="button" data-resource-action="dataset" data-id="${escapeHtml(id)}">${resource.kind === "simulation_assets" ? "View versions" : "View dataset"}</button>${resource.provider === "huggingface" ? `<button type="button" data-resource-action="import" data-id="${escapeHtml(id)}">Import</button>` : ""}<button type="button" data-resource-action="version" data-id="${escapeHtml(id)}">Add version</button><button type="button" data-resource-action="edit" data-id="${escapeHtml(id)}">View / edit</button><button type="button" data-resource-action="archive" data-id="${escapeHtml(id)}">Archive</button></td>
       </tr>`;
     }).join("")
     : emptyRow(8, "No source resources have been registered.");
@@ -11999,11 +12039,6 @@ async function loadSettings(force = false) {
 }
 
 function updateExperimentFields() {
-  const manualNode = elements.experimentNodeMode.value === "manual";
-  elements.experimentNodeField.hidden = !manualNode;
-  elements.experimentNodeName.required = manualNode;
-  elements.experimentNodeName.disabled = !manualNode;
-
   const manualGpu = elements.gpuMode.value === "manual";
   elements.experimentGpuCount.disabled = !manualGpu;
   elements.experimentGpuCount.required = manualGpu;
@@ -12128,7 +12163,8 @@ elements.experimentForm.addEventListener("submit", (event) => {
   event.preventDefault();
   createExperiment(true);
 });
-function experimentFormChanged() {
+function experimentFormChanged(event) {
+  if (event?.target?.dataset.adapterInputPath !== "native.config.training_preset") updateTrainingPresetLabel();
   invalidateExperimentPreview();
   elements.toast.querySelectorAll(".is-error").forEach(dismissToast);
   updateExperimentSubmitState();
@@ -12207,7 +12243,7 @@ elements.adapterDeclaredFieldsGrid.addEventListener("change", (event) => {
   const control = event.target.closest("[data-adapter-input-path]");
   if (!control) return;
   if (control.dataset.adapterInputPath === "native.config.training_preset") {
-    applyTrainingPreset(JSON.parse(control.value));
+    if (control.value) applyTrainingPreset(JSON.parse(control.value));
     return;
   }
   const values = adapterDeclaredScopeValues(renderedAdapterDeclaredScope, true);
@@ -12226,7 +12262,6 @@ elements.experimentDataBundle.addEventListener("change", () => {
 });
 elements.experimentRuntime.addEventListener("change", () => applyRuntimeSelection(true));
 elements.experimentRuntimeProfileSelect.addEventListener("change", () => applyRuntimeProfileSelection(true));
-elements.experimentNodeMode.addEventListener("change", updateExperimentFields);
 elements.gpuMode.addEventListener("change", updateExperimentFields);
 elements.checkpointMode.addEventListener("change", updateExperimentFields);
 elements.wandbEnabled.addEventListener("change", updateExperimentFields);

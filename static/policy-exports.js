@@ -26,6 +26,9 @@
   function sourceNote() {
     const policy = recipe(el("policy-export-format").value);
     const source = snapshot?.sessions.find((s) => s.id === sourceSessionId);
+    const hint = el("policy-export-format-help");
+    hint.textContent = policy?.available && !policy.trainable ? policy.description : "";
+    hint.hidden = !hint.textContent;
     const dpMissingSplit =
       policy?.trainable &&
       (source?.episodes < 2 ||
@@ -133,7 +136,6 @@
     el("policy-export-name").value = "";
     el("preparation-validation").value = 20;
     el("preparation-seed").value = 42;
-    dialog.querySelector("details").open = false;
     el("create-policy-export").disabled = true;
     error("policy-export-compatibility", "Loading recordings…");
     SkynetDialog.open(dialog);
@@ -191,6 +193,12 @@
     const location = copies.map(l => `<span class="secondary" title="${esc(l.path)}">${l.kind === "cluster" ? "Training cluster" : "This computer"}</span>`).join("") || "—";
     return `<tr><td><strong>${esc(policy?.name || job.format)}</strong>${policy?.container ? `<span class="secondary">${esc(policy.container)}</span>` : ""}</td><td>${statusPill(state)}${statusNote ? `<span class="secondary">${esc(statusNote)}</span>` : ""}</td><td>${location}</td><td>${job.episodes || job.sources?.length || 0}${job.split ? `<span class="secondary">${job.split.train.length} train / ${job.split.validation.length} validation</span>` : ""}</td><td>${esc(formatDate(job.created_at))}</td><td><div class="row-actions">${actions.join("")}</div></td></tr>`;
   }
+  function sourceVersionRow(version) {
+    const locations = (version.locations || []).filter(l => l.status === "AVAILABLE");
+    const paths = locations.length ? locations.map(l => l.path) : [version.path].filter(Boolean);
+    const episodes = version.metadata?.episodes ?? version.metadata?.num_episodes ?? "—";
+    return `<tr><td><strong>${esc(version.format || "Original data")}</strong><span class="secondary">${esc(version.revision?.slice(0, 12) || "")}</span></td><td>${statusPill(dataVersionStatus(version))}</td><td class="wrap-cell">${paths.map(path => `<span class="secondary">${esc(path)}</span>`).join("") || "—"}</td><td>${esc(episodes)}</td><td>${esc(formatDate(version.created_at))}</td><td>—</td></tr>`;
+  }
   async function renderDataset() {
     const token = ++detailGeneration;
     const payload = await api(`/api/data/resources/${encodeURIComponent(selectedResource.id)}`);
@@ -198,15 +206,20 @@
     selectedResource = payload.resource;
     const r = selectedResource;
     const jobs = snapshot.exports.filter(j => j.resource_id === r.id);
-    const originals = r.versions.filter(v => v.format === "skynet.episodes/v1");
+    const versions = r.versions || [];
+    const managed = r.metadata?.managed_dataset || jobs.length > 0;
+    const originals = versions.filter(v => v.format === "skynet.episodes/v1");
     el("prepared-dataset-title").textContent = r.metadata?.display_name || r.name;
-    el("prepared-dataset-context").textContent = `${jobs.filter(j => j.version_id).length} prepared versions`;
+    el("prepared-dataset-context").textContent = managed
+      ? `${jobs.filter(j => j.version_id).length} prepared versions`
+       : `${versions.length} version${versions.length === 1 ? "" : "s"}`;
+    const rows = managed ? jobs.map(preparedRow) : versions.map(sourceVersionRow);
     const sourceRows = originals.map(v => `<tr><td>${esc(v.revision.slice(0, 12))}</td><td>${v.metadata.episodes}</td><td>${v.metadata.split?.train.length || 0} train / ${v.metadata.split?.validation.length || 0} validation</td></tr>`).join("");
     const usage = [...new Map(jobs.flatMap(j => j.usage || []).map(u => [`${u.experiment_id}:${u.revision_number}`, u])).values()];
-    el("prepared-dataset-content").innerHTML = `<div class="table-frame"><div class="table-scroll"><table class="prepared-dataset-table"><thead><tr>${["Format", "Status", "Location", "Episodes", "Date", "Actions"].map(label => `<th scope="col">${label}</th>`).join("")}</tr></thead><tbody>${jobs.map(preparedRow).join("") || '<tr><td colspan="6">No prepared formats yet.</td></tr>'}</tbody></table></div></div>
+    el("prepared-dataset-content").innerHTML = `<div class="table-frame"><div class="table-scroll"><table class="prepared-dataset-table"><thead><tr>${["Format", "Status", "Location", "Episodes", "Date", "Actions"].map(label => `<th scope="col">${label}</th>`).join("")}</tr></thead><tbody>${rows.join("") || `<tr><td colspan="6">${managed ? "No prepared formats yet." : "No versions yet."}</td></tr>`}</tbody></table></div></div>
       ${usage.length ? `<p>Used by: ${usage.map(u => `<button type="button" class="text-button" data-preparation-experiment="${esc(u.experiment_id)}" data-revision="${u.revision_number}">${esc(u.name)} · revision ${u.revision_number}</button>`).join(" ")}</p>` : ""}
-      <details class="collection-disclosure"><summary>Original recordings and revisions</summary><div class="table-scroll"><table><thead><tr><th>Revision</th><th>Episodes</th><th>Split</th></tr></thead><tbody>${sourceRows || '<tr><td colspan="3">Original recordings are preserved.</td></tr>'}</tbody></table></div></details>
-      <div class="form-actions"><button type="button" class="button button-outline" data-preparation-delete="${esc(r.id)}" ${jobs.some(j => !terminal(j)) || usage.length ? 'disabled title="Preparation is active or a version is used by an experiment"' : ""}>Delete dataset</button></div>`;
+      ${managed ? `<details class="collection-disclosure"><summary>Original recordings and revisions</summary><div class="table-scroll"><table><thead><tr><th>Revision</th><th>Episodes</th><th>Split</th></tr></thead><tbody>${sourceRows || '<tr><td colspan="3">Original recordings are preserved.</td></tr>'}</tbody></table></div></details>
+      <div class="form-actions"><button type="button" class="button button-outline" data-preparation-delete="${esc(r.id)}" ${jobs.some(j => !terminal(j)) || usage.length ? 'disabled title="Preparation is active or a version is used by an experiment"' : ""}>Delete dataset</button></div>` : ""}`;
   }
   window.openPreparedDataset = async (id) => {
     const token = ++detailGeneration;

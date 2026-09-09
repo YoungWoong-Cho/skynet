@@ -39,18 +39,18 @@ RECIPES = {
         contract="skynet.act-rgb-joints/v1",
         adapter=None,
         trainable=False,
-        description="Prepare ACT episode files. An ACT training adapter is not installed yet.",
+        description="ACT HDF5 episodes. Training in Skynet is not connected yet.",
     ),
     "xpolicylab": dict(
         id="xpolicylab",
-        name="XPolicyLab demonstrations",
+        name="XPolicyLab intermediate HDF5",
         observations=["state", "rgb"],
         format="xpolicylab-demonstrations/v1",
         container="HDF5",
         contract="skynet.xpl-rgb-joints/v1",
         adapter=None,
         trainable=False,
-        description="Prepare shared demonstrations for another XPolicyLab converter; additional policy requirements still apply.",
+        description="Shared images and joints for further policy-specific conversion.",
     ),
 }
 

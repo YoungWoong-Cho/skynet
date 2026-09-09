@@ -499,7 +499,6 @@
           hand_name: session.profile.hand_name || catalog?.hands.find(hand => hand.key === session.profile.robot)?.name,
         },
       }));
-      window.setCollectionConversions?.(result.conversions || []);
       window.setConversionTarget?.(result.conversion_target);
       el("live-xr-consent-field").hidden = result.license.accepted;
       el("live-xr-consent").required = !result.license.accepted;

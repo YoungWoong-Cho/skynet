@@ -714,6 +714,8 @@ tbody tr:last-child td { border-bottom: 0; }
 .state-pill.is-pending::before { background: #b5a500; }
 .state-pill.is-failed { color: var(--danger); background: var(--danger-soft); }
 .state-pill.is-failed::before { background: var(--danger); }
+.state-pill.is-local { color: #305a7b; background: var(--blue-soft); }
+.state-pill.is-local::before { background: #305a7b; }
 
 .availability { min-width: 145px; }
 .availability-copy { display: flex; justify-content: space-between; margin-bottom: 4px; font: 9px var(--mono); }

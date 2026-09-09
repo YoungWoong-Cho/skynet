@@ -18,6 +18,12 @@ w.openLiveReview = (s) => (reviewed = s.id);
 w.openPolicyExport = (id) => (prepared = id);
 w.openPreparedDataset = (id) => (viewed = id);
 w.document.addEventListener("collection-recordings-changed", () => changes++);
+const app = await readFile(new URL("../static/app.js", import.meta.url), "utf8");
+for (const name of ["escapeHtml", "stateClass", "statusPill"]) {
+  const start = app.indexOf(`function ${name}(`);
+  const end = app.indexOf("\n}\n", start) + 3;
+  w.eval(app.slice(start, end));
+}
 try {
   w.eval(
     await readFile(
@@ -37,6 +43,8 @@ try {
   w.renderSimulationRecordings([s]);
   assert.equal(changes, 1);
   assert.match(el("simulation-recordings-body").textContent, /Images ready/);
+  assert.ok(el("simulation-recordings-body").querySelector(".state-pill.is-running"));
+  assert.doesNotMatch(el("simulation-recordings-body").textContent, /Earlier state HDF5/);
   let buttons = el("simulation-recordings-body").querySelectorAll("button");
   buttons[0].click();
   buttons[1].click();

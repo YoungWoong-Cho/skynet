@@ -40,7 +40,7 @@ def manifest():
                     "rgb": [RECIPES["dp"]["contract"]],
                 },
             ),
-            help="Selected automatically from a verified training-cluster dataset.",
+            help="From the selected cluster dataset.",
         )
         for key, label, value in [
             ("dataset_path", "Prepared dataset", "location.path"),
@@ -200,13 +200,13 @@ def manifest():
         id="dexverse-state/v1",
         name="DexVerse state DP",
         source="https://arxiv.org/html/2607.08751v1",
-        description="Paper hyperparameters with joint-state observations. Patience 20, constant LR, zero warmup and seed 42 are implementation choices; task observations and rollout evaluation are not a benchmark reproduction.",
+        description="Paper training settings with joint-state input.",
         values={**common, **{"native.config." + x[0]: x[3] for x in settings}},
     )
     rgb = TrainingPreset(
         id="rgb-joints/v2",
         name="RGB and joints DP",
-        description="Three scene cameras plus joints; a smaller batch for image memory use.",
+        description="Three camera views and joints; batch 8.",
         values={
             **state.values,
             "native.config.observation_mode": "rgb",
@@ -220,8 +220,8 @@ def manifest():
             label="Training preset",
             kind="string",
             default=state.id,
-            choices=[state.id, rgb.id],
-            help="Loads versioned defaults. Individual settings remain editable.",
+            choices=[state.id, rgb.id, "custom"],
+            help="Choose a preset or customize its values.",
         ),
     )
     argv = [

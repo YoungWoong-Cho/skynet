@@ -43,6 +43,24 @@ try {
  input('training_preset').dispatchEvent(new w.Event('change',{bubbles:true}));
  assert.equal(el('hp-batch-size').value,'256');
  assert.equal(input('dataset').value,'/cluster/test');
+ el('hp-batch-size').value='128';
+ el('hp-batch-size').dispatchEvent(new w.Event('input',{bubbles:true}));
+ assert.equal(input('training_preset').value,JSON.stringify('custom'));
+ assert.equal(input('training_preset').selectedOptions[0].textContent,'Custom');
+ assert.equal(input('observation_mode').value,JSON.stringify('state'));
+ assert.equal(el('hp-batch-size').value,'128');
+ // Rerendering must preserve custom values; reselecting a preset restores it.
+ w.renderAdapterDeclaredFields();
+ assert.equal(input('training_preset').value,JSON.stringify('custom'));
+ input('training_preset').value=JSON.stringify('rgb/v1');
+ input('training_preset').dispatchEvent(new w.Event('change',{bubbles:true}));
+ assert.equal(el('hp-batch-size').value,'8');
+ input('observation_mode').value=JSON.stringify('state');
+ input('observation_mode').dispatchEvent(new w.Event('change',{bubbles:true}));
+ assert.equal(input('training_preset').value,JSON.stringify('custom'));
+ assert.equal(el('hp-batch-size').value,'8');
+ assert.equal(input('dataset').value,'/cluster/test');
+ assert.equal(el('experiment-node-mode'),null);
  input('steps').value='101';
  assert.equal(w.validateAdapterDeclaredFields({focus:false,notify:false}),false);
  assert.match(input('steps').validationMessage,/maximum is 100/);

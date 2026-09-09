@@ -33,6 +33,7 @@ for (const name of [
   "formatDate",
   "stateClass",
   "statusPill",
+  "dataVersionStatus",
 ]) {
   const start = app.indexOf(`function ${name}(`),
     end = app.indexOf("\nfunction ", start + 1);
@@ -114,6 +115,10 @@ try {
     ),
   );
   await flush();
+  assert.equal(w.stateClass("SUCCEEDED"), "is-running");
+  assert.equal(w.stateClass("ON CLUSTER"), "is-running");
+  assert.equal(w.stateClass("LOCAL"), "is-local");
+  assert.equal(w.stateClass("COPY UNAVAILABLE"), "is-failed");
   await w.openPolicyExport("old");
   assert.equal(el("create-policy-export").disabled, true);
   assert.match(
@@ -222,6 +227,16 @@ try {
   assert.equal(el("create-policy-export").disabled, true);
   el("close-policy-export").click();
   assert.equal(el("policy-export-dialog").open, false);
+  assert.equal(el("policy-export-dialog").querySelector("details"), null);
+  options.exports = [];
+  resource.metadata = {};
+  resource.versions = [{id: "imported", format: "lerobot-v2.0", status: "READY", path: "/cluster/imported", revision: "abc123", metadata: {episodes: 42}}];
+  await w.openPreparedDataset("dataset");
+  assert.match(el("prepared-dataset-content").textContent, /lerobot-v2.0/);
+  assert.match(el("prepared-dataset-content").textContent, /42/);
+  assert.match(el("prepared-dataset-content").textContent, /cluster\/imported/);
+  assert.ok(el("prepared-dataset-content").querySelector(".state-pill.is-running"));
+  assert.equal(el("prepared-dataset-content").querySelector("[data-preparation-delete]"), null);
   console.log(
     "Preparation UI passed: policy requirements, all session recordings, split guard, submission, grouped management, failed-stage download and retry.",
   );

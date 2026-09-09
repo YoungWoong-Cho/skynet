@@ -3,7 +3,6 @@
   const el = (id) => document.getElementById(id);
   let sessions = [],
     preparations = [],
-    legacy = [],
     signature = "",
     sourceSignature = "";
   const label = (s) => s.profile.task_name || s.profile.task;
@@ -30,7 +29,7 @@
         .toLowerCase()
         .includes(query),
     );
-    const next = JSON.stringify([rows, preparations, legacy, query]);
+    const next = JSON.stringify([rows, preparations, query]);
     if (next === signature) return;
     signature = next;
     const count = saved.reduce(
@@ -75,28 +74,16 @@
         ),
       );
       const ready = jobs.filter((j) => j.state === "READY");
-      const active = jobs.find((j) => !["READY", "FAILED"].includes(j.state));
+      const active = jobs.find((j) => !["READY", "FAILED", "DELETE_FAILED"].includes(j.state));
       const cell = text(row, "td", "", "wrap-cell");
       const images = Object.keys(session.recording_images || {}).length;
-      text(
-        cell,
-        "span",
-        active
-          ? active.detail
-          : ready.length
-            ? `${ready.length} prepared format${ready.length === 1 ? "" : "s"}`
-            : images === session.recordings.length
-              ? "Images ready"
-              : "Original recordings saved",
-        "state-pill",
-      );
-      if (
-        !jobs.length &&
-        legacy.some((j) => j.session_id === session.id && j.state === "READY")
-      )
-        text(cell, "span", "Earlier state HDF5 is in Resources", "secondary");
-      if (jobs.some((j) => j.state === "FAILED"))
-        text(cell, "span", "Preparation needs attention", "secondary");
+      const datasetLabel = active ? active.detail
+        : ready.length ? `${ready.length} prepared format${ready.length === 1 ? "" : "s"}`
+        : images === session.recordings.length ? "Images ready" : "Original recordings saved";
+      cell.innerHTML = statusPill(datasetLabel);
+      if (active) cell.firstElementChild.className = `state-pill ${stateClass(active.stage || "PENDING")}`;
+      if (jobs.some((j) => ["FAILED", "DELETE_FAILED"].includes(j.state)))
+        cell.insertAdjacentHTML("beforeend", statusPill("Preparation needs attention"));
       const actions = text(row, "td", "", "row-actions");
       button(actions, "Review recordings", () =>
         window.openLiveReview(session),
@@ -132,10 +119,6 @@
     el("simulation-recordings-error").hidden = false;
     el("simulation-recordings-error").textContent =
       "Could not refresh recordings: " + message;
-  };
-  window.setCollectionConversions = (value) => {
-    legacy = value;
-    render();
   };
   document.addEventListener("dataset-preparation-changed", (event) => {
     preparations = event.detail;

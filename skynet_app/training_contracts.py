@@ -54,6 +54,8 @@ def selected_preset(document, command):
     identifier = (
         lookup(document, "native.config.training_preset") or command.default_preset
     )
+    if identifier == "custom":
+        return None
     preset = next((p for p in command.presets if p.id == identifier), None)
     if preset is None:
         raise ValueError("Choose a declared training preset")

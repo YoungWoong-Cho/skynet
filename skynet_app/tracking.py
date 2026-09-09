@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -209,10 +210,24 @@ class DrainReport:
     errors: tuple[str, ...] = ()
 
 
+def _retry_after_seconds(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        from email.utils import parsedate_to_datetime
+        try:
+            return max(0.0, parsedate_to_datetime(value).timestamp() - time.time())
+        except (ValueError, TypeError, OverflowError):
+            return None
+
+
 class TrackingRequestError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(self, message: str, *, status_code: int | None = None, retry_after: float | None = None) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.retry_after = retry_after
 
 
 class MLflowBridge:
@@ -1375,33 +1390,56 @@ class WandBBridge:
     def drain_spool(self, *, limit: int | None = None) -> DrainReport:
         if not self.settings.configured:
             return DrainReport(0, 0, self.pending_count(), False)
-        attempted = 0
-        delivered = 0
+        attempted = delivered = 0
         errors: list[str] = []
         with self._locked():
             events = self._events_unlocked()
             state = self._load_state_unlocked()
-            pending = [
-                event for event in events
-                if int(event["sequence"]) > int(state.get("acked_through", 0))
-            ]
+            pending = [event for event in events
+                       if int(event["sequence"]) > int(state.get("acked_through", 0))]
+            if pending and time.time() < float(state.get("retry_not_before", 0)):
+                return DrainReport(0, 0, len(pending), False,
+                                   ("W&B is busy. Saved metrics will sync automatically.",))
             if limit is not None:
                 pending = pending[:max(0, limit)]
-            for event in pending:
-                attempted += 1
+            index = 0
+            while index < len(pending):
+                batch = [pending[index]]
+                event = batch[0]
+                if event.get("operation") == "log_metrics":
+                    run_id = event["payload"].get("local_run_id")
+                    for following in pending[index + 1:index + 100]:
+                        if (following.get("operation") != "log_metrics"
+                                or following["payload"].get("local_run_id") != run_id):
+                            break
+                        batch.append(following)
+                    if len(batch) > 1:
+                        event = {"operation": "log_metrics_batch", "payload": {
+                            "local_run_id": run_id, "samples": [item["payload"] for item in batch]}}
+                attempted += len(batch)
                 try:
-                    self._deliver_event(event, state)
+                    delivery_state = copy.deepcopy(state)
+                    self._deliver_event(event, delivery_state)
                 except Exception as error:
                     message = str(sanitize(str(error), secrets=(self.settings.api_key,)))
+                    if isinstance(error, TrackingRequestError) and error.status_code == 429:
+                        retries = int(state.get("rate_limit_retries", 0)) + 1
+                        delay = max(error.retry_after or 0, min(900, 60 * 2 ** min(retries - 1, 4)))
+                        state.update(retry_not_before=time.time() + delay, rate_limit_retries=retries)
+                        self._write_state_unlocked(state)
+                        message = "W&B is busy. Saved metrics will sync automatically."
                     self._last_error = message
                     errors.append(message)
                     break
-                state["acked_through"] = int(event["sequence"])
+                state = delivery_state
+                state["acked_through"] = int(batch[-1]["sequence"])
+                state.pop("retry_not_before", None)
+                state.pop("rate_limit_retries", None)
+                self._last_error = None
                 self._write_state_unlocked(state)
-                delivered += 1
-            remaining = sum(
-                int(event["sequence"]) > int(state.get("acked_through", 0)) for event in events
-            )
+                delivered += len(batch)
+                index += len(batch)
+            remaining = sum(int(event["sequence"]) > int(state.get("acked_through", 0)) for event in events)
         return DrainReport(attempted, delivered, remaining, not errors, tuple(errors))
 
     def _deliver_event(self, event: Mapping[str, Any], state: dict[str, Any]) -> None:
@@ -1463,15 +1501,16 @@ class WandBBridge:
 
         if operation == "log_params":
             run["config"].update(dict(payload.get("params") or {}))
-        elif operation == "log_metrics":
-            metrics = dict(payload.get("metrics") or {})
-            self._append_history(
-                run,
-                metrics,
-                step=int(payload.get("step") or 0),
-                timestamp_ms=int(payload.get("timestamp_ms") or _milliseconds_now()),
-            )
-            run["summary"].update(metrics)
+        elif operation in {"log_metrics", "log_metrics_batch"}:
+            samples = payload["samples"] if operation == "log_metrics_batch" else [payload]
+            self._append_history_rows(run, [
+                {**dict(sample.get("metrics") or {}),
+                 "_step": int(sample.get("step") or 0),
+                 "_timestamp": int(sample.get("timestamp_ms") or _milliseconds_now()) / 1000.0}
+                for sample in samples
+            ])
+            for sample in samples:
+                run["summary"].update(dict(sample.get("metrics") or {}))
         elif operation == "set_tags":
             run["tags"].update(dict(payload.get("tags") or {}))
         elif operation == "artifact_link":
@@ -1534,28 +1573,11 @@ class WandBBridge:
             summary=run.get("summary", {}),
         )
 
-    def _append_history(
-        self,
-        run: dict[str, Any],
-        metrics: Mapping[str, Any],
-        *,
-        step: int,
-        timestamp_ms: int,
-    ) -> None:
-        """Append one chartable history row using W&B's documented SDK wire shape."""
-
+    def _append_history_rows(self, run: dict[str, Any], rows: Sequence[Mapping[str, Any]]) -> None:
+        """Upload queued samples together while retaining each step and timestamp."""
         offset = int(run.get("history_offset") or 0)
-        history = {
-            **{str(key): sanitize(value) for key, value in metrics.items()},
-            "_step": step,
-            "_timestamp": timestamp_ms / 1000.0,
-        }
-        line = json.dumps(
-            history,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        ) + "\n"
+        lines = [json.dumps(sanitize(row), sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+                 for row in rows]
         entity = urllib.parse.quote(str(run["entity"]), safe="")
         project = urllib.parse.quote(str(run["project"]), safe="")
         remote_name = urllib.parse.quote(str(run["name"]), safe="")
@@ -1569,7 +1591,7 @@ class WandBBridge:
                 "files": {
                     "wandb-history.jsonl": {
                         "offset": offset,
-                        "content": [line],
+                        "content": lines,
                     }
                 }
             },
@@ -1599,10 +1621,11 @@ class WandBBridge:
             raise TrackingRequestError(
                 f"W&B history returned HTTP {error.code}: {detail}",
                 status_code=error.code,
+                retry_after=_retry_after_seconds((error.headers or {}).get("Retry-After")),
             ) from error
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             raise TrackingRequestError(f"W&B history transport unavailable: {error}") from error
-        run["history_offset"] = offset + 1
+        run["history_offset"] = offset + len(lines)
 
     @staticmethod
     def _wandb_config(

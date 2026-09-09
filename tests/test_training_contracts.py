@@ -61,6 +61,20 @@ def test_preset_applies_canonical_and_native_defaults_preserving_explicit_overri
         )
 
 
+def test_custom_training_values_survive_defaults_and_validation():
+    manifest = dp()
+    doc = {"train": {"batch": {"value": 128}, "learning_rate": 0.002},
+           "native": {"config": {"training_preset": "custom", "epochs": 7,
+                       "dataset_path": "/prepared", "dataset_manifest_sha256": "a" * 64}}}
+    PipelineService._apply_training_preset(doc, manifest)
+    PipelineService._apply_manifest_input_defaults(doc, manifest)
+    PipelineService._validate_manifest_input_fields(doc, manifest)
+    assert doc["train"]["batch"]["value"] == 128
+    assert doc["train"]["learning_rate"] == 0.002
+    assert doc["native"]["config"]["training_preset"] == "custom"
+    assert doc["native"]["config"]["epochs"] == 7
+
+
 def test_input_bounds_and_unknown_settings_are_rejected_before_launch():
     manifest = dp()
     base = {

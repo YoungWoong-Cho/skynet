@@ -5,15 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Skynet Slurm experiment and evaluation console.">
     <title>Skynet / Experiment Console</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260908-preparation-v2">
+    <link rel="stylesheet" href="/static/styles.css?v=20260909-data-refinement">
     <script src="/static/dialogs.js?v=20260909-data" defer></script>
     <script src="/static/collection-ui.js?v=20260909-data" defer></script>
-    <script src="/static/app.js?v=20260908-preparation-v2" defer></script>
+    <script src="/static/app.js?v=20260909-data-refinement" defer></script>
     <script src="/static/hands-ui.js?v=20260907-imported-hands-2" defer></script>
     <script src="/static/live-review.js?v=20260909-review-only" defer></script>
-    <script src="/static/live-conversion.js?v=20260908-preparation-v2" defer></script>
-    <script src="/static/policy-exports.js?v=20260908-preparation-v2" defer></script>
-    <script src="/static/live-xr.js?v=20260908-clean-session" defer></script>
+    <script src="/static/live-conversion.js?v=20260909-data-refinement" defer></script>
+    <script src="/static/policy-exports.js?v=20260909-data-refinement" defer></script>
+    <script src="/static/live-xr.js?v=20260909-data-refinement" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -178,7 +178,7 @@
               <div class="panel-heading">
                 <div>
 
-                  <h2>Configure a training run</h2><p>Choose a model adapter, pin its repository version, then select training data in a format the adapter accepts. Simulation evaluation is configured separately after a checkpoint is available.</p>
+                  <h2>Configure a training run</h2><p>Choose a policy, code version, training data, and cluster resources.</p>
                   <p id="experiment-revision-intent" class="secondary">Submitted specifications are immutable. Changes create a new experiment revision.</p>
                 </div>
                 <span id="adapter-status" class="quiet-label">Loading adapters...</span>
@@ -313,7 +313,7 @@
                       <strong id="adapter-declared-fields-title">Adapter-declared inputs</strong>
                       <span id="adapter-declared-fields-status" class="quiet-label">Select an adapter.</span>
                     </div>
-                    <p>These typed values come from the selected adapter manifest. Required values must be set before preview, save, or submit.</p>
+                    <p>Policy settings. Complete required fields before previewing.</p>
                     <div id="adapter-declared-fields-grid" class="adapter-declared-fields-grid"></div>
                     <div id="adapter-declared-fields-error" class="adapter-declared-fields-error" role="alert" hidden></div>
                   </section>
@@ -335,17 +335,6 @@
                       <option value="normal">Normal / rl2-lab</option>
                       <option value="overcap">Preemptible / overcap</option>
                     </select>
-                  </div>
-                  <div class="field">
-                    <label for="experiment-node-mode">Node placement</label>
-                    <select id="experiment-node-mode">
-                      <option value="auto">Automatic</option>
-                      <option value="manual">Manual node</option>
-                    </select>
-                  </div>
-                  <div id="experiment-node-field" class="field span-2" hidden>
-                    <label for="experiment-node-name">Node name</label>
-                    <input id="experiment-node-name" placeholder="e.g. atlas">
                   </div>
                   <div class="field">
                     <label for="gpu-mode">GPU allocation</label>
@@ -1837,15 +1826,11 @@
       <form id="policy-export-form">
         <div class="form-grid">
           <div class="field"><label for="policy-export-name">Dataset name</label><input id="policy-export-name" maxlength="100" required></div>
-          <div class="field"><label for="policy-export-format">Policy</label><select id="policy-export-format" required></select></div>
+          <div class="field"><label for="policy-export-format">Policy</label><select id="policy-export-format" required></select><small id="policy-export-format-help" hidden></small></div>
+          <div class="field"><label for="preparation-validation">Validation episodes (%)</label><input id="preparation-validation" type="number" min="0" max="50" value="20" required></div>
+          <div class="field"><label for="preparation-seed">Split seed</label><input id="preparation-seed" type="number" min="0" max="2147483647" value="42" required></div>
         </div>
         <p id="policy-export-compatibility" role="status" class="inline-alert" hidden></p>
-        <details class="collection-disclosure"><summary>Preparation settings</summary>
-          <div class="form-grid">
-            <div class="field"><label for="preparation-validation">Validation episodes (%)</label><input id="preparation-validation" type="number" min="0" max="50" value="20" required></div>
-            <div class="field"><label for="preparation-seed">Split seed</label><input id="preparation-seed" type="number" min="0" max="2147483647" value="42" required></div>
-          </div>
-        </details>
         <p id="policy-export-error" role="alert" class="inline-alert" hidden></p>
         <div class="form-actions"><button id="create-policy-export" type="submit" class="button button-accent">Prepare dataset</button></div>
       </form>
