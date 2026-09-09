@@ -187,7 +187,7 @@ def workspace_class():
                 num_warmup_steps=cfg.training.lr_warmup_steps,
                 num_training_steps=updates,
             )
-            best, stale = float("inf"), 0
+            best = float("inf")
             self.stop_reason = "max_epochs"
             with (JsonLogger(str(Path(self.output_dir) / "logs.json.txt")) if context.primary else nullcontext()) as logger:
                 for epoch in range(cfg.training.num_epochs):
@@ -252,15 +252,7 @@ def workspace_class():
                     epoch_loss = context.mean(loss_sum, examples, min(len(dataset), batches * cfg.dataloader.batch_size))
                     improved = val_loss < best
                     if improved:
-                        best, stale = val_loss, 0
-                    else:
-                        stale += 1
-                    stopping = (
-                        cfg.training.early_stopping_patience > 0
-                        and stale >= cfg.training.early_stopping_patience
-                    )
-                    if stopping:
-                        self.stop_reason = "early_stopping"
+                        best = val_loss
                     record = dict(
                         epoch=epoch,
                         global_step=self.global_step,
@@ -268,7 +260,6 @@ def workspace_class():
                         val_loss=val_loss,
                         lr=self.optimizer.param_groups[0]["lr"],
                         best_val_loss=best,
-                        early_stopping=stopping,
                     )
                     if context.primary:
                         logger.log(record)
@@ -278,8 +269,6 @@ def workspace_class():
                         if improved:
                             self.save_checkpoint("best.ckpt")
                         self.save_checkpoint()
-                    if stopping:
-                        break
 
     return TrainingWorkspace
 
@@ -306,7 +295,6 @@ def arguments():
         "inference-steps": 20,
         "gradient-accumulation": 1,
         "num-workers": 0,
-        "early-stopping-patience": 20,
         "warmup-steps": 0,
     }.items():
         parser.add_argument("--" + key, type=int, default=default)
@@ -357,12 +345,11 @@ def arguments():
         )
     if (
         args.num_workers < 0
-        or args.early_stopping_patience < 0
         or args.warmup_steps < 0
         or not 0 <= args.ema_decay < 1
         or args.gradient_clip <= 0
     ):
-        parser.error("Invalid worker, stopping, warmup, EMA, or clipping setting")
+        parser.error("Invalid worker, warmup, EMA, or clipping setting")
     return args
 
 
@@ -472,7 +459,6 @@ def main():
         "gradient_accumulate_every": args.gradient_accumulation,
         "gradient_clip": args.gradient_clip,
         "ema_decay": args.ema_decay,
-        "early_stopping_patience": args.early_stopping_patience,
         "lr_scheduler": args.lr_schedule,
         "lr_warmup_steps": args.warmup_steps,
         "use_ema": True,

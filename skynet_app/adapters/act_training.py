@@ -109,7 +109,6 @@ def arguments():
         feedforward_dim=3200,
         gradient_accumulation=1,
         num_workers=0,
-        early_stopping_patience=20,
     ).items():
         parser.add_argument("--" + key.replace("_", "-"), type=int, default=value)
     for key, value in dict(
@@ -146,7 +145,6 @@ def arguments():
     if (
         args.hidden_dim % 8
         or args.num_workers < 0
-        or args.early_stopping_patience < 0
         or args.kl_weight < 0
         or args.gradient_clip <= 0
         or args.learning_rate <= 0
@@ -252,7 +250,7 @@ def main():
         )
     checkpoints = output / "checkpoints"
     checkpoints.mkdir(exist_ok=True)
-    best, stale, global_step, reason = float("inf"), 0, 0, "max_epochs"
+    best, global_step = float("inf"), 0
     for epoch in range(args.epochs):
         means = {}
         for split, loader in loaders.items():
@@ -296,12 +294,7 @@ def main():
             means[split] = context.mean(loss_sum, examples, len(loader.dataset))
         improved = means["validation"] < best
         if improved:
-            best, stale = means["validation"], 0
-        else:
-            stale += 1
-        stopping = bool(
-            args.early_stopping_patience and stale >= args.early_stopping_patience
-        )
+            best = means["validation"]
         record = dict(
             epoch=epoch,
             global_step=global_step,
@@ -309,7 +302,6 @@ def main():
             val_loss=means["validation"],
             best_val_loss=best,
             lr=optimizer.param_groups[0]["lr"],
-            early_stopping=stopping,
         )
         if primary:
             with (output / "logs.json.txt").open("a") as f:
@@ -329,9 +321,6 @@ def main():
                 temporary = checkpoints / (name + ".tmp")
                 torch.save(payload, temporary)
                 temporary.replace(checkpoints / name)
-        if stopping:
-            reason = "early_stopping"
-            break
     if not primary:
         context.close()
         return
@@ -343,7 +332,7 @@ def main():
             checkpoint_sha256=digest(checkpoint),
             global_step=global_step,
             epochs=epoch + 1,
-            stop_reason=reason,
+            stop_reason="max_epochs",
             manifest_sha256=args.manifest_sha,
         ),
     )

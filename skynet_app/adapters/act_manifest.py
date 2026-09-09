@@ -42,7 +42,7 @@ def manifest():
         ]
     ]
     settings = [
-        ("epochs", "Maximum epochs", "integer", 6000, 1, 100000),
+        ("epochs", "Epochs", "integer", 6000, 1, 100000),
         ("action_steps", "Action chunk", "integer", 50, 1, 200),
         ("hidden_dim", "Hidden dimension", "integer", 512, 64, 2048),
         ("feedforward_dim", "Feedforward dimension", "integer", 3200, 128, 8192),
@@ -50,14 +50,6 @@ def manifest():
         ("backbone_learning_rate", "Backbone learning rate", "number", 1e-5, 1e-10, 1),
         ("weight_decay", "Weight decay", "number", 1e-4, 0, 1),
         ("gradient_clip", "Gradient norm limit", "number", 1.0, 1e-6, 1000),
-        (
-            "early_stopping_patience",
-            "Early stopping patience",
-            "integer",
-            20,
-            0,
-            100000,
-        ),
     ]
     for key, label, kind, default, minimum, maximum in settings:
         fields.append(
@@ -69,11 +61,6 @@ def manifest():
                 minimum=minimum,
                 maximum=maximum,
                 canonical_path="train.max_epochs" if key == "epochs" else None,
-                help=(
-                    "0 disables early stopping."
-                    if key == "early_stopping_patience"
-                    else ""
-                ),
             )
         )
     common = {

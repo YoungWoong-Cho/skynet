@@ -61,13 +61,13 @@ def manifest():
         ),
         (
             "epochs",
-            "Maximum epochs",
+            "Epochs",
             "integer",
             300,
             1,
             100000,
             [],
-            "Training stops earlier when validation loss stops improving.",
+            "Number of training epochs.",
         ),
         (
             "observation_steps",
@@ -138,16 +138,6 @@ def manifest():
             0.999999,
             [],
             "Fixed decay per optimizer update; validation uses EMA weights.",
-        ),
-        (
-            "early_stopping_patience",
-            "Early stopping patience",
-            "integer",
-            20,
-            0,
-            100000,
-            [],
-            "Epochs without validation improvement. 0 disables it. The paper does not specify patience.",
         ),
         (
             "lr_schedule",

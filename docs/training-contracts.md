@@ -37,9 +37,9 @@ actual observation, action, embodiment and configuration mappings.
 256 and output width 128 per observation, observation history 2, future action
 chunks 16, DDPM squared-cosine training with 100 timesteps and 20 inference steps,
 AdamW LR 1e-4 / weight decay 1e-4, nominal effective batch 256, gradient clipping 1,
-fixed EMA 0.995, at most 300 epochs and held-out validation early stopping.
-The two encoded observations are concatenated for U-Net conditioning. Patience 20,
-constant LR, zero warmup, seed 42 and the pinned optimizer betas/epsilon are
+fixed EMA 0.995 and 300 epochs, with held-out validation each epoch.
+The two encoded observations are concatenated for U-Net conditioning. Constant LR,
+zero warmup, seed 42 and the pinned optimizer betas/epsilon are
 implementation choices: the [paper](https://arxiv.org/html/2607.08751v1) does not
 specify them. The encoder history aggregation is also explicit in the saved config.
 This is a policy training preset, not a reproduction of the paper's task suite,
