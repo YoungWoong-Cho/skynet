@@ -254,8 +254,7 @@ class PolicyExportService:
             try:
                 sources = self.sources(session, require_images=False)
                 reason = None
-                with self.lock:
-                    resource = self.dataset(session, create=False)
+                resource = self.dataset(session, create=False)
             except (ValueError, KeyError) as exc:
                 sources, reason = [], str(exc)
             if session.get("recordings"):
@@ -996,32 +995,52 @@ class PolicyExportService:
                 raise ValueError(
                     "Keep at least one verified copy; transfer to the training cluster first"
                 )
-            gateway = self.cluster.resolve_gateway("auto")
+            # Reserve this preparation, not the entire catalog, during remote I/O.
+            self.active.add(identifier)
+        try:
             script = f"{WORK_ROOT}/jobs/runs/{identifier}/verify-dataset.py"
-            self.cluster.ssh(
-                gateway,
+            self.cluster.run_with_fallback(
                 shlex.join(
                     ["python3", script, cluster["path"], version["manifest_sha256"]]
                 ),
-                timeout=3600,
+                gateway=job.get("gateway", "auto"),
+                timeout=60,
             )
-            directory = self.root / identifier
-            if (directory / "output").exists():
-                shutil.rmtree(directory / "output")
-            (directory / "dataset.zip").unlink(missing_ok=True)
-            self.database.record_data_location(
-                version["id"],
-                kind="local",
-                host="local",
-                path=str(directory / "output"),
-                manifest_sha256=version["manifest_sha256"],
-                status="REMOVED",
-            )
-            return self.update(
-                identifier,
-                local_removed=True,
-                detail="Verified dataset retained on the training cluster",
-            )
+            with self.lock:
+                if self.stopping:
+                    raise ValueError("The app is restarting; retry shortly")
+                # An experiment may have pinned the version while verification ran.
+                if self.database.data_version_usage(version["manifest_sha256"]):
+                    raise ValueError(
+                        "This dataset is now pinned by an experiment; retain its copies"
+                    )
+                current = self.database.get_data_resource_version(version["id"])
+                if not current or not any(
+                    location["id"] == cluster["id"]
+                    and location["status"] == "AVAILABLE"
+                    for location in current["locations"]
+                ):
+                    raise ValueError("The verified cluster copy is no longer available")
+                directory = self.root / identifier
+                if (directory / "output").exists():
+                    shutil.rmtree(directory / "output")
+                (directory / "dataset.zip").unlink(missing_ok=True)
+                self.database.record_data_location(
+                    version["id"],
+                    kind="local",
+                    host="local",
+                    path=str(directory / "output"),
+                    manifest_sha256=version["manifest_sha256"],
+                    status="REMOVED",
+                )
+                return self.update(
+                    identifier,
+                    local_removed=True,
+                    detail="Verified dataset retained on the training cluster",
+                )
+        finally:
+            with self.lock:
+                self.active.discard(identifier)
 
     def artifact(self, identifier, name):
         job = self.get(identifier)

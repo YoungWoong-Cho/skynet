@@ -10,7 +10,7 @@
     <script src="/static/collection-ui.js?v=20260909-data" defer></script>
     <script src="/static/app.js?v=20260908-preparation-v2" defer></script>
     <script src="/static/hands-ui.js?v=20260907-imported-hands-2" defer></script>
-    <script src="/static/live-review.js?v=20260908-preparation-v2" defer></script>
+    <script src="/static/live-review.js?v=20260909-review-only" defer></script>
     <script src="/static/live-conversion.js?v=20260908-preparation-v2" defer></script>
     <script src="/static/policy-exports.js?v=20260908-preparation-v2" defer></script>
     <script src="/static/live-xr.js?v=20260908-clean-session" defer></script>
@@ -942,7 +942,6 @@
           </div>
           <dialog id="live-review-dialog" class="app-dialog" aria-labelledby="live-review-title">
             <div class="panel-heading"><div><h3 id="live-review-title">Review recordings</h3><p id="live-review-context" class="secondary"></p></div><button id="live-review-close" data-dialog-close class="button button-outline" type="button">Close review</button></div>
-            <div class="form-actions"><button id="live-review-convert" class="button button-outline" type="button">Prepare for training</button></div>
             <div class="field"><label for="live-review-recording">Recording</label><select id="live-review-recording"></select></div>
             <p id="live-review-status" role="status">Loading recording…</p>
             <button id="live-review-retry" class="button button-outline" type="button" hidden>Retry download</button>

@@ -350,10 +350,6 @@
     SkynetDialog.open(dialog);
     selectRecording(Number(select.value));
   };
-  el("live-review-convert").onclick = () => {
-    SkynetDialog.close(dialog);
-    window.openPolicyExport(reviewSession.id);
-  };
   el("live-review-recording").onchange = (event) =>
     selectRecording(Number(event.target.value));
   document.addEventListener("visibilitychange", () => {

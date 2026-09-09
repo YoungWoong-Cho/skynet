@@ -2,6 +2,9 @@
 
 import copy
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -141,6 +144,66 @@ def test_archive_prevents_new_preparation_without_deleting_files(setup):
         service.retry(job["id"])
     assert service.artifact(job["id"], "dataset.zip").exists()
     assert not service.options()["sessions"][0]["eligible"]
+
+
+@pytest.mark.parametrize("outcome", ["success", "timeout", "pinned"])
+def test_local_copy_verification_keeps_catalog_responsive_and_copies_safe(
+    setup, monkeypatch, outcome
+):
+    service, session, _, job = prepared(setup)
+    version = service.database.get_data_resource_version(job["version_id"])
+    service.database.record_data_location(
+        version["id"], kind="cluster", host="skynet", path="/cluster/prepared",
+        manifest_sha256=version["manifest_sha256"],
+    )
+    service.update(job["id"], gateway="sky2")
+    started, release = threading.Event(), threading.Event()
+    usage = []
+    monkeypatch.setattr(service.database, "data_version_usage", lambda _: usage)
+
+    def verify(command, *, gateway, timeout):
+        assert gateway == "sky2" and timeout == 60
+        assert "verify-dataset.py" in command
+        started.set()
+        assert release.wait(5)
+        if outcome == "timeout":
+            raise ClusterError("Verification timed out")
+        return gateway, "verified"
+
+    service.cluster = SimpleNamespace(run_with_fallback=verify)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        removal = pool.submit(service.remove_local_copy, job["id"])
+        try:
+            assert started.wait(3)
+            overview = pool.submit(service.options).result(timeout=2)
+            assert overview["sessions"][0]["eligible"]
+            assert overview["sessions"][0]["id"] == session["id"]
+            with pytest.raises(ValueError, match="preparation to finish"):
+                service.delete_dataset(job["resource_id"])
+            assert service.artifact(job["id"], "dataset.zip").is_file()
+            if outcome == "pinned":
+                usage.append({"experiment_id": "new-experiment"})
+        finally:
+            release.set()
+        if outcome == "success":
+            assert removal.result(timeout=3)["local_removed"]
+        else:
+            with pytest.raises((ClusterError, ValueError)):
+                removal.result(timeout=3)
+    assert job["id"] not in service.active
+    assert (service.root / job["id"] / "dataset.zip").exists() == (outcome != "success")
+    locations = service.database.get_data_resource_version(version["id"])["locations"]
+    assert next(l for l in locations if l["kind"] == "cluster")["status"] == "AVAILABLE"
+
+
+def test_catalog_reads_do_not_wait_for_dataset_mutations(setup):
+    service, _, _, _ = prepared(setup)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with service.lock:
+            pending = pool.submit(service.options)
+            # The catalog reads committed registry snapshots; deletion holds this
+            # mutation lock while cleaning remote files and must not hide the form.
+            assert pending.result(timeout=2)["sessions"][0]["eligible"]
 
 
 def test_verified_archive_is_atomic_and_content_addressed(setup, tmp_path):
