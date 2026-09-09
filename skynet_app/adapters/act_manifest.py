@@ -115,6 +115,8 @@ def manifest():
     ]
     for flag, path in {
         "batch-size": "train.batch.value",
+        "batch-semantics": "train.batch.declared_semantics",
+        "gpu-count": "computed.gpu_count",
         "learning-rate": "train.learning_rate",
         "seed": "train.seed",
         "gradient-accumulation": "train.batch.gradient_accumulation_steps",
@@ -133,9 +135,9 @@ def manifest():
             name="xpolicylab-act",
             runtime_backends={"existing", "conda"},
             minimum_gpus=1,
-            maximum_gpus=1,
+            maximum_gpus=8,
             supports_resume=False,
-            supports_multi_gpu_single_node=False,
+            supports_multi_gpu_single_node=True,
         ),
         runtime=AdapterRuntimePolicy(
             allowed_backends={"existing", "conda"}, recommended_backend="existing"

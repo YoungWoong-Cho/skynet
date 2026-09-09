@@ -4732,14 +4732,15 @@ function experimentPayload() {
       run_name_template: elements.mlflowRunName.value.trim() || null,
     });
   }
+  const trainingNumber = (element) => element.disabled ? null : numberOrNull(element);
   const hyperparameters = Object.fromEntries(Object.entries({
-    learning_rate: numberOrNull(elements.hpLearningRate),
-    batch_size: numberOrNull(elements.hpBatchSize),
+    learning_rate: trainingNumber(elements.hpLearningRate),
+    batch_size: trainingNumber(elements.hpBatchSize),
     batch_semantics: elements.hpBatchSemantics.value,
-    gradient_accumulation: numberOrNull(elements.hpGradAcc),
-    num_workers: numberOrNull(elements.hpNumWorkers),
+    gradient_accumulation: trainingNumber(elements.hpGradAcc),
+    num_workers: trainingNumber(elements.hpNumWorkers),
     precision: enforceSupportedPrecision(),
-    max_steps: numberOrNull(elements.hpMaxSteps),
+    max_steps: trainingNumber(elements.hpMaxSteps),
   }).filter(([, value]) => value !== null && value !== undefined && value !== "" && value !== "adapter-default"));
   const selectedEvaluationSuiteIds = elements.evaluationEnabled.checked
     ? selectedValues(elements.experimentEvaluationSuites)

@@ -61,6 +61,12 @@ try {
  assert.equal(el('hp-batch-size').value,'8');
  assert.equal(input('dataset').value,'/cluster/test');
  assert.equal(el('experiment-node-mode'),null);
+ // Old loaded snapshots can retain unsupported defaults in disabled fields.
+ el('hp-max-steps').value='1000';
+ assert.equal(el('hp-max-steps').disabled,true);
+ assert.equal(w.experimentPayload().hyperparameters.max_steps,undefined);
+ assert.equal(w.experimentPayload().hyperparameters.batch_size,8);
+
  input('steps').value='101';
  assert.equal(w.validateAdapterDeclaredFields({focus:false,notify:false}),false);
  assert.match(input('steps').validationMessage,/maximum is 100/);

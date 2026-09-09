@@ -190,3 +190,42 @@ def test_old_pinned_manifests_do_not_gain_new_contract_fields():
     ]:
         raw["train"].pop(key)
     assert canonical_adapter_manifest(AdapterManifest.model_validate(raw)) == raw
+
+
+def test_all_current_training_adapters_accept_multiple_gpu_allocations():
+    for manifest in builtin_adapter_manifests():
+        assert manifest.capabilities.supports_multi_gpu_single_node, manifest.slug
+        assert manifest.capabilities.maximum_gpus >= 2, manifest.slug
+        spec = make_spec()
+        spec.source.adapter = manifest.slug
+        spec.resources.gpu.count = 2
+        spec.native.argv = []
+        plan = ManifestAdapter(manifest).resolve(spec)
+        assert not any("one GPU" in issue or "1-1 GPUs" in issue for issue in plan.blockers), manifest.slug
+        if manifest.slug.startswith("xpolicylab-"):
+            flag = plan.argv.index("--gpu-count")
+            assert plan.argv[flag + 1] == "2"
+            assert "adapter-support/training_parallel.py" in plan.capsule_files
+
+
+def test_dexmimicgen_keeps_old_pinned_launcher_and_versions_new_bridge():
+    manifest = next(m for m in builtin_adapter_manifests() if m.slug == "dexmimicgen")
+    spec = make_spec()
+    spec.source.adapter = manifest.slug
+    spec.native.argv = []
+    spec.native.config = {"training_config": "/cluster/train.json", "robomimic_revision": "a" * 40}
+    spec.resources.gpu.count = 2
+    spec.source.adapter_manifest = canonical_adapter_manifest(manifest)
+    plan = ManifestAdapter(manifest).resolve(spec)
+    assert "robomimic_training.py" in plan.argv[1]
+    assert plan.argv[plan.argv.index("--gpu-count") + 1] == "2"
+    assert "adapter-support/robomimic_training.py" in plan.capsule_files
+    old = manifest.model_copy(deep=True)
+    old.train.capsule_files = {}
+    old.capabilities.maximum_gpus = 1
+    old.capabilities.supports_multi_gpu_single_node = False
+    spec.source.adapter_manifest = canonical_adapter_manifest(old)
+    spec.resources.gpu.count = 1
+    plan = ManifestAdapter(old).resolve(spec)
+    assert plan.argv == ["python", "-m", "robomimic.scripts.train", "--config", "/cluster/train.json"]
+    assert not plan.capsule_files

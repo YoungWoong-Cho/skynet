@@ -7,6 +7,9 @@ SUPPORT = Path(__file__).parent
 
 def support_files(policy):
     files = {
+        "adapter-support/training_parallel.py": (
+            SUPPORT / "training_parallel.py"
+        ).read_text(),
         "adapter-support/xpolicy_runtime.py": (
             SUPPORT / "xpolicy_runtime.py"
         ).read_text(),

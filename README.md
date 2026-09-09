@@ -74,6 +74,15 @@ The tests use temporary databases and mocked transports where appropriate. Clust
 8. Use **Resume** for an interrupted resumable run, **Cancel** for active work, or fork the experiment revision when changing scientific inputs.
 9. Create evaluations from a retained inference checkpoint and monitor the episode ledger, logs, videos, and normalized result.
 
+For multi-GPU training, choose **Experiments → Slurm resources → GPU allocation → Manual**
+and set **GPUs / node**. DP, ACT and DexMimicGen support up to eight GPUs on one
+node. DP/ACT split each batch across the selected devices and reduce gradients
+into one optimizer; per-device batch size is multiplied by the GPU count before
+accumulation. Checkpoints remain compatible with single-GPU evaluation.
+DexMimicGen uses the native robomimic BC family and keeps its configured global
+batch size. Other adapters retain their native launchers; custom commands must
+use the allocation exposed through `SKYNET_ASSIGNED_GPU_COUNT`.
+
 For DP and ACT, open **Training Runs → View attempts → Start evaluation**. In
 **Evaluations**, choose one or more configured DexVerse tasks, episodes, seeds,
 and up to eight parallel jobs. The recorded task is the default. Choose the
@@ -568,4 +577,4 @@ For a read-only metadata and file-presence check, run `python skynet_app/adapter
 - The console is currently single-user and trusted-network only.
 - Statistical reproducibility may be the strongest available guarantee for nondeterministic frameworks and simulators.
 
-Policy-aware dataset preparation and management are described in [Dataset preparation](docs/policy-data-exports.md). One dataset groups original revisions, prepared formats, verified local/cluster copies and experiment usage. DP supports training through the pinned XPolicyLab adapter; ACT and shared XPolicyLab HDF5 are export-only. All entry points use the same preparation workflow.
+Policy-aware dataset preparation and management are described in [Dataset preparation](docs/policy-data-exports.md). One dataset groups original revisions, prepared formats, verified local/cluster copies and experiment usage. DP and ACT support training and evaluation through the pinned XPolicyLab adapters; shared XPolicyLab HDF5 is an export format. All entry points use the same preparation workflow.

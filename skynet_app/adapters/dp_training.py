@@ -25,6 +25,13 @@ def configure_repository(repository):
     if not (root / "diffusion_policy/workspace/robotworkspace.py").is_file():
         raise ValueError("Select the pinned XPolicyLab repository with policy/DP")
     sys.path.insert(0, str(root))
+    from diffusion_policy.model.common.module_attr_mixin import ModuleAttrMixin
+
+    # DataParallel replicas expose parameter tensors as attributes, while their
+    # parameters() iterator is empty. The existing dummy tensor preserves device
+    # and dtype introspection without changing native checkpoint keys.
+    ModuleAttrMixin.device = property(lambda self: self._dummy_variable.device)
+    ModuleAttrMixin.dtype = property(lambda self: self._dummy_variable.dtype)
     return root
 
 
@@ -193,6 +200,11 @@ def workspace_class():
     from diffusion_policy.workspace.robotworkspace import RobotWorkspace
     from hydra.utils import instantiate
     from torch.utils.data import DataLoader
+    from training_parallel import (
+        ParallelLoss,
+        PolicyLoss,
+        validate_devices,
+    )
 
     class TrainingWorkspace(RobotWorkspace):
         def save_checkpoint(self, path=None, **kwargs):
@@ -213,6 +225,12 @@ def workspace_class():
                 model.set_normalizer(normalizer)
                 model.to(device)
             optimizer_to(self.optimizer, device)
+            devices = validate_devices(cfg.training.gpu_count)
+            train_loss = ParallelLoss(PolicyLoss(self.model, "compute_loss"), devices)
+            validation_loss = ParallelLoss(
+                PolicyLoss(self.ema_model, "compute_loss"), devices
+            )
+            input_device = torch.device("cpu") if len(devices) > 1 else device
             generator = torch.Generator().manual_seed(cfg.training.seed)
             train = DataLoader(
                 dataset,
@@ -245,9 +263,9 @@ def workspace_class():
                     loss_sum, examples = 0.0, 0
                     window_examples = 0
                     for index, raw in enumerate(train):
-                        batch = dataset.postprocess(raw, device)
+                        batch = dataset.postprocess(raw, input_device)
                         size = len(batch["action"])
-                        loss = self.model.compute_loss(batch)
+                        loss = train_loss(batch)[0]["loss"]
                         if not torch.isfinite(loss):
                             raise ValueError("Training produced a nonfinite loss")
                         (loss * size).backward()
@@ -282,12 +300,11 @@ def workspace_class():
                     self.ema_model.eval()
                     val_sum, val_examples = 0.0, 0
                     # Keep diffusion noise fixed across epochs for comparable held-out loss.
-                    devices = [device.index or 0] if device.type == "cuda" else []
                     with torch.random.fork_rng(devices=devices), torch.no_grad():
                         torch.manual_seed(cfg.training.seed + 1)
                         for index, raw in enumerate(validation):
-                            batch = dataset.postprocess(raw, device)
-                            loss = self.ema_model.compute_loss(batch)
+                            batch = dataset.postprocess(raw, input_device)
+                            loss = validation_loss(batch)[0]["loss"]
                             if not torch.isfinite(loss):
                                 raise ValueError("Validation produced a nonfinite loss")
                             val_sum += loss.item() * len(batch["action"])
@@ -343,6 +360,7 @@ def arguments():
     )
     for key, default in {
         "batch-size": 256,
+        "gpu-count": 1,
         "epochs": 300,
         "seed": 42,
         "observation-steps": 2,
@@ -368,11 +386,22 @@ def arguments():
         type=int,
         help="Bound each epoch for isolated runtime smoke checks",
     )
+    parser.add_argument(
+        "--batch-semantics",
+        default="per_device",
+        choices=[
+            "per_device",
+            "global_before_accumulation",
+            "global_effective",
+            "repository_native",
+        ],
+    )
     args = parser.parse_args()
     if any(
         getattr(args, k) < 1
         for k in [
             "batch_size",
+            "gpu_count",
             "epochs",
             "observation_steps",
             "action_steps",
@@ -411,6 +440,7 @@ def main():
     import numpy as np
     import torch
     from artifacts import digest, verify
+    from training_parallel import training_batch_size
     from hydra import compose, initialize_config_dir
     from omegaconf import OmegaConf
 
@@ -462,20 +492,27 @@ def main():
         "n_obs_steps": args.observation_steps,
         "horizon": args.action_steps,
     }
+    batch_size = training_batch_size(
+        args.batch_size,
+        args.gpu_count,
+        args.gradient_accumulation,
+        args.batch_semantics,
+    )
     cfg.dataloader = {
-        "batch_size": args.batch_size,
+        "batch_size": batch_size,
         "num_workers": args.num_workers,
         "shuffle": True,
         "drop_last": False,
     }
     cfg.val_dataloader = {
-        "batch_size": min(args.batch_size, 32),
+        "batch_size": min(batch_size, 32 * args.gpu_count),
         "num_workers": args.num_workers,
         "shuffle": False,
         "drop_last": False,
     }
     for key, value in {
         "seed": args.seed,
+        "gpu_count": args.gpu_count,
         "device": args.device,
         "num_epochs": args.epochs,
         "resume": False,
@@ -497,7 +534,7 @@ def main():
     cfg.logging.mode = "disabled"
     cfg.skynet = {
         "training_preset": args.training_preset,
-        "effective_batch_size": args.batch_size * args.gradient_accumulation,
+        "effective_batch_size": batch_size * args.gradient_accumulation,
         "action_alignment": "current observation then future commands",
         "image_normalization": (
             "uint8 / 255 then ImageNet once" if args.observation_mode == "rgb" else None
@@ -543,7 +580,7 @@ def main():
             dict(
                 schema="skynet.applied-settings/v1",
                 settings=vars(args),
-                effective_batch_size=args.batch_size * args.gradient_accumulation,
+                effective_batch_size=batch_size * args.gradient_accumulation,
                 manifest_sha256=args.manifest_sha,
                 repository_revision=revision,
             ),

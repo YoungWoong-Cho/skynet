@@ -116,6 +116,7 @@ def arguments():
     parser.add_argument("--training-preset", default="xpolicylab-act/v1")
     for key, value in dict(
         batch_size=16,
+        gpu_count=1,
         epochs=6000,
         seed=42,
         action_steps=50,
@@ -135,9 +136,20 @@ def arguments():
     ).items():
         parser.add_argument("--" + key.replace("_", "-"), type=float, default=value)
     parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument(
+        "--batch-semantics",
+        default="per_device",
+        choices=[
+            "per_device",
+            "global_before_accumulation",
+            "global_effective",
+            "repository_native",
+        ],
+    )
     args = parser.parse_args()
     for key in [
         "batch_size",
+        "gpu_count",
         "epochs",
         "action_steps",
         "hidden_dim",
@@ -165,6 +177,12 @@ def main():
     import numpy as np
     import torch
     from torch.utils.data import DataLoader
+    from training_parallel import (
+        ParallelLoss,
+        PolicyLoss,
+        validate_devices,
+        training_batch_size,
+    )
     from artifacts import verify, digest
 
     root, output = Path(args.dataset), Path(args.output)
@@ -220,10 +238,18 @@ def main():
     np.random.seed(args.seed)
     policy = build_policy(args.repository, args.revision, vars(args), dim)
     optimizer = policy.configure_optimizers()
+    devices = validate_devices(args.gpu_count)
+    compute_loss = ParallelLoss(PolicyLoss(policy), devices)
+    batch_size = training_batch_size(
+        args.batch_size,
+        args.gpu_count,
+        args.gradient_accumulation,
+        args.batch_semantics,
+    )
     loaders = {
         s: DataLoader(
             d,
-            batch_size=args.batch_size,
+            batch_size=batch_size,
             shuffle=(s == "train"),
             num_workers=args.num_workers,
             generator=torch.Generator().manual_seed(args.seed),
@@ -235,7 +261,7 @@ def main():
         dict(
             schema="skynet.applied-settings/v1",
             settings=vars(args),
-            effective_batch_size=args.batch_size * args.gradient_accumulation,
+            effective_batch_size=batch_size * args.gradient_accumulation,
             manifest_sha256=args.manifest_sha,
             repository_revision=args.revision,
         ),
@@ -248,35 +274,38 @@ def main():
         for split, loader in loaders.items():
             training = split == "train"
             policy.train(training)
-            loss_sum = examples = 0
+            loss_sum = examples = window_examples = 0
             optimizer.zero_grad(set_to_none=True)
-            with torch.random.fork_rng(devices=[0]) if not training else nullcontext():
+            with (
+                torch.random.fork_rng(devices=devices)
+                if not training
+                else nullcontext()
+            ):
                 if not training:
                     torch.manual_seed(args.seed + 1)
                 with torch.set_grad_enabled(training):
                     for batch_index, batch in enumerate(loader):
-                        qpos, images, actions, is_pad = [x.cuda() for x in batch]
-                        loss = policy(qpos, images, actions, is_pad)["loss"]
+                        inputs = (
+                            batch if args.gpu_count > 1 else [x.cuda() for x in batch]
+                        )
+                        loss = compute_loss(inputs)[0]["loss"]
                         if not torch.isfinite(loss):
                             raise ValueError("ACT produced a nonfinite loss")
-                        count = len(qpos)
+                        count = len(batch[0])
                         loss_sum += loss.item() * count
                         examples += count
                         if training:
-                            group_start = (
-                                batch_index
-                                // args.gradient_accumulation
-                                * args.gradient_accumulation
-                            )
-                            group_size = min(
-                                args.gradient_accumulation, len(loader) - group_start
-                            )
-                            (loss / group_size).backward()
+                            (loss * count).backward()
+                            window_examples += count
                             if (
                                 batch_index + 1
                             ) % args.gradient_accumulation == 0 or batch_index + 1 == len(
                                 loader
                             ):
+                                for parameter in policy.parameters():
+                                    if parameter.grad is not None:
+                                        parameter.grad.div_(window_examples)
+                                window_examples = 0
                                 torch.nn.utils.clip_grad_norm_(
                                     policy.parameters(), args.gradient_clip
                                 )

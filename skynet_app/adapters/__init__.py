@@ -4,7 +4,7 @@ import json
 import math
 import re
 from abc import ABC, abstractmethod
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Mapping
 
 from pydantic import Field, computed_field, field_serializer, field_validator, model_serializer, model_validator
@@ -574,12 +574,12 @@ class DexMimicGenAdapter(RepositoryAdapter):
     capabilities = AdapterCapabilities(
         name=AdapterName.DEXMIMICGEN,
         runtime_backends={"uv", "conda", "apptainer", "existing"},
-        supports_multi_gpu_single_node=False,
+        supports_multi_gpu_single_node=True,
         supports_resume=False,
         supports_evaluation_resume=True,
         minimum_gpus=1,
         recommended_gpus=1,
-        maximum_gpus=1,
+        maximum_gpus=8,
         evaluation_adapters=["robosuite", "mujoco"],
     )
 
@@ -589,7 +589,17 @@ class DexMimicGenAdapter(RepositoryAdapter):
         if spec.native.argv:
             argv = list(spec.native.argv)
         elif config_path:
-            argv = ["python", "-m", "robomimic.scripts.train", "--config", str(config_path)]
+            pinned = spec.source.adapter_manifest
+            files = (pinned or {}).get("train", {}).get("capsule_files", {})
+            if pinned is not None and "adapter-support/robomimic_training.py" not in files:
+                argv = ["python", "-m", "robomimic.scripts.train", "--config", str(config_path)]
+                if gpu_count > 1:
+                    blockers.append("Choose the current DexMimicGen adapter for multi-GPU training")
+            else:
+                argv = [
+                    "python", f"{RUN_DIR_TOKEN}/adapter-support/robomimic_training.py",
+                    "--gpu-count", str(gpu_count), "--", "--config", str(config_path),
+                ]
         else:
             argv = []
             blockers.append(
@@ -601,11 +611,11 @@ class DexMimicGenAdapter(RepositoryAdapter):
             argv=argv,
             resume_argv=list(spec.native.resume_argv),
             native_config=spec.native.config,
-            environment={},
+            environment={"SKYNET_ASSIGNED_GPU_COUNT": str(gpu_count)},
             checkpoint_globs=["**/models/*.pth"],
             blockers=blockers,
             todos=["Implement a tested robomimic checkpoint-resume hook before enabling training auto-resume."],
-            warnings=["Rollout evaluation needs substantial CPUs and RAM despite single-GPU training."],
+            warnings=[],
         )
 
 
@@ -2959,6 +2969,10 @@ def builtin_adapter_manifests() -> list[AdapterManifest]:
         ),
         _builtin_manifest(
             "dexmimicgen", "DexMimicGen", "https://github.com/NVlabs/dexmimicgen", [], "uv",
+            capsule_files={
+                "adapter-support/" + name: (Path(__file__).parent / name).read_text()
+                for name in ["robomimic_training.py", "training_parallel.py"]
+            },
             input_fields=[
                 AdapterInputField(
                     path="native.config.training_config", label="Generated training config", kind="string",

@@ -181,9 +181,11 @@ def manifest():
                 maximum=maximum,
                 choices=choices,
                 help=help_text,
-                maximum_path="native.config.diffusion_steps"
-                if key == "inference_steps"
-                else None,
+                maximum_path=(
+                    "native.config.diffusion_steps"
+                    if key == "inference_steps"
+                    else None
+                ),
                 canonical_path="train.max_epochs" if key == "epochs" else None,
             )
         )
@@ -237,6 +239,8 @@ def manifest():
     ]
     for flag, path in {
         "batch-size": "train.batch.value",
+        "batch-semantics": "train.batch.declared_semantics",
+        "gpu-count": "computed.gpu_count",
         "learning-rate": "train.learning_rate",
         "seed": "train.seed",
         "gradient-accumulation": "train.batch.gradient_accumulation_steps",
@@ -257,10 +261,10 @@ def manifest():
         capabilities=AdapterCapabilities(
             name="xpolicylab-dp",
             runtime_backends={"conda", "existing"},
-            supports_multi_gpu_single_node=False,
+            supports_multi_gpu_single_node=True,
             supports_resume=False,
             minimum_gpus=1,
-            maximum_gpus=1,
+            maximum_gpus=8,
         ),
         defaults=AdapterDefaults(
             resources=AdapterResourceDefaults(gpu_type="l40s"),
@@ -292,7 +296,7 @@ def manifest():
             ],
             checkpoint_globs=["artifacts/checkpoints/*.ckpt"],
             progress=progress_contract(),
-            capsule_files=support_files('dp'),
+            capsule_files=support_files("dp"),
         ),
-        evaluations=[evaluation('dp')],
+        evaluations=[evaluation("dp")],
     )
