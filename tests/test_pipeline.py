@@ -3090,3 +3090,15 @@ def test_rollout_logs_use_its_worker_directory_and_shared_log_reader(tmp_path, m
     with pytest.raises(pipeline_api.HTTPException, match="Invalid rollout worker identity"):
         pipeline_api.get_evaluation_episode_log(evaluation["id"], episode["id"])
     assert len(reads) == 1
+
+
+@pytest.mark.parametrize("requested,expected", [({}, "1"), ({"NCCL_P2P_DISABLE": "0"}, "0")])
+def test_cluster_transport_is_pinned_into_new_runtime_without_mutating_request(tmp_path, requested, expected):
+    service = PipelineService(Database(tmp_path / "transport.db"), FakeCluster())
+    manifest = next(m for m in builtin_adapter_manifests() if m.slug == "xpolicylab-dp")
+    runtime_input = {"backend": "existing", "profile_id": "skynet-dp", "environment": dict(requested)}
+    _, runtime = service._resolve_source_and_runtime(
+        {"repository": manifest.default_repository, "revision": COMMIT},
+        runtime_input, manifest, "sky2")
+    assert runtime["environment"]["NCCL_P2P_DISABLE"] == expected
+    assert runtime_input["environment"] == requested

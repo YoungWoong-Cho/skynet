@@ -1,6 +1,5 @@
-"""Numerical checks for the shared training loss reducer; CUDA coverage runs on the cluster."""
-
-import copy
+"""Exact sample accounting and failure detection for shared distributed training."""
+import math
 from pathlib import Path
 import sys
 
@@ -8,84 +7,61 @@ import pytest
 
 torch = pytest.importorskip("torch")
 sys.path.insert(0, str(Path(__file__).parents[1] / "skynet_app/adapters"))
-from training_parallel import (
-    ParallelLoss,
-    PolicyLoss,
-    training_batch_size,
-    validate_devices,
-)
+from training_parallel import ShardedBatchSampler, TrainingContext, training_batch_size
 
 
-class Regression(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.linear = torch.nn.Linear(3, 2)
-
-    def compute_loss(self, batch):
-        return (self.linear(batch["x"]) - batch["y"]).square().mean()
-
-
-def test_batch_sizes_keep_the_declared_semantics():
-    assert training_batch_size(4, 3, 2) == 12
-    assert training_batch_size(12, 3, 2, "global_before_accumulation") == 12
-    assert training_batch_size(24, 3, 2, "global_effective") == 12
+def test_batch_sizes_keep_declared_semantics():
+    assert training_batch_size(8, 4, 2) == 32
+    assert training_batch_size(32, 4, 2, "global_before_accumulation") == 32
+    assert training_batch_size(64, 4, 2, "global_effective") == 32
     with pytest.raises(ValueError, match="divisible"):
-        training_batch_size(25, 3, 2, "global_effective")
+        training_batch_size(25, 4, 2, "global_effective")
     with pytest.raises(ValueError, match="one sample"):
-        training_batch_size(2, 3, 1, "global_before_accumulation")
+        training_batch_size(2, 4, 1, "global_before_accumulation")
 
 
-def test_uneven_replica_batches_match_full_batch_loss_and_gradients():
-    torch.manual_seed(1)
-    model = Regression()
-    reference = copy.deepcopy(model)
-    batch = {"x": torch.randn(5, 3), "y": torch.randn(5, 2)}
-    expected = reference.compute_loss(batch)
-    expected.backward()
-    module = PolicyLoss(model, "compute_loss")
-    outputs = [
-        module({k: v[a:b] for k, v in batch.items()}) for a, b in [(0, 3), (3, 5)]
-    ]
-    actual = sum(x["loss_sums"]["loss"].sum() for x in outputs) / sum(
-        x["count"].sum() for x in outputs
-    )
-    actual.backward()
-    torch.testing.assert_close(actual, expected)
-    for parameter, target in zip(model.parameters(), reference.parameters()):
-        torch.testing.assert_close(parameter.grad, target.grad)
-    assert set(model.state_dict()) == set(
-        reference.state_dict()
-    ), "checkpoints retain native parameter names"
+@pytest.mark.parametrize("size", [1, 2, 4, 5, 26, 29, 32])
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_each_sample_contributes_exactly_once_with_uneven_and_empty_ranks(size, shuffle):
+    samplers = [ShardedBatchSampler(size, 12, rank, 4, shuffle, 47) for rank in range(4)]
+    all_indices=[]
+    for epoch in [0, 1]:
+        for sampler in samplers: sampler.set_epoch(epoch)
+        batches = [list(sampler) for sampler in samplers]
+        assert all(len(b) == math.ceil(size / 12) for b in batches)
+        actual=[]
+        for step in range(len(batches[0])):
+            assert sum(s.valid_count(step) for s in samplers)==samplers[0].global_count(step)
+            for rank, sampler in enumerate(samplers):
+                assert batches[rank][step]  # zero-weight padding participates in DDP
+                actual.extend(batches[rank][step][:sampler.valid_count(step)])
+        assert sorted(actual)==list(range(size))
+        all_indices.append(actual)
+    if shuffle and size > 4: assert all_indices[0]!=all_indices[1]
 
 
-def test_one_gpu_path_keeps_original_policy_and_loss():
-    model = Regression()
-    loss = ParallelLoss(PolicyLoss(model, "compute_loss"), [0])
-    batch = {"x": torch.randn(3, 3), "y": torch.randn(3, 2)}
-    torch.testing.assert_close(loss(batch)[0]["loss"], model.compute_loss(batch))
-    assert loss.module.policy is model
+def cpu_context():
+    context=object.__new__(TrainingContext)
+    context.world_size=1
+    context.device=torch.device("cpu")
+    return context
 
 
-def test_missing_allocated_gpus_fails_instead_of_silently_using_one(monkeypatch):
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
-    with pytest.raises(ValueError, match="only 1"):
-        validate_devices(2)
+def test_corrupt_sample_counts_fail_instead_of_generating_tiny_loss():
+    context=cpu_context()
+    with pytest.raises(ValueError, match="sample count mismatch"):
+        context.mean(40.0, 4519575824443980770, 32)
+    assert context.mean(40.0, 32, 32)==1.25
+    for bad in [float('nan'), float('inf'), -1.0]:
+        with pytest.raises(ValueError, match="invalid loss"):
+            context.check_loss(torch.tensor(bad))
 
 
-@pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="requires two allocated CUDA GPUs"
-)
-def test_two_real_gpus_compute_and_reduce_the_same_gradient():
-    torch.manual_seed(2)
-    model = Regression().cuda(0)
-    reference = copy.deepcopy(model)
-    batch = {"x": torch.randn(7, 3), "y": torch.randn(7, 2)}
-    expected = reference.compute_loss({k: v.cuda(0) for k, v in batch.items()})
-    expected.backward()
-    loss = ParallelLoss(PolicyLoss(model, "compute_loss"), validate_devices(2))
-    actual = loss(batch)[0]["loss"]
-    actual.backward()
-    torch.testing.assert_close(actual, expected)
-    for parameter, target in zip(model.parameters(), reference.parameters()):
-        torch.testing.assert_close(parameter.grad, target.grad)
-    assert loss.reported_devices == {0, 1}
+def test_accumulated_gradients_are_normalized_by_real_samples():
+    context=cpu_context()
+    parameter=torch.nn.Parameter(torch.tensor([2.0]))
+    (parameter.square()*3).backward()
+    context.normalize_gradients([parameter], 3, 3)
+    torch.testing.assert_close(parameter.grad, torch.tensor([4.0]))
+    with pytest.raises(ValueError, match="sample count mismatch"):
+        context.normalize_gradients([parameter], 3, 4)

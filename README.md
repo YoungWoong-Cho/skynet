@@ -76,12 +76,20 @@ The tests use temporary databases and mocked transports where appropriate. Clust
 
 For multi-GPU training, choose **Experiments → Slurm resources → GPU allocation → Manual**
 and set **GPUs / node**. DP, ACT and DexMimicGen support up to eight GPUs on one
-node. DP/ACT split each batch across the selected devices and reduce gradients
-into one optimizer; per-device batch size is multiplied by the GPU count before
-accumulation. Checkpoints remain compatible with single-GPU evaluation.
+node. Each GPU runs a separate DDP worker; per-device batch size is multiplied
+by the GPU count before accumulation. Losses and gradients are weighted by the
+actual sample count, including uneven final batches. Only the main worker
+writes logs and checkpoints, which remain compatible with single-GPU evaluation.
 DexMimicGen uses the native robomimic BC family and keeps its configured global
 batch size. Other adapters retain their native launchers; custom commands must
 use the allocation exposed through `SKYNET_ASSIGNED_GPU_COUNT`.
+
+The Skynet cluster profile pins `NCCL_P2P_DISABLE=1` into new experiment runtimes
+to avoid unreliable direct peer transfers on this cluster. NCCL uses host-memory
+communication within the node. Other cluster profiles may leave this unset.
+The shared trainers validate collective communication before loading the policy
+and fail if loss values or sample counts are invalid. Existing experiment revisions
+retain their pinned code; create a new revision to use an updated trainer.
 
 For DP and ACT, open **Training Runs → View attempts → Start evaluation**. In
 **Evaluations**, choose one or more configured DexVerse tasks, episodes, seeds,

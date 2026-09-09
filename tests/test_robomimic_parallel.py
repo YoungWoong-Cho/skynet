@@ -1,54 +1,24 @@
-"""Exercise the native DexMimicGen BC training and checkpoint interfaces on two GPUs."""
-
+"""Check native batch sharding without duplicating observations or goals."""
 from pathlib import Path
 import sys
 
 import pytest
 
 torch = pytest.importorskip("torch")
-pytest.importorskip("robomimic")
 sys.path.insert(0, str(Path(__file__).parents[1] / "skynet_app/adapters"))
-from robomimic_training import enable_parallel_training
+from robomimic_training import shard_batch
 
 
-@pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="requires two allocated CUDA GPUs"
-)
-def test_native_bc_rnn_gmm_updates_on_both_gpus_and_reloads_checkpoint():
-    from robomimic.config import config_factory
-    import robomimic.algo as algorithms
-    import robomimic.utils.obs_utils as obs_utils
-
-    config = config_factory(algo_name="bc")
-    with config.values_unlocked():
-        config.train.batch_size = 5
-        config.observation.modalities.obs.low_dim = ["state"]
-        config.algo.actor_layer_dims = (32,)
-        config.algo.rnn.enabled = True
-        config.algo.rnn.hidden_dim = 32
-        config.algo.gmm.enabled = True
-    obs_utils.initialize_obs_utils_with_config(config)
-    enable_parallel_training([0, 1])
-    model = algorithms.algo_factory(
-        "bc", config, {"state": (4,)}, 2, torch.device("cuda:0")
-    )
-    before = {k: v.clone() for k, v in model.nets.state_dict().items()}
-    batch = {
-        "obs": {"state": torch.randn(5, 3, 4, device="cuda:0")},
-        "goal_obs": None,
-        "actions": torch.randn(5, 3, 2, device="cuda:0"),
-    }
-    model.set_train()
-    info = model.train_on_batch(batch, epoch=1)
-    assert torch.isfinite(info["losses"]["action_loss"])
-    assert model._skynet_parallel.reported_devices == {0, 1}
-    assert any(
-        not torch.equal(before[k], v) for k, v in model.nets.state_dict().items()
-    )
-    restored = algorithms.algo_factory(
-        "bc", config, {"state": (4,)}, 2, torch.device("cuda:0")
-    )
-    restored.deserialize(model.serialize())
-    for k, v in model.nets.state_dict().items():
-        torch.testing.assert_close(v, restored.nets.state_dict()[k])
-    assert set(model.log_info(info))
+@pytest.mark.parametrize("size", [1, 2, 5, 8])
+def test_native_batches_preserve_observation_action_alignment(size):
+    batch = {"obs": {"state": torch.arange(size).reshape(size, 1)},
+             "actions": torch.arange(size).reshape(size, 1), "goal_obs": None}
+    seen = []
+    for rank in range(4):
+        local = shard_batch(batch, rank, 4, size)
+        assert local["goal_obs"] is None
+        assert torch.equal(local["obs"]["state"], local["actions"])
+        count = len(range(rank, size, 4))
+        assert len(local["actions"]) == max(1, count)
+        seen.extend(local["actions"][:count].flatten().tolist())
+    assert sorted(seen) == list(range(size))

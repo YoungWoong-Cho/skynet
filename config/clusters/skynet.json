@@ -328,5 +328,8 @@
     "max_gpus_per_node": 16,
     "max_cpus_per_task": 256,
     "max_memory_gb": 2048
+  },
+  "training_environment": {
+    "NCCL_P2P_DISABLE": "1"
   }
 }

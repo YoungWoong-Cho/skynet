@@ -252,6 +252,7 @@ class ClusterProfile(ProfileModel):
     gateways: list[str] = Field(min_length=1)
     paths: ClusterPaths
     commands: ClusterCommands
+    training_environment: dict[str, str] = Field(default_factory=dict)
     runtime_profiles: dict[str, RuntimeProfileConfig] = Field(default_factory=dict)
     queues: dict[str, QueueProfile]
     gpu_aliases: dict[str, str | None]

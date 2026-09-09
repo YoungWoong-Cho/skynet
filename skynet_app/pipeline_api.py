@@ -2400,6 +2400,11 @@ class PipelineService:
         manifest: AdapterManifest,
         gateway: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        runtime_input = copy.deepcopy(runtime_input)
+        runtime_input["environment"] = {
+            **CLUSTER.training_environment,
+            **(runtime_input.get("environment") or {}),
+        }
         repository = self.source_discovery.repository_url(
             str(source.get("repository") or manifest.default_repository or "")
         )
