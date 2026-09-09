@@ -34,6 +34,9 @@ for (const name of [
   "stateClass",
   "statusPill",
   "dataVersionStatus",
+  "datasetBindingValue",
+  "adapterDataContracts",
+  "experimentBundleCompatibility",
 ]) {
   const start = app.indexOf(`function ${name}(`),
     end = app.indexOf("\nfunction ", start + 1);
@@ -43,6 +46,14 @@ for (const name of [
   if (brace >= 0) text = text.slice(0, brace + 3);
   w.eval(text);
 }
+w.declaredAdapterInputFields = adapter => adapter.fields;
+const nativeAdapter = {fields:[{data_binding:{role:'training_data',formats:['egoverse-episodes-zarr/v1'],contracts:['egoverse.native-pi0.5_bc_aria/v1'],value_path:'location.path'}}]};
+const registered = {assignments:[{role:'training_data',version:{format:'egoverse-episodes-zarr/v1',manifest_sha256:'sha',metadata:{contract:'skynet.egoverse-rgb-joints/v1',validation:{status:'PASSED'}}},config:{location:{kind:'cluster',status:'AVAILABLE',manifest_sha256:'sha',path:'/prepared'}}}]};
+assert.equal(w.experimentBundleCompatibility(registered,nativeAdapter).compatible,false,'matching file formats cannot substitute for matching model observations');
+registered.assignments[0].version.metadata.contract='egoverse.native-pi0.5_bc_aria/v1';
+assert.equal(w.experimentBundleCompatibility(registered,nativeAdapter).compatible,true,'verified native model data remains selectable');
+registered.assignments[0].version.metadata.validation.status='FAILED';
+assert.equal(w.experimentBundleCompatibility(registered,nativeAdapter).compatible,false,'failed validation cannot appear as compatible');
 const registryRefreshes = [];
 w.loadDataRegistry = async (force) => { registryRefreshes.push(force); };
 w.askUserDialog = async () => true;

@@ -232,7 +232,7 @@ def test_export_api_validates_formats_and_exposes_downloads(setup, monkeypatch):
     app = FastAPI()
     app.include_router(api.router)
     client = TestClient(app)
-    assert len(client.get("/api/data/exports").json()["formats"]) == 4
+    assert {f["id"] for f in client.get("/api/data/exports").json()["formats"]} == {"dp", "dp-state", "act", "xpolicylab", "egoverse"}
     body = dict(session_id=session["id"], format="dp", name="API export")
     assert client.post("/api/data/exports", json=dict(body, format="any-policy")).status_code == 409
     for removed in ({"target": "local"}, {"selections": [{"session_id": session["id"], "indices": [0]}]}):

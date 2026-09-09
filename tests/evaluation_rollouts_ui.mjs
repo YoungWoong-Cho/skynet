@@ -67,6 +67,17 @@ try {
  assert.ok(el('evaluation-search').closest('.panel-heading-tools .toolbar'),'evaluation filters reuse the training toolbar');
  const parallel=el('evaluation-parallelism').closest('.field');
  assert.equal(parallel.nextElementSibling.querySelector('input').id,'evaluation-max-attempts');
+ // A different training run must resolve its own checkpoint.
+ el('evaluation-checkpoint').value='/runs/previous/checkpoints/last.ckpt';
+ el('evaluation-run-id').value='new-run';
+ el('evaluation-run-id').dispatchEvent(new w.Event('input',{bubbles:true}));
+ assert.equal(el('evaluation-checkpoint').value,'','switching runs clears the previous checkpoint');
+ const prediction={...episodes[0],success:null,metrics_json:{joint_mse:0.125}};
+ w.renderEvaluationRollouts({...base,episodes:[prediction],attempts:[]});
+ assert.match(el('evaluation-rollouts-body').textContent,/joint_mse: 0.125/,'prediction results display their measured error');
+ el('evaluation-rollouts-body').querySelector('button').click();
+ assert.match(el('evaluation-result-summary').textContent,/joint_mse/);
+ el('evaluation-rollout-dialog').querySelector('[data-dialog-close]').click();
  // Submission must use the same row disclosure as a Results click, including
  // replacing an already-open evaluation and clearing filters hiding the new row.
  w.activateTab=async()=>{};

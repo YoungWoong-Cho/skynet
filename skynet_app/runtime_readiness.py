@@ -81,6 +81,11 @@ def suite_contract_sha256(config: Mapping[str, Any]) -> str:
     return _content_sha256(suite_contract(config))
 
 
+def requires_isaac_consent(contract):
+    return (contract.get("suite", {}).get("evaluator") in {"isaac_sim", "isaac_lab"}
+            or "isaacsim" in contract.get("verification", {}).get("distributions", {}))
+
+
 def _resolve_template(value: str, tokens: Mapping[str, str]) -> str:
     resolved = value
     for name, replacement in tokens.items():
@@ -149,7 +154,7 @@ def build_readiness_contract(profile_id: str, suite_id: str) -> tuple[dict[str, 
     ]
     suite_task_ids = [
         str(item.get("environment_id") or "")
-        for item in pinned_suite["task_environments"]
+        for item in pinned_suite["task_environments"] if item.get("environment_id")
     ]
     if suite_task_ids != expected_task_ids:
         raise ValueError(
@@ -331,10 +336,10 @@ def render_readiness_sbatch(
         "#SBATCH --export=ALL",
         *compile_slurm_placement_directives(resources),
         "set -euo pipefail",
-        'if test "${OMNI_KIT_ACCEPT_EULA:-}" != "YES"; then',
+        *(['if test "${OMNI_KIT_ACCEPT_EULA:-}" != "YES"; then',
         "  printf '%s\n' 'Read and accept the NVIDIA Isaac Sim EULA, then explicitly export OMNI_KIT_ACCEPT_EULA=YES for this sbatch submission.' >&2",
         "  exit 2",
-        "fi",
+        "fi"] if requires_isaac_consent(contract) else []),
         'probe_root="${SLURM_TMPDIR:-/tmp}/skynet-runtime-readiness-${SLURM_JOB_ID:-manual}"',
         'mkdir -p "$probe_root"',
         'mkdir -p "$probe_root/tmp"',
@@ -654,7 +659,7 @@ def execute_compute_probe(contract_path: Path, hook_path: Path, attestation_path
 
     if not str(os.environ.get("SLURM_JOB_ID") or "").isdigit():
         errors.append("compute readiness must run inside a Slurm allocation")
-    if os.environ.get("OMNI_KIT_ACCEPT_EULA") != "YES":
+    if requires_isaac_consent(contract) and os.environ.get("OMNI_KIT_ACCEPT_EULA") != "YES":
         errors.append(
             "NVIDIA Isaac Sim EULA acceptance is missing; explicitly provide "
             "OMNI_KIT_ACCEPT_EULA=YES after reviewing and accepting the EULA"
@@ -679,7 +684,7 @@ def execute_compute_probe(contract_path: Path, hook_path: Path, attestation_path
     hook_integrity_valid = (
         hashlib.sha256(hook_path.read_bytes()).hexdigest() == hook["capsule_sha256"]
     )
-    operator_authorized = os.environ.get("OMNI_KIT_ACCEPT_EULA") == "YES"
+    operator_authorized = not requires_isaac_consent(contract) or os.environ.get("OMNI_KIT_ACCEPT_EULA") == "YES"
     actual["hook"] = {
         "attempted": False,
         "returncode": None,

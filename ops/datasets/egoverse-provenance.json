@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/GaTech-RL2/EgoVerse",
+  "revision": "e17cf98fe4bc234c564b37abc9e155f25e76d566",
+  "files": {
+    "egomimic/rldb/zarr/zarr_writer.py": "9fa8d5fe91745e47e4593ce752a6adec42829b7d7a494c1a2b8e724f1773a983"
+  }
+}

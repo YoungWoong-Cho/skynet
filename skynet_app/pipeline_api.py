@@ -1423,7 +1423,7 @@ class PipelineService:
         for record in self.database.list_adapter_registry(include_archived=False):
             # Retire only the seeded experiment adapter. Collection adapters use
             # a separate registry; saved experiment versions remain resolvable.
-            if record.get("seed_key") in {"dexverse", "builtin:dexverse"}:
+            if record.get("seed_key") in {"dexverse", "builtin:dexverse", "egoverse", "builtin:egoverse"}:
                 self.database.archive_adapter(str(record["id"]))
                 continue
             if not str(record.get("seed_key") or "").startswith("builtin:"):
@@ -8424,7 +8424,8 @@ class PipelineService:
             )
 
         versions = copy.deepcopy(dict(profile.versions))
-        for version_name in ("python", "isaac_sim", "isaac_lab"):
+        uses_isaac = suite_config.get("evaluator") in {"isaac_sim", "isaac_lab"} or "isaacsim" in profile.verification.distributions
+        for version_name in (("python", "isaac_sim", "isaac_lab") if uses_isaac else ("python",)):
             if not str(versions.get(version_name) or "").strip():
                 blockers.append(
                     f"evaluation runtime profile {runtime_profile_id} must pin {version_name}"
@@ -8433,9 +8434,9 @@ class PipelineService:
         import os
 
         operator_environment: dict[str, str] = {}
-        if os.environ.get("OMNI_KIT_ACCEPT_EULA") == "YES":
+        if uses_isaac and os.environ.get("OMNI_KIT_ACCEPT_EULA") == "YES":
             operator_environment["OMNI_KIT_ACCEPT_EULA"] = "YES"
-        else:
+        elif uses_isaac:
             blockers.append(
                 "NVIDIA Isaac Sim EULA acceptance is not configured. After reviewing and "
                 "accepting the NVIDIA Isaac Sim EULA, set OMNI_KIT_ACCEPT_EULA=YES in the "
@@ -8648,6 +8649,9 @@ class PipelineService:
         evaluator_runtime_gateway: str = "auto",
         refresh_evaluator_runtime: bool = False,
     ) -> tuple[ExperimentSpec, AdapterPlan, dict[str, Any], dict[str, Any], dict[str, Any], str]:
+        episode_limit = suite.get("config_json", {}).get("maximum_episodes_per_task")
+        if episode_limit is not None and episodes_per_task > episode_limit:
+            raise ValueError(f"The dataset has {episode_limit} held-out episodes; choose at most {episode_limit}")
         training_spec = ExperimentSpec.model_validate(run["resolved_spec_json"])
         training_adapter = self._adapter_identity(training_spec)
         training_document = training_spec.model_dump(mode="json", by_alias=True)

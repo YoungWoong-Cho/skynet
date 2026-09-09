@@ -805,7 +805,7 @@
               <div>
 
                 <h2>Submit an evaluation</h2>
-                <p class="secondary">Choose a training checkpoint and an independently versioned simulation suite. Only compatible evaluators are offered; readiness checks explain missing runtimes or unsupported tasks.</p>
+                <p class="secondary">Choose a training checkpoint and a compatible evaluation suite.</p>
               </div>
             </div>
             <fieldset class="form-section">
@@ -951,11 +951,11 @@
                           <div id="evaluation-detail-meta" class="key-value-grid"></div>
 
                           <section id="evaluation-rollouts" class="evaluation-rollouts">
-                            <h3>Rollout videos</h3>
+                            <h3>Episode results</h3>
                             <span id="evaluation-rollout-count" class="quiet-label"></span>
                             <p id="evaluation-detail-error" class="field-validation is-invalid" hidden></p>
                             <div class="table-scroll">
-                              <table><thead><tr><th>Episode</th><th>State</th><th>Seed</th><th>Success rate</th><th></th></tr></thead>
+                              <table><thead><tr><th>Episode</th><th>State</th><th>Seed</th><th>Result</th><th></th></tr></thead>
                                 <tbody id="evaluation-rollouts-body"><tr><td colspan="5">Loading rollouts…</td></tr></tbody>
                               </table>
                             </div>

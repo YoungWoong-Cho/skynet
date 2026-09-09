@@ -1,0 +1,31 @@
+{
+  "schema_version": 2,
+  "evaluator": "egoverse",
+  "suite": "egoverse_held_out",
+  "version": "v2",
+  "label": "EgoVerse held-out predictions",
+  "task_source": "repository",
+  "task_catalog_complete": true,
+  "task_selection_mode": "all_only",
+  "task_selection_reason": "Prediction error on the saved validation split.",
+  "task_catalog_provenance": {
+    "repository": "https://github.com/GaTech-RL2/EgoVerse",
+    "revision": "e17cf98fe4bc234c564b37abc9e155f25e76d566",
+    "source_path": "egomimic/eval"
+  },
+  "task_catalog_sha256": "0d70212b703ec8c4dcf3798abd25f4e99a8d9b9dace29f1d06886d6c1fb4600e",
+  "tasks": [
+    "held_out"
+  ],
+  "task_options": [
+    {
+      "id": "held_out",
+      "label": "Held-out demonstrations"
+    }
+  ],
+  "current": true,
+  "dataset_episode_binding": {
+    "role": "training_data",
+    "metadata_path": "split.validation"
+  }
+}

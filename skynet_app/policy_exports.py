@@ -363,7 +363,7 @@ class PolicyExportService:
         split = self.split(sources, validation_percent, seed)
         if RECIPES[format]["trainable"] and not split["validation"]:
             raise ValueError(
-                "DP training needs at least two episodes and a non-zero validation split"
+                "Training needs at least two episodes and a non-zero validation split"
             )
         source_root = self.live.root / "ops/datasets"
         worker = (source_root / "policy_export.py").read_text()
@@ -396,6 +396,16 @@ class PolicyExportService:
                 }.items()
             },
         }
+        if format == "egoverse":
+            provenance = json.loads((source_root / "egoverse-provenance.json").read_text())
+            expected = provenance["files"]["egomimic/rldb/zarr/zarr_writer.py"]
+            if digest(source_root / "egoverse_zarr_writer.py") != expected:
+                raise ValueError("Pinned EgoVerse writer changed; review its provenance")
+            for asset_name in ("egoverse_export.py", "egoverse_zarr_writer.py", "egoverse-provenance.json", "egoverse-LICENSE"):
+                frozen_files[asset_name] = (source_root / asset_name).read_text()
+            frozen_files["egoverse_runtime.py"] = (self.live.root / "skynet_app/adapters/egoverse_runtime.py").read_text()
+            frozen_files["egoverse_data.py"] = (self.live.root / "skynet_app/adapters/egoverse_data.py").read_text()
+            frozen_files["conversion-dependencies.json"] = canonical_json(RECIPES[format]["conversion_dependencies"])
         converter_sha = fingerprint([frozen_files, provenance, runtime_lock])
         identity = fingerprint(
             [sources, format, split, converter_sha, RECIPES[format]["contract"]]
@@ -617,9 +627,19 @@ class PolicyExportService:
                     detail="Converting the selected observations and actions",
                 )
                 with (directory / "export.log").open("w") as log:
+                    interpreter = [sys.executable]
+                    dependencies = directory / "worker/conversion-dependencies.json"
+                    if dependencies.is_file():
+                        uv = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
+                        if not Path(uv).is_file():
+                            raise ValueError("Install uv to prepare this dataset format")
+                        interpreter = [uv, "run", "--no-project", "--python", sys.executable]
+                        for package in json.loads(dependencies.read_text()):
+                            interpreter.extend(["--with", package])
+                        interpreter.append("python")
                     process = subprocess.Popen(
                         [
-                            sys.executable,
+                            *interpreter,
                             str(directory / "worker/policy_export.py"),
                             str(directory / "request.json"),
                         ],
@@ -751,8 +771,8 @@ class PolicyExportService:
                         role="native_demonstrations",
                     )
                 ],
-                converter_repository=XPL_REPOSITORY,
-                converter_commit=COMMIT,
+                converter_repository=RECIPES[job["format"]].get("training_setup", {}).get("repository", XPL_REPOSITORY),
+                converter_commit=RECIPES[job["format"]].get("training_setup", {}).get("revision", COMMIT),
                 converter_config={
                     "recipe": job["format"],
                     "contract": job["contract"],
@@ -814,7 +834,7 @@ class PolicyExportService:
                 "Training cluster verification did not match the prepared dataset"
             )
         if RECIPES[job["format"]]["trainable"]:
-            kind = "act" if job["format"] == "act" else "dp"
+            kind = "egoverse" if job["format"] == "egoverse" else "act" if job["format"] == "act" else "dp"
             expected_mode = (
                 "rgb" if "rgb" in RECIPES[job["format"]]["observations"] else "state"
             )
@@ -823,11 +843,12 @@ class PolicyExportService:
                 stage="CHECKING_LOADER",
                 detail="Checking the training data loader",
             )
-            profile = CLUSTER.runtime_profiles["skynet-dp"]
+            profile = CLUSTER.runtime_profiles["egoverse-native" if kind == "egoverse" else "skynet-dp"]
             source = profile.source_prerequisites[0].path
             for name in [
-                f"skynet_{kind}_training.py",
+                "egoverse_runtime.py" if kind == "egoverse" else f"skynet_{kind}_training.py",
                 "artifacts.py",
+                *(["egoverse_data.py"] if kind == "egoverse" else []),
                 *(["xpolicy_runtime.py"] if kind == "act" else []),
             ]:
                 frozen = directory / "worker" / name
@@ -847,11 +868,11 @@ class PolicyExportService:
             command = shlex.join(
                 [
                     str(profile.environment_path) + "/bin/python",
-                    f"{WORK_ROOT}/jobs/runs/{job['id']}/adapter-support/skynet_{kind}_training.py",
+                    f"{WORK_ROOT}/jobs/runs/{job['id']}/adapter-support/" + ("egoverse_runtime.py" if kind == "egoverse" else f"skynet_{kind}_training.py"),
                     "--repository",
                     str(source),
                     "--revision",
-                    COMMIT,
+                    RECIPES[job["format"]].get("training_setup", {}).get("revision", COMMIT),
                     "--dataset",
                     destination,
                     "--manifest-sha",
@@ -867,7 +888,7 @@ class PolicyExportService:
             output = self.cluster.ssh(gateway, command, timeout=300)
             receipt = json.loads(output.strip().splitlines()[-1])
             schemas = (
-                {"skynet.act-loader-validation/v1"}
+                {"skynet.egoverse-loader-validation/v1"} if kind == "egoverse" else {"skynet.act-loader-validation/v1"}
                 if kind == "act"
                 else {
                     "skynet.dp-loader-validation/v1",

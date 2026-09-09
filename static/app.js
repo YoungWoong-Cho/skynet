@@ -2412,6 +2412,17 @@ function datasetBindingValue(assignment, binding) {
     "version.manifest_sha256": assignment.version?.manifest_sha256}[binding.value_path || "version.path"];
 }
 
+function adapterDataContracts(binding, adapter = selectedAdapter()) {
+  let contracts = binding.contracts?.length ? binding.contracts : binding.contract ? [binding.contract] : [];
+  if (binding.contract_selector && binding.contract_choices) {
+    const control = document.getElementById(adapterFieldControlId(binding.contract_selector));
+    const field = declaredAdapterInputFields(adapter).find(f => f.path === binding.contract_selector);
+    const selected = control && field ? parseAdapterDeclaredValue(control, field).value : field?.default;
+    contracts = binding.contract_choices[selected] || contracts;
+  }
+  return contracts;
+}
+
 function resolveAdapterDataBinding(field) {
   const binding = field?.data_binding;
   if (!binding) return null;
@@ -2435,13 +2446,7 @@ function resolveAdapterDataBinding(field) {
       message: `Selected ${binding.role} format “${format || "undeclared"}” is incompatible; this adapter accepts ${formats.join(", ")}.`,
     };
   }
-  let contracts = binding.contracts?.length ? binding.contracts : binding.contract ? [binding.contract] : [];
-  if (binding.contract_selector && binding.contract_choices) {
-    const control = document.getElementById(adapterFieldControlId(binding.contract_selector));
-    const field = declaredAdapterInputFields(selectedAdapter()).find(f => f.path === binding.contract_selector);
-    const selected = control && field ? parseAdapterDeclaredValue(control, field).value : field?.default;
-    contracts = binding.contract_choices[selected] || contracts;
-  }
+  const contracts = adapterDataContracts(binding);
   const metadata = assignment.version?.metadata || {};
   if (contracts.length && (!contracts.includes(metadata.contract) || metadata.validation?.status !== "PASSED")) {
     return {value:null, state:"error", message:"Dataset does not satisfy the selected observation requirements."};
@@ -2974,6 +2979,8 @@ function applyEvaluationSuiteDefaults(suiteIds) {
 }
 
 function applySelectedAdapter({ loadSource = true } = {}) {
+  const previousSource = elements.experimentSource.value.trim();
+  const previousWorkdir = elements.experimentWorkdir.value.trim();
   adapterDefaultErrors = [];
   document.querySelectorAll("[data-adapter-default-error]").forEach((control) => {
     control.setCustomValidity?.("");
@@ -3062,7 +3069,10 @@ function applySelectedAdapter({ loadSource = true } = {}) {
   } else {
     clearNotice(elements.experimentsError);
   }
-  if (loadSource) loadSourceBranches();
+  const keepSource = previousSource === defaults.url && previousWorkdir === defaults.workdir
+    && /^[a-f0-9]{40}$/i.test(elements.experimentRevision.value)
+    && (manifest.runtime?.allowed_backends || []).includes(elements.experimentRuntime.value);
+  if (loadSource && !keepSource) loadSourceBranches();
 }
 
 function renderAdapters() {
@@ -3981,7 +3991,7 @@ function populateEvaluationSuites(preferredSuiteId = "", { runId = "" } = {}) {
       : `Selected ${selectedSuite?.label || selectedSuite?.name || selectedSuiteId}, the first compatible suite for this run.`
     : desiredSuiteId && !desiredExists
       ? `Unsupported: the previously selected suite is not compatible with this run. Choose a listed suite.`
-      : `${evaluationSuites.length} ${runId ? "compatible" : "registered"} suites available. Choose the simulation suite you intend to run.`;
+      : `${evaluationSuites.length} ${runId ? "compatible" : "registered"} suites available. Choose an evaluation suite.`;
   elements.evaluationSuiteStatus.textContent = selectionMessage;
   updateEvaluationEnvironmentFromSuite({ preserveTasks: desiredExists && selectedSuiteId === desiredSuiteId });
   if (elements.evaluationRunId.value.trim()) scheduleEvaluationTargetValidation();
@@ -7423,6 +7433,9 @@ function updateEvaluationEnvironmentFromSuite({ preserveTasks = false } = {}) {
     "",
   );
   elements.evaluationEnvironment.value = suite ? String(environment || "") : "";
+  const episodeLimit = Number(config.maximum_episodes_per_task || 10000);
+  elements.evaluationEpisodes.max = String(episodeLimit);
+  if (Number(elements.evaluationEpisodes.value) > episodeLimit) elements.evaluationEpisodes.value = String(episodeLimit);
   populateEvaluationTasks(suite, { preserve: preserveTasks });
   const limit = Number(suite?.maximum_parallelism || 1);
   elements.evaluationParallelism.max = String(limit);
@@ -7581,7 +7594,7 @@ async function validateEvaluationTarget(request, signature) {
     const budget = document.querySelector("#evaluation-resource-summary");
     budget.textContent = resources
       ? `Total: ${resources.gpu?.count || 1} ${document.querySelector("#evaluation-resource-gpu option:checked")?.textContent || resources.gpu?.type} GPU${resources.gpu?.count === 1 ? "" : "s"} · ${resources.cpus_per_task} CPUs · ${resources.memory_gb} GB RAM · ${resources.time_limit}`
-      : "Allocation has not been resolved. Validate a compatible checkpoint and simulation suite.";
+      : "Allocation has not been resolved. Validate a compatible checkpoint and evaluation suite.";
     const evaluator = result.evaluator && typeof result.evaluator === "object" ? result.evaluator : null;
     const evaluatorLabel = evaluator
       ? `${evaluator.slug || evaluator.id || "evaluator"} / v${evaluator.version ?? evaluator.version_id ?? "?"}`
@@ -7880,6 +7893,8 @@ function evaluationPrimaryResult(evaluation) {
   const aggregate = evaluation.aggregate || [];
   const successRate = aggregate.find((metric) => metric.metric === "success_rate" && !metric.task);
   if (successRate) return `success_rate: ${Number(successRate.mean).toFixed(3)}`;
+  const primaryMetric = aggregate.find((metric) => metric.mean !== undefined);
+  if (primaryMetric) return `${primaryMetric.metric}: ${Number(primaryMetric.mean).toPrecision(4)}`;
   const result = evaluation.result || evaluation.results || evaluation.metrics || {};
   if (evaluation.primary_result !== undefined) return evaluation.primary_result;
   for (const key of ["success_rate", "score", "mean_reward", "accuracy"]) {
@@ -8223,6 +8238,12 @@ function evaluationEpisodeRate(episode) {
   return episode.success === true ? "100%" : episode.success === false ? "0%" : "—";
 }
 
+function evaluationEpisodeResult(episode) {
+  if (typeof episode.success === "boolean") return evaluationEpisodeRate(episode);
+  const metric = Object.entries(episode.metrics_json || {}).find(([, value]) => typeof value === "number" && Number.isFinite(value));
+  return metric ? `${metric[0]}: ${Number(metric[1]).toPrecision(4)}` : "—";
+}
+
 function closeEvaluationRollout() {
   const dialog = document.querySelector("#evaluation-rollout-dialog");
   activeEvaluationRollout = null;
@@ -8267,7 +8288,7 @@ function renderEvaluationRolloutModal(evaluation, episode) {
   empty.hidden = Boolean(episode.video_path);
   empty.textContent = ["FAILED", "CANCELLED", "BLOCKED"].includes(evaluation.status)
     ? "No video was recorded for this episode."
-    : "The rollout video will appear when this episode finishes.";
+    : "The video will appear when this episode finishes.";
   if (video.dataset.videoKey !== key) {
     video.pause();
     video.dataset.videoKey = key;
@@ -8275,10 +8296,11 @@ function renderEvaluationRolloutModal(evaluation, episode) {
     else video.removeAttribute("src");
     video.load();
   }
-  video.onerror = () => { empty.hidden = false; empty.textContent = "Unable to load the rollout video. Close and reopen Detail to retry."; };
+  video.onerror = () => { empty.hidden = false; empty.textContent = "Unable to load the video. Close and reopen Detail to retry."; };
   const values = [["Task", episode.task], ["Episode", Number(episode.episode_index) + 1], ["State", episode.status],
     ["Seed", episode.seed], ["Success rate", evaluationEpisodeRate(episode)], ["Reward", episode.reward ?? "—"],
-    ["Steps", episode.episode_length ?? "—"], ["Failure", episode.failure_reason || "—"]];
+    ["Steps", episode.episode_length ?? "—"], ["Failure", episode.failure_reason || "—"],
+    ...Object.entries(episode.metrics_json || {}).filter(([, value]) => typeof value === "number" && Number.isFinite(value))];
   setHtmlIfChanged(document.querySelector("#evaluation-result-summary"), '<table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>'
     + values.map(([key, value]) => `<tr><td>${escapeHtml(key)}</td><td>${escapeHtml(value)}</td></tr>`).join("") + '</tbody></table>');
   updateLogView(elements.evaluationResultJson, JSON.stringify(episode, null, 2));
@@ -8320,7 +8342,7 @@ function renderEvaluationRollouts(evaluation) {
   const body = document.querySelector("#evaluation-rollouts-body");
   const signature = refreshContentSignature(episodes);
   const section = document.querySelector("#evaluation-rollouts");
-  setTextIfChanged(document.querySelector("#evaluation-rollout-count"), `${episodes.length} rollout${episodes.length === 1 ? "" : "s"}`);
+  setTextIfChanged(document.querySelector("#evaluation-rollout-count"), `${episodes.length} episode${episodes.length === 1 ? "" : "s"}`);
   if (section.dataset.rolloutSignature !== signature) {
     section.dataset.rolloutSignature = signature;
     const rows = new Map([...body.querySelectorAll("tr[data-episode-id]")].map(row => [row.dataset.episodeId, row]));
@@ -8330,7 +8352,7 @@ function renderEvaluationRollouts(evaluation) {
       row.dataset.episodeId = id;
       patchTableRow(row, [
         {html: `<strong>Episode ${Number(episode.episode_index) + 1}</strong><span class="secondary">${escapeHtml(episode.task)}</span>`},
-        {html: statusPill(episode.status)}, {html: escapeHtml(episode.seed)}, {html: evaluationEpisodeRate(episode)},
+        {html: statusPill(episode.status)}, {html: escapeHtml(episode.seed)}, {html: escapeHtml(evaluationEpisodeResult(episode))},
         {className: "row-actions", preserve: true, html: `<button type="button" data-rollout-detail="${escapeHtml(id)}" aria-haspopup="dialog" aria-controls="evaluation-rollout-dialog">Detail</button>`},
       ]);
       return row;
@@ -8385,7 +8407,7 @@ function renderEvaluationDetail(evaluation) {
     ["Run", evaluation.run_id], ["Suite", evaluation.suite_name || evaluation.suite_id || evaluation.suite],
     ["Progress", progressSummaryLabel(evaluation.progress_summary) || "Waiting"],
     ["ETA", etaPresentation(evaluation.progress_summary).detail],
-    ["Success rate", evaluationPrimaryResult(evaluation)],
+    ["Result", evaluationPrimaryResult(evaluation)],
     ["Updated", formatDate(evaluation.updated_at || evaluation.created_at)],
   ]));
   renderEvaluationRollouts(evaluation);
@@ -8531,7 +8553,9 @@ function experimentBundleCompatibility(bundle, adapter = selectedAdapter()) {
     if (!assignment) return { compatible: false, message: `missing ${binding.role} role` };
     const location = assignment.config?.location;
     const locationReady = location?.kind === "cluster" && location?.status === "AVAILABLE" && location?.manifest_sha256 === assignment.version?.manifest_sha256;
-    if (binding.contract && (assignment.version?.metadata?.contract !== binding.contract || assignment.version?.metadata?.validation?.status !== "PASSED")) return {compatible:false, message:"Dataset has not passed this policy's data requirements."};
+    const contracts = adapterDataContracts(binding, adapter);
+    const metadata = assignment.version?.metadata || {};
+    if (contracts.length && (!contracts.includes(metadata.contract) || metadata.validation?.status !== "PASSED")) return {compatible:false, message:"Dataset has not passed this policy's data requirements."};
     if (binding.value_path === "location.path" && !locationReady) return {compatible:false, message:"No verified copy on the training cluster."};
     if (String(assignment.version?.status || "").toUpperCase() !== "READY" && !locationReady) {
       return { compatible: false, message: `${binding.role} is ${assignment.version?.status || "unverified"}; complete import or transfer to the cluster` };
@@ -12311,6 +12335,7 @@ elements.evaluationSuite.addEventListener("change", () => {
 });
 elements.evaluationRunId.addEventListener("input", () => {
   const runId = elements.evaluationRunId.value.trim();
+  elements.evaluationCheckpoint.value = "";
   pendingEvaluationSuiteId = elements.evaluationSuite.value;
   clearTimeout(evaluationSuiteReloadTimer);
   elements.evaluationSuite.innerHTML = `<option value="">${runId ? "Loading compatible suites..." : "Loading suites..."}</option>`;

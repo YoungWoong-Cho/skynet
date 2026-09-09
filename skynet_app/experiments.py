@@ -900,6 +900,7 @@ class EvaluationDatasetTaskBinding(CanonicalModel):
 
 class EvaluationSuite(CanonicalModel):
     dataset_task_binding: EvaluationDatasetTaskBinding | None = None
+    dataset_episode_binding: EvaluationDatasetTaskBinding | None = None
     default_tasks: list[str] | None = None
     schema_version: Literal[2]
     evaluator: str = Field(min_length=1, max_length=96)
@@ -933,6 +934,8 @@ class EvaluationSuite(CanonicalModel):
             result.pop("default_tasks", None)
         if self.dataset_task_binding is None:
             result.pop("dataset_task_binding", None)
+        if self.dataset_episode_binding is None:
+            result.pop("dataset_episode_binding", None)
         return result
 
     @model_validator(mode="after")

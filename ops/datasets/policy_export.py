@@ -190,6 +190,9 @@ def split(values, groups):
 
 def export(request):
     kind = request["format"]
+    if kind == "egoverse":
+        from egoverse_export import export as export_egoverse
+        return export_egoverse(request)
     visual = kind != "dp-state"
     if visual:
         import cv2

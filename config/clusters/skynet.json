@@ -274,6 +274,142 @@
           "numpy": "1.26.4"
         }
       }
+    },
+    "egoverse-native": {
+      "label": "EgoVerse native",
+      "description": "Pinned EgoVerse models and Lightning trainer.",
+      "backend": "existing",
+      "environment_path": "/coc/flash7/ycho420/repos/EgoVerse-f7f08862/e17cf98fe4bc234c564b37abc9e155f25e76d566/.venv",
+      "source_prerequisites": [
+        {
+          "kind": "git_checkout",
+          "name": "EgoVerse",
+          "path": "/coc/flash7/ycho420/repos/EgoVerse-f7f08862/e17cf98fe4bc234c564b37abc9e155f25e76d566",
+          "revision": "e17cf98fe4bc234c564b37abc9e155f25e76d566",
+          "required": true
+        }
+      ],
+      "verification": {
+        "python_version": "3.11",
+        "distributions": {
+          "torch": "2.7.1",
+          "zarr": "3.1.5",
+          "lightning": "2.6.1",
+          "diffusers": "0.35.1"
+        },
+        "requires_gpu": true,
+        "compute_attestation_path": "/coc/flash7/ycho420/jobs/runtime-readiness/egoverse-native.json",
+        "compute_smoke": {
+          "suite": "egoverse_held_out",
+          "adapter": "egoverse-act",
+          "capsule_asset": "adapter-support/egoverse_readiness.py",
+          "capsule_sha256": "e8b6f39b3453a5770433231b5a3e026088b36f88d84c0968bc847871566fac1f",
+          "argv": [
+            "{{runtime.python_executable}}",
+            "{{smoke.asset_path}}",
+            "--source-dir",
+            "{{runtime.source_dir}}",
+            "--result",
+            "{{smoke.result_path}}"
+          ],
+          "result_schema": "skynet.evaluator-readiness/v1",
+          "timeout_seconds": 180,
+          "required_checks": [
+            "native_imports",
+            "cuda_forward_backward",
+            "video_encode_decode"
+          ],
+          "resources": {
+            "queue_policy": "normal",
+            "gpu_type": "a40",
+            "gpu_count": 1,
+            "cpus_per_task": 4,
+            "memory_gb": 16,
+            "time_limit": "00:05:00"
+          }
+        }
+      },
+      "versions": {
+        "python": "3.11",
+        "torch": "2.7.1+cu126",
+        "zarr": "3.1.5",
+        "lightning": "2.6.1",
+        "diffusers": "0.35.1"
+      }
+    },
+    "egoverse-pi": {
+      "label": "EgoVerse \u03c00.5",
+      "description": "Native \u03c00.5 with the pinned OpenPI source and its Transformers patch.",
+      "backend": "existing",
+      "environment_path": "/coc/flash7/ycho420/envs/skynet-egoverse-pi-981483dc",
+      "source_prerequisites": [
+        {
+          "kind": "git_checkout",
+          "name": "EgoVerse",
+          "path": "/coc/flash7/ycho420/repos/EgoVerse-f7f08862/e17cf98fe4bc234c564b37abc9e155f25e76d566",
+          "revision": "e17cf98fe4bc234c564b37abc9e155f25e76d566",
+          "required": true
+        },
+        {
+          "kind": "git_checkout",
+          "name": "OpenPI",
+          "path": "/coc/flash7/ycho420/repos/EgoVerse-f7f08862/e17cf98fe4bc234c564b37abc9e155f25e76d566/external/openpi",
+          "revision": "981483dca0fd9acba698fea00aa6e52d56a66c58",
+          "required": true
+        }
+      ],
+      "verification": {
+        "python_version": "3.11",
+        "distributions": {
+          "torch": "2.7.1",
+          "zarr": "3.1.5",
+          "lightning": "2.6.1",
+          "diffusers": "0.35.1",
+          "flax": "0.10.2",
+          "jax": "0.5.3",
+          "transformers": "4.53.2"
+        },
+        "requires_gpu": true,
+        "compute_attestation_path": "/coc/flash7/ycho420/jobs/runtime-readiness/egoverse-pi.json",
+        "compute_smoke": {
+          "suite": "egoverse_held_out",
+          "adapter": "egoverse-act",
+          "capsule_asset": "adapter-support/egoverse_readiness.py",
+          "capsule_sha256": "e8b6f39b3453a5770433231b5a3e026088b36f88d84c0968bc847871566fac1f",
+          "argv": [
+            "{{runtime.python_executable}}",
+            "{{smoke.asset_path}}",
+            "--source-dir",
+            "{{runtime.source_dir}}",
+            "--result",
+            "{{smoke.result_path}}",
+            "--pi"
+          ],
+          "result_schema": "skynet.evaluator-readiness/v1",
+          "timeout_seconds": 180,
+          "required_checks": [
+            "native_imports",
+            "cuda_forward_backward",
+            "video_encode_decode",
+            "pi_imports_and_patch"
+          ],
+          "resources": {
+            "queue_policy": "normal",
+            "gpu_type": "a40",
+            "gpu_count": 1,
+            "cpus_per_task": 4,
+            "memory_gb": 16,
+            "time_limit": "00:05:00"
+          }
+        }
+      },
+      "versions": {
+        "python": "3.11",
+        "torch": "2.7.1+cu126",
+        "zarr": "3.1.5",
+        "lightning": "2.6.1",
+        "diffusers": "0.35.1"
+      }
     }
   },
   "queues": {

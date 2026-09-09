@@ -2864,9 +2864,11 @@ def _builtin_manifest(
 def builtin_adapter_manifests() -> list[AdapterManifest]:
     from .dp_manifest import manifest as dp_manifest
     from .act_manifest import manifest as act_manifest
+    from .egoverse_manifest import manifests as egoverse_manifests
     return [
         dp_manifest(),
         act_manifest(),
+        *egoverse_manifests(),
         _builtin_manifest(
             "generic", "Custom structured command", None, ["custom"], None,
             input_fields=[

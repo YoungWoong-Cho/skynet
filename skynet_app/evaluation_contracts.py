@@ -5,12 +5,7 @@ from collections.abc import Mapping
 from skynet_app.experiments import evaluation_task_catalog_sha256
 
 
-def bind_suite_to_dataset(suite, spec):
-    result = copy.deepcopy(suite)
-    config = result["config_json"]
-    binding = config.get("dataset_task_binding")
-    if not binding:
-        return result
+def bound_metadata(spec, binding):
     assignments = (spec.get("data") or {}).get("bundle", {}).get("assignments", [])
     candidates = [a for a in assignments if a.get("role") == binding["role"]]
     if len(candidates) != 1:
@@ -18,6 +13,22 @@ def bind_suite_to_dataset(suite, spec):
     value = candidates[0].get("version", {}).get("metadata", {})
     for part in binding["metadata_path"].split("."):
         value = value.get(part) if isinstance(value, Mapping) else None
+    return value
+
+
+def bind_suite_to_dataset(suite, spec):
+    result = copy.deepcopy(suite)
+    config = result["config_json"]
+    episode_binding = config.get("dataset_episode_binding")
+    if episode_binding:
+        episodes = bound_metadata(spec, episode_binding)
+        if not isinstance(episodes, list) or not episodes:
+            raise ValueError("The dataset has no held-out episodes")
+        config["maximum_episodes_per_task"] = len(episodes)
+    binding = config.get("dataset_task_binding")
+    if not binding:
+        return result
+    value = bound_metadata(spec, binding)
     if (
         not isinstance(value, str)
         or not value.strip()
