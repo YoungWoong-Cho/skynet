@@ -133,6 +133,8 @@ const elements = {
   runAttemptDetailMeta: document.querySelector("#run-attempt-detail-meta"),
   runAttemptDetailTracking: document.querySelector("#run-attempt-detail-tracking"),
   runAttemptHyperparameters: document.querySelector("#run-attempt-hyperparameters"),
+  runAttemptAdapterSection: document.querySelector("#run-attempt-adapter-section"),
+  runAttemptAdapterSettings: document.querySelector("#run-attempt-adapter-settings"),
   runAttemptStdoutStatus: document.querySelector("#run-attempt-stdout-status"),
   runAttemptStdoutLog: document.querySelector("#run-attempt-stdout-log"),
   runAttemptStderrStatus: document.querySelector("#run-attempt-stderr-status"),
@@ -6676,11 +6678,13 @@ function renderRunAttemptMetadata(record) {
   elements.runAttemptHyperparameters.innerHTML = commonHyperparameters.length
     ? keyValueHtml(commonHyperparameters.map(([label, entry]) => [label, commonHyperparameterLabel(entry)]))
     : "";
-  if (record.adapter_settings && Object.keys(record.adapter_settings).length) {
-    elements.runAttemptHyperparameters.insertAdjacentHTML("beforeend", keyValueHtml(
-      Object.entries(record.adapter_settings).map(([path, value]) => [path.replace(/^native\.(config|overrides)\./, "").replaceAll("_", " "), displayCommonHyperparameterDefault(value)])
-    ));
-  }
+  const adapterSettings = Object.entries(attempt.adapter_settings || {});
+  const fieldLabels = new Map((record.adapterFields || []).map(field => [field.path, field.label]));
+  elements.runAttemptAdapterSection.hidden = adapterSettings.length === 0;
+  elements.runAttemptAdapterSettings.innerHTML = keyValueHtml(adapterSettings.map(([path, value]) => [
+    fieldLabels.get(path) || path.replace(/^native\.(config|overrides)\./, "").replaceAll("_", " "),
+    displayCommonHyperparameterDefault(value),
+  ]));
   if (commonHyperparameters.length) renderCommonHyperparameterResolution(record);
 }
 
@@ -6968,6 +6972,8 @@ function renderRunDetailContent(payload, id, { preserveAttempt = false } = {}) {
         attemptId,
         attemptNumber,
         attemptKey,
+        adapterFields: (attempt.execution_snapshot_json?.adapter?.manifest
+          || run.resolved_spec_json?.source?.adapter_manifest)?.train?.input_fields || [],
         trackingLinks: Array.isArray(run.tracking_links) ? run.tracking_links : [],
       });
       retainedAttemptKeys.add(attemptKey);

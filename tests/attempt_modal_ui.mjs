@@ -20,7 +20,16 @@ try{
    {id:'train-stage',stage_type:'TRAIN'},
    {id:'evaluation-stage',stage_type:'EVALUATE'},
  ],attempts:[
-   {id:'attempt-1',stage_id:'train-stage',attempt_number:1,status:'RUNNING',slurm_job_id:'123'},
+   {id:'attempt-1',stage_id:'train-stage',attempt_number:1,status:'RUNNING',slurm_job_id:'123',
+    adapter_settings:{'native.config.epochs':2000,'native.config.validation_every':200,'native.config.reject_outliers':false,'native.config.train_batches':0,'native.config.model_overrides':{encoder:'<img src=x onerror=alert(1)>'}},
+    execution_snapshot_json:{adapter:{manifest:{train:{input_fields:[
+      {path:'native.config.epochs',label:'Epochs'},
+      {path:'native.config.validation_every',label:'Validate every epochs'},
+      {path:'native.config.reject_outliers',label:'Filter training outliers'},
+      {path:'native.config.train_batches',label:'Training batches per epoch'},
+      {path:'native.config.model_overrides',label:'Model overrides'},
+    ]}}}},
+   },
    {id:'evaluation-attempt',stage_id:'evaluation-stage',attempt_number:1,status:'SUCCEEDED',slurm_job_id:'456'},
  ]}};
  w.renderRunDetailContent(payload,'test-run');
@@ -34,6 +43,11 @@ try{
  assert.equal(el('run-attempt-detail-dialog').open,true);
  assert.equal(el('run-attempt-detail').closest('tr'),null);
  assert.equal(launch.textContent,'Detail');
+ assert.equal(el('run-attempt-adapter-section').hidden,false);
+ const settings=Object.fromEntries([...el('run-attempt-adapter-settings').children].map(row=>[row.querySelector('span').textContent,row.querySelector('strong').textContent]));
+ assert.deepEqual(settings,{'Epochs':'2000','Validate every epochs':'200','Filter training outliers':'false','Training batches per epoch':'0','Model overrides':'{"encoder":"<img src=x onerror=alert(1)>"}'});
+ assert.equal(el('run-attempt-adapter-settings').querySelector('img'),null,'configuration is escaped');
+ assert.doesNotMatch(el('run-attempt-hyperparameters').textContent,/Filter training outliers/,'adapter configuration has its own section');
  w.renderRunDetailContent(payload,'test-run',{preserveAttempt:true});
  w.remountActiveRunAttemptDisclosure();
  assert.equal(el('run-attempt-detail-dialog').open,true,'refresh keeps modal open');
@@ -45,5 +59,15 @@ try{
  el('attempts-body').querySelector('button').click();await flush();
  w.document.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
  assert.equal(el('run-attempt-detail-dialog').open,false);
- console.log('Attempt modal: opening, close, Escape, stable table and refresh behavior passed.');
+ w.renderRunAttemptMetadata({attempt:{adapter_settings:{'native.config.epochs':5}},attemptNumber:2});
+ assert.match(el('run-attempt-adapter-settings').textContent,/5/);
+ assert.doesNotMatch(el('run-attempt-adapter-settings').textContent,/2000|Filter training outliers/,'switching attempts clears previous settings');
+ w.renderRunAttemptMetadata({attempt:{},attemptNumber:3});
+ assert.equal(el('run-attempt-adapter-section').hidden,true);
+ assert.equal(el('run-attempt-adapter-settings').textContent,'');
+ const commonKeys=['learning_rate','batch_size','batch_semantics','gradient_accumulation','num_workers','precision','max_steps'];
+ w.renderRunAttemptMetadata({attempt:{adapter_settings:{'native.config.epochs':10},common_hyperparameters:Object.fromEntries(commonKeys.map(key=>[key,null])),common_hyperparameter_provenance:Object.fromEntries(commonKeys.map(key=>[key,{status:'not_applicable',source:'not_applicable'}]))},attemptNumber:4});
+ assert.equal(el('run-attempt-hyperparameters').closest('section').hidden,true);
+ assert.equal(el('run-attempt-adapter-section').hidden,false,'adapter settings remain visible without common hyperparameters');
+ console.log('Attempt modal: adapter configuration, escaping, switching, opening, close, Escape and refresh behavior passed.');
 }finally{for(const observer of observers)observer.disconnect();await flush();w.close();}
