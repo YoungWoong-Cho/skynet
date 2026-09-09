@@ -320,7 +320,4 @@ def manifest():
                 ).read_text(),
             },
         ),
-        warnings=[
-            "Training measures validation loss. Simulation evaluation is not available yet."
-        ],
     )
