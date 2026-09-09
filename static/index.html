@@ -738,22 +738,26 @@
                 </div>
                 <div class="field">
                   <label for="evaluation-parallelism">Parallel jobs</label>
-                  <input id="evaluation-parallelism" type="number" value="1" min="1" max="1" readonly>
-                  <small>Current evaluators support one worker only. Larger values are rejected, never silently run serially.</small>
+                  <input id="evaluation-parallelism" type="number" value="1" min="1" max="8">
+                  <small id="evaluation-parallelism-help">One GPU per worker.</small>
+                </div>
+                <div class="field">
+                  <label for="evaluation-max-attempts">Maximum automatic attempts</label>
+                  <input id="evaluation-max-attempts" type="number" value="5" min="1" max="100">
                 </div>
                 <label class="check-field span-2">
                   <input id="evaluation-headless" type="checkbox" checked>
                   <span>Headless rendering</span>
                 </label>
-                <div class="field span-2">
-                  <label for="evaluation-max-attempts">Maximum automatic attempts</label>
-                  <input id="evaluation-max-attempts" type="number" value="5" min="1" max="100">
-                </div>
                 <label class="check-field span-2">
                   <input id="evaluation-auto-resume" type="checkbox" checked>
                   <span>Auto-resume from episode ledger</span>
                 </label>
               </div>
+            </fieldset>
+            <fieldset class="form-section">
+              <legend>Slurm resources</legend>
+              <div id="evaluation-resources" class="form-grid"></div>
             </fieldset>
             <fieldset class="form-section">
               <legend>Advanced</legend>
@@ -774,19 +778,20 @@
               </details>
             </fieldset>
             <div class="form-actions sticky-actions">
-              <p id="evaluation-resource-summary" class="field-validation">Allocation is resolved from the selected training run.</p><button id="submit-evaluation" class="button button-accent" type="submit" disabled>Create evaluation</button>
+              <p id="evaluation-resource-summary" class="field-validation">Choose evaluation resources.</p><button id="submit-evaluation" class="button button-accent" type="submit" disabled>Create evaluation</button>
             </div>
           </form>
 
           <section class="panel table-panel">
-            <div class="panel-heading">
+            <div class="panel-heading panel-heading-tools">
               <div>
-
                 <h2>Evaluation jobs and results</h2>
               </div>
-              <label for="evaluation-search">Find evaluation</label><input id="evaluation-search" type="search" placeholder="Evaluation, run or suite">
+              <div class="toolbar">
+                <input id="evaluation-search" type="search" aria-label="Find evaluation" placeholder="Filter evaluation, run, suite">
                 <label for="evaluation-state-filter">State</label><select id="evaluation-state-filter"><option value="all">All states</option><option>SUCCEEDED</option><option>FAILED</option><option>RUNNING</option><option>PENDING</option><option>CANCELLED</option></select>
                 <span id="evaluation-count" class="quiet-label">Not loaded</span>
+              </div>
             </div>
             <div class="table-scroll tall-table">
               <table>
@@ -822,45 +827,15 @@
                           <div id="evaluation-detail-meta" class="key-value-grid"></div>
 
                           <section id="evaluation-rollouts" class="evaluation-rollouts">
-                            <div class="log-heading">
-                              <h3>Rollout videos</h3>
-                              <span id="evaluation-rollout-count" class="quiet-label">loading</span>
+                            <h3>Rollout videos</h3>
+                            <span id="evaluation-rollout-count" class="quiet-label"></span>
+                            <p id="evaluation-detail-error" class="field-validation is-invalid" hidden></p>
+                            <div class="table-scroll">
+                              <table><thead><tr><th>Episode</th><th>State</th><th>Seed</th><th>Success rate</th><th></th></tr></thead>
+                                <tbody id="evaluation-rollouts-body"><tr><td colspan="5">Loading rollouts…</td></tr></tbody>
+                              </table>
                             </div>
-                            <p id="evaluation-rollout-empty" class="secondary">Loading rollout records...</p>
-                            <label class="evaluation-rollout-picker" hidden>
-                              <span>Episode</span>
-                              <select id="evaluation-rollout-select"></select>
-                            </label>
-                            <video id="evaluation-rollout-video" controls preload="metadata" playsinline hidden></video>
-                            <div id="evaluation-rollout-meta" class="key-value-grid evaluation-rollout-meta" hidden></div>
                           </section>
-
-                          <h3>Slurm attempt</h3>
-                          <div id="evaluation-attempt-meta" class="key-value-grid"></div>
-                          <div class="attempt-log-grid">
-                            <section>
-                              <div class="log-heading">
-                                <h3>stdout</h3>
-                                <span id="evaluation-stdout-status" class="quiet-label"></span>
-                              </div>
-                              <pre class="log-view"><code id="evaluation-stdout-log">No Slurm attempt selected.</code></pre>
-                            </section>
-                            <section>
-                              <div class="log-heading">
-                                <h3>stderr</h3>
-                                <span id="evaluation-stderr-status" class="quiet-label"></span>
-                              </div>
-                              <pre class="log-view"><code id="evaluation-stderr-log">No Slurm attempt selected.</code></pre>
-                            </section>
-                          </div>
-
-                          <div class="log-heading">
-                            <h3>Canonical results</h3>
-                            <span id="evaluation-result-status" class="quiet-label"></span>
-                          </div>
-                          <p>A completed job means the evaluation ran. Task success below measures whether the robot achieved the goal.</p>
-                          <div id="evaluation-result-summary" class="key-value-grid"></div>
-                          <details><summary>Full result record / JSON</summary><pre class="result-view"><code id="evaluation-result-json"></code></pre></details>
                         </div>
                       </aside>
           </section>
@@ -1884,5 +1859,28 @@
                             </div>
                           </section>
                           </dialog>
+  <dialog id="evaluation-rollout-dialog" class="app-dialog" data-panel-dialog aria-labelledby="evaluation-rollout-title">
+    <section id="evaluation-rollout-detail">
+      <div class="panel-heading">
+        <h3 id="evaluation-rollout-title">Rollout</h3>
+        <button type="button" class="button button-outline" data-dialog-close>Close</button>
+      </div>
+      <div class="dialog-body">
+        <p id="evaluation-rollout-empty" class="secondary"></p>
+        <video id="evaluation-rollout-video" controls preload="metadata" playsinline hidden></video>
+        <h3>Canonical results</h3>
+        <div class="table-scroll" id="evaluation-result-summary"></div>
+        <details><summary>Full result record / JSON</summary><pre class="result-view"><code id="evaluation-result-json"></code></pre></details>
+        <h3>Slurm attempt</h3>
+        <div class="table-scroll" id="evaluation-attempt-meta"></div>
+        <div class="attempt-log-grid">
+          <section><div class="log-heading"><h3>stdout</h3><span id="evaluation-stdout-status" class="quiet-label"></span></div>
+            <pre class="log-view"><code id="evaluation-stdout-log">Loading stdout…</code></pre></section>
+          <section><div class="log-heading"><h3>stderr</h3><span id="evaluation-stderr-status" class="quiet-label"></span></div>
+            <pre class="log-view"><code id="evaluation-stderr-log">Loading stderr…</code></pre></section>
+        </div>
+      </div>
+    </section>
+  </dialog>
 </body>
 </html>

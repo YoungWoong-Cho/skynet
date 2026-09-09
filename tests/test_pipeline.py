@@ -3035,3 +3035,58 @@ def test_manual_submission_recovery_reports_concurrent_cancellation(tmp_path, mo
     result = service.recover_run_submission(run_id, "sky2")
     assert result["status"] == "CANCELLING"
     assert ("9004", "sky2") in cluster.cancel_calls
+
+
+def test_evaluation_running_progress_does_not_count_as_completed(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline_api, "LOCAL_CAPSULE_ROOT", tmp_path / "capsules")
+    database = Database(tmp_path / "test.db")
+    cluster = FakeCluster()
+    service = make_pipeline_service(database, cluster)
+    run, evaluation = _create_active_evaluation(service, "evaluation-running-progress")
+    task = evaluation["task_selection_json"][0]
+    episode = dict(task=task, seed=0, episode_index=0, status="RUNNING", metrics={"worker_index": 0})
+    record = dict(kind="episode_observed", total=1, episode=episode, recorded_at="2026-09-09T12:00:00Z")
+    cluster.file_content = json.dumps(record)
+    service._ingest_evaluation_progress(evaluation)
+    loaded = database.get_evaluation(evaluation["id"])
+    assert loaded["progress_completed"] == 0
+    assert loaded["episodes"][0]["status"] == "RUNNING"
+    assert loaded["episodes"][0]["completed_at"] is None
+    episode.update(status="SUCCEEDED", success=False, episode_length=1200)
+    record["recorded_at"] = "2026-09-09T12:01:00Z"
+    cluster.file_content = json.dumps(record)
+    service._evaluation_progress_last_reads = {}
+    service._ingest_evaluation_progress(evaluation)
+    loaded = database.get_evaluation(evaluation["id"])
+    assert loaded["progress_completed"] == 1
+    assert loaded["episodes"][0]["success"] is False
+    assert loaded["episodes"][0]["started_at"] == "2026-09-09T12:00:00Z"
+    assert loaded["episodes"][0]["completed_at"] == "2026-09-09T12:01:00Z"
+
+
+def test_rollout_logs_use_its_worker_directory_and_shared_log_reader(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline_api, "LOCAL_CAPSULE_ROOT", tmp_path / "capsules")
+    database = Database(tmp_path / "test.db")
+    cluster = FakeCluster()
+    service = make_pipeline_service(database, cluster)
+    _, evaluation = _create_active_evaluation(service, "rollout-worker-logs")
+    episode = database.upsert_evaluation_episode(
+        evaluation["id"], task=evaluation["task_selection_json"][0], seed=0,
+        episode_index=0, status="RUNNING", metrics={"worker_index": 2},
+    )
+    monkeypatch.setattr(pipeline_api, "service", service)
+    reads = []
+    def read_log(path, gateway, *, lines):
+        reads.append((path, gateway, lines))
+        return gateway, "worker output"
+    monkeypatch.setattr(cluster, "read_log", read_log)
+    assert pipeline_api.get_evaluation_episode_log(evaluation["id"], episode["id"], "stderr") == "worker output"
+    assert reads[0][0] == str(Path(evaluation["result_path"]).parent / "workers/2/stderr.log")
+    assert reads[0][2] == 500
+    database.upsert_evaluation_episode(
+        evaluation["id"], task=episode["task"], seed=0, episode_index=0,
+        metrics={"worker_index": "../../outside"},
+    )
+    with pytest.raises(pipeline_api.HTTPException, match="Invalid rollout worker identity"):
+        pipeline_api.get_evaluation_episode_log(evaluation["id"], episode["id"])
+    assert len(reads) == 1

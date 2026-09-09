@@ -1058,11 +1058,8 @@ class EvaluationRequest(BaseModel):
     parallelism: int = Field(
         default=1,
         ge=1,
-        le=1,
-        description=(
-            "Parallel evaluation workers are not implemented by any registered evaluator; "
-            "requests must use exactly one worker and are never silently serialized."
-        ),
+        le=8,
+        description="Concurrent evaluation workers; checked against the evaluator capability.",
     )
     headless: bool = True
     auto_resume: bool = True
@@ -1091,11 +1088,8 @@ class EvaluationTargetValidationRequest(BaseModel):
     parallelism: int = Field(
         default=1,
         ge=1,
-        le=1,
-        description=(
-            "Parallel evaluation workers are not implemented by any registered evaluator; "
-            "requests must use exactly one worker and are never silently serialized."
-        ),
+        le=8,
+        description="Concurrent evaluation workers; checked against the evaluator capability.",
     )
     headless: bool = True
     gateway: str = "auto"
@@ -7649,7 +7643,7 @@ class PipelineService:
             status = episode.get("status")
             success = episode.get("success")
             metrics = episode.get("metrics")
-            if status not in {"SUCCEEDED", "FAILED", "TIMEOUT"}:
+            if status not in {"RUNNING", "SUCCEEDED", "FAILED", "TIMEOUT"}:
                 continue
             if success is not None and not isinstance(success, bool):
                 continue
@@ -7708,7 +7702,9 @@ class PipelineService:
                 failure_reason=desired["failure_reason"],
                 metrics=desired["metrics_json"],
                 video_path=desired["video_path"],
-                completed_at=recorded_at if isinstance(recorded_at, str) else utc_now(),
+                started_at=current.get("started_at") or (recorded_at if isinstance(recorded_at, str) else utc_now()),
+                completed_at=(recorded_at if isinstance(recorded_at, str) else utc_now())
+                    if desired["status"] != "RUNNING" else None,
             )
 
     def _ingest_evaluation_result(
@@ -8595,7 +8591,7 @@ class PipelineService:
             resolved_tasks = (
                 []
                 if selection_mode == "single" and not requested_tasks
-                else requested_tasks or catalog_tasks
+                else requested_tasks or suite_config.get("default_tasks") or catalog_tasks
             )
         else:
             resolved_tasks = requested_tasks
@@ -8667,6 +8663,17 @@ class PipelineService:
         )
         if resources is not None:
             evaluator_document["resources"] = resources.model_dump(mode="json", by_alias=True)
+        worker_resources = copy.deepcopy(evaluator_document["resources"])
+        supports_workers = any(
+            entry.environment == environment and suite["name"] in entry.suites
+            and (entry.maximum_parallelism or 1) > 1
+            for entry in evaluator_manifest.evaluations
+        )
+        if supports_workers:
+            total_resources = evaluator_document["resources"]
+            total_resources["gpu"].update(mode="explicit", count=parallelism)
+            for key in ("cpus_per_task", "memory_gb"):
+                total_resources[key] = worker_resources[key] * parallelism
         evaluator_spec = ExperimentSpec.model_validate(evaluator_document)
         evaluator_adapter = self._adapter_identity(evaluator_spec)
 
@@ -8718,6 +8725,7 @@ class PipelineService:
             "seeds": list(seeds),
             "episodes_per_task": episodes_per_task,
             "parallelism": parallelism,
+            "worker_resources": worker_resources,
             "headless": headless,
             "result_path": f"{evaluation_root}/result.json",
             "progress_path": f"{evaluation_root}/progress.jsonl",
@@ -9948,6 +9956,11 @@ def evaluation_suites(
             "version": row["suite_version"],
             "tasks": config.get("tasks", []),
             "task_options": config.get("task_options", []),
+            "default_tasks": config.get("default_tasks", []),
+            "maximum_parallelism": max((entry.maximum_parallelism or 1
+                for entry in (evaluator_manifest.evaluations if evaluator_manifest else [])
+                if entry.environment == row["evaluator_adapter"] and row["name"] in entry.suites
+                and declaration_enabled(entry)), default=1),
             "task_source": config.get("task_source"),
             "task_catalog_complete": bool(config.get("task_catalog_complete")),
             "task_selection_mode": config.get("task_selection_mode", "subset"),
@@ -11052,6 +11065,67 @@ def cancel_evaluation(evaluation_id: str) -> dict[str, Any]:
         return service.cancel_evaluation(evaluation_id)
     except Exception as error:
         raise _http_error(error) from error
+
+
+@router.get(
+    "/evaluations/{evaluation_id}/episodes/{episode_id}/logs",
+    response_class=PlainTextResponse,
+)
+def get_evaluation_episode_log(
+    evaluation_id: str,
+    episode_id: str,
+    stream: Literal["stdout", "stderr"] = "stdout",
+) -> str:
+    evaluation = service.database.get_evaluation(evaluation_id)
+    if not evaluation:
+        raise HTTPException(status_code=404, detail="Evaluation not found")
+    episode = next(
+        (item for item in evaluation.get("episodes", []) if item["id"] == episode_id),
+        None,
+    )
+    if not episode:
+        raise HTTPException(status_code=404, detail="Rollout not found")
+    run = service.database.get_run(evaluation["run_id"]) or {}
+    attempts = [
+        a
+        for a in run.get("attempts", [])
+        if a.get("stage_id") == evaluation.get("stage_id")
+    ]
+    if not attempts:
+        return "No Slurm attempt recorded."
+    metrics = episode.get("metrics_json") or {}
+    job = _progress_integer(metrics.get("slurm_job_id"))
+    attempt = next(
+        (a for a in attempts if job and str(a.get("slurm_job_id")) == str(job)), None
+    )
+    attempt = attempt or max(attempts, key=lambda a: a.get("attempt_number") or 0)
+    worker = metrics.get("worker_index")
+    if worker is None:
+        return service._read_attempt_log(
+            attempt, stream, 500, retrieval_errors_as_text=True
+        )
+    if (
+        isinstance(worker, bool)
+        or not isinstance(worker, (int, float))
+        or not math.isfinite(worker)
+        or worker != int(worker)
+        or not 0 <= worker <= 100000
+    ):
+        raise HTTPException(status_code=409, detail="Invalid rollout worker identity")
+    result_path = evaluation.get("result_path")
+    if not result_path:
+        raise HTTPException(
+            status_code=409, detail="Evaluation result location is unavailable"
+        )
+    path = str(
+        PurePosixPath(result_path).parent
+        / "workers"
+        / str(int(worker))
+        / (stream + ".log")
+    )
+    return service._read_attempt_log(
+        {**attempt, stream + "_path": path}, stream, 500, retrieval_errors_as_text=True
+    )
 
 
 @router.get("/evaluations/{evaluation_id}/episodes/{episode_id}/video")

@@ -173,7 +173,6 @@ const elements = {
   evaluationStdoutLog: document.querySelector("#evaluation-stdout-log"),
   evaluationStderrStatus: document.querySelector("#evaluation-stderr-status"),
   evaluationStderrLog: document.querySelector("#evaluation-stderr-log"),
-  evaluationResultStatus: document.querySelector("#evaluation-result-status"),
   evaluationResultJson: document.querySelector("#evaluation-result-json"),
   dataRegistryError: document.querySelector("#data-registry-error"),
   refreshDataRegistry: document.querySelector("#refresh-data-registry"),
@@ -511,7 +510,7 @@ function applyEvaluationTaskSelectionPolicy(changedInput = null) {
         ? "Clear individual tasks; this suite only accepts its complete default task set."
         : "This suite always uses its complete default task set."
       : inputs.length
-        ? "Choose any tasks, or leave all unchecked to use the suite default."
+        ? "Choose tasks; leave blank for the default."
         : "No task catalog is declared; the suite or adapter default will be used.";
   elements.evaluationTasksStatus.textContent = [modeStatus, policy.reason, unavailableSelection].filter(Boolean).join(" ");
   setEvaluationTaskCreateValidity(!invalid);
@@ -553,7 +552,7 @@ function installStructuredEvaluationTaskOptions() {
     const requestedSelection = Array.isArray(renderOptions.preferredTasks)
       ? renderOptions.preferredTasks.map(String)
       : [];
-    const retainedSelection = requestedSelection.length ? requestedSelection : currentSelection;
+    const retainedSelection = requestedSelection.length ? requestedSelection : preserve ? currentSelection : (suite?.default_tasks || suite?.config_json?.default_tasks || []);
     const availableIds = new Set(taskOptions.map((option) => option.id));
     const unavailable = retainedSelection.filter((taskId) => !availableIds.has(taskId));
     if (unavailable.length) {
@@ -3347,6 +3346,7 @@ function revealPanel(panel, { focusTarget = null, launcher = null, scroll = true
   if (!modal && ((activeDisclosure?.panel === panel && activeDisclosure.rowOwned) || panel === elements.runAttemptDetail)) {
     mountRowDisclosure(panel, actualLauncher);
   }
+  if (activeDisclosure?.panel === panel) activeDisclosure.revealed = true;
   panel.hidden = false;
   if (modal) SkynetDialog.open(modal, {launcher: actualLauncher});
   window.requestAnimationFrame(() => {
@@ -3491,7 +3491,7 @@ function toggleDisclosure(panel, revealKey, launcher, { rowOwned = false } = {})
   panel.dataset.disclosureManaged = "true";
   panel.dataset.disclosureKey = revealKey;
   panel.dataset.disclosureToken = String(token);
-  activeDisclosure = { panel, revealKey, launcher, token, rowOwned };
+  activeDisclosure = { panel, revealKey, launcher, token, rowOwned, revealed: false };
   if (rowOwned && !mountRowDisclosure(panel, launcher)) {
     activeDisclosure = null;
     delete panel.dataset.disclosureToken;
@@ -3682,6 +3682,8 @@ function installDisclosureBehavior() {
         record.type === "attributes"
         && record.attributeName === "hidden"
         && record.target === activeDisclosure?.panel
+        // An old row's close can be observed before the new row's click handler.
+        && activeDisclosure.revealed
         && record.target.hidden
       ) closeActiveDisclosure();
       if (record.type === "childList") {
@@ -7419,6 +7421,51 @@ function updateEvaluationEnvironmentFromSuite({ preserveTasks = false } = {}) {
   );
   elements.evaluationEnvironment.value = suite ? String(environment || "") : "";
   populateEvaluationTasks(suite, { preserve: preserveTasks });
+  const limit = Number(suite?.maximum_parallelism || 1);
+  elements.evaluationParallelism.max = String(limit);
+  elements.evaluationParallelism.readOnly = limit === 1;
+  if (Number(elements.evaluationParallelism.value) > limit) elements.evaluationParallelism.value = String(limit);
+  document.querySelector("#evaluation-parallelism-help").textContent = limit > 1
+    ? "One GPU per worker, in one Slurm allocation."
+    : "This evaluator runs one worker.";
+}
+
+function initializeEvaluationResources() {
+  const container = document.querySelector("#evaluation-resources");
+  // Reuse the training form's resource controls, validation and options.
+  for (const [source, name, label] of [
+    ["resource-policy", "queue", "Queue policy"],
+    ["experiment-gpu-type", "gpu", "GPU type"],
+    ["resource-cpus", "cpus", "CPUs / worker"],
+    ["resource-memory", "memory", "Memory / worker (GB)"],
+    ["resource-time", "time", "Wall time"],
+  ]) {
+    const field = document.getElementById(source).closest(".field").cloneNode(true);
+    const input = field.querySelector("input, select");
+    input.id = `evaluation-resource-${name}`;
+    input.required = true;
+    const title = field.querySelector("label");
+    title.htmlFor = input.id;
+    title.textContent = label;
+    if (name === "gpu") {
+      input.querySelector('option[value="auto"]')?.remove();
+      input.value = "a40";
+    }
+    input.addEventListener("input", () => scheduleEvaluationTargetValidation());
+    input.addEventListener("change", () => scheduleEvaluationTargetValidation());
+    container.append(field);
+  }
+}
+initializeEvaluationResources();
+
+function evaluationResources() {
+  const value = name => document.getElementById(`evaluation-resource-${name}`).value;
+  return {
+    gateway: elements.gateway.value, queue_policy: value("queue"), nodes: 1,
+    gpu: {mode: "explicit", count: 1, type: value("gpu")},
+    cpus_per_task: Number(value("cpus")), memory_gb: Number(value("memory")),
+    time_limit: value("time").trim(),
+  };
 }
 
 function evaluationTargetSignature() {
@@ -7435,6 +7482,7 @@ function evaluationTargetSignature() {
     elements.evaluationSeeds.value,
     elements.evaluationParallelism.value,
     elements.evaluationHeadless.checked,
+    evaluationResources(),
   ]);
 }
 
@@ -7494,6 +7542,7 @@ async function validateEvaluationTarget(request, signature) {
         seeds: elements.evaluationSeeds.value.split(",").map(seed => Number(seed.trim())),
         parallelism: numberOrNull(elements.evaluationParallelism),
         headless: elements.evaluationHeadless.checked,
+        resources: evaluationResources(),
         argv: commandOverrides.argv,
         resume_argv: commandOverrides.resumeArgv,
       }),
@@ -7528,7 +7577,7 @@ async function validateEvaluationTarget(request, signature) {
     const resources = result.resolved_resources;
     const budget = document.querySelector("#evaluation-resource-summary");
     budget.textContent = resources
-      ? `Allocation inherited from training: ${resources.gpu?.count || "automatic"} ${resources.gpu?.type || "compatible"} GPU(s), ${resources.cpus_per_task} CPUs, ${resources.memory_gb} GB RAM, ${resources.time_limit} wall time; queue ${resources.queue_policy}. Gateway: ${elements.gateway.options[elements.gateway.selectedIndex].text}.`
+      ? `Total: ${resources.gpu?.count || 1} ${document.querySelector("#evaluation-resource-gpu option:checked")?.textContent || resources.gpu?.type} GPU${resources.gpu?.count === 1 ? "" : "s"} · ${resources.cpus_per_task} CPUs · ${resources.memory_gb} GB RAM · ${resources.time_limit}`
       : "Allocation has not been resolved. Validate a compatible checkpoint and simulation suite.";
     const evaluator = result.evaluator && typeof result.evaluator === "object" ? result.evaluator : null;
     const evaluatorLabel = evaluator
@@ -8051,6 +8100,7 @@ function evaluationPayload() {
     seeds,
     parallelism: numberOrNull(elements.evaluationParallelism),
     headless: elements.evaluationHeadless.checked,
+    resources: evaluationResources(),
     auto_resume: elements.evaluationAutoResume.checked,
     max_attempts: numberOrNull(elements.evaluationMaxAttempts),
     gateway: elements.gateway.value,
@@ -8140,6 +8190,7 @@ function stopEvaluationDetailPolling() {
   window.clearTimeout(evaluationDetailPollTimer);
   evaluationDetailPollTimer = null;
   activeEvaluationDetailId = null;
+  closeEvaluationRollout();
   const video = document.querySelector("#evaluation-rollout-video");
   if (video && !video.paused) video.pause();
 }
@@ -8160,211 +8211,140 @@ function attemptFailureDetail(attempt) {
   return value;
 }
 
-function renderEvaluationAttempt(attempt) {
-  if (!attempt) {
-    elements.evaluationAttemptMeta.innerHTML = keyValueHtml([["State", "No Slurm attempt recorded"]]);
-    return;
-  }
-  elements.evaluationAttemptMeta.innerHTML = keyValueHtml([
-    ["Attempt", runAttemptValue(attempt, "attempt_number")],
-    ["State", runAttemptValue(attempt, "status", "state")],
-    ["Scheduler reason", queueReasonLabel(attempt)],
-    ["Slurm job", runAttemptValue(attempt, "slurm_job_id", "job_id")],
-    ["Gateway", runAttemptValue(attempt, "gateway")],
-    ["Node(s)", runAttemptValue(attempt, "node", "node_list", "nodelist")],
-    ["Account", runAttemptValue(attempt, "account")],
-    ["Partition", runAttemptValue(attempt, "partition", "partition_name")],
-    ["Started", formatDate(runAttemptValue(attempt, "started_at"))],
-    ["Ended", formatDate(runAttemptValue(attempt, "ended_at", "finished_at"))],
-    ["Exit code", attemptExitCodeLabel(attempt)],
-    ["Stdout file", runAttemptPath(attempt, "stdout_path", "output_path")],
-    ["Stderr file", runAttemptPath(attempt, "stderr_path", "error_path")],
-    ["Failure detail", attemptFailureDetail(attempt)],
-  ]);
+let activeEvaluationRollout = null;
+let evaluationRolloutGeneration = 0;
+
+function evaluationEpisodeRate(episode) {
+  return episode.success === true ? "100%" : episode.success === false ? "0%" : "—";
 }
 
-async function loadEvaluationAttemptLogs(evaluation, attempt, requestToken, { polling = false } = {}) {
-  const stdoutGeneration = beginLogViewUpdate(elements.evaluationStdoutLog);
-  const stderrGeneration = beginLogViewUpdate(elements.evaluationStderrLog);
-  if (!attempt || !runAttemptValue(attempt, "id", "attempt_id")) {
-    setTextIfChanged(elements.evaluationStdoutStatus, "not submitted");
-    setTextIfChanged(elements.evaluationStderrStatus, "not submitted");
-    updateLogView(elements.evaluationStdoutLog, "No Slurm attempt was recorded for this evaluation.", { generation: stdoutGeneration });
-    updateLogView(elements.evaluationStderrLog, "No Slurm attempt was recorded for this evaluation.", { generation: stderrGeneration });
-    return;
-  }
-  if (!polling) {
-    elements.evaluationStdoutStatus.textContent = "loading";
-    elements.evaluationStderrStatus.textContent = "loading";
-    updateLogView(elements.evaluationStdoutLog, "Loading stdout...", { generation: stdoutGeneration });
-    updateLogView(elements.evaluationStderrLog, "Loading stderr...", { generation: stderrGeneration });
-  }
-  const attemptId = runAttemptValue(attempt, "id", "attempt_id");
-  const base = `/api/runs/${encodeURIComponent(evaluation.run_id)}/attempts/${encodeURIComponent(attemptId)}/logs`;
-  const [stdoutResult, stderrResult] = await Promise.allSettled([
-    api(`${base}?stream=stdout`),
-    api(`${base}?stream=stderr`),
-  ]);
-  if (!disclosureTokenIsCurrent(elements.evaluationDetail, requestToken)) return;
-  if (stdoutResult.status === "fulfilled") {
-    const content = logContent(stdoutResult.value);
-    if (updateLogView(elements.evaluationStdoutLog, content || "No stdout output.", { generation: stdoutGeneration })) {
-      setTextIfChanged(elements.evaluationStdoutStatus, logStreamStatus(content, "live"));
-    }
-  } else {
-    updateLogView(elements.evaluationStdoutLog, `Unable to load stdout: ${stdoutResult.reason.message}`, { generation: stdoutGeneration });
-    elements.evaluationStdoutStatus.textContent = "unavailable";
-  }
-  if (stderrResult.status === "fulfilled") {
-    const content = logContent(stderrResult.value);
-    if (updateLogView(elements.evaluationStderrLog, content || "No stderr output.", { generation: stderrGeneration })) {
-      setTextIfChanged(elements.evaluationStderrStatus, logStreamStatus(content, "live"));
-    }
-  } else {
-    updateLogView(elements.evaluationStderrLog, `Unable to load stderr: ${stderrResult.reason.message}`, { generation: stderrGeneration });
-    elements.evaluationStderrStatus.textContent = "unavailable";
-  }
-}
-
-function evaluationResultRecord(evaluation) {
-  const episodes = Array.isArray(evaluation.episodes) ? evaluation.episodes : [];
-  const aggregate = Array.isArray(evaluation.aggregate) ? evaluation.aggregate : [];
-  const artifacts = Array.isArray(evaluation.artifacts) ? evaluation.artifacts : [];
-  const producedEpisodes = episodes.filter(
-    (episode) => String(episode.status || "").toUpperCase() !== "PENDING",
-  );
-  const episodeStates = {};
-  episodes.forEach((episode) => {
-    const state = String(episode.status || "UNKNOWN").toUpperCase();
-    episodeStates[state] = (episodeStates[state] || 0) + 1;
-  });
-  return {
-    status: evaluation.status || evaluation.state || "UNKNOWN",
-    result_path: evaluation.result_path || null,
-    planned_episodes: episodes.length,
-    episode_states: episodeStates,
-    aggregate,
-    episodes: producedEpisodes,
-    artifacts,
-  };
-}
-
-function evaluationRolloutLabel(episode) {
-  const seed = episode.seed ?? "-";
-  const number = Number(episode.episode_index);
-  const episodeNumber = Number.isFinite(number) ? number + 1 : "-";
-  const outcome = episode.success === true
-    ? "task success"
-    : episode.success === false
-      ? "task failure"
-      : String(episode.status || "recorded").toLowerCase();
-  return `Seed ${seed} / episode ${episodeNumber} / ${outcome}`;
-}
-
-function updateEvaluationRolloutPlayer(evaluation, episodes) {
-  const select = document.querySelector("#evaluation-rollout-select");
+function closeEvaluationRollout() {
+  const dialog = document.querySelector("#evaluation-rollout-dialog");
+  activeEvaluationRollout = null;
+  evaluationRolloutGeneration += 1;
   const video = document.querySelector("#evaluation-rollout-video");
-  const meta = document.querySelector("#evaluation-rollout-meta");
-  const empty = document.querySelector("#evaluation-rollout-empty");
-  if (!select || !video || !meta || !empty) return;
-  const episode = episodes.find((item) => String(item.id) === select.value);
-  if (!episode) {
-    if (video.dataset.videoKey) {
-      video.pause();
-      video.removeAttribute("src");
-      video.removeAttribute("data-video-key");
-      video.load();
-    }
-    video.hidden = true;
-    meta.hidden = true;
-    empty.textContent = select.value
-      ? "The selected rollout is unavailable. Choose an available rollout."
-      : "Choose a rollout video to load it.";
-    empty.hidden = false;
-    return;
-  }
-  empty.hidden = true;
-  video.hidden = false;
-  meta.hidden = false;
-  const videoKey = `${evaluation.id || evaluation.evaluation_id}:${episode.id}`;
-  const source = `/api/evaluations/${encodeURIComponent(evaluation.id || evaluation.evaluation_id)}`
-    + `/episodes/${encodeURIComponent(episode.id)}/video`;
-  if (video.dataset.videoKey !== videoKey) {
-    video.dataset.videoKey = videoKey;
-    video.src = source;
+  if (video?.dataset.videoKey) {
+    video.pause();
+    video.removeAttribute("src");
+    delete video.dataset.videoKey;
     video.load();
   }
-  meta.innerHTML = keyValueHtml([
-    ["Task", episode.task],
-    ["Seed", episode.seed],
-    ["Episode", Number(episode.episode_index) + 1],
-    ["Task success", episode.success === true ? "Yes" : episode.success === false ? "No" : "-"],
-    ["Rollout state", episode.status],
-    ["Remote file", episode.video_path],
-  ]);
+  if (dialog?.open) SkynetDialog.close(dialog);
+}
+
+document.querySelector("#evaluation-rollout-dialog").addEventListener("close", closeEvaluationRollout);
+
+function evaluationEpisodeAttempt(evaluation, episode) {
+  const job = episode.metrics_json?.slurm_job_id;
+  return evaluation.attempts?.find(attempt => job && String(attempt.slurm_job_id) === String(job))
+    || latestEvaluationAttempt(evaluation);
+}
+
+function renderEvaluationAttempt(attempt) {
+  const headings = ["Attempt", "State", "Slurm job", "Gateway / node", "Started", "Ended", "Error"];
+  const values = attempt ? [
+    escapeHtml(attempt.attempt_number ?? "—"), statusPill(attempt.status),
+    escapeHtml(attempt.slurm_job_id || "—"),
+    escapeHtml([attempt.gateway, attempt.node_list || attempt.node].filter(Boolean).join(" / ") || "—"),
+    escapeHtml(formatDate(attempt.started_at)), escapeHtml(formatDate(attempt.finished_at || attempt.ended_at)),
+    escapeHtml(attemptFailureDetail(attempt) || "—"),
+  ] : [];
+  setHtmlIfChanged(elements.evaluationAttemptMeta, `<table><thead><tr>${headings.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>`
+    + (values.length ? `<tr>${values.map(v => `<td>${v}</td>`).join("")}</tr>` : '<tr><td colspan="7">No Slurm attempt recorded.</td></tr>') + '</tbody></table>');
+}
+
+function renderEvaluationRolloutModal(evaluation, episode) {
+  const video = document.querySelector("#evaluation-rollout-video");
+  const empty = document.querySelector("#evaluation-rollout-empty");
+  setTextIfChanged(document.querySelector("#evaluation-rollout-title"), `Episode ${Number(episode.episode_index) + 1} · ${episode.task}`);
+  const key = `${evaluation.id}:${episode.id}:${episode.video_path || ""}`;
+  video.hidden = !episode.video_path;
+  empty.hidden = Boolean(episode.video_path);
+  empty.textContent = ["FAILED", "CANCELLED", "BLOCKED"].includes(evaluation.status)
+    ? "No video was recorded for this episode."
+    : "The rollout video will appear when this episode finishes.";
+  if (video.dataset.videoKey !== key) {
+    video.pause();
+    video.dataset.videoKey = key;
+    if (episode.video_path) video.src = `/api/evaluations/${encodeURIComponent(evaluation.id)}/episodes/${encodeURIComponent(episode.id)}/video`;
+    else video.removeAttribute("src");
+    video.load();
+  }
+  video.onerror = () => { empty.hidden = false; empty.textContent = "Unable to load the rollout video. Close and reopen Detail to retry."; };
+  const values = [["Task", episode.task], ["Episode", Number(episode.episode_index) + 1], ["State", episode.status],
+    ["Seed", episode.seed], ["Success rate", evaluationEpisodeRate(episode)], ["Reward", episode.reward ?? "—"],
+    ["Steps", episode.episode_length ?? "—"], ["Failure", episode.failure_reason || "—"]];
+  setHtmlIfChanged(document.querySelector("#evaluation-result-summary"), '<table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>'
+    + values.map(([key, value]) => `<tr><td>${escapeHtml(key)}</td><td>${escapeHtml(value)}</td></tr>`).join("") + '</tbody></table>');
+  updateLogView(elements.evaluationResultJson, JSON.stringify(episode, null, 2));
+  renderEvaluationAttempt(evaluationEpisodeAttempt(evaluation, episode));
+}
+
+async function loadEvaluationRolloutLogs(evaluation, episode, generation, {polling = false} = {}) {
+  const base = `/api/evaluations/${encodeURIComponent(evaluation.id)}/episodes/${encodeURIComponent(episode.id)}/logs`;
+  const targets = [["stdout", elements.evaluationStdoutLog, elements.evaluationStdoutStatus], ["stderr", elements.evaluationStderrLog, elements.evaluationStderrStatus]];
+  await Promise.all(targets.map(async ([stream, log, status]) => {
+    const update = beginLogViewUpdate(log);
+    if (!polling) { status.textContent = "loading"; updateLogView(log, `Loading ${stream}…`, {generation: update}); }
+    try {
+      const result = await api(`${base}?stream=${stream}`);
+      if (generation !== evaluationRolloutGeneration || !activeEvaluationRollout) return;
+      const content = logContent(result);
+      updateLogView(log, content || `No ${stream} output.`, {generation: update});
+      status.textContent = logStreamStatus(content, "loaded");
+    } catch (error) {
+      if (generation !== evaluationRolloutGeneration || !activeEvaluationRollout) return;
+      status.textContent = "unavailable";
+      updateLogView(log, `Unable to load ${stream}: ${error.message}`, {generation: update});
+    }
+  }));
+}
+
+function openEvaluationRollout(evaluation, episode, launcher) {
+  closeEvaluationRollout();
+  activeEvaluationRollout = {evaluationId: String(evaluation.id), episodeId: String(episode.id)};
+  const generation = ++evaluationRolloutGeneration;
+  document.querySelector("#evaluation-rollout-detail").hidden = false;
+  renderEvaluationRolloutModal(evaluation, episode);
+  SkynetDialog.open(document.querySelector("#evaluation-rollout-dialog"), {launcher});
+  void loadEvaluationRolloutLogs(evaluation, episode, generation);
 }
 
 function renderEvaluationRollouts(evaluation) {
+  const episodes = evaluation.episodes || [];
+  const body = document.querySelector("#evaluation-rollouts-body");
+  const signature = refreshContentSignature(episodes);
   const section = document.querySelector("#evaluation-rollouts");
-  const count = document.querySelector("#evaluation-rollout-count");
-  const select = document.querySelector("#evaluation-rollout-select");
-  const video = document.querySelector("#evaluation-rollout-video");
-  const picker = document.querySelector(".evaluation-rollout-picker");
-  const meta = document.querySelector("#evaluation-rollout-meta");
-  const empty = document.querySelector("#evaluation-rollout-empty");
-  if (!section || !count || !select || !video || !picker || !meta || !empty) return;
-  const episodes = (Array.isArray(evaluation.episodes) ? evaluation.episodes : [])
-    .filter((episode) => episode.id && episode.video_path);
-  const signature = refreshContentSignature({
-    evaluation_id: evaluation.id || evaluation.evaluation_id,
-    episodes: episodes.map((episode) => ({
-      id: episode.id,
-      status: episode.status,
-      success: episode.success,
-      video_path: episode.video_path,
-      task: episode.task,
-      seed: episode.seed,
-      episode_index: episode.episode_index,
-    })),
-  });
-  if (section.dataset.rolloutSignature === signature) return;
-  section.dataset.rolloutSignature = signature;
-  if (!episodes.length) {
-    section.hidden = false;
-    count.textContent = "not produced";
-    empty.textContent = "No rollout video has been produced for this evaluation.";
-    empty.hidden = false;
-    picker.hidden = true;
-    video.hidden = true;
-    meta.hidden = true;
-    if (video.dataset.videoKey) {
-      video.pause();
-      video.removeAttribute("src");
-      video.removeAttribute("data-video-key");
-      video.load();
-    }
-    return;
+  setTextIfChanged(document.querySelector("#evaluation-rollout-count"), `${episodes.length} rollout${episodes.length === 1 ? "" : "s"}`);
+  if (section.dataset.rolloutSignature !== signature) {
+    section.dataset.rolloutSignature = signature;
+    const rows = new Map([...body.querySelectorAll("tr[data-episode-id]")].map(row => [row.dataset.episodeId, row]));
+    const ordered = episodes.map(episode => {
+      const id = String(episode.id);
+      const row = rows.get(id) || document.createElement("tr");
+      row.dataset.episodeId = id;
+      patchTableRow(row, [
+        {html: `<strong>Episode ${Number(episode.episode_index) + 1}</strong><span class="secondary">${escapeHtml(episode.task)}</span>`},
+        {html: statusPill(episode.status)}, {html: escapeHtml(episode.seed)}, {html: evaluationEpisodeRate(episode)},
+        {className: "row-actions", preserve: true, html: `<button type="button" data-rollout-detail="${escapeHtml(id)}" aria-haspopup="dialog" aria-controls="evaluation-rollout-dialog">Detail</button>`},
+      ]);
+      return row;
+    });
+    body.replaceChildren(...ordered);
+    if (!episodes.length) body.innerHTML = `<tr><td colspan="5">${Array.isArray(evaluation.episodes) ? "No rollouts recorded." : "Loading rollouts…"}</td></tr>`;
   }
-
-  section.hidden = false;
-  count.textContent = `${episodes.length} video${episodes.length === 1 ? "" : "s"}`;
-  empty.textContent = "Choose a rollout video to load it.";
-  empty.hidden = false;
-  picker.hidden = false;
-  video.hidden = true;
-  meta.hidden = true;
-  const previousSelection = select.value;
-  select.innerHTML = ['<option value="">Choose a rollout video...</option>', ...episodes.map((episode) => (
-    `<option value="${escapeHtml(episode.id)}">${escapeHtml(evaluationRolloutLabel(episode))}</option>`
-  ))].join("");
-  if (episodes.some((episode) => String(episode.id) === previousSelection)) {
-    select.value = previousSelection;
-  } else if (previousSelection) {
-    select.value = "";
-    empty.textContent = "The previously selected rollout is no longer available. Choose another.";
+  body.onclick = event => {
+    const button = event.target.closest("[data-rollout-detail]");
+    const episode = episodes.find(ep => String(ep.id) === button?.dataset.rolloutDetail);
+    if (episode) openEvaluationRollout(evaluation, episode, button);
+  };
+  if (activeEvaluationRollout?.evaluationId === String(evaluation.id)) {
+    const selected = episodes.find(ep => String(ep.id) === activeEvaluationRollout.episodeId);
+    if (selected) {
+      renderEvaluationRolloutModal(evaluation, selected);
+      void loadEvaluationRolloutLogs(evaluation, selected, evaluationRolloutGeneration, {polling: true});
+    } else closeEvaluationRollout();
   }
-  select.onchange = () => updateEvaluationRolloutPlayer(evaluation, episodes);
-  updateEvaluationRolloutPlayer(evaluation, episodes);
 }
 
 function evaluationDetailPollEligible(id) {
@@ -8391,83 +8371,49 @@ function scheduleEvaluationDetailPolling(id) {
   }, 5000);
 }
 
+function renderEvaluationDetail(evaluation) {
+  const id = evaluation.id || evaluation.evaluation_id;
+  patchEvaluationSummaryRow(evaluation);
+  setTextIfChanged(elements.evaluationDetailTitle, evaluation.name || id);
+  setHtmlIfChanged(elements.evaluationDetailActions, cancellationActionButton("evaluation", id, evaluation.manual_actions || {}));
+  setHtmlIfChanged(elements.evaluationDetailMeta, keyValueHtml([
+    ["Run", evaluation.run_id], ["Suite", evaluation.suite_name || evaluation.suite_id || evaluation.suite],
+    ["Progress", progressSummaryLabel(evaluation.progress_summary) || "Waiting"],
+    ["ETA", etaPresentation(evaluation.progress_summary).detail],
+    ["Success rate", evaluationPrimaryResult(evaluation)],
+    ["Updated", formatDate(evaluation.updated_at || evaluation.created_at)],
+  ]));
+  renderEvaluationRollouts(evaluation);
+}
+
 async function viewEvaluation(id, launcher = null, { polling = false } = {}) {
   if (polling && !evaluationDetailPollEligible(id)) return;
-  if (!polling) activeEvaluationDetailId = String(id);
   const revealLauncher = launcher || currentRevealLauncher();
   const requestToken = disclosureToken(elements.evaluationDetail, revealLauncher);
-  if (!polling) elements.evaluationDetailActions.innerHTML = "";
-  let evaluation = evaluationRows.find((row) => String(row.id || row.evaluation_id) === String(id));
-  if (!evaluation) {
-    closeDisclosurePanel(elements.evaluationDetail, revealLauncher);
-    showToast(polling ? "Evaluation is no longer available." : "Evaluation result is no longer present in the current snapshot.", true);
-    return;
+  let evaluation = evaluationRows.find(row => String(row.id || row.evaluation_id) === String(id));
+  if (!evaluation) return;
+  if (!polling) {
+    if (activeEvaluationDetailId !== String(id)) closeEvaluationRollout();
+    activeEvaluationDetailId = String(id);
+    renderEvaluationDetail(evaluation);
+    revealPanel(elements.evaluationDetail, {focusTarget: elements.evaluationDetailTitle, launcher: revealLauncher});
   }
-  const resultGeneration = beginLogViewUpdate(elements.evaluationResultJson);
+  const errorBox = document.querySelector("#evaluation-detail-error");
+  const current = () => disclosureTokenIsCurrent(elements.evaluationDetail, requestToken) && activeEvaluationDetailId === String(id) && !elements.evaluationDetail.hidden;
   try {
     const payload = await api(`/api/evaluations/${encodeURIComponent(id)}`);
-    if (!disclosureTokenIsCurrent(elements.evaluationDetail, requestToken)) return;
+    if (!current()) return;
     evaluation = entityFrom(payload, "evaluation");
-    const rowIndex = evaluationRows.findIndex(
-      (row) => String(row.id || row.evaluation_id) === String(id),
-    );
-    if (rowIndex >= 0) {
-      evaluationRows[rowIndex] = { ...evaluationRows[rowIndex], ...evaluation };
-      evaluation = evaluationRows[rowIndex];
-    }
+    const index = evaluationRows.findIndex(row => String(row.id || row.evaluation_id) === String(id));
+    if (index >= 0) evaluationRows[index] = {...evaluationRows[index], ...evaluation};
+    errorBox.hidden = true;
+    renderEvaluationDetail(evaluation);
   } catch (error) {
-    if (!disclosureTokenIsCurrent(elements.evaluationDetail, requestToken)) return;
-    if (polling) {
-      showNotice(elements.evaluationsError, `Live evaluation detail update failed; displayed data may be stale: ${error.message}. Retrying automatically.`);
-      scheduleEvaluationDetailPolling(id);
-      return;
-    }
-    closeDisclosurePanel(elements.evaluationDetail, revealLauncher);
-    showToast(`Evaluation detail failed: ${error.message}`, true);
-    return;
+    if (!current()) return;
+    errorBox.textContent = `Unable to refresh details: ${error.message}. Retrying…`;
+    errorBox.hidden = false;
   }
-  if (elements.evaluationsError.textContent.startsWith("Live evaluation detail update failed")) clearNotice(elements.evaluationsError);
-  const completed = evaluation.progress_completed ?? 0;
-  const total = evaluation.progress_total ?? 0;
-  const attempt = latestEvaluationAttempt(evaluation);
-  const resultRecord = evaluationResultRecord(evaluation);
-  const hasCanonicalResult = resultRecord.aggregate.length > 0
-    || resultRecord.episodes.length > 0
-    || resultRecord.artifacts.length > 0;
-  const manualActions = evaluation.manual_actions && typeof evaluation.manual_actions === "object"
-    ? evaluation.manual_actions
-    : {};
-  const panel = elements.evaluationsBody.closest(".panel") || elements.evaluationDetail;
-  commitPanelRefresh(panel, `evaluation-detail:${id}`, evaluation, () => {
-    patchEvaluationSummaryRow(evaluation);
-    setTextIfChanged(elements.evaluationDetailTitle, evaluation.name || id);
-    setHtmlIfChanged(elements.evaluationDetailActions, cancellationActionButton("evaluation", id, manualActions));
-    setHtmlIfChanged(elements.evaluationDetailMeta, keyValueHtml([
-      ["Run", evaluation.run_id],
-      ["Suite", evaluation.suite_name || evaluation.suite_id || evaluation.suite],
-    ["Evaluator", `${evaluation.evaluator_adapter || "-"}@${evaluation.evaluator_version || "-"}`],
-    ["Progress", progressSummaryLabel(evaluation.progress_summary) || `${completed}/${total}`],
-    ["ETA", etaPresentation(evaluation.progress_summary).detail],
-    ["Result path", evaluation.result_path],
-      ["Updated", formatDate(evaluation.updated_at || evaluation.created_at)],
-    ]));
-    renderEvaluationAttempt(attempt);
-    setTextIfChanged(elements.evaluationResultStatus, hasCanonicalResult ? "available" : "not produced");
-    const taskOutcomes = resultRecord.episodes.filter(episode => typeof episode.success === "boolean");
-    const successes = taskOutcomes.filter(episode => episode.success).length;
-    setHtmlIfChanged(document.querySelector("#evaluation-result-summary"), keyValueHtml([
-      ["Job state", resultRecord.status],
-      ["Episodes with a recorded outcome", `${taskOutcomes.length} / ${resultRecord.planned_episodes}`],
-      ["Task successes", taskOutcomes.length ? `${successes} / ${taskOutcomes.length}` : "No task outcomes recorded"],
-      ["Task success rate", evaluationPrimaryResult(evaluation)],
-    ]));
-    updateLogView(elements.evaluationResultJson, JSON.stringify(resultRecord, null, 2), { generation: resultGeneration });
-    renderEvaluationRollouts(evaluation);
-  }, { background: polling });
-  await loadEvaluationAttemptLogs(evaluation, attempt, requestToken, { polling });
-  if (!disclosureTokenIsCurrent(elements.evaluationDetail, requestToken)) return;
-  if (!polling) revealPanel(elements.evaluationDetail, { focusTarget: elements.evaluationDetailTitle, launcher: revealLauncher });
-  scheduleEvaluationDetailPolling(id);
+  if (current()) scheduleEvaluationDetailPolling(id);
 }
 
 function dataResourceIdentity(resource) {

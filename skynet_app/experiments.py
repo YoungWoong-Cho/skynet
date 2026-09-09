@@ -900,6 +900,7 @@ class EvaluationDatasetTaskBinding(CanonicalModel):
 
 class EvaluationSuite(CanonicalModel):
     dataset_task_binding: EvaluationDatasetTaskBinding | None = None
+    default_tasks: list[str] | None = None
     schema_version: Literal[2]
     evaluator: str = Field(min_length=1, max_length=96)
     suite: str = Field(min_length=1, max_length=256)
@@ -928,6 +929,8 @@ class EvaluationSuite(CanonicalModel):
     def serialize_without_absent_binding(self, handler):
         result = handler(self)
         # Existing immutable catalogs must retain their original content hashes.
+        if self.default_tasks is None:
+            result.pop("default_tasks", None)
         if self.dataset_task_binding is None:
             result.pop("dataset_task_binding", None)
         return result

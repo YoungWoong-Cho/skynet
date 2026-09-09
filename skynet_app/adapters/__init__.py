@@ -1820,6 +1820,15 @@ class AdapterRuntimePolicy(CanonicalModel):
 
 
 class EvaluationAdapterMetadata(CanonicalModel):
+    maximum_parallelism: int | None = Field(default=None, ge=1, le=8)
+
+    @model_serializer(mode="wrap")
+    def serialize_parallelism(self, handler):
+        result = handler(self)
+        if self.maximum_parallelism is None:
+            result.pop("maximum_parallelism", None)
+        return result
+
     environment: str
     suites: list[str] = Field(default_factory=list)
     runtime_profile_id: str | None = Field(
@@ -2495,6 +2504,12 @@ class ManifestAdapter(RepositoryAdapter):
             )
 
         metadata = matches[0]
+        parallelism = int(context.get("parallelism", 1))
+        limit = metadata.maximum_parallelism or 1
+        if parallelism > limit:
+            blockers.append(f"This evaluator supports at most {limit} parallel jobs")
+        if parallelism > 1 and parallelism > len(context.get("tasks", [])) * len(context.get("seeds", [])) * int(context.get("episodes_per_task", 1)):
+            blockers.append("Parallel jobs cannot exceed the number of evaluation episodes")
         command = metadata.command
         if command is None:
             blockers.append(
@@ -2565,6 +2580,7 @@ class ManifestAdapter(RepositoryAdapter):
                 "evaluation_environment": environment,
                 "evaluation_suite": suite,
                 "evaluation_result_schema": metadata.result_schema,
+                "evaluation_parallelism_limit": limit,
                 **(
                     {"evaluation_runtime_profile_id": metadata.runtime_profile_id}
                     if metadata.runtime_profile_id is not None
@@ -2578,7 +2594,12 @@ class ManifestAdapter(RepositoryAdapter):
             blockers=list(dict.fromkeys(blockers)),
             todos=list(self.manifest.todos),
             warnings=list(self.manifest.warnings),
-            capabilities=self.capabilities,
+            capabilities=(
+                self.capabilities.model_copy(update={
+                    "supports_multi_gpu_single_node": limit > 1,
+                    "maximum_gpus": limit,
+                }) if metadata.maximum_parallelism is not None else self.capabilities
+            ),
             manifest_sha256=self.manifest_sha256,
         )
 

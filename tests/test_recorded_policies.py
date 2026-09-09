@@ -129,12 +129,16 @@ def test_evaluation_task_is_frozen_from_training_bundle_not_catalog_mutated():
         }
     }
     bound = bind_suite_to_dataset(suite, spec)
-    assert bound["config_json"]["tasks"] == ["Dexverse-PickCube-v0"]
+    assert bound["config_json"]["tasks"] == suite["config_json"]["tasks"]
+    assert bound["config_json"]["default_tasks"] == ["Dexverse-PickCube-v0"]
     assert bound["config_json"]["task_catalog_complete"]
     assert bound["config_json"][
         "task_catalog_sha256"
-    ] == evaluation_task_catalog_sha256(["Dexverse-PickCube-v0"])
-    assert suite["config_json"]["tasks"] == []
+    ] == evaluation_task_catalog_sha256(catalog.tasks)
+    assert "default_tasks" not in suite["config_json"]
+    legacy = copy.deepcopy(suite)
+    legacy["config_json"].update(tasks=[], task_options=[], task_selection_mode="all_only")
+    assert bind_suite_to_dataset(legacy, spec)["config_json"]["tasks"] == ["Dexverse-PickCube-v0"]
     with pytest.raises(ValueError, match="registered training dataset"):
         bind_suite_to_dataset(suite, {})
     spec["data"]["bundle"]["assignments"][0]["version"]["metadata"] = {}

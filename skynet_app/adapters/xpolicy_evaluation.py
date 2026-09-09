@@ -202,8 +202,10 @@ def main():
     manifest = validate_manifest(
         verify(config["dataset_path"], config["dataset_manifest_sha256"])
     )
-    if context["tasks"] != [manifest["capture"]["task"]] or context["parallelism"] != 1:
-        raise ValueError("Evaluate the dataset task with one worker")
+    if len(context["tasks"]) != 1 or context["parallelism"] != 1:
+        raise ValueError("Each evaluation worker requires one assigned task")
+    if context["tasks"][0] not in context["suite"]["tasks"]:
+        raise ValueError("Task is outside the pinned evaluation catalog")
     runtime = context["evaluator_runtime"]
     source = Path(runtime["source_dir"])
     revision = (source / ".skynet-source-revision").read_text().strip()
@@ -212,6 +214,18 @@ def main():
         or revision != runtime["source"]["revision"]
     ):
         raise ValueError("Evaluation source does not match collection")
+    print(
+        json.dumps(
+            dict(
+                event="worker_device",
+                worker=context.get("worker_index"),
+                cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
+                slurm_step_id=os.environ.get("SLURM_STEP_ID"),
+                slurm_step_gpus=os.environ.get("SLURM_STEP_GPUS"),
+            )
+        ),
+        flush=True,
+    )
     policy = RecordedPolicy(context, args.source_dir, manifest)
     auth = secrets.token_bytes(32)
     listener = Listener(("127.0.0.1", 0), authkey=auth)

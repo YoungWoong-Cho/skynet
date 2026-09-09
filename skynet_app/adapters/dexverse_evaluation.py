@@ -16,7 +16,7 @@ from xpolicy_runtime import write_json
 
 def identity(context):
     selected = {
-        k: context[k]
+        k: context.get(k)
         for k in [
             "run_id",
             "checkpoint",
@@ -25,6 +25,7 @@ def identity(context):
             "seeds",
             "episodes_per_task",
             "policy",
+            "episode_assignments",
         ]
     }
     return hashlib.sha256(
@@ -32,24 +33,65 @@ def identity(context):
     ).hexdigest()
 
 
-def completed_episodes(path, expected_identity):
+def observed_episodes(path, expected_identity):
     records = {}
     if Path(path).exists():
-        for line in Path(path).read_text().splitlines():
+        lines = Path(path).read_text().splitlines(keepends=True)
+        for line in lines:
+            if not line.endswith("\n"):
+                break
             row = json.loads(line)
             if row.get("identity") != expected_identity:
                 raise ValueError(
                     "Evaluation progress belongs to a different checkpoint or configuration"
                 )
-            if row.get("status") == "SUCCEEDED":
+            if row.get("status") in {"RUNNING", "SUCCEEDED"}:
                 ep = row["episode"]
                 key = (ep["task"], ep["seed"], ep["episode_index"])
-                if key in records or not Path(ep["video_path"]).is_file():
+                if (
+                    key in records
+                    and records[key].get("status", "SUCCEEDED") == "SUCCEEDED"
+                ) or (
+                    row["status"] == "SUCCEEDED"
+                    and not Path(ep["video_path"]).is_file()
+                ):
                     raise ValueError(
                         "Invalid completed episode or missing rollout video"
                     )
                 records[key] = ep
     return records
+
+
+def completed_episodes(path, expected_identity):
+    return {
+        key: ep
+        for key, ep in observed_episodes(path, expected_identity).items()
+        if ep.get("status", "SUCCEEDED") == "SUCCEEDED"
+    }
+
+
+def append_progress(path, row):
+    # A preempted process may leave half a JSON record. Repair only that tail.
+    with path.open("a+b") as stream:
+        end = stream.tell()
+        if end:
+            stream.seek(end - 1)
+            if stream.read(1) != b"\n":
+                position = end
+                while position:
+                    start = max(0, position - 4096)
+                    stream.seek(start)
+                    chunk = stream.read(position - start)
+                    newline = chunk.rfind(b"\n")
+                    if newline >= 0:
+                        position = start + newline + 1
+                        break
+                    position = start
+                stream.truncate(position)
+        stream.write((json.dumps(row, allow_nan=False) + "\n").encode())
+        stream.flush()
+        os.fsync(stream.fileno())
+    print(json.dumps(row), flush=True)
 
 
 def validate_layout(env, capture, order):
@@ -97,16 +139,22 @@ def main():
         ).read_text()
     )
     capture = manifest["capture"]
-    task = capture["task"]
+    task = context["tasks"][0]
     order = manifest["policy_to_source_indices"]
     import pinocchio  # Load before Isaac's plugins, as in collection.
     from isaaclab.app import AppLauncher
 
     launcher = AppLauncher(
+        multi_gpu=False,
         headless=context["headless"],
         enable_cameras=True,
         device="cuda:0",
-        kit_args="--/rtx/verifyDriverVersion/enabled=false",
+        # Isolate writable Kit caches/configuration between concurrent simulators.
+        kit_args=(
+            "--portable-root "
+            + str(Path(context["result_path"]).parent / "kit")
+            + " --/rtx/verifyDriverVersion/enabled=false"
+        ),
     )
     app = launcher.app
     env = None
@@ -141,9 +189,12 @@ def main():
             cfg.commands.object_pose.resampling_time_range = (1.0e9, 1.0e9)
         cfg.observations.policy.concatenate_terms = False
         recipe = camera_recipe(cfg)
-        if os.environ["SKYNET_POLICY_IMAGES"] == "1" and training_image_request(recipe)[
-            "recipe_sha256"
-        ] != capture.get("image_recipe_sha256"):
+        if (
+            task == capture["task"]
+            and os.environ["SKYNET_POLICY_IMAGES"] == "1"
+            and training_image_request(recipe)["recipe_sha256"]
+            != capture.get("image_recipe_sha256")
+        ):
             raise ValueError("Evaluation cameras differ from recorded training images")
         configure_cameras(cfg)
         cfg = prune_stale_obs_refs(cfg)
@@ -193,10 +244,37 @@ def main():
 
             for seed in context["seeds"]:
                 for index in range(context["episodes_per_task"]):
+                    if [seed, index] not in context.get(
+                        "episode_assignments",
+                        [
+                            [s, i]
+                            for s in context["seeds"]
+                            for i in range(context["episodes_per_task"])
+                        ],
+                    ):
+                        continue
                     key = (task, seed, index)
                     if key in completed:
                         continue
                     effective_seed = seed * 1000003 + index
+                    worker_metrics = {
+                        "worker_index": float(context.get("worker_index", 0)),
+                        "slurm_job_id": float(os.environ.get("SLURM_JOB_ID", 0)),
+                    }
+                    append_progress(
+                        progress,
+                        dict(
+                            identity=fingerprint,
+                            status="RUNNING",
+                            episode=dict(
+                                task=task,
+                                seed=seed,
+                                episode_index=index,
+                                status="RUNNING",
+                                metrics=worker_metrics,
+                            ),
+                        ),
+                    )
                     env.reset(seed=effective_seed)
                     if isinstance(success_fn, ManagerTermBase):
                         success_fn.reset()
@@ -207,6 +285,8 @@ def main():
                     streak = 0
                     reward_sum = 0.0
                     reason = "time_limit"
+                    # Simulator buffers must remain mutable for the next reset.
+                    # Inference mode is confined to the separate policy process.
                     with (
                         imageio.get_writer(
                             video,
@@ -214,7 +294,7 @@ def main():
                             codec="libx264",
                             macro_block_size=1,
                         ) as writer,
-                        torch.inference_mode(),
+                        torch.no_grad(),
                     ):
                         for step in range(max_steps):
                             env.sim.render()
@@ -286,6 +366,7 @@ def main():
                         metrics={
                             "effective_seed": float(effective_seed),
                             "success_hold_steps": float(streak),
+                            **worker_metrics,
                         },
                         video_path=str(video),
                         failure_reason=None,
@@ -300,16 +381,13 @@ def main():
                         episode=episode,
                         termination_reason=reason,
                     )
-                    with progress.open("a") as f:
-                        f.write(json.dumps(row, allow_nan=False) + "\n")
-                        f.flush()
-                        os.fsync(f.fileno())
+                    append_progress(progress, row)
                     completed[key] = episode
-                    print(json.dumps(row), flush=True)
         episodes = [
             completed[(task, s, i)]
             for s in context["seeds"]
             for i in range(context["episodes_per_task"])
+            if (task, s, i) in completed
         ]
         values = [float(e["success"]) for e in episodes]
         aggregate = [

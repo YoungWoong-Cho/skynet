@@ -48,6 +48,9 @@ def evaluation(policy):
     files = support_files(policy)
     files.update(
         {
+            "adapter-support/evaluation_workers.py": (
+                SUPPORT / "evaluation_workers.py"
+            ).read_text(),
             "adapter-support/dexverse_readiness.py": (
                 SUPPORT / "dexverse_readiness.py"
             ).read_text(),
@@ -67,13 +70,14 @@ def evaluation(policy):
     )
     argv = [
         "python",
-        "{{tokens.run_dir}}/adapter-support/xpolicy_evaluation.py",
+        "{{tokens.run_dir}}/adapter-support/evaluation_workers.py",
         "--context",
         "{{tokens.run_dir}}/adapter-support/evaluation-context.json",
         "--source-dir",
         "{{tokens.source_dir}}",
     ]
     return EvaluationAdapterMetadata(
+        maximum_parallelism=8,
         environment="isaac_lab",
         suites=["dexverse_recorded"],
         runtime_profile_id="isaacsim-5.1.0_isaaclab-2.3.2_py311",

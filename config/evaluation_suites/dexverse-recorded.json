@@ -2,12 +2,12 @@
   "schema_version": 2,
   "evaluator": "isaac_lab",
   "suite": "dexverse_recorded",
-  "version": "recorded-v1",
-  "label": "DexVerse \u00b7 recorded task",
+  "version": "tasks-v2",
+  "label": "DexVerse",
   "task_source": "training_dataset",
-  "task_catalog_complete": false,
-  "task_selection_mode": "all_only",
-  "task_selection_reason": "Evaluate the task recorded in the training dataset.",
+  "task_catalog_complete": true,
+  "task_selection_mode": "subset",
+  "task_selection_reason": "Choose tasks. The recorded task is selected by default.",
   "dataset_task_binding": {
     "role": "training_data",
     "metadata_path": "capture.task"
@@ -17,8 +17,30 @@
     "revision": "30cc673e27684b9f10186fa6bea731aed246bc9f",
     "source_path": "source/dexverse/dexverse/tasks"
   },
-  "task_catalog_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-  "tasks": [],
-  "task_options": [],
+  "task_catalog_sha256": "1efdb7cb80f30cee4cc65e711f557e6aedc6df7f4d1df3f76f7d6f3f6cf74adf",
+  "tasks": [
+    "Dexverse-PickUpStick-v0",
+    "Dexverse-PickCube-v0",
+    "Dexverse-StackCube-v0",
+    "Dexverse-RelocateSphere-v0"
+  ],
+  "task_options": [
+    {
+      "id": "Dexverse-PickUpStick-v0",
+      "label": "Pick up stick"
+    },
+    {
+      "id": "Dexverse-PickCube-v0",
+      "label": "Pick up cube"
+    },
+    {
+      "id": "Dexverse-StackCube-v0",
+      "label": "Stack cubes"
+    },
+    {
+      "id": "Dexverse-RelocateSphere-v0",
+      "label": "Move sphere to target"
+    }
+  ],
   "current": true
 }

@@ -74,6 +74,21 @@ The tests use temporary databases and mocked transports where appropriate. Clust
 8. Use **Resume** for an interrupted resumable run, **Cancel** for active work, or fork the experiment revision when changing scientific inputs.
 9. Create evaluations from a retained inference checkpoint and monitor the episode ledger, logs, videos, and normalized result.
 
+For DP and ACT, open **Training Runs → View attempts → Start evaluation**. In
+**Evaluations**, choose one or more configured DexVerse tasks, episodes, seeds,
+and up to eight parallel jobs. The recorded task is the default. Choose the
+queue, GPU type, CPUs and RAM per worker, and wall time; the total allocation is
+shown before submission. Parallel workers occupy separate GPUs in one Slurm
+allocation, so two workers request two GPUs. Completed episodes and their videos
+are retained across automatic attempts.
+
+**Results** opens immediately. Its **Rollout videos** table lists every requested
+episode; **Detail** opens the shared modal with that episode's video, canonical
+results, Slurm attempt, stdout and stderr. Logs load independently of the panel.
+Changing evaluation tasks measures transfer to those tasks; it does not change
+the trained policy. Robot joint layout, control frequency and checkpoint/data
+provenance must still match.
+
 Edits create a new immutable experiment revision. Previously submitted variants and runs continue to reference the configuration under which they were created.
 
 ## Canonical experiment model

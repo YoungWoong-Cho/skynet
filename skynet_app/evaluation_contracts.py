@@ -24,6 +24,9 @@ def bind_suite_to_dataset(suite, spec):
         or any(c in value for c in "\x00\n\r")
     ):
         raise ValueError("The training dataset does not identify its simulation task")
+    if config.get("task_selection_mode") == "subset" and config.get("tasks"):
+        config["default_tasks"] = [value] if value in config["tasks"] else []
+        return result
     config.update(
         tasks=[value],
         task_options=[{"id": value, "label": value}],
