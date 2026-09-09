@@ -16,8 +16,19 @@ try{
  for(const file of ['dialogs.js','collection-ui.js','app.js'])w.eval((await readFile(new URL('../static/'+file,import.meta.url),'utf8')) + (file==='app.js' ? '\nwindow.setupAttemptTest=()=>{activeRunDetailId="test-run";elements.runDetail.hidden=false;};' : ''));
  w.api=async()=>({content:'sample log'});
  w.setupAttemptTest();
- const payload={run:{id:'test-run',status:'RUNNING',attempts:[{id:'attempt-1',attempt_number:1,status:'RUNNING',slurm_job_id:'123'}]}};
+ const payload={run:{id:'test-run',status:'RUNNING',stages:[
+   {id:'train-stage',stage_type:'TRAIN'},
+   {id:'evaluation-stage',stage_type:'EVALUATE'},
+ ],attempts:[
+   {id:'attempt-1',stage_id:'train-stage',attempt_number:1,status:'RUNNING',slurm_job_id:'123'},
+   {id:'evaluation-attempt',stage_id:'evaluation-stage',attempt_number:1,status:'SUCCEEDED',slurm_job_id:'456'},
+ ]}};
  w.renderRunDetailContent(payload,'test-run');
+ assert.equal(el('attempts-body').rows.length,1,'training detail excludes evaluation attempts');
+ assert.doesNotMatch(el('attempts-body').textContent,/456/);
+ assert.equal(w.runAttemptCount(payload.run),1,'attempt count reflects training only');
+ assert.equal(w.runAttemptRecords({attempts:[{id:'legacy'}]}).length,1,'legacy training attempts remain visible');
+ assert.equal(w.runAttemptRecords({stages:[{id:'utility',stage_type:'UTILITY'}],attempts:[{id:'utility-attempt',stage_id:'utility'}]}).length,1,'utility runs keep their own attempts');
  const launch=el('attempts-body').querySelector('button');
  launch.click();await flush();
  assert.equal(el('run-attempt-detail-dialog').open,true);

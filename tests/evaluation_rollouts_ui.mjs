@@ -17,7 +17,7 @@ const flush=async()=>{for(let i=0;i<5;i++)await new Promise(r=>setImmediate(r));
 const base={id:'eval',run_id:'run',status:'RUNNING',suite_name:'dexverse_recorded'};
 const episodes=[{id:'ep-a',task:'cube',episode_index:0,seed:0,status:'SUCCEEDED',success:false,video_path:'/videos/a.mp4'}, {id:'ep-b',task:'stick',episode_index:0,seed:1,status:'PENDING',success:null}];
 try {
- for(const file of ['dialogs.js','collection-ui.js','app.js']) w.eval(await readFile(new URL('../static/'+file,import.meta.url),'utf8')+(file==='app.js'?'\nwindow.setupEvaluationTest=rows=>{activeTab="evaluations";evaluationRows=rows;renderEvaluations();};':''));
+ for(const file of ['dialogs.js','collection-ui.js','app.js']) w.eval(await readFile(new URL('../static/'+file,import.meta.url),'utf8')+(file==='app.js'?'\nwindow.setupEvaluationTest=rows=>{activeTab="evaluations";evaluationRows=rows;renderEvaluations();};window.prepareEvaluationSubmission=()=>{evaluationTargetValidationState={pending:false,valid:true,signature:evaluationTargetSignature()};};':''));
  let resolveDetail; const logReplies=[];
  w.api=url=>url.includes('/logs') ? new Promise(resolve=>logReplies.push(resolve)) : new Promise(resolve=>{resolveDetail=resolve;});
  w.setupEvaluationTest([base]);
@@ -67,5 +67,36 @@ try {
  assert.ok(el('evaluation-search').closest('.panel-heading-tools .toolbar'),'evaluation filters reuse the training toolbar');
  const parallel=el('evaluation-parallelism').closest('.field');
  assert.equal(parallel.nextElementSibling.querySelector('input').id,'evaluation-max-attempts');
- console.log('Evaluation UI: immediate panel, rollout rows, modal, playback preservation, stale logs, Escape and field order passed.');
+ // Submission must use the same row disclosure as a Results click, including
+ // replacing an already-open evaluation and clearing filters hiding the new row.
+ w.activateTab=async()=>{};
+ w.scheduleEvaluationTargetValidation=()=>{};
+ w.evaluationTargetSignature=()=> 'submission-test';
+ w.evaluationPayload=()=>({run_id:'run',seeds:[0]});
+ el('evaluation-form').reportValidity=()=>true;
+ for(const id of ['submitted-with-open-row','submitted-with-closed-row']) {
+   const submitted={...base,id};
+   el('evaluation-search').value='unrelated run';
+   el('evaluation-state-filter').value='FAILED';
+   w.prepareEvaluationSubmission();
+   w.loadEvaluations=async()=>w.setupEvaluationTest([submitted,base,other]);
+   w.api=(url,options)=>options?.method==='POST'
+     ? Promise.resolve({evaluation:submitted})
+     : new Promise(resolve=>{resolveDetail=resolve;});
+   await w.createEvaluation(new w.Event('submit',{cancelable:true}));
+   await flush();
+   assert.equal(el('evaluation-search').value,'');
+   assert.equal(el('evaluation-state-filter').value,'all');
+   const row=el('evaluations-body').querySelector(`[data-evaluation-id="${id}"]`);
+   assert.equal(row.nextElementSibling.querySelector('#evaluation-detail'),el('evaluation-detail'),'submitted details sit immediately below their row');
+   assert.equal(el('evaluation-detail').hidden,false,'submission opens before detail response');
+   assert.equal(row.querySelector('button').getAttribute('aria-expanded'),'true');
+   resolveDetail({evaluation:{...submitted,episodes:[]}});
+   await flush();
+   w.setupEvaluationTest([submitted,base,other]);
+   assert.equal(row.nextElementSibling.querySelector('#evaluation-detail'),el('evaluation-detail'),'refresh preserves the submitted row placement');
+   row.querySelector('button').click();
+   assert.equal(el('evaluation-detail').hidden,true,'the submitted row closes with one click');
+ }
+ console.log('Evaluation UI: immediate panel, rollout rows, modal, playback, row switching, submission placement and field order passed.');
 } finally {for(const observer of observers)observer.disconnect();await flush();w.close();}

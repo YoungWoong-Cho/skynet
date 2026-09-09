@@ -5227,7 +5227,7 @@ function runAttemptCount(run) {
     const count = Number(declared);
     if (Number.isInteger(count) && count >= 0) return count;
   }
-  if (Array.isArray(run?.attempts)) return run.attempts.length;
+  if (Array.isArray(run?.attempts)) return runAttemptRecords(run).length;
   return null;
 }
 
@@ -5242,7 +5242,11 @@ function runAttemptRecords(run) {
     && !Array.isArray(latest)
     && !attempts.some((attempt) => attempt === latest || (attempt.id && latest.id && attempt.id === latest.id))
   ) attempts.push(latest);
-  return attempts;
+  const stages = new Map((run?.stages || []).map(stage => [stage.id, stage.stage_type]));
+  return attempts.filter(attempt => {
+    const stageType = normalizedRunState(attempt.stage_type || stages.get(attempt.stage_id));
+    return stageType !== "EVALUATE" && !attempt.evaluation_id;
+  });
 }
 
 function attemptHasSlurmSubmission(attempt) {
@@ -6139,7 +6143,7 @@ function runRowDescriptor(run) {
   const state = run.status || run.state || "unknown";
   const slurm = run.slurm_job_id || run.job_id || run.latest_attempt?.slurm_job_id || "-";
   const attempt = run.attempt ?? run.attempt_number ?? run.latest_attempt?.attempt_number ?? run.latest_attempt?.number ?? "-";
-  const attemptCount = run.attempt_count ?? run.attempts?.length;
+  const attemptCount = runAttemptCount(run);
   const attemptLabel = attempt === "-"
     ? "-"
     : `#${attempt}${attemptCount && Number(attemptCount) !== Number(attempt) ? ` of ${attemptCount}` : ""}`;
@@ -6884,9 +6888,7 @@ async function toggleRunAttemptDetail(attemptKey, launcher) {
 
 function renderRunDetailContent(payload, id, { preserveAttempt = false } = {}) {
   const run = entityFrom(payload, "run");
-  const attempts = Array.isArray(run.attempts)
-    ? run.attempts
-    : listFrom(payload, ["attempts"]);
+  const attempts = runAttemptRecords({...run, attempts: Array.isArray(run.attempts) ? run.attempts : listFrom(payload, ["attempts"])});
   const selectedAttemptId = preserveAttempt ? activeRunAttemptDisclosure?.attemptId : null;
   const state = run.status || run.state || "unknown";
   elements.runDetail.dataset.runState = String(state).toUpperCase();
@@ -7022,7 +7024,7 @@ function renderRunDetailContent(payload, id, { preserveAttempt = false } = {}) {
 
 function renderRunDetail(payload, id, { preserveAttempt = false, background = false } = {}) {
   const run = entityFrom(payload, "run");
-  const attempts = Array.isArray(run.attempts) ? run.attempts : listFrom(payload, ["attempts"]);
+  const attempts = runAttemptRecords({...run, attempts: Array.isArray(run.attempts) ? run.attempts : listFrom(payload, ["attempts"])});
   const panel = elements.runsBody.closest(".panel") || elements.runDetail;
   let rendered = null;
   commitPanelRefresh(panel, `run-detail:${id}`, { run, attempts }, () => {
@@ -8168,6 +8170,8 @@ async function createEvaluation(event) {
     evaluationLastValidatedAt = 0;
     scheduleEvaluationTargetValidation({ immediate: true });
     showToast(`Evaluation ${evaluationId} created.`);
+    document.querySelector("#evaluation-search").value = "";
+    document.querySelector("#evaluation-state-filter").value = "all";
     await activateTab("evaluations");
     await loadEvaluations(true);
     const launcher = [...elements.evaluationsBody.querySelectorAll("[data-evaluation-action='view']")]
@@ -8176,7 +8180,7 @@ async function createEvaluation(event) {
       showNotice(elements.evaluationsError, `Evaluation ${evaluationId} was created but is not present in the evaluation list response.`);
     } else {
       clearNotice(elements.evaluationsError);
-      await viewEvaluation(evaluationId, launcher);
+      launcher.click();
     }
   } catch (error) {
     showToast(`Evaluation creation failed: ${error.message}`, true);
