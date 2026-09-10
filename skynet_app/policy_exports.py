@@ -247,6 +247,19 @@ class PolicyExportService:
             validation_percent=validation_percent,
         )
 
+    @staticmethod
+    def recording_locations(session):
+        root = session.get("root")
+        if not root:
+            return []
+        directories = set()
+        for relative in session.get("recordings") or []:
+            path = PurePosixPath(relative)
+            if path.is_absolute() or ".." in path.parts:
+                continue
+            directories.add(str(PurePosixPath(root) / "output" / path.parent))
+        return [dict(kind="remote", host=session.get("gateway") or session.get("profile", {}).get("gateway") or "Collection host", path=path) for path in sorted(directories)]
+
     def options(self):
         sessions = []
         for session in self.live.list():
@@ -274,6 +287,7 @@ class PolicyExportService:
                         ),
                         images=len(session.get("recording_images") or {}),
                         resource_id=(resource or {}).get("id"),
+                        locations=self.recording_locations(session),
                     )
                 )
         policies = catalog(self.database)

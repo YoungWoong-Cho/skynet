@@ -12,6 +12,7 @@ from pydantic import Field, computed_field, field_serializer, field_validator, m
 from skynet_app.experiments import AdapterName, CanonicalModel, ExperimentSpec, canonical_sha256
 
 from skynet_app.training_contracts import DatasetRequirement, TrainingPreset
+from skynet_app.model_io import ModelIOContract
 
 from .groot_isaaclab_bridge import GROOT_ISAACLAB_BRIDGE_SOURCE
 from .groot_robocasa_bridge import GROOT_ROBOCASA_BRIDGE_SOURCE
@@ -1699,6 +1700,7 @@ class RepositoryArgumentValidation(CanonicalModel):
 
 
 class CommandTemplate(CanonicalModel):
+    model_io: ModelIOContract | None = None
     data_requirements: DatasetRequirement | None = None
     presets: list[TrainingPreset] = Field(default_factory=list)
     default_preset: str | None = None
@@ -2103,7 +2105,7 @@ def canonical_adapter_manifest(value: AdapterManifest | dict[str, Any]) -> dict[
                 for key, child in item.items()
                 if not (
                     (key == "companion_arguments" and child == [])
-                    or (key in {"argument_validation", "data_requirements", "default_preset", "contract_selector", "minimum", "maximum", "maximum_path", "canonical_path"} and child is None)
+                    or (key in {"argument_validation", "data_requirements", "model_io", "default_preset", "contract_selector", "minimum", "maximum", "maximum_path", "canonical_path"} and child is None)
                     or (key in {"presets", "contracts"} and child == [])
                     or (key == "contract_choices" and child == {})
                     or (key in {"strict_canonical_inputs", "strict_native_config"} and child is False)

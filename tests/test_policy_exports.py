@@ -341,3 +341,13 @@ def test_saved_state_images_bind_original_recipe_and_timing_without_modifying_re
     result = service.get(job["id"])
     assert result["state"] == ("FAILED" if mutation else "READY"), result
     assert {str(p): digest(p) for p in source.rglob("*.pkl")} == before
+
+
+def test_original_recording_locations_are_actual_directories(setup):
+    service, session, source = setup
+    locations = service.options()["sessions"][0]["locations"]
+    assert locations == [{"kind": "remote", "host": "test-host", "path": str(source / "recordings/live")}]
+    assert Path(locations[0]["path"]).is_dir()
+    assert service.recording_locations({}) == []
+    session["recordings"] = ["../../outside.pkl"]
+    assert service.recording_locations(session) == []

@@ -1,5 +1,7 @@
 """ACT training and evaluation through the ordinary Skynet adapter interface."""
 
+from skynet_app.model_io import adapter_io_contract
+
 from skynet_app.dataset_formats import RECIPES, XPL_COMMIT, XPL_REPOSITORY
 from skynet_app.training_contracts import TrainingPreset, DatasetRequirement
 from .xpolicy_manifest import support_files, progress_contract, evaluation
@@ -141,6 +143,7 @@ def manifest():
             ),
         ),
         train=CommandTemplate(
+            model_io=adapter_io_contract("xpolicylab-act"),
             argv=argv,
             input_fields=fields,
             presets=[preset],

@@ -4,7 +4,7 @@
   "scripts": {
     "build:hands": "esbuild frontend/hands-viewer.js --bundle --format=esm --minify --legal-comments=linked --outfile=static/hands-viewer.js",
     "test:hands": "node tests/hand_materials.mjs",
-    "test:live": "node tests/live_xr_ui.mjs && node tests/live_review_ui.mjs && node tests/live_conversion_ui.mjs && node tests/policy_exports_ui.mjs && node tests/dialogs_ui.mjs && node tests/registry_modals_ui.mjs && node tests/attempt_modal_ui.mjs && node tests/training_contracts_ui.mjs && node tests/evaluation_rollouts_ui.mjs"
+    "test:live": "node tests/live_xr_ui.mjs && node tests/live_review_ui.mjs && node tests/live_conversion_ui.mjs && node tests/policy_exports_ui.mjs && node tests/dialogs_ui.mjs && node tests/registry_modals_ui.mjs && node tests/attempt_modal_ui.mjs && node tests/model_io_ui.mjs && node tests/training_contracts_ui.mjs && node tests/evaluation_rollouts_ui.mjs"
   },
   "dependencies": {
     "three": "0.180.0",

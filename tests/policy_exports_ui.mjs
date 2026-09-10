@@ -57,6 +57,9 @@ assert.equal(w.experimentBundleCompatibility(registered,nativeAdapter).compatibl
 const registryRefreshes = [];
 w.loadDataRegistry = async (force) => { registryRefreshes.push(force); };
 w.askUserDialog = async () => true;
+const copied=[];
+w.navigator.clipboard={writeText:async path=>copied.push(path)};
+w.showToast=()=>{};
 const options = {
   policies: [
     {
@@ -182,7 +185,7 @@ try {
       stage: "TRANSFERRING",
       error: "Gateway unavailable",
       version_id: "v",
-      locations: [{ kind: "local", status: "AVAILABLE" }],
+      locations: [{ kind: "local", status: "AVAILABLE", path: "/prepared/data <&>" }],
       split: { train: [0], validation: [1] },
       source_revision: "abc",
       sources: [{}, {}],
@@ -198,6 +201,9 @@ try {
     el("prepared-dataset-content").textContent,
     /This computer/,
   );
+  el("prepared-dataset-content").querySelector("[data-dataset-copy-path]").click();
+  await flush();
+  assert.equal(copied.at(-1), "/prepared/data <&>");
   assert.equal(
     el("prepared-dataset-content").querySelector("[data-preparation-train]"),
     null,
@@ -225,6 +231,12 @@ try {
       },
     },
   ];
+  options.sessions[1].locations = [{kind:"remote", host:"sky2", path:"/recording/output/recordings/live"}];
+  await w.openPreparedDataset("dataset");
+  assert.match(el("prepared-dataset-content").textContent,/sky2/);
+  const originalCopy = [...el("prepared-dataset-content").querySelectorAll("[data-dataset-copy-path]")].find(b=>b.dataset.datasetCopyPath.startsWith("/recording"));
+  originalCopy.click();await flush();
+  assert.equal(copied.at(-1), "/recording/output/recordings/live");
   options.exports[0].source_version_id = "source-two";
   await w.openPolicyExport("new");
   assert.equal(el("preparation-validation").value, "20");

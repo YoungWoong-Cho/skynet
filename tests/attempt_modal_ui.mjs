@@ -21,6 +21,7 @@ try{
    {id:'evaluation-stage',stage_type:'EVALUATE'},
  ],attempts:[
    {id:'attempt-1',stage_id:'train-stage',attempt_number:1,status:'RUNNING',slurm_job_id:'123',
+    model_io:{entries:[['Input · RGB · scene_front','1 × 256 × 256 × 3'],['Output · Joint commands','100 × 28']],note:'Per sample.'},
     adapter_settings:{'native.config.epochs':2000,'native.config.validation_every':200,'native.config.reject_outliers':false,'native.config.train_batches':0,'native.config.model_overrides':{encoder:'<img src=x onerror=alert(1)>'}},
     execution_snapshot_json:{adapter:{slug:'egoverse-act',version:8,manifest:{train:{input_fields:[
       {path:'native.config.epochs',label:'Epochs'},
@@ -49,6 +50,8 @@ try{
  assert.match(el('run-attempt-detail-meta').textContent,/egoverse-act · v8/);
  assert.equal(el('run-attempt-detail').closest('tr'),null);
  assert.equal(launch.textContent,'Detail');
+ assert.match(el('run-attempt-model-io').textContent,/256 × 256 × 3/);
+ assert.match(el('run-attempt-model-io').textContent,/100 × 28/);
  assert.equal(el('run-attempt-adapter-section').hidden,false);
  const settings=Object.fromEntries([...el('run-attempt-adapter-settings').children].map(row=>[row.querySelector('span').textContent,row.querySelector('strong').textContent]));
  assert.deepEqual(settings,{'Epochs':'2000','Validate every epochs':'200','Filter training outliers':'false','Training batches per epoch':'0','Model overrides':'{"encoder":"<img src=x onerror=alert(1)>"}'});
@@ -71,6 +74,8 @@ try{
  w.renderRunAttemptMetadata({attempt:{},attemptNumber:3});
  assert.equal(el('run-attempt-adapter-section').hidden,true);
  assert.equal(el('run-attempt-adapter-settings').textContent,'');
+ assert.doesNotMatch(el('run-attempt-model-io').textContent,/100 × 28/);
+ assert.match(el('run-attempt-model-io').textContent,/Sizes were not recorded/);
  const commonKeys=['learning_rate','batch_size','batch_semantics','gradient_accumulation','num_workers','precision','max_steps'];
  w.renderRunAttemptMetadata({attempt:{adapter_settings:{'native.config.epochs':10},common_hyperparameters:Object.fromEntries(commonKeys.map(key=>[key,null])),common_hyperparameter_provenance:Object.fromEntries(commonKeys.map(key=>[key,{status:'not_applicable',source:'not_applicable'}]))},attemptNumber:4});
  assert.equal(el('run-attempt-hyperparameters').closest('section').hidden,true);

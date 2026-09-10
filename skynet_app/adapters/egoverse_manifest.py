@@ -1,5 +1,7 @@
 """One declaration factory for EgoVerse model adapters."""
 
+from skynet_app.model_io import adapter_io_contract
+
 from pathlib import Path
 
 REPOSITORY = "https://github.com/GaTech-RL2/EgoVerse"
@@ -236,6 +238,7 @@ def manifests():
                 ),
             ),
             train=CommandTemplate(
+                model_io=adapter_io_contract(slug),
                 argv=argv,
                 parameter_flags={
                     k: ArgumentBinding(flag="--" + v) for k, v in flags.items()

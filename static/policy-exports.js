@@ -177,6 +177,14 @@
       }
     }
   };
+  function locationHtml(locations) {
+    return locations.filter(location => location.path).map(location => {
+      const host = location.kind === "local" ? "This computer"
+        : location.host === "skynet" ? "Training cluster"
+          : location.host || (location.kind === "cluster" ? "Training cluster" : "Recorded location");
+      return `<div><strong>${esc(location.label || host)}</strong><span class="secondary">${esc(location.path)}</span><button type="button" class="text-button" data-dataset-copy-path="${esc(location.path)}">Copy path</button></div>`;
+    }).join("") || "—";
+  }
   function preparedRow(job) {
     const policy = recipe(job.format);
     const copies = (job.locations || []).filter(l => l.status === "AVAILABLE");
@@ -195,14 +203,14 @@
     if (local && cluster && !(job.usage || []).length && job.state === "READY") actions.push(`<button type="button" class="text-button" data-preparation-remove="${esc(job.id)}">Remove local copy</button>`);
     if (terminal(job)) actions.push(`<button type="button" class="text-button" data-preparation-delete-format="${esc(job.id)}" ${(job.usage || []).length ? 'disabled title="Used by an experiment"' : ""}>Delete</button>`);
     const statusNote = failed || !terminal(job) ? jobStatus(job) : policy?.trainable === false ? "Export only" : "";
-    const location = copies.map(l => `<span class="secondary" title="${esc(l.path)}">${l.kind === "cluster" ? "Training cluster" : "This computer"}</span>`).join("") || "—";
-    return `<tr><td><strong>${esc(policy?.name || job.format)}</strong>${policy?.container ? `<span class="secondary">${esc(policy.container)}</span>` : ""}</td><td>${statusPill(state)}${statusNote ? `<span class="secondary">${esc(statusNote)}</span>` : ""}</td><td>${location}</td><td>${job.episodes || job.sources?.length || 0}${job.split ? `<span class="secondary">${job.split.train.length} train / ${job.split.validation.length} validation</span>` : ""}</td><td>${esc(formatDate(job.created_at))}</td><td><div class="row-actions">${actions.join("")}</div></td></tr>`;
+    const location = locationHtml(copies);
+    return `<tr><td><strong>${esc(policy?.name || job.format)}</strong>${policy?.container ? `<span class="secondary">${esc(policy.container)}</span>` : ""}</td><td>${statusPill(state)}${statusNote ? `<span class="secondary">${esc(statusNote)}</span>` : ""}</td><td class="wrap-cell">${location}</td><td>${job.episodes || job.sources?.length || 0}${job.split ? `<span class="secondary">${job.split.train.length} train / ${job.split.validation.length} validation</span>` : ""}</td><td>${esc(formatDate(job.created_at))}</td><td><div class="row-actions">${actions.join("")}</div></td></tr>`;
   }
   function sourceVersionRow(version) {
     const locations = (version.locations || []).filter(l => l.status === "AVAILABLE");
-    const paths = locations.length ? locations.map(l => l.path) : [version.path].filter(Boolean);
+    const paths = locations.length ? locations : version.path ? [{kind: version.metadata?.storage_location || "unknown", path: version.path}] : [];
     const episodes = version.metadata?.episodes ?? version.metadata?.num_episodes ?? "—";
-    return `<tr><td><strong>${esc(version.format || "Original data")}</strong><span class="secondary">${esc(version.revision?.slice(0, 12) || "")}</span></td><td>${statusPill(dataVersionStatus(version))}</td><td class="wrap-cell">${paths.map(path => `<span class="secondary">${esc(path)}</span>`).join("") || "—"}</td><td>${esc(episodes)}</td><td>${esc(formatDate(version.created_at))}</td><td>—</td></tr>`;
+    return `<tr><td><strong>${esc(version.format || "Original data")}</strong><span class="secondary">${esc(version.revision?.slice(0, 12) || "")}</span></td><td>${statusPill(dataVersionStatus(version))}</td><td class="wrap-cell">${locationHtml(paths)}</td><td>${esc(episodes)}</td><td>${esc(formatDate(version.created_at))}</td><td>—</td></tr>`;
   }
   async function renderDataset() {
     const token = ++detailGeneration;
@@ -219,11 +227,16 @@
       ? `${jobs.filter(j => j.version_id).length} prepared versions`
        : `${versions.length} version${versions.length === 1 ? "" : "s"}`;
     const rows = managed ? jobs.map(preparedRow) : versions.map(sourceVersionRow);
-    const sourceRows = originals.map(v => `<tr><td>${esc(v.revision.slice(0, 12))}</td><td>${v.metadata.episodes}</td><td>${v.metadata.split?.train.length || 0} train / ${v.metadata.split?.validation.length || 0} validation</td></tr>`).join("");
+    const sourceRows = originals.map(v => {
+      const sessions = [...new Set((v.metadata?.sources || []).map(source => source.session_id))];
+      const locations = sessions.flatMap(id => snapshot.sessions.find(session => session.id === id)?.locations || []);
+      if (!locations.length && v.path) locations.push({kind: "local", path: v.path, label: "Recording manifest"});
+      return `<tr><td>${esc(v.revision.slice(0, 12))}</td><td class="wrap-cell">${locationHtml(locations)}</td><td>${v.metadata.episodes}</td><td>${v.metadata.split?.train.length || 0} train / ${v.metadata.split?.validation.length || 0} validation</td></tr>`;
+    }).join("");
     const usage = [...new Map(jobs.flatMap(j => j.usage || []).map(u => [`${u.experiment_id}:${u.revision_number}`, u])).values()];
     el("prepared-dataset-content").innerHTML = `<div class="table-frame"><div class="table-scroll"><table class="prepared-dataset-table"><thead><tr>${["Format", "Status", "Location", "Episodes", "Date", "Actions"].map(label => `<th scope="col">${label}</th>`).join("")}</tr></thead><tbody>${rows.join("") || `<tr><td colspan="6">${managed ? "No prepared formats yet." : "No versions yet."}</td></tr>`}</tbody></table></div></div>
       ${usage.length ? `<p>Used by: ${usage.map(u => `<button type="button" class="text-button" data-preparation-experiment="${esc(u.experiment_id)}" data-revision="${u.revision_number}">${esc(u.name)} · revision ${u.revision_number}</button>`).join(" ")}</p>` : ""}
-      ${managed ? `<details class="collection-disclosure"><summary>Original recordings and revisions</summary><div class="table-scroll"><table><thead><tr><th>Revision</th><th>Episodes</th><th>Split</th></tr></thead><tbody>${sourceRows || '<tr><td colspan="3">Original recordings are preserved.</td></tr>'}</tbody></table></div></details>
+      ${managed ? `<details class="collection-disclosure"><summary>Original recordings and revisions</summary><div class="table-scroll"><table><thead><tr><th>Revision</th><th>Location</th><th>Episodes</th><th>Split</th></tr></thead><tbody>${sourceRows || '<tr><td colspan="4">Original recordings are preserved.</td></tr>'}</tbody></table></div></details>
       <div class="form-actions"><button type="button" class="button button-outline" data-preparation-delete="${esc(r.id)}" ${jobs.some(j => !terminal(j)) || usage.length ? 'disabled title="Preparation is active or a version is used by an experiment"' : ""}>Delete dataset</button></div>` : ""}`;
   }
   window.openPreparedDataset = async (id) => {
@@ -246,6 +259,11 @@
     const data = button.dataset;
     try {
       button.disabled = true;
+      if (data.datasetCopyPath) {
+        await navigator.clipboard.writeText(data.datasetCopyPath);
+        showToast("Path copied.");
+        return;
+      }
       if (data.preparedResource)
         return await window.openPreparedDataset(data.preparedResource);
       if (data.preparationExperiment) {

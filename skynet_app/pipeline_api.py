@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from skynet_app.evaluation_contracts import bind_suite_to_dataset
 from skynet_app.gpu_tracking import sync_gpu_statistics
+from skynet_app.model_io import resolve_model_io, preview_spec
 
 import math
 import ipaddress
@@ -1851,6 +1852,7 @@ class PipelineService:
                 "schema_version": "skynet.repository-input-selections/v1",
                 "selected": selected_repository_inputs,
             },
+            "model_io": resolve_model_io(spec.source.adapter_manifest, resolved_spec, legacy=True),
             "common_hyperparameters": common_hyperparameters,
             "migration_provenance": copy.deepcopy(dict(provenance)),
         }
@@ -9480,6 +9482,16 @@ def archive_data_bundle(bundle_id: str) -> dict[str, Any]:
         raise _http_error(error) from error
 
 
+@router.post("/model-io/preview")
+def preview_model_io(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    try:
+        bundle_id = payload.get("bundle_id")
+        bundle = service.database.get_data_bundle(bundle_id) if bundle_id else None
+        return resolve_model_io(payload.get("manifest") or {}, preview_spec(payload.get("values"), bundle), legacy=True)
+    except (TypeError, ValueError) as error:
+        raise _http_error(error) from error
+
+
 @router.get("/adapters")
 def adapters(include_archived: bool = Query(default=False)) -> dict[str, Any]:
     records = []
@@ -10946,6 +10958,10 @@ def get_run(run_id: str) -> dict[str, Any]:
         common = _attempt_common_hyperparameter_contract(
             run, attempt, receipt_event
         )
+        snapshot = attempt.get("execution_snapshot_json") or {}
+        pinned_spec = snapshot.get("resolved_spec") or run.get("resolved_spec_json") or {}
+        pinned_manifest = (snapshot.get("adapter") or {}).get("manifest") or (pinned_spec.get("source") or {}).get("adapter_manifest") or {}
+        attempt["model_io"] = snapshot.get("model_io") or resolve_model_io(pinned_manifest, pinned_spec, legacy=True)
         attempt["adapter_settings"] = common.get("adapter_settings", {})
         attempt["common_hyperparameters"] = common["values"]
         attempt["common_hyperparameter_provenance"] = common["provenance"]

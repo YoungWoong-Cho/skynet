@@ -322,6 +322,7 @@
                     <div id="adapter-declared-fields-grid" class="adapter-declared-fields-grid"></div>
                     <div id="adapter-declared-fields-error" class="adapter-declared-fields-error" role="alert" hidden></div>
                   </section>
+                  <section id="experiment-model-io" class="attempt-hyperparameters span-4" aria-label="Inputs and outputs"></section>
                   <div class="field span-4">
                     <label for="native-overrides">Advanced native values</label>
                     <textarea id="native-overrides" rows="4" placeholder="One adapter-native key=value per line&#10;model.encoder.name=resnet50&#10;trainer.deterministic=true"></textarea>
@@ -624,6 +625,7 @@
                 </div>
               </fieldset>
 
+              <section id="adapter-model-io" class="form-section" aria-label="Inputs and outputs"></section>
               <fieldset class="form-section">
                 <legend>Manifest</legend>
                 <div class="form-grid">
@@ -1836,6 +1838,7 @@
                                 <h3 id="run-attempt-hyperparameters-title">Common hyperparameters</h3>
                                 <div id="run-attempt-hyperparameters" class="key-value-grid"></div>
                               </section>
+                              <section id="run-attempt-model-io" class="attempt-hyperparameters" aria-label="Inputs and outputs"></section>
                               <section id="run-attempt-adapter-section" class="attempt-hyperparameters" aria-labelledby="run-attempt-adapter-title" hidden>
                                 <h3 id="run-attempt-adapter-title">Adapter configuration</h3>
                                 <div id="run-attempt-adapter-settings" class="key-value-grid"></div>

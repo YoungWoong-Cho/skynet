@@ -2631,11 +2631,13 @@ function renderAdapterDeclaredFields(adapter = selectedAdapter()) {
   if (!adapter) {
     elements.adapterDeclaredFieldsStatus.textContent = "Select an adapter.";
     renderCommonHyperparameterDefaults(null);
+    renderModelIO(document.getElementById("experiment-model-io"), null);
     return;
   }
   if (!fields.length) {
     elements.adapterDeclaredFieldsStatus.textContent = "No typed inputs declared.";
     renderCommonHyperparameterDefaults(adapter);
+    refreshExperimentModelIO();
     return;
   }
 
@@ -2764,6 +2766,7 @@ function renderAdapterDeclaredFields(adapter = selectedAdapter()) {
     elements.adapterDeclaredFieldsGrid.append(wrapper);
   });
   renderCommonHyperparameterDefaults(adapter);
+  refreshExperimentModelIO();
 }
 
 function parseAdapterDeclaredValue(control, field) {
@@ -3249,6 +3252,7 @@ function setAdapterEditorMode(mode) {
     : `v${adapterVersion(adapterEditorState.adapter)}${adapterArchived(adapterEditorState.adapter) ? " / archived" : ""}`;
   elements.adapterValidationReport.hidden = true;
   elements.adapterValidationReport.textContent = "";
+  refreshAdapterModelIO();
 }
 
 const revealedPanelLaunchers = new WeakMap();
@@ -6130,6 +6134,70 @@ function runResourceLabel(run) {
   return parts.join(" / ") || "-";
 }
 
+const modelIORequests = new WeakMap();
+
+function renderModelIO(section, summary, message = "") {
+  if (!section) return;
+  const pending = modelIORequests.get(section);
+  if (pending) clearTimeout(pending.timer);
+  modelIORequests.delete(section);
+  section.innerHTML = `<h3>Inputs and outputs</h3><div class="key-value-grid">${summary ? keyValueHtml(summary.entries || []) : ""}</div><p class="secondary">${escapeHtml(message || summary?.note || "Select an adapter.")}</p>`;
+}
+
+function requestModelIO(section, manifest, values = {}, bundleId = null) {
+  if (!section) return;
+  const previous = modelIORequests.get(section);
+  if (previous) clearTimeout(previous.timer);
+  const request = {};
+  renderModelIO(section, null, "Reading input and output sizes…");
+  modelIORequests.set(section, request);
+  request.timer = setTimeout(async () => {
+    try {
+      // Send only declarations; embedded runtime scripts are not needed here.
+      const train = manifest?.train || {};
+      const summary = await api("/api/model-io/preview", {method: "POST", body: JSON.stringify({
+        manifest: {slug: manifest?.slug, train: {model_io: train.model_io, data_requirements: train.data_requirements,
+          input_fields: (train.input_fields || []).filter(field => !field.sensitive).map(({path, default: value}) => ({path, default: value}))}},
+        values, bundle_id: bundleId,
+      })});
+      if (modelIORequests.get(section) === request) renderModelIO(section, summary);
+    } catch (error) {
+      if (modelIORequests.get(section) === request) renderModelIO(section, null, `Sizes unavailable: ${error.message}`);
+    }
+  }, 180);
+}
+
+function refreshAdapterModelIO() {
+  const section = document.getElementById("adapter-model-io");
+  try { requestModelIO(section, JSON.parse(elements.adapterManifest.value)); }
+  catch { renderModelIO(section, null, "Enter a valid manifest to see sizes."); }
+}
+
+function refreshExperimentModelIO() {
+  const adapter = selectedAdapter();
+  const section = document.getElementById("experiment-model-io");
+  if (!adapter) { renderModelIO(section, null); return; }
+  const values = {};
+  for (const field of declaredAdapterInputFields(adapter)) {
+    if (field.sensitive) continue;
+    const control = document.getElementById(adapterFieldControlId(field.path));
+    if (!control) continue;
+    const parsed = parseAdapterDeclaredValue(control, field);
+    if (parsed.error) { renderModelIO(section, null, "Complete the model settings to resolve sizes."); return; }
+    if (parsed.present) values[field.path] = parsed.value;
+  }
+  if (elements.nativeOverrides.value.trim()) {
+    renderModelIO(section, null, "Advanced native values are set. Exact sizes depend on those overrides.");
+    return;
+  }
+  const bundle = selectedExperimentDataBundle();
+  if (bundle && !experimentBundleCompatibility(bundle, adapter).compatible) {
+    renderModelIO(section, null, "Choose a compatible dataset to resolve sizes.");
+    return;
+  }
+  requestModelIO(section, adapterManifest(adapter), values, bundle?.id || null);
+}
+
 function trainingAdapterLabel(run = {}, attempt = null) {
   const snapshot = attempt?.execution_snapshot_json;
   const source = snapshot?.resolved_spec?.source || run.resolved_spec_json?.source || {};
@@ -6627,6 +6695,7 @@ function renderCommonHyperparameterResolution(record) {
 
 function renderRunAttemptMetadata(record) {
   const attempt = record.attempt;
+  renderModelIO(document.getElementById("run-attempt-model-io"), attempt.model_io, attempt.model_io ? "" : "Sizes were not recorded.");
   const error = attemptFailureDetail(attempt);
   const hyperparameters = attempt.common_hyperparameters && typeof attempt.common_hyperparameters === "object"
     ? attempt.common_hyperparameters
@@ -12587,3 +12656,14 @@ window.usePreparedDataset = async (job) => {
   }
   showToast(profile ? "Dataset, policy, pinned source and runtime selected. Preview the training run when ready." : "Dataset and pinned policy selected. Choose an available training runtime, then preview.");
 };
+
+// I/O uses the same resolver in adapter inspection, submission, and saved attempts.
+elements.experimentForm.addEventListener("input", event => {
+  if (event.target.matches("[data-adapter-input-path], #native-overrides")) refreshExperimentModelIO();
+});
+elements.experimentForm.addEventListener("change", event => {
+  if (event.target.matches("[data-adapter-input-path], #experiment-adapter, #experiment-data-bundle")) refreshExperimentModelIO();
+});
+elements.adapterManifest.addEventListener("input", () => {
+  refreshAdapterModelIO();
+});

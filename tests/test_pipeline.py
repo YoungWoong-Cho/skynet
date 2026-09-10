@@ -2236,6 +2236,10 @@ class AttemptLogCluster(FakeCluster):
 
 
 def _create_submitted_run(service: PipelineService, name: str) -> dict:
+    # Historical receipt fixtures intentionally use the retired generic EgoVerse
+    # adapter; make it available only in this test's isolated database.
+    legacy = next(row for row in service.database.list_adapter_registry(include_archived=True) if row["seed_key"] == "egoverse")
+    service.database.restore_adapter(legacy["id"])
     spec = canonical_spec()
     spec["identity"]["experiment"] = name
     experiment = service.create_experiment(spec)
