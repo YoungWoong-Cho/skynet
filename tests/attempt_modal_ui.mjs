@@ -16,13 +16,13 @@ try{
  for(const file of ['dialogs.js','workspace-navigation.js','app.js'])w.eval((await readFile(new URL('../static/'+file,import.meta.url),'utf8')) + (file==='app.js' ? '\nwindow.setupAttemptTest=()=>{activeRunDetailId="test-run";elements.runDetail.hidden=false;};' : ''));
  w.api=async()=>({content:'sample log'});
  w.setupAttemptTest();
- const payload={run:{id:'test-run',status:'RUNNING',stages:[
+ const payload={run:{id:'test-run',status:'RUNNING',adapter_name:'egoverse-act',adapter_version:7,stages:[
    {id:'train-stage',stage_type:'TRAIN'},
    {id:'evaluation-stage',stage_type:'EVALUATE'},
  ],attempts:[
    {id:'attempt-1',stage_id:'train-stage',attempt_number:1,status:'RUNNING',slurm_job_id:'123',
     adapter_settings:{'native.config.epochs':2000,'native.config.validation_every':200,'native.config.reject_outliers':false,'native.config.train_batches':0,'native.config.model_overrides':{encoder:'<img src=x onerror=alert(1)>'}},
-    execution_snapshot_json:{adapter:{manifest:{train:{input_fields:[
+    execution_snapshot_json:{adapter:{slug:'egoverse-act',version:8,manifest:{train:{input_fields:[
       {path:'native.config.epochs',label:'Epochs'},
       {path:'native.config.validation_every',label:'Validate every epochs'},
       {path:'native.config.reject_outliers',label:'Filter training outliers'},
@@ -33,6 +33,11 @@ try{
    {id:'evaluation-attempt',stage_id:'evaluation-stage',attempt_number:1,status:'SUCCEEDED',slurm_job_id:'456'},
  ]}};
  w.renderRunDetailContent(payload,'test-run');
+ assert.match(el('run-detail-meta').textContent,/egoverse-act · v7/);
+ assert.match(w.runRowDescriptor(payload.run).cells[1].html,/egoverse-act · v7/);
+ assert.equal(w.trainingAdapterLabel({adapter_name:'old-adapter',adapter_version:1},payload.run.attempts[0]),'egoverse-act · v8','attempt identity uses its pinned version');
+ assert.equal(w.trainingAdapterLabel({}), 'Not recorded');
+ assert.equal(w.trainingAdapterLabel({adapter_name:'legacy'}), 'legacy');
  assert.equal(el('attempts-body').rows.length,1,'training detail excludes evaluation attempts');
  assert.doesNotMatch(el('attempts-body').textContent,/456/);
  assert.equal(w.runAttemptCount(payload.run),1,'attempt count reflects training only');
@@ -41,6 +46,7 @@ try{
  const launch=el('attempts-body').querySelector('button');
  launch.click();await flush();
  assert.equal(el('run-attempt-detail-dialog').open,true);
+ assert.match(el('run-attempt-detail-meta').textContent,/egoverse-act · v8/);
  assert.equal(el('run-attempt-detail').closest('tr'),null);
  assert.equal(launch.textContent,'Detail');
  assert.equal(el('run-attempt-adapter-section').hidden,false);

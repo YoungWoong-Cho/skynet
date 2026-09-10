@@ -6130,6 +6130,14 @@ function runResourceLabel(run) {
   return parts.join(" / ") || "-";
 }
 
+function trainingAdapterLabel(run = {}, attempt = null) {
+  const snapshot = attempt?.execution_snapshot_json;
+  const source = snapshot?.resolved_spec?.source || run.resolved_spec_json?.source || {};
+  const name = snapshot?.adapter?.slug || source.adapter || run.adapter_name;
+  const version = snapshot?.adapter?.version ?? source.adapter_version ?? run.adapter_version;
+  return name ? `${name}${version != null ? ` · v${version}` : ""}` : "Not recorded";
+}
+
 function filteredRuns() {
   const query = elements.runSearch.value.trim().toLowerCase();
   const stateFilter = elements.runStatusFilter.value;
@@ -6142,6 +6150,7 @@ function filteredRuns() {
       run.experiment_id,
       run.variant_name,
       run.variant_id,
+      trainingAdapterLabel(run),
       run.latest_attempt?.slurm_job_id,
       run.slurm_job_id,
     ].join(" ").toLowerCase();
@@ -6172,7 +6181,7 @@ function runRowDescriptor(run) {
     id,
     cells: [
       { html: `<span class="node-name">${escapeHtml(runLabel)}</span><span class="secondary">${escapeHtml(runSecondary)}</span>` },
-      { html: `${escapeHtml(run.experiment_name || run.experiment_id || "-")}<span class="secondary">${escapeHtml([experimentRevision, variantLabel].filter(Boolean).join(" / "))}</span>` },
+      { html: `${escapeHtml(run.experiment_name || run.experiment_id || "-")}<span class="secondary">${escapeHtml(trainingAdapterLabel(run))}</span><span class="secondary">${escapeHtml([experimentRevision, variantLabel].filter(Boolean).join(" / "))}</span>` },
       { html: statusPill(state) },
       { html: `<span class="job-id">${escapeHtml(slurm)}</span><span class="secondary">${escapeHtml(run.latest_attempt?.partition_name || run.partition || run.resources?.partition || "")}</span>` },
       { html: escapeHtml(runResourceLabel(run)) },
@@ -6629,6 +6638,7 @@ function renderRunAttemptMetadata(record) {
   elements.runAttemptDetailTitle.textContent = `Attempt ${record.attemptNumber}`;
   elements.runAttemptDetailMeta.innerHTML = keyValueHtml([
     ["Attempt", record.attemptNumber],
+    ["Adapter", record.adapterLabel || trainingAdapterLabel({}, attempt)],
     ["Attempt ID", runAttemptValue(attempt, "id", "attempt_id")],
     ["State", runAttemptValue(attempt, "status", "state")],
     ["Scheduler reason", queueReasonLabel(attempt)],
@@ -6911,6 +6921,7 @@ function renderRunDetailContent(payload, id, { preserveAttempt = false } = {}) {
   setHtmlIfChanged(elements.runDetailMeta, keyValueHtml([
     ["Experiment", run.experiment_name || run.experiment_id],
     ["Experiment revision", run.experiment_revision_number],
+    ["Adapter", trainingAdapterLabel(run)],
     ["Variant", run.variant_name || run.variant_id],
     ["Training Run number", run.run_number],
     ["Restarted from run", run.restarted_from_run_id],
@@ -6972,6 +6983,7 @@ function renderRunDetailContent(payload, id, { preserveAttempt = false } = {}) {
         attemptId,
         attemptNumber,
         attemptKey,
+        adapterLabel: trainingAdapterLabel(run, attempt),
         adapterFields: (attempt.execution_snapshot_json?.adapter?.manifest
           || run.resolved_spec_json?.source?.adapter_manifest)?.train?.input_fields || [],
         trackingLinks: Array.isArray(run.tracking_links) ? run.tracking_links : [],
