@@ -62,7 +62,9 @@
       : resourceId ? "Adds a prepared version to this existing dataset; its name and earlier versions are retained." : "Name the dataset created for these recordings.";
     sourceNote();
   }
-  const splitLabel = split => split?.mode === "single_episode_overfit"
+  const splitLabel = split => !split?.validation?.length
+    ? `${split?.train?.length || 0} train · no validation`
+    : split?.mode === "single_episode_overfit"
     ? "1 train · same episode for validation (overfit)"
     : `${split?.train.length || 0} train / ${split?.validation.length || 0} validation`;
   function error(id, message) {
@@ -76,15 +78,15 @@
     el("preparation-mode-field").hidden = policy?.id !== "egoverse";
     el("preparation-episode-field").hidden = !overfit;
     for (const id of ["preparation-validation", "preparation-seed"]) {
-      el(id).disabled = overfit;
-      el(id).closest(".field").hidden = overfit;
+      el(id).disabled = overfit || source?.episodes === 1;
+      el(id).closest(".field").hidden = overfit || source?.episodes === 1;
     }
     const hint = el("policy-export-format-help");
     hint.textContent = policy?.available && !policy.trainable ? policy.description : "";
     hint.hidden = !hint.textContent;
-    const missingSplit =
-      !overfit && policy?.trainable &&
-      (source?.episodes < 2 ||
+    const noValidation =
+      policy?.trainable &&
+      (overfit || source?.episodes < 2 ||
         Number(el("preparation-validation").value) === 0);
     const missingImages = policy?.observations?.includes("rgb") && source?.images < source?.episodes;
     const message = !source
@@ -94,16 +96,16 @@
         : !policy?.available
           ? policy?.description || "Choose an available policy."
           : missingImages ? "This format requires completed training images for every recording."
-          : missingSplit
-            ? "Training needs at least two recordings and a validation split."
-            : "";
-    error("policy-export-compatibility", message);
+          : "";
+    error("policy-export-compatibility", message || (noValidation
+      ? "Warning: no validation recordings. Training will run without validation steps." : ""));
+    el("policy-export-compatibility").classList.toggle("is-warning", !message && noValidation);
     el("create-policy-export").disabled =
       busy || catalogState !== "ready" ||
       !source?.eligible ||
       !source.episodes ||
       !policy?.available ||
-      missingSplit || missingImages;
+      missingImages;
   }
   const stageLabels = {
     QUEUED: "Queued",

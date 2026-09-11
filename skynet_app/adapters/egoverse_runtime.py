@@ -83,7 +83,7 @@ def make_act(norm_stats, **kwargs):
     return ACT(data_schematic=ACTDataInterface(norm_stats), **kwargs)
 
 
-def joint_data(root, batch, workers, horizon=100, reject_outliers=True, *, overfit=False):
+def joint_data(root, batch, workers, horizon=100, reject_outliers=True, *, overfit=False, validation=True):
     datasets = {}
     for split in ("train", "validation"):
         datasets[split] = {
@@ -105,9 +105,10 @@ def joint_data(root, batch, workers, horizon=100, reject_outliers=True, *, overf
     return {
         "_target_": "egomimic.pl_utils.pl_data_utils.MultiDataModuleWrapper",
         "train_datasets": datasets["train"],
-        "valid_datasets": datasets["validation"],
+        "valid_datasets": datasets["validation"] if validation else {},
         **{
-            k: {"skynet_joints": {"batch_size": batch, "num_workers": workers}}
+            k: ({"skynet_joints": {"batch_size": batch, "num_workers": workers}}
+                if validation or k == "train_dataloader_params" else {})
             for k in ("train_dataloader_params", "valid_dataloader_params")
         },
     }
@@ -174,8 +175,6 @@ def validate_manifest(root, sha, model):
             raise ValueError(
                 "This model requires its native robot/human dataset, not recorded joint data"
             )
-        if not manifest.get("split", {}).get("validation"):
-            raise ValueError("A separate validation episode is required")
     elif manifest.get("contract") != f"egoverse.native-{model}/v1":
         raise ValueError("Dataset contract does not match the selected EgoVerse model")
     return manifest
@@ -268,6 +267,7 @@ def build_config(args, manifest):
                 args.num_workers,
                 reject_outliers=args.reject_outliers,
                 overfit=manifest["split"].get("mode") == OVERFIT_MODE,
+                validation=bool(manifest["split"]["validation"]),
             )
             if args.model == "act":
                 cfg.model.robomimic_model._target_ = "egoverse_runtime.make_act"
@@ -345,6 +345,11 @@ def build_config(args, manifest):
             cfg.trainer.limit_train_batches = args.train_batches
         if args.validation_batches is not None:
             cfg.trainer.limit_val_batches = args.validation_batches
+        if not manifest["split"]["validation"]:
+            cfg.trainer.limit_val_batches = 0
+            cfg.trainer.num_sanity_val_steps = 0
+            cfg.data.valid_datasets = {}
+            cfg.data.valid_dataloader_params = {}
         if args.weights:
             if not Path(args.weights).is_dir():
                 raise ValueError(
@@ -369,7 +374,8 @@ def build_config(args, manifest):
                 else cfg.model.robomimic_model.head_specs.skynet_joints.action_horizon
             )
             for split in ("train_datasets", "valid_datasets"):
-                cfg.data[split].skynet_joints.resolver.key_map.horizon = horizon
+                if "skynet_joints" in cfg.data[split]:
+                    cfg.data[split].skynet_joints.resolver.key_map.horizon = horizon
     return cfg
 
 

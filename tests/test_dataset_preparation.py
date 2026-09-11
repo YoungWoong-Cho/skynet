@@ -252,7 +252,7 @@ def test_failed_transfer_retries_verified_conversion_without_rewriting(
     assert before == {p: p.stat().st_mtime_ns for p in root.rglob("*") if p.is_file()}
 
 
-def test_selection_rejects_duplicates_and_dp_without_validation(setup):
+def test_selection_rejects_duplicates_but_allows_training_without_validation(setup):
     service, session, _ = setup
     with pytest.raises(ValueError, match="unique recording"):
         service.create(
@@ -261,15 +261,15 @@ def test_selection_rejects_duplicates_and_dp_without_validation(setup):
             "Duplicate",
             selections=[dict(session_id=session["id"], indices=[0, 0])],
         )
-    with pytest.raises(ValueError, match="at least two"):
-        service.create(
-            None,
-            "dp",
-            "Too small",
-            selections=[dict(session_id=session["id"], indices=[0])],
-        )
-    with pytest.raises(ValueError, match="non-zero"):
-        service.create(session["id"], "dp", "No validation", validation_percent=0)
+    single = service.create(
+        None, "dp", "One episode",
+        selections=[dict(session_id=session["id"], indices=[0])],
+    )
+    assert single["split"]["train"] == [0] and single["split"]["validation"] == []
+    all_training = service.create(session["id"], "dp", "No validation", validation_percent=0)
+    assert all_training["split"]["train"] == [0, 1]
+    assert all_training["split"]["validation"] == []
+
 
 
 def test_other_session_resource_is_rejected(setup):

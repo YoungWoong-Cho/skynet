@@ -98,7 +98,9 @@ def export(request):
     (output / "split.json").write_text(json.dumps(split, indent=2))
     (output / "README.txt").write_text(
         "EgoVerse Zarr episodes. Native joint order and three calibrated scene cameras.\n"
-        + ("Single-episode overfit: validation reuses the training episode; it is not a held-out score.\n"
+        + ("No validation episodes: training runs without a validation step.\n"
+           if not split["validation"] else
+           "Single-episode overfit: validation reuses the training episode; it is not a held-out score.\n"
            if overfit else "Train and validation episodes are separate.\n")
         + "Native training computes normalization from training data only.\n"
         "Compatible with native EgoVerse ACT and the HPT recorded-joints configuration.\n"

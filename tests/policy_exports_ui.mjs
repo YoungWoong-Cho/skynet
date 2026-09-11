@@ -155,7 +155,8 @@ try {
     assert.equal(el(id), null, id);
   el("preparation-validation").value = 0;
   el("preparation-validation").dispatchEvent(new w.Event("input"));
-  assert.equal(el("create-policy-export").disabled, true);
+  assert.equal(el("create-policy-export").disabled, false);
+  assert.match(el("policy-export-compatibility").textContent,/without validation/);
   el("preparation-validation").value = 20;
   el("preparation-validation").dispatchEvent(new w.Event("input"));
   assert.equal(el("create-policy-export").disabled, false);
@@ -193,6 +194,14 @@ try {
   assert.equal(oneEpisode.overfit_episode,1);
   assert.equal(oneEpisode.resource_id,null,'overfit cannot add a subset to the full dataset identity');
   assert.match(oneEpisode.name,/episode 2 overfit/);
+
+  options.sessions.find(s=>s.id==='new').episodes=1;
+  await w.openPolicyExport('new');
+  el('policy-export-format').value='egoverse';
+  el('policy-export-format').dispatchEvent(new w.Event('change'));
+  assert.equal(el('create-policy-export').disabled,false);
+  assert.match(el('policy-export-compatibility').textContent,/without validation steps/);
+  assert.equal(el('preparation-validation').disabled,true);
 
   options.exports = [
     {
@@ -278,7 +287,7 @@ try {
   assert.ok(!("selections" in JSON.parse(latest[1].body)), "older partial revisions cannot override all recordings");
   options.sessions[1].episodes = 1;
   await w.openPolicyExport("new");
-  assert.equal(el("create-policy-export").disabled, true);
+  assert.equal(el("create-policy-export").disabled, false);
   el("close-policy-export").click();
   assert.equal(el("policy-export-dialog").open, false);
   assert.equal(el("policy-export-dialog").querySelector("details"), null);

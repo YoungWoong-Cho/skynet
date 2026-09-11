@@ -447,12 +447,8 @@ class PolicyExportService(ClusterPolicyPreparation):
                 "The selection contains duplicate recordings; select each episode once"
             )
         split = self.split(sources, validation_percent, seed)
-        if overfit_episode is not None:
-            split = dict(mode="single_episode_overfit", train=[0], validation=[0])
-        if RECIPES[format]["trainable"] and not split["validation"]:
-            raise ValueError(
-                "Training needs at least two episodes and a non-zero validation split"
-            )
+        if not split["validation"]:
+            split["mode"] = "training_only"
         source_root = self.live.root / "ops/datasets"
         worker = (source_root / "policy_export.py").read_text()
         arrays = "import pickle\nimport numpy as np\n" + inspect.getsource(

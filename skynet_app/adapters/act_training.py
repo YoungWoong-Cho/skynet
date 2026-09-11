@@ -236,7 +236,7 @@ def main():
         args.batch_semantics,
     )
     loaders = {s: context.loader(d, batch_size, args.num_workers, shuffle=(s == "train"), seed=args.seed)
-        for s, d in datasets.items()}
+        for s, d in datasets.items() if len(d)}
     if primary:
         write_json(
             output / "applied-settings.json",
@@ -292,15 +292,14 @@ def main():
                                 optimizer.zero_grad(set_to_none=True)
                                 global_step += 1
             means[split] = context.mean(loss_sum, examples, len(loader.dataset))
-        improved = means["validation"] < best
+        improved = "validation" in means and means["validation"] < best
         if improved:
             best = means["validation"]
         record = dict(
             epoch=epoch,
             global_step=global_step,
             train_loss=means["train"],
-            val_loss=means["validation"],
-            best_val_loss=best,
+            **({"val_loss": means["validation"], "best_val_loss": best} if "validation" in means else {}),
             lr=optimizer.param_groups[0]["lr"],
         )
         if primary:
@@ -324,7 +323,7 @@ def main():
     if not primary:
         context.close()
         return
-    checkpoint = checkpoints / "best.ckpt"
+    checkpoint = checkpoints / ("best.ckpt" if manifest["split"]["validation"] else "latest.ckpt")
     write_json(
         output / "training-result.json",
         dict(

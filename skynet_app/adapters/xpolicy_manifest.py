@@ -34,7 +34,7 @@ def progress_contract():
             path="artifacts/logs.json.txt",
             completed_key="epoch",
             completed_offset=1,
-            required_key="val_loss",
+            required_key="train_loss",
             metrics={
                 "train_loss": "train/loss",
                 "val_loss": "validation/loss",

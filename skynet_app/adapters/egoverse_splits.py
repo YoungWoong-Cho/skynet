@@ -11,8 +11,10 @@ def validate_split(split, episode_count):
         if episode_count != 1 or train != [0] or validation != [0]:
             raise ValueError("Single-episode overfit must reuse exactly one episode")
         return
-    if split.get("mode") not in {None, "held_out"} or (
-        not train or not validation
+    if split.get("mode") == "training_only" and validation:
+        raise ValueError("Training-only datasets must not contain validation episodes")
+    if split.get("mode") not in {None, "held_out", "training_only"} or (
+        not train
         or sorted(train + validation) != list(range(episode_count))
     ):
         raise ValueError("Every episode must belong to exactly one training or validation split")

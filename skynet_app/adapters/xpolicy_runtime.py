@@ -31,7 +31,6 @@ def validate_manifest(manifest):
         sorted(split["train"] + split["validation"])
         != list(range(len(manifest["episodes"])))
         or not split["train"]
-        or not split["validation"]
     ):
         raise ValueError(
             "Dataset requires disjoint, complete training and validation episodes"

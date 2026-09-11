@@ -47,7 +47,7 @@ class RecordedDataset:
         split = manifest["split"]
         count = self.replay_buffer.n_episodes
         if (sorted(split["train"] + split["validation"]) != list(range(count))
-                or not split["train"] or not split["validation"]):
+                or not split["train"]):
             raise ValueError("Training requires disjoint, complete train/validation episode splits")
         self.train_mask = np.zeros(count, dtype=bool)
         self.train_mask[split["train"]] = True
@@ -176,8 +176,10 @@ def workspace_class():
             torch.manual_seed(cfg.training.seed + context.rank)
             train = context.loader(dataset, cfg.dataloader.batch_size,
                 cfg.dataloader.num_workers, shuffle=True, seed=cfg.training.seed)
-            validation = context.loader(dataset.get_validation_dataset(),
+            validation_dataset = dataset.get_validation_dataset()
+            validation = (context.loader(validation_dataset,
                 cfg.val_dataloader.batch_size, cfg.val_dataloader.num_workers)
+                if len(validation_dataset) else None)
             accumulation = cfg.training.gradient_accumulate_every
             batches = min(len(train), cfg.training.max_train_steps or len(train))
             updates = math.ceil(batches / accumulation) * cfg.training.num_epochs
@@ -230,36 +232,37 @@ def workspace_class():
                                     target.copy_(source)
                         if index + 1 >= batches:
                             break
-                    self.ema_model.eval()
-                    val_sum, val_examples = 0.0, 0
-                    # Keep diffusion noise fixed across epochs for comparable held-out loss.
-                    with torch.random.fork_rng(devices=[context.local_rank]), torch.no_grad():
-                        torch.manual_seed(cfg.training.seed + context.rank + 1)
-                        for index, raw in enumerate(validation):
-                            batch = dataset.postprocess(raw, device)
-                            loss = validation_loss(batch)[0]["loss"]
-                            context.check_loss(loss)
-                            count = validation.batch_sampler.valid_count(index)
-                            val_sum += loss.item() * count
-                            val_examples += count
-                            if (
-                                cfg.training.max_val_steps
-                                and index + 1 >= cfg.training.max_val_steps
-                            ):
-                                break
-                    val_loss = context.mean(val_sum, val_examples,
-                        min(len(validation.dataset), (cfg.training.max_val_steps or len(validation)) * cfg.val_dataloader.batch_size))
+                    val_loss = None
+                    if validation is not None:
+                        self.ema_model.eval()
+                        val_sum, val_examples = 0.0, 0
+                        # Keep diffusion noise fixed across epochs for comparable held-out loss.
+                        with torch.random.fork_rng(devices=[context.local_rank]), torch.no_grad():
+                            torch.manual_seed(cfg.training.seed + context.rank + 1)
+                            for index, raw in enumerate(validation):
+                                batch = dataset.postprocess(raw, device)
+                                loss = validation_loss(batch)[0]["loss"]
+                                context.check_loss(loss)
+                                count = validation.batch_sampler.valid_count(index)
+                                val_sum += loss.item() * count
+                                val_examples += count
+                                if (
+                                    cfg.training.max_val_steps
+                                    and index + 1 >= cfg.training.max_val_steps
+                                ):
+                                    break
+                        val_loss = context.mean(val_sum, val_examples,
+                            min(len(validation.dataset), (cfg.training.max_val_steps or len(validation)) * cfg.val_dataloader.batch_size))
                     epoch_loss = context.mean(loss_sum, examples, min(len(dataset), batches * cfg.dataloader.batch_size))
-                    improved = val_loss < best
+                    improved = val_loss is not None and val_loss < best
                     if improved:
                         best = val_loss
                     record = dict(
                         epoch=epoch,
                         global_step=self.global_step,
                         train_loss=epoch_loss,
-                        val_loss=val_loss,
                         lr=self.optimizer.param_groups[0]["lr"],
-                        best_val_loss=best,
+                        **({"val_loss": val_loss, "best_val_loss": best} if val_loss is not None else {}),
                     )
                     if context.primary:
                         logger.log(record)
@@ -479,9 +482,9 @@ def main():
     dataset = RecordedDataset(
         **{k: v for k, v in cfg.task.dataset.items() if k != "_target_"}
     )
-    if not len(dataset) or not len(dataset.get_validation_dataset()):
+    if not len(dataset):
         raise ValueError(
-            "Training and validation must each contain at least one sequence"
+            "Training must contain at least one sequence"
         )
     sample = dataset.postprocess(dataset[np.array([0])], torch.device("cpu"))
     for key, value in sample["obs"].items():
