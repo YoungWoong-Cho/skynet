@@ -1,0 +1,24 @@
+[Unit]
+Description=Skynet team training and evaluation console
+Wants=gnome-keyring-daemon.service
+After=gnome-keyring-daemon.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/skynet
+ExecStart=%h/skynet/.venv/bin/python -m uvicorn skynet_app.main:app --host 0.0.0.0 --port 8080 --workers 1
+Environment=SKYNET_DATABASE_PATH=%h/skynet/data/skynet.db
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
+Environment=XDG_RUNTIME_DIR=%t
+EnvironmentFile=-%h/skynet/data/operator.env
+UMask=0077
+NoNewPrivileges=yes
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+KillMode=control-group
+
+[Install]
+WantedBy=default.target

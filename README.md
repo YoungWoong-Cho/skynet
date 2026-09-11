@@ -6,13 +6,13 @@ The application talks to the cluster through the `sky1` and `sky2` SSH login ali
 
 ## Safety boundary
 
-Run the service only on a trusted workstation and bind it to loopback. The application can submit and cancel Slurm jobs and execute adapter-defined workloads as your cluster user. Adapter manifests use structured argv rather than shell command strings, but a manifest can still select any executable available to that user. Registry authors are therefore trusted operators. Email workspaces separate saved experiment configurations, custom training adapters, repository selections, tracking credentials, training runs and evaluations. Emails are deliberately unverified: anyone who enters an email can open its workspace. This is workspace organization, not identity authentication or a cluster execution sandbox. All workloads still use the configured cluster SSH account.
+Run the service on a trusted workstation or server. Use a loopback binding with an SSH tunnel, or restrict direct network access to the trusted team. The application can submit and cancel Slurm jobs and execute adapter-defined workloads as your cluster user. Adapter manifests use structured argv rather than shell command strings, but a manifest can still select any executable available to that user. Registry authors are therefore trusted operators. Email workspaces separate saved experiment configurations, custom training adapters, repository selections, tracking credentials, training runs and evaluations. Emails are deliberately unverified: anyone who enters an email can open its workspace. This is workspace organization, not identity authentication or a cluster execution sandbox. All workloads still use the configured cluster SSH account.
 
 ```bash
 uv run uvicorn skynet_app.main:app --host 127.0.0.1 --port 8080
 ```
 
-If the browser is on another machine, use an SSH tunnel rather than exposing the server publicly.
+If the browser is on another machine, use an SSH tunnel or restrict direct access to your trusted team network. See [Linux team deployment](docs/deployment.md) for the persistent service, workspace cutover and operations guide.
 
 ## Prerequisites
 
