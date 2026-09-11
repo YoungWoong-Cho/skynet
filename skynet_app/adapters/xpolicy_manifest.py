@@ -88,7 +88,7 @@ def simulation_support_files():
         for name in (
             "evaluation_workers.py", "dexverse_readiness.py", "xpolicy_evaluation.py",
             "dexverse_evaluation.py", "evaluation_video.py", "policy_simulator.py",
-            "recorded_scene.py", "xpolicy_runtime.py",
+            "recorded_scene.py", "xpolicy_runtime.py", "policy_transport.py",
         )
     }
     files.update({

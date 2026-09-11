@@ -12,6 +12,7 @@ import statistics
 import traceback
 
 from xpolicy_runtime import write_json
+from policy_transport import receive_message, send_message
 
 
 def identity(context):
@@ -255,10 +256,10 @@ def main():
         ) as conn:
 
             def request(value):
-                conn.send(value)
+                send_message(conn, value)
                 if not conn.poll(300):
                     raise TimeoutError("Policy did not answer within five minutes")
-                response = conn.recv()
+                response = receive_message(conn)
                 if "error" in response:
                     raise RuntimeError(response["error"])
                 return response["result"]
@@ -438,6 +439,7 @@ def main():
                 artifacts=[e["video_path"] for e in episodes],
             ),
         )
+        Path(os.environ["SKYNET_SIMULATOR_COMPLETION"]).touch()
     except BaseException:
         # Kit's shutdown can terminate the interpreter before Python prints it.
         traceback.print_exc()

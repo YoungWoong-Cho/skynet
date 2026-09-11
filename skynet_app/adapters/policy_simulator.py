@@ -8,6 +8,17 @@ import subprocess
 import threading
 from tempfile import TemporaryDirectory
 
+from policy_transport import receive_message, send_message
+
+
+def run_checked_simulator(command, *, completion_path, **kwargs):
+    subprocess.run(command, check=True, **kwargs)
+    # Kit may exit with code zero while unwinding a Python exception.
+    # Only the evaluator's result-writing path can acknowledge completion.
+    if not Path(completion_path).is_file():
+        raise RuntimeError("Simulator exited before writing its evaluation result; see simulator stderr")
+
+
 def simulator_environment(runtime):
     env = os.environ.copy()
     for key in [
@@ -69,7 +80,7 @@ def run_simulator(context, context_path, policy):
         try:
             with listener.accept() as conn:
                 while True:
-                    request = conn.recv()
+                    request = receive_message(conn)
                     try:
                         if request["command"] == "reset":
                             policy.reset(request["seed"])
@@ -80,9 +91,9 @@ def run_simulator(context, context_path, policy):
                             )
                         else:
                             raise ValueError("Unknown policy request")
-                        conn.send({"result": result})
+                        send_message(conn, {"result": result})
                     except Exception as exc:
-                        conn.send({"error": str(exc)})
+                        send_message(conn, {"error": str(exc)})
         except (EOFError, OSError):
             pass
 
@@ -96,7 +107,9 @@ def run_simulator(context, context_path, policy):
     try:
         with TemporaryDirectory(prefix="simulator-", dir=temporary_root) as temporary:
             env["TMPDIR"] = temporary
-            subprocess.run(
+            completion_path = Path(temporary) / "evaluation-complete"
+            env["SKYNET_SIMULATOR_COMPLETION"] = str(completion_path)
+            run_checked_simulator(
                 [
                     runtime["python_executable"],
                     str(Path(__file__).with_name("dexverse_evaluation.py")),
@@ -105,8 +118,7 @@ def run_simulator(context, context_path, policy):
                 ],
                 env=env,
                 cwd=source,
-                check=True,
+                completion_path=completion_path,
             )
     finally:
         listener.close()
-
