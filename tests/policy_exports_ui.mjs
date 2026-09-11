@@ -181,19 +181,17 @@ try {
   await w.openPolicyExport('new');
   el('policy-export-format').value='egoverse';
   el('policy-export-format').dispatchEvent(new w.Event('change'));
-  assert.equal(el('preparation-mode-field').hidden,false);
-  el('preparation-mode').value='overfit';
-  el('preparation-mode').dispatchEvent(new w.Event('change'));
-  assert.equal(el('preparation-validation').disabled,true);
-  assert.equal(el('preparation-episode-field').hidden,false);
-  el('preparation-episode').value='1';
-  el('preparation-episode').dispatchEvent(new w.Event('change'));
+  assert.equal(el('preparation-mode'),null);
+  assert.equal(el('preparation-episode'),null);
+  const datasetName = el('policy-export-name').value;
   el('policy-export-form').dispatchEvent(new w.Event('submit',{cancelable:true}));
   await flush();
-  const oneEpisode=JSON.parse(calls.filter(([,r])=>r.method==='POST').at(-1)[1].body);
-  assert.equal(oneEpisode.overfit_episode,1);
-  assert.equal(oneEpisode.resource_id,null,'overfit cannot add a subset to the full dataset identity');
-  assert.match(oneEpisode.name,/episode 2 overfit/);
+  const submission=JSON.parse(calls.filter(([,r])=>r.method==='POST').at(-1)[1].body);
+  assert.equal(submission.session_id,'new');
+  assert.equal(submission.resource_id,'dataset');
+  assert.equal(submission.name,datasetName);
+  assert.ok(!('overfit_episode' in submission));
+  assert.ok(!('selections' in submission));
 
   options.sessions.find(s=>s.id==='new').episodes=1;
   await w.openPolicyExport('new');

@@ -1841,8 +1841,6 @@
           <div class="form-grid">
             <div class="field"><label for="policy-export-name">Dataset name</label><input id="policy-export-name" maxlength="100" required aria-describedby="policy-export-name-help"><small id="policy-export-name-help"></small></div>
             <div class="field"><label for="policy-export-format">Policy</label><select id="policy-export-format" required></select><small id="policy-export-format-help" hidden></small></div>
-            <div class="field" id="preparation-mode-field" hidden><label for="preparation-mode">Recordings</label><select id="preparation-mode"><option value="all">All recordings</option><option value="overfit">One episode (overfit)</option></select></div>
-            <div class="field" id="preparation-episode-field" hidden><label for="preparation-episode">Recording</label><select id="preparation-episode"></select><small>Validation reuses this episode; it is not a held-out score.</small></div>
             <div class="field"><label for="preparation-validation">Validation episodes (%)</label><input id="preparation-validation" type="number" min="0" max="50" value="20" required></div>
             <div class="field"><label for="preparation-seed">Split seed</label><input id="preparation-seed" type="number" min="0" max="2147483647" value="42" required></div>
           </div>

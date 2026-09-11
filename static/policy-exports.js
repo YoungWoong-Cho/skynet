@@ -40,8 +40,7 @@
     registrySignature = null,
     resourceId = null,
     selectedResource = null,
-    sourceSessionId = null,
-    sourceDatasetName = "";
+    sourceSessionId = null;
   let busy = false,
     timer = null,
     generation = 0,
@@ -52,16 +51,6 @@
   let deletionQueue = Promise.resolve();
   const terminal = (job) => ["READY", "FAILED", "DELETE_FAILED"].includes(job.state);
   const recipe = (id) => snapshot?.policies.find((p) => p.id === id);
-  const isOverfit = () => el("policy-export-format").value === "egoverse" && el("preparation-mode").value === "overfit";
-  function changeSelection() {
-    el("policy-export-name").value = isOverfit()
-      ? `${sourceDatasetName.slice(0,65)} · episode ${Number(el("preparation-episode").value) + 1} overfit`
-      : sourceDatasetName;
-    el("policy-export-name-help").textContent = isOverfit()
-      ? "Creates a separate dataset. Original recordings are retained."
-      : resourceId ? "Adds a prepared version to this existing dataset; its name and earlier versions are retained." : "Name the dataset created for these recordings.";
-    sourceNote();
-  }
   const splitLabel = split => !split?.validation?.length
     ? `${split?.train?.length || 0} train · no validation`
     : split?.mode === "single_episode_overfit"
@@ -74,19 +63,16 @@
   function sourceNote() {
     const policy = recipe(el("policy-export-format").value);
     const source = snapshot?.sessions.find((s) => s.id === sourceSessionId);
-    const overfit = isOverfit();
-    el("preparation-mode-field").hidden = policy?.id !== "egoverse";
-    el("preparation-episode-field").hidden = !overfit;
     for (const id of ["preparation-validation", "preparation-seed"]) {
-      el(id).disabled = overfit || source?.episodes === 1;
-      el(id).closest(".field").hidden = overfit || source?.episodes === 1;
+      el(id).disabled = source?.episodes === 1;
+      el(id).closest(".field").hidden = source?.episodes === 1;
     }
     const hint = el("policy-export-format-help");
     hint.textContent = policy?.available && !policy.trainable ? policy.description : "";
     hint.hidden = !hint.textContent;
     const noValidation =
       policy?.trainable &&
-      (overfit || source?.episodes < 2 ||
+      (source?.episodes < 2 ||
         Number(el("preparation-validation").value) === 0);
     const missingImages = policy?.observations?.includes("rgb") && source?.images < source?.episodes;
     const message = !source
@@ -302,8 +288,6 @@
     el("policy-export-name-help").textContent = "Name the dataset created for these recordings.";
     el("preparation-validation").value = 20;
     el("preparation-seed").value = 42;
-    el("preparation-mode").value = "all";
-    el("preparation-episode").replaceChildren();
     el("create-policy-export").disabled = true;
     error("policy-export-compatibility", "Loading recordings…");
     SkynetDialog.open(dialog);
@@ -316,7 +300,6 @@
       if (!source)
         throw new Error("This recording session is no longer available.");
       resourceId = source.resource_id || null;
-      for (let i = 0; i < source.episodes; i++) el("preparation-episode").add(new Option(`Recording ${i + 1}`, String(i)));
       const resource = resourceId
         ? (await api(`/api/data/resources/${encodeURIComponent(resourceId)}`))
             .resource
@@ -334,7 +317,6 @@
       }
       el("policy-export-name").value =
         resource?.metadata?.display_name || resource?.name || source.name;
-      sourceDatasetName = el("policy-export-name").value;
       el("policy-export-name").readOnly = Boolean(resource);
       el("policy-export-name-help").textContent = resource
         ? "Adds a prepared version to this existing dataset; its name and earlier versions are retained."
@@ -514,12 +496,7 @@
   }
   dialog.addEventListener("close", () => generation++);
   detail.addEventListener("close", () => detailGeneration++);
-  el("policy-export-format").onchange = changeSelection;
-  el("preparation-mode").onchange = changeSelection;
-  el("preparation-episode").onchange = changeSelection;
-  el("policy-export-name").addEventListener("input", () => {
-    if (!isOverfit()) sourceDatasetName = el("policy-export-name").value;
-  });
+  el("policy-export-format").onchange = sourceNote;
   el("preparation-validation").oninput = sourceNote;
   el("refresh-policy-exports").onclick = refresh;
   el("refresh-data-registry").addEventListener("click", refresh);
@@ -544,8 +521,7 @@
           session_id: sourceSessionId,
           format: el("policy-export-format").value,
           name: el("policy-export-name").value.trim(),
-          resource_id: isOverfit() ? null : resourceId,
-          ...(isOverfit() ? {overfit_episode: Number(el("preparation-episode").value)} : {}),
+          resource_id: resourceId,
           gateway: el("gateway").value,
           validation_percent: Number(el("preparation-validation").value),
           seed: Number(el("preparation-seed").value),
