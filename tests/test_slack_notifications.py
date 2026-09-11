@@ -175,46 +175,39 @@ def test_failed_workflow_does_not_report_successful_process_as_complete(setup):
 
 
 @pytest.mark.parametrize("stage_type", ["TRAIN", "EVALUATE"])
-def test_unconfirmed_submission_warns_once_and_preserves_later_events(setup, stage_type):
+def test_only_confirmed_attempts_notify_including_after_restart(setup, stage_type):
     system, _, create = setup
     db, slack, sender = create()
     slack.configure(webhook_url=WEBHOOK)
     _, stage, attempt = graph(db, stage_type=stage_type)
-    assert queued(db) == []
-    for reason in ["SSH operation timed out", "recovery did not complete"]:
-        transition(db, stage, attempt, "SUBMITTING", slurm_reason="Submission outcome unknown: " + reason)
-    assert [r["category"] for r in queued(db)] == ["submission_unconfirmed"]
-    # Initialization and re-saving the same connection neither duplicate nor drop it.
+    for status in ["SUBMITTING", "FAILED", "BLOCKED", "CANCELLED"]:
+        transition(db, stage, attempt, status, slurm_reason="Submission outcome unknown: SSH operation timed out")
     Database(system.path)
-    slack.configure()
-    assert slack.deliver_one()
-    payload = sender.call_args.args[1]
-    assert "submission unconfirmed" in payload["text"]
-    assert "Slurm acceptance could be confirmed" in json.dumps(payload)
-    assert "failed:" not in payload["text"]
+    assert queued(db) == []
+    assert not slack.deliver_one()
+    sender.assert_not_called()
     transition(db, stage, attempt, "SUBMITTED", slurm_job_id="123")
     transition(db, stage, attempt, "RUNNING")
     transition(db, stage, attempt, "FAILED")
+    assert [row["category"] for row in queued(db)] == ["submitted", "running", "failed"]
     for _ in range(3):
         assert slack.deliver_one()
-    assert not slack.deliver_one()
-    assert [r["category"] for r in queued(db)] == ["submission_unconfirmed", "submitted", "running", "failed"]
+    assert sender.call_count == 3
 
 
-def test_unconfirmed_upgrade_recovers_only_active_enabled_workspace(setup):
+def test_upgrade_skips_previously_queued_unconfirmed_errors(setup):
     system, _, create = setup
-    db, slack, _ = create()
-    _, stage, attempt = graph(db)
-    transition(db, stage, attempt, "SUBMITTING", slurm_reason="Submission outcome unknown: SSH operation timed out")
-    assert queued(db) == []
+    db, slack, sender = create()
     slack.configure(webhook_url=WEBHOOK)
+    _, stage, attempt = graph(db)
+    with db.transaction() as c:
+        for category in ['submission_unconfirmed', 'failed']:
+            c.execute('INSERT INTO notification_outbox(owner_id,stage_id,attempt_key,category,job_status) VALUES(?,?,?,?,?)',
+                (db.workspace_id,stage['id'],attempt['id'],category,'SUBMITTING'))
     Database(system.path)
-    assert [r["category"] for r in queued(db)] == ["submission_unconfirmed"]
-    other_db, other_slack, _ = create("bob@example.com")
-    assert queued(other_db) == []
-    other_slack.configure(webhook_url=WEBHOOK)
-    Database(system.path)
-    assert queued(other_db) == []
+    assert [row['status'] for row in queued(db)] == ['skipped', 'skipped']
+    assert not slack.deliver_one()
+    sender.assert_not_called()
 
 
 def test_rollback_disabled_and_no_history_backfill(setup):

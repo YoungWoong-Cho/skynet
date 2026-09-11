@@ -212,11 +212,10 @@ class SlackNotifications:
                         ),
                     )
                     if events:
-                        categories = [*events, *(["submission_unconfirmed"] if "failed" in events else [])]
-                        placeholders = ",".join("?" for _ in categories)
+                        placeholders = ",".join("?" for _ in events)
                         connection.execute(
                             f"UPDATE notification_outbox SET status='skipped',lease_token=NULL WHERE owner_id=? AND status IN ('pending','sending') AND category NOT IN ({placeholders})",
-                            (self.owner, *categories),
+                            (self.owner, *events),
                         )
             except sqlite3.Error:
                 if webhook:
@@ -273,7 +272,7 @@ class SlackNotifications:
             WHERE s.id=? AND r.owner_id=?""",
             (item["attempt_key"], item["stage_id"], self.owner),
         ).fetchone()
-        if row is None or (item["attempt_key"] and row["attempt_number"] is None):
+        if row is None or not row["slurm_job_id"] or item["category"] not in EVENTS:
             return None
         kind = (
             "Evaluation"
@@ -288,23 +287,15 @@ class SlackNotifications:
             "cancelled": "cancelled",
             "failed": "failed",
             "completed": "completed",
-            "submission_unconfirmed": "submission unconfirmed",
         }[item["category"]]
         title = f"{kind} {verb}: {row['experiment_name']}"[:250]
         description = f"Adapter: {row['adapter_name']}\n"
         description += (
             f"Slurm job: {row['slurm_job_id']} · Attempt {row['attempt_number']}"
             if row["slurm_job_id"]
-            else f"Slurm job: unconfirmed · Attempt {row['attempt_number']}"
-            if item["category"] == "submission_unconfirmed"
             else "Before cluster submission"
         )
         description += f"\nRecorded: {item['created_at']}"
-        if item["category"] == "submission_unconfirmed":
-            if row["slurm_job_id"]:
-                description += "\nSubmission confirmation was lost, then recovered. See the job's current state in Skynet."
-            else:
-                description += "\nConnection failed before Slurm acceptance could be confirmed. Recover the existing submission or cancel it in Skynet."
         if item["job_status"] == "RETRY_PENDING":
             description += "\nAn automatic retry is queued."
         if item["category"] == "failed" and row["slurm_state"]:

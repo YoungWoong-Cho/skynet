@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import sqlite3
 
-from .job_status import SUBMISSION_UNKNOWN_PREFIX
-
 EVENT_STATUSES = {
     "RUNNING": "running",
     "CANCELLED": "cancelled",
@@ -63,8 +61,14 @@ def migrate_notifications(connection: sqlite3.Connection) -> None:
         + " END"
     )
     states = ",".join(f"'{status}'" for status in EVENT_STATUSES)
+    connection.execute("DROP TRIGGER IF EXISTS notify_submission_unconfirmed")
+    connection.execute("""UPDATE notification_outbox SET status='skipped',lease_token=NULL
+        WHERE status IN ('pending','sending') AND (category='submission_unconfirmed'
+            OR NOT EXISTS (SELECT 1 FROM job_attempts a WHERE a.id=attempt_key
+                AND a.slurm_job_id IS NOT NULL AND a.slurm_job_id!=''))""")
     # Queue the workflow outcome, not just Slurm's exit state: a process that
     # exits successfully can still fail checkpoint or evaluation validation.
+    connection.execute("DROP TRIGGER IF EXISTS notify_workflow_status")
     connection.execute(f"""CREATE TRIGGER IF NOT EXISTS notify_workflow_status
         AFTER UPDATE OF status ON workflow_stages
         WHEN NEW.status IS NOT OLD.status AND NEW.status IN ({states})
@@ -75,6 +79,9 @@ def migrate_notifications(connection: sqlite3.Connection) -> None:
                 {cases}, NEW.status
             FROM runs r JOIN slack_notifications n ON n.owner_id=r.owner_id
             WHERE r.id=NEW.run_id AND n.enabled=1
+                AND EXISTS (SELECT 1 FROM job_attempts a
+                    WHERE a.id=(SELECT id FROM job_attempts WHERE stage_id=NEW.id ORDER BY attempt_number DESC LIMIT 1)
+                        AND a.slurm_job_id IS NOT NULL AND a.slurm_job_id!='')
                 AND EXISTS (SELECT 1 FROM json_each(n.events_json) WHERE value={cases});
         END""")
     # A Slurm ID means submission was acknowledged, including recovery of an
@@ -100,9 +107,11 @@ def migrate_notifications(connection: sqlite3.Connection) -> None:
 
     # Short jobs may start and finish between Slurm polls. Accounting confirms
     # execution even if the browser never observed a RUNNING state.
+    connection.execute("DROP TRIGGER IF EXISTS notify_accounted_start")
     connection.execute("""CREATE TRIGGER IF NOT EXISTS notify_accounted_start
         AFTER UPDATE OF started_at ON job_attempts
         WHEN NEW.started_at IS NOT NULL AND OLD.started_at IS NULL
+            AND NEW.slurm_job_id IS NOT NULL AND NEW.slurm_job_id!=''
             AND NEW.slurm_state IN ('RUNNING','COMPLETED','FAILED','OUT_OF_MEMORY','TIMEOUT')
         BEGIN
             INSERT OR IGNORE INTO notification_outbox(owner_id,stage_id,attempt_key,category,job_status)
@@ -112,23 +121,3 @@ def migrate_notifications(connection: sqlite3.Connection) -> None:
             WHERE s.id=NEW.stage_id AND n.enabled=1
                 AND EXISTS (SELECT 1 FROM json_each(n.events_json) WHERE value='running');
         END""")
-    # A lost SSH acknowledgement is actionable even though it is unsafe to
-    # declare the cluster job failed. Keep a separate deduplication category so
-    # a later confirmed failure still produces its own notification.
-    select_unconfirmed = f"""
-        SELECT a.owner_id,a.stage_id,a.id,'submission_unconfirmed','SUBMISSION_UNCONFIRMED'
-        FROM job_attempts a JOIN slack_notifications n ON n.owner_id=a.owner_id
-        WHERE a.status='SUBMITTING' AND (a.slurm_job_id IS NULL OR a.slurm_job_id='')
-            AND a.slurm_reason LIKE '{SUBMISSION_UNKNOWN_PREFIX}%'
-            AND n.enabled=1
-            AND EXISTS (SELECT 1 FROM json_each(n.events_json) WHERE value='failed')
-    """
-    connection.execute(f"""CREATE TRIGGER IF NOT EXISTS notify_submission_unconfirmed
-        AFTER UPDATE OF status,slurm_reason ON job_attempts
-        BEGIN
-            INSERT OR IGNORE INTO notification_outbox(owner_id,stage_id,attempt_key,category,job_status)
-            {select_unconfirmed} AND a.id=NEW.id;
-        END""")
-    # Include unresolved submissions at upgrade; completed history is not replayed.
-    connection.execute(f"""INSERT OR IGNORE INTO notification_outbox
-        (owner_id,stage_id,attempt_key,category,job_status) {select_unconfirmed}""")
