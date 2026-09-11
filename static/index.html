@@ -12,6 +12,7 @@
     <script type="application/skynet-script" data-workspace-src="/static/slack-settings.js?v=1" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/workspace-storage.js?v=1" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/app.js?v=20260909-experiment-tabs" defer></script>
+    <script type="application/skynet-script" data-workspace-src="/static/maintenance.js?v=1" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/hands-ui.js?v=20260907-imported-hands-2" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/live-review.js?v=20260909-review-only" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/live-conversion.js?v=20260909-data-refinement" defer></script>
@@ -1760,6 +1761,7 @@
               <p id="workspace-storage-detail" class="tracking-connection-detail" role="status" aria-live="polite">Open Settings to load your saved base path.</p>
               <div class="form-actions tracking-connection-actions">
                 <button id="save-workspace-storage" class="button button-accent" type="submit" disabled>Validate and initialize</button>
+                <button id="inspect-cluster-storage" class="button button-outline" type="button">Inspect files</button>
 
               </div>
             </form>
@@ -1926,6 +1928,14 @@
         </div>
       </div>
     </section>
+  </dialog>
+  <dialog id="maintenance-dialog" class="app-dialog" aria-labelledby="maintenance-title">
+    <div class="panel-heading"><h3 id="maintenance-title">Delete history</h3><button type="button" data-dialog-close class="button button-outline">Close</button></div>
+    <div class="dialog-body">
+      <p id="maintenance-message" role="status" aria-live="polite"></p>
+      <div id="maintenance-content" class="table-scroll"></div>
+    </div>
+    <div class="form-actions"><button id="maintenance-confirm" class="button button-danger" type="button" disabled>Delete</button></div>
   </dialog>
     </div>
 </body>

@@ -21,18 +21,20 @@ DATABASE_ERRORS = (sqlite3.Error, psycopg.Error)
 class Record:
     """A database row with both column-name and positional access."""
 
-    def __init__(self, names, values):
+    def __init__(self, names, values, payload_store=None):
         self._values = tuple(values)
         self._data = dict(zip(names, values))
+        self.payload_store = payload_store
 
     def __getitem__(self, key):
-        return self._values[key] if isinstance(key, (int, slice)) else self._data[key]
+        value = self._values[key] if isinstance(key, (int, slice)) else self._data[key]
+        return self.payload_store.read(value) if self.payload_store and not isinstance(key, slice) else value
 
     def keys(self):
         return self._data.keys()
 
     def __iter__(self):
-        return iter(self._values)
+        return (self[index] for index in range(len(self._values)))
 
     def __len__(self):
         return len(self._data)
@@ -66,6 +68,7 @@ class PostgresConnection:
 
     def __init__(self, connection):
         self.raw = connection
+        self.payload_store = None
 
     def execute(self, statement, parameters=None):
         parameters = (
@@ -75,9 +78,10 @@ class PostgresConnection:
             if parameters is not None
             else None
         )
-        return self.raw.execute(
+        cursor = self.raw.execute(
             bind_sql(statement) if parameters is not None else statement, parameters
         )
+        return PayloadCursor(cursor, self.payload_store) if self.payload_store else cursor
 
     def executemany(self, statement, parameters):
         cursor = self.raw.cursor()
@@ -96,6 +100,31 @@ class PostgresConnection:
 
     def close(self):
         self.raw.close()
+
+
+class PayloadCursor:
+    def __init__(self, cursor, store):
+        self.cursor, self.store = cursor, store
+
+    @property
+    def rowcount(self):
+        return self.cursor.rowcount
+
+    def fetchone(self):
+        row = self.cursor.fetchone()
+        if row is not None:
+            row.payload_store = self.store
+        return row
+
+    def fetchall(self):
+        rows = self.cursor.fetchall()
+        self.store.prefetch(value for row in rows for value in row._values)
+        for row in rows:
+            row.payload_store = self.store
+        return rows
+
+    def __iter__(self):
+        return iter(self.fetchall())
 
 
 def lock_key(name: str) -> int:

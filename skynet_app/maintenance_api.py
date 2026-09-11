@@ -1,0 +1,71 @@
+"""A single preview/confirm contract for history and storage cleanup."""
+
+from typing import Literal
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, ConfigDict, Field
+
+from .cluster_runtime import ClusterError
+from .maintenance import Maintenance
+
+router = APIRouter(prefix="/api/maintenance")
+Kind = Literal["experiment", "run", "evaluation"]
+
+
+class DeleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: str = Field(min_length=64, max_length=64)
+    gateway: str = "auto"
+
+
+class CleanupRequest(DeleteRequest):
+    paths: list[str] = Field(min_length=1, max_length=500)
+
+
+def manager():
+    from .pipeline_api import LOCAL_CAPSULE_ROOT, service
+
+    if not service.database.workspace_id:
+        raise HTTPException(401, "Open an email workspace first")
+    return Maintenance(
+        service.database, service.cluster, local_capsules=LOCAL_CAPSULE_ROOT
+    )
+
+
+def invoke(operation):
+    try:
+        return operation()
+    except KeyError as error:
+        raise HTTPException(404, str(error)) from error
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from error
+    except (OSError, ClusterError) as error:
+        raise HTTPException(
+            503,
+            "Storage operation did not finish. Retry after reconnecting. "
+            + str(error)[-500:],
+        ) from error
+
+
+@router.get("/history/{kind}/{identifier}")
+def preview(kind: Kind, identifier: str, gateway: str = "auto"):
+    return invoke(lambda: manager().preview(kind, identifier, gateway))
+
+
+@router.delete("/history/{kind}/{identifier}")
+def delete(kind: Kind, identifier: str, request: DeleteRequest):
+    return invoke(
+        lambda: manager().delete(kind, identifier, request.token, request.gateway)
+    )
+
+
+@router.get("/storage")
+def inspect(gateway: str = "auto"):
+    return invoke(lambda: manager().inspect_storage(gateway))
+
+
+@router.post("/storage/cleanup")
+def cleanup(request: CleanupRequest):
+    return invoke(
+        lambda: manager().clean_storage(request.paths, request.token, request.gateway)
+    )

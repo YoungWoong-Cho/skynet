@@ -661,6 +661,11 @@ class Database:
         if isinstance(self.url, str) and not self.url.startswith(("postgresql://", "postgres://", "dbname=", "host=", "user=")):
             raise ValueError("SKYNET_DATABASE_URL must describe a PostgreSQL connection")
         self.backend = PostgresBackend(self.url, workspace_id) if self.is_postgres else None
+        self.payload_store = None
+        object_config = getattr(self.url, "config", None) or self.endpoint_config
+        if self.is_postgres and object_config.get("object_store_root"):
+            from .payload_store import PayloadStore
+            self.payload_store = PayloadStore(self)
         configured = path if path is not None else os.environ.get("SKYNET_DATABASE_PATH")
         self.path = None if self.is_postgres else Path(configured or DEFAULT_DATABASE_PATH).expanduser().resolve()
         if data_root is None and path is not None:
@@ -681,7 +686,9 @@ class Database:
 
     def _connect(self) -> sqlite3.Connection:
         if self.is_postgres:
-            return self.backend.connect()
+            connection = self.backend.connect()
+            connection.payload_store = self.payload_store
+            return connection
         connection = sqlite3.connect(self.path, timeout=30.0, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.create_function("current_workspace_id", 0, lambda: self.workspace_id)
@@ -707,6 +714,8 @@ class Database:
                 self._ensure_execution_immutability_triggers(connection)
                 migrate_workspaces(connection)
                 migrate_notifications(connection)
+                from .maintenance_schema import SCHEMA as MAINTENANCE_SCHEMA
+                connection.executescript(MAINTENANCE_SCHEMA)
             finally:
                 connection.close()
 
@@ -1155,6 +1164,10 @@ class Database:
 
     @staticmethod
     def _insert(connection: sqlite3.Connection, table: str, values: Mapping[str, Any]) -> None:
+        from .maintenance_guard import guard_write
+        guard_write(connection, table, values)
+        if getattr(connection, "payload_store", None):
+            values = connection.payload_store.encode_fields(connection, table, values.get("id"), values)
         if table in PRIVATE_TABLES:
             values = dict(values)
             values["owner_id"] = connection.execute("SELECT current_workspace_id()").fetchone()[0] or LEGACY_WORKSPACE
@@ -1193,6 +1206,8 @@ class Database:
         entity_id: str,
         fields: Mapping[str, Any],
     ) -> dict[str, Any]:
+        from .maintenance_guard import guard_write
+        guard_write(connection, table, {"id": entity_id, **fields})
         if not fields:
             current = cls._row_by_id(connection, table, entity_id)
             if current is None:
@@ -1200,6 +1215,8 @@ class Database:
             return current
         if cls._row_by_id(connection, table, entity_id) is None:
             raise KeyError(f"{table} entity not found: {entity_id}")
+        if getattr(connection, "payload_store", None):
+            fields = connection.payload_store.encode_fields(connection, table, entity_id, fields)
         assignments = ", ".join(f"{key} = ?" for key in fields)
         cursor = connection.execute(
             f"UPDATE {table} SET {assignments} WHERE id = ?",

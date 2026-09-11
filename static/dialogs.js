@@ -94,6 +94,7 @@ window.SkynetDialog = (() => {
     openDialogs.push(dialog);
   }
   function close(dialog, value = "") {
+    if (dialog.dataset.blockClose === "true") return;
     const guide = dialog.querySelector("#tutorial-layer");
     if (guide) document.body.append(guide);
     if (dialog.open) dialog.close(value);

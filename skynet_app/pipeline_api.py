@@ -4257,6 +4257,10 @@ class PipelineService:
 
     def _local_capsule(self, run_id: str, compiled: CompiledSlurmJob) -> Path:
         root = LOCAL_CAPSULE_ROOT / run_id
+        if self.database.is_postgres:
+            # Compiled files are embedded in the submitted cluster capsule.
+            # Central journals do not require a second persistent host copy.
+            return root
         root.mkdir(parents=True, exist_ok=True)
         for name, content in compiled.files.items():
             target = root / name
@@ -4270,13 +4274,14 @@ class PipelineService:
         path = LOCAL_CAPSULE_ROOT / run_id / "submissions" / f"{attempt_id}.sbatch"
         content = script.encode("utf-8")
         digest = hashlib.sha256(content).hexdigest()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with path.open("xb") as target:
-                target.write(content)
-        except FileExistsError:
-            if path.read_bytes() != content:
-                raise ValueError("The saved submission script differs from this attempt")
+        if not self.database.is_postgres:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with path.open("xb") as target:
+                    target.write(content)
+            except FileExistsError:
+                if path.read_bytes() != content:
+                    raise ValueError("The saved submission script differs from this attempt")
         existing = next((item for item in self.database.list_artifacts(run_id, artifact_type="SUBMISSION_SCRIPT")
                          if item.get("metadata_json", {}).get("attempt_id") == attempt_id), None)
         if existing:

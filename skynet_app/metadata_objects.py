@@ -1,8 +1,4 @@
-"""Immutable, checksum-addressed supporting files stored beside the central DB.
-
-Only small manifests and submission receipts use this store. Recordings, trained
-checkpoints and rollout videos continue to use their registered cluster paths.
-"""
+"""Immutable, checksum-addressed bodies stored beside the central database."""
 
 from __future__ import annotations
 
@@ -17,32 +13,42 @@ from pathlib import PurePosixPath
 MAX_BYTES = 16 * 1024 * 1024
 _REMOTE = r"""
 import base64, hashlib, json, os, pathlib, sys, tempfile
-request = json.load(sys.stdin)
-root = pathlib.Path(request["root"])
-digest = request["sha256"]
-path = root / digest[:2] / digest / request["name"]
-if request["operation"] == "put":
-    content = base64.b64decode(request["content"], validate=True)
-    if len(content) > 16 * 1024 * 1024 or hashlib.sha256(content).hexdigest() != digest:
-        raise ValueError("Invalid metadata object")
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".upload-")
-    try:
-        with os.fdopen(descriptor, "wb") as target:
-            target.write(content)
-            target.flush()
-            os.fsync(target.fileno())
+
+def handle(request):
+    root = pathlib.Path(request["root"])
+    digest = request["sha256"]
+    path = root / digest[:2] / digest / request["name"]
+    if not root.is_absolute() or any(p.is_symlink() for p in (path, *path.parents)):
+        raise ValueError("Invalid metadata storage path")
+    if request["operation"] == "put":
+        content = base64.b64decode(request["content"], validate=True)
+        if len(content) > 16 * 1024 * 1024 or hashlib.sha256(content).hexdigest() != digest:
+            raise ValueError("Invalid metadata object")
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".upload-")
         try:
-            os.link(temporary, path)
-        except FileExistsError:
-            pass
-    finally:
-        os.unlink(temporary)
-content = path.read_bytes()
-if len(content) > 16 * 1024 * 1024 or hashlib.sha256(content).hexdigest() != digest:
-    raise ValueError("Metadata object checksum mismatch")
-print(json.dumps({"sha256": digest, "size": len(content), "content":
-    base64.b64encode(content).decode() if request["operation"] == "get" else None}))
+            with os.fdopen(descriptor, "wb") as target:
+                target.write(content)
+                target.flush()
+                os.fsync(target.fileno())
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                pass
+            descriptor = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        finally:
+            os.unlink(temporary)
+    content = path.read_bytes()
+    if len(content) > 16 * 1024 * 1024 or hashlib.sha256(content).hexdigest() != digest:
+        raise ValueError("Metadata object checksum mismatch")
+    return {"sha256": digest, "size": len(content), "content":
+        base64.b64encode(content).decode() if request["operation"] == "get" else None}
+request = json.load(sys.stdin)
+print(json.dumps([handle(item) for item in request] if isinstance(request, list) else handle(request)))
 """
 
 
@@ -64,15 +70,7 @@ class MetadataObjects:
             raise ValueError("Invalid metadata filename")
         return str(self.root / digest[:2] / digest / name)
 
-    def _request(self, operation, digest, content=None, *, name="content"):
-        request = {
-            "operation": operation,
-            "root": str(self.root),
-            "sha256": digest,
-            "name": name,
-        }
-        if content is not None:
-            request["content"] = base64.b64encode(content).decode()
+    def _exchange(self, request):
         result = subprocess.run(
             [
                 "ssh",
@@ -87,7 +85,7 @@ class MetadataObjects:
             input=json.dumps(request),
             text=True,
             capture_output=True,
-            timeout=60,
+            timeout=120,
             check=False,
         )
         if result.returncode:
@@ -95,6 +93,18 @@ class MetadataObjects:
                 "Central metadata transfer failed: " + result.stderr.strip()[-500:]
             )
         return json.loads(result.stdout)
+
+    def _request(self, operation, digest, content=None, *, name="content"):
+        self.path(digest, name)
+        request = {
+            "operation": operation,
+            "root": str(self.root),
+            "sha256": digest,
+            "name": name,
+        }
+        if content is not None:
+            request["content"] = base64.b64encode(content).decode()
+        return self._exchange(request)
 
     def put(self, content: bytes, *, name="content"):
         if len(content) > MAX_BYTES:
@@ -106,6 +116,33 @@ class MetadataObjects:
             raise OSError("Central metadata verification failed")
         return path
 
+    def put_many(self, contents):
+        """Deduplicated and bounded bulk transfer for an offline migration."""
+        unique = {hashlib.sha256(content).hexdigest(): content for content in contents}
+        values = list(unique.items())
+        for start in range(0, len(values), 16):
+            batch = values[start : start + 16]
+            if any(len(content) > MAX_BYTES for _, content in batch):
+                raise ValueError("Supporting metadata file exceeds 16 MiB")
+            result = self._exchange(
+                [
+                    {
+                        "operation": "put",
+                        "root": str(self.root),
+                        "sha256": digest,
+                        "name": "body",
+                        "content": base64.b64encode(content).decode(),
+                    }
+                    for digest, content in batch
+                ]
+            )
+            if len(result) != len(batch) or any(
+                item["sha256"] != digest or item["size"] != len(content)
+                for item, (digest, content) in zip(result, batch)
+            ):
+                raise OSError("Incomplete metadata bulk transfer")
+        return {digest: self.path(digest, "body") for digest in unique}
+
     def read(self, path, digest):
         name = PurePosixPath(path).name
         if path != self.path(digest, name):
@@ -115,5 +152,37 @@ class MetadataObjects:
         if hashlib.sha256(content).hexdigest() != digest:
             raise ValueError(
                 "Saved submission script changed: central metadata checksum mismatch"
+                if name.endswith(".sbatch")
+                else "Central metadata checksum mismatch"
             )
         return content
+
+    def read_many(self, references):
+        output = []
+        for start in range(0, len(references), 16):
+            batch = references[start : start + 16]
+            for ref in batch:
+                if ref["path"] != self.path(ref["sha256"], "body"):
+                    raise ValueError("Invalid metadata object path")
+            values = self._exchange(
+                [
+                    {
+                        "operation": "get",
+                        "root": str(self.root),
+                        "sha256": ref["sha256"],
+                        "name": "body",
+                    }
+                    for ref in batch
+                ]
+            )
+            if len(values) != len(batch):
+                raise ValueError("Incomplete metadata object batch")
+            for value, ref in zip(values, batch):
+                content = base64.b64decode(value["content"], validate=True)
+                if (
+                    len(content) != ref["size"]
+                    or hashlib.sha256(content).hexdigest() != ref["sha256"]
+                ):
+                    raise ValueError("Metadata object checksum mismatch")
+                output.append(content)
+        return output

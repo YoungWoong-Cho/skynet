@@ -247,7 +247,8 @@ class MLflowBridge:
         self.lock_path = self.run_capsule / LOCK_FILENAME
         self._thread_lock = threading.RLock()
         self._last_error: str | None = None
-        self.run_capsule.mkdir(parents=True, exist_ok=True)
+        if not journal:
+            self.run_capsule.mkdir(parents=True, exist_ok=True)
         with self._locked():
             if not self.spool_path.exists():
                 self._atomic_write(self.spool_path, b"")
@@ -293,7 +294,7 @@ class MLflowBridge:
         }
 
     def _atomic_write(self, path: Path, payload: bytes) -> None:
-        if self._journal and path in (self.state_path, self.spool_path):
+        if self._journal and not isinstance(path, Path):
             path.write_bytes(payload)
             return
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -867,7 +868,7 @@ class MLflowBridge:
             "sha256": payload.get("sha256"),
             "metadata": payload.get("metadata", {}),
         }
-        manifest_path = self.run_capsule / "tracking-artifact-links.json"
+        manifest_path = self._journal.file("tracking-artifact-links.json") if self._journal else self.run_capsule / "tracking-artifact-links.json"
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError, OSError):
@@ -1152,7 +1153,8 @@ class WandBBridge:
         self.lock_path = self.run_capsule / WANDB_LOCK_FILENAME
         self._thread_lock = threading.RLock()
         self._last_error: str | None = None
-        self.run_capsule.mkdir(parents=True, exist_ok=True)
+        if not journal:
+            self.run_capsule.mkdir(parents=True, exist_ok=True)
         with self._locked():
             if not self.spool_path.exists():
                 self._atomic_write(self.spool_path, b"")
@@ -1187,7 +1189,7 @@ class WandBBridge:
                 os.close(descriptor)
 
     def _atomic_write(self, path: Path, payload: bytes) -> None:
-        if self._journal and path in (self.state_path, self.spool_path):
+        if self._journal and not isinstance(path, Path):
             path.write_bytes(payload)
             return
         path.parent.mkdir(parents=True, exist_ok=True)

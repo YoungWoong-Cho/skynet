@@ -36,6 +36,15 @@ from skynet_app.tracking import WandBSettings
 COMMIT = "e17cf98fe4bc234c564b37abc9e155f25e76d566"
 
 
+def submitted_execution(cluster):
+    """Read the execution file actually embedded in the submitted transport."""
+    lines = cluster.script.splitlines()
+    for index, line in enumerate(lines):
+        if "base64 --decode >" in line and "/execution.json" in line:
+            return json.loads(base64.b64decode(lines[index + 1].strip()))
+    raise AssertionError("Submitted capsule has no execution.json")
+
+
 def test_retired_dexverse_preserves_pinned_experiments_and_collection(tmp_path):
     from skynet_app.adapters import _builtin_manifest
     from skynet_app.collection import CollectionService
@@ -1639,8 +1648,7 @@ def test_rerun_is_checkpoint_free_new_run_with_pinned_variant(monkeypatch):
         assert result["status"] == "SUBMITTED"
         rerun_id = result["run_id"]
         assert rerun_id != run_id
-        execution_path = next((Path(directory) / "capsules" / rerun_id).rglob("execution.json"))
-        execution = json.loads(execution_path.read_text())
+        execution = submitted_execution(cluster)
         assert execution["initial_checkpoint"] is None
         assert execution["auto_resume"] is True
         refreshed = database.get_run(rerun_id)
@@ -1679,8 +1687,7 @@ def test_manual_resume_submits_the_registered_resumable_checkpoint(monkeypatch):
         result = service.retry_run(run_id, "resume", "auto")
 
         assert result["status"] == "SUBMITTED"
-        execution_path = next((Path(directory) / "capsules" / run_id).rglob("execution.json"))
-        execution = json.loads(execution_path.read_text())
+        execution = submitted_execution(cluster)
         assert execution["initial_checkpoint"] == checkpoint_path
 
 
@@ -1726,8 +1733,7 @@ def test_cancelled_run_resumes_from_valid_checkpoint_in_same_run(monkeypatch):
         assert second_attempt["execution_snapshot_json"]["migration_provenance"][
             "policy"
         ] == "strict_pinned_resume"
-        execution_path = next((capsule_root / run_id).rglob("execution.json"))
-        execution = json.loads(execution_path.read_text())
+        execution = submitted_execution(cluster)
         assert execution["initial_checkpoint"] == checkpoint["path"]
         assert execution["auto_resume"] is True
 
@@ -1826,8 +1832,7 @@ def test_cancelled_run_without_checkpoint_replays_immutable_initial_execution(mo
             assert replay_snapshot[key] == initial_snapshot[key]
         assert "registry-drift.py" not in replay_snapshot["argv"]
         assert "stage-drift.py" not in replay_snapshot["argv"]
-        execution_path = next((capsule_root / run_id).rglob("execution.json"))
-        execution = json.loads(execution_path.read_text())
+        execution = submitted_execution(cluster)
         assert execution["initial_checkpoint"] is None
         assert execution["auto_resume"] is False
 

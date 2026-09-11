@@ -5980,6 +5980,7 @@ function renderExperiments() {
             ${lifecycle.locked
               ? `<button type="button" data-experiment-action="view" data-id="${escapeHtml(id)}" aria-controls="experiment-detail" aria-expanded="false">View variants</button>`
               : `<button type="button" data-experiment-action="submit" data-id="${escapeHtml(id)}">Submit</button>`}
+            <button type="button" data-delete-kind="experiment" data-delete-id="${escapeHtml(id)}">Delete</button>
           </td>
         </tr>`;
   }).join("");
@@ -6326,7 +6327,7 @@ function runRowDescriptor(run) {
       {
         className: "row-actions",
         preserve: active,
-        html: `<button type="button" data-run-action="view" data-id="${escapeHtml(id)}" aria-controls="run-detail" aria-expanded="false">View attempts</button>`,
+        html: `<button type="button" data-run-action="view" data-id="${escapeHtml(id)}" aria-controls="run-detail" aria-expanded="false">View attempts</button><button type="button" data-delete-kind="run" data-delete-id="${escapeHtml(id)}">Delete</button>`,
       },
     ],
   };
@@ -8179,7 +8180,7 @@ function evaluationRowDescriptor(evaluation) {
       {
         className: "row-actions",
         preserve: active,
-        html: `<button type="button" data-evaluation-action="view" data-id="${escapeHtml(id)}">Results</button>`,
+        html: `<button type="button" data-evaluation-action="view" data-id="${escapeHtml(id)}">Results</button><button type="button" data-delete-kind="evaluation" data-delete-id="${escapeHtml(id)}">Delete</button>`,
       },
     ],
   };
