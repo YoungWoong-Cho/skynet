@@ -129,6 +129,18 @@ def validate_layout(env, capture, order):
     return [env.scene["robot"].joint_names.index(names[i]) for i in order]
 
 
+def assigned_episodes(context):
+    expected = {(seed, index) for seed in context["seeds"]
+                for index in range(context["episodes_per_task"])}
+    selected = context.get("episode_assignments")
+    if selected is None:
+        return expected
+    assigned = {tuple(pair) for pair in selected}
+    if len(assigned) != len(selected) or not assigned.issubset(expected):
+        raise ValueError("Worker episode assignments do not match the evaluation")
+    return assigned
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--context", required=True)
@@ -251,17 +263,10 @@ def main():
                     raise RuntimeError(response["error"])
                 return response["result"]
 
+            assignments = assigned_episodes(context)
             for seed in context["seeds"]:
                 for index in range(context["episodes_per_task"]):
-                    if [seed, index] not in context.get(
-                        "episode_assignments",
-            "recorded_episode_sources",
-                        [
-                            [s, i]
-                            for s in context["seeds"]
-                            for i in range(context["episodes_per_task"])
-                        ],
-                    ):
+                    if (seed, index) not in assignments:
                         continue
                     key = (task, seed, index)
                     if key in completed:

@@ -151,3 +151,14 @@ def test_running_episode_transitions_to_complete_without_counting_twice(
         path, dict(identity=identity(unit), status="SUCCEEDED", episode=episode)
     )
     assert list(workers.completed_results(context, units).values()) == [episode]
+
+
+def test_simulator_executes_single_episode_without_worker_assignment(workers, context):
+    from dexverse_evaluation import assigned_episodes
+    single = dict(context, seeds=[42], episodes_per_task=1,
+                  recorded_episode_sources=[{"path": "/recorded/episode.pkl"}])
+    assert assigned_episodes(single) == {(42, 0)}
+    for unit in workers.worker_contexts(context):
+        assert assigned_episodes(unit) == {tuple(pair) for pair in unit["episode_assignments"]}
+    with pytest.raises(ValueError, match="assignments"):
+        assigned_episodes(dict(single, episode_assignments=[[42, 1]]))
