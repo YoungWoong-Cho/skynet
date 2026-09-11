@@ -174,6 +174,49 @@ def test_failed_workflow_does_not_report_successful_process_as_complete(setup):
     assert "completed" not in "".join(titles)
 
 
+@pytest.mark.parametrize("stage_type", ["TRAIN", "EVALUATE"])
+def test_unconfirmed_submission_warns_once_and_preserves_later_events(setup, stage_type):
+    system, _, create = setup
+    db, slack, sender = create()
+    slack.configure(webhook_url=WEBHOOK)
+    _, stage, attempt = graph(db, stage_type=stage_type)
+    assert queued(db) == []
+    for reason in ["SSH operation timed out", "recovery did not complete"]:
+        transition(db, stage, attempt, "SUBMITTING", slurm_reason="Submission outcome unknown: " + reason)
+    assert [r["category"] for r in queued(db)] == ["submission_unconfirmed"]
+    # Initialization and re-saving the same connection neither duplicate nor drop it.
+    Database(system.path)
+    slack.configure()
+    assert slack.deliver_one()
+    payload = sender.call_args.args[1]
+    assert "submission unconfirmed" in payload["text"]
+    assert "Slurm acceptance could be confirmed" in json.dumps(payload)
+    assert "failed:" not in payload["text"]
+    transition(db, stage, attempt, "SUBMITTED", slurm_job_id="123")
+    transition(db, stage, attempt, "RUNNING")
+    transition(db, stage, attempt, "FAILED")
+    for _ in range(3):
+        assert slack.deliver_one()
+    assert not slack.deliver_one()
+    assert [r["category"] for r in queued(db)] == ["submission_unconfirmed", "submitted", "running", "failed"]
+
+
+def test_unconfirmed_upgrade_recovers_only_active_enabled_workspace(setup):
+    system, _, create = setup
+    db, slack, _ = create()
+    _, stage, attempt = graph(db)
+    transition(db, stage, attempt, "SUBMITTING", slurm_reason="Submission outcome unknown: SSH operation timed out")
+    assert queued(db) == []
+    slack.configure(webhook_url=WEBHOOK)
+    Database(system.path)
+    assert [r["category"] for r in queued(db)] == ["submission_unconfirmed"]
+    other_db, other_slack, _ = create("bob@example.com")
+    assert queued(other_db) == []
+    other_slack.configure(webhook_url=WEBHOOK)
+    Database(system.path)
+    assert queued(other_db) == []
+
+
 def test_rollback_disabled_and_no_history_backfill(setup):
     _, _, create = setup
     db, slack, _ = create()

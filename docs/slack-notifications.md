@@ -15,6 +15,8 @@ Notifications cover training and evaluation workflows, including their individua
 
 Submission is reported after Slurm acknowledges a job ID. Cancellation is reported after confirmation, or immediately when Skynet cancels work before submission. A retry's failed attempt is identified as such, with an automatic-retry note. Each new attempt can produce its own submission and start notifications. Successful Slurm exit alone does not mean completion: failed checkpoint or evaluation-result validation produces a failure notification.
 
+A connection failure with unknown Slurm acceptance produces a separate **submission unconfirmed** warning. It does not claim the job failed or was accepted. The UI shows the same state while preserving recovery and cancellation controls. Repeated checks do not repeat the warning; later confirmed submission, start and failure events remain independent. Upgrades include currently unresolved submissions, without replaying completed history.
+
 Messages contain the experiment name, job type, adapter, Slurm ID, attempt number and event time, plus status/exit code when available. They do not include credentials, full configurations or raw logs. Names are rendered as plain text so they cannot trigger Slack mentions.
 
 State changes and queue entries commit together. A separate worker checks the queue every two seconds; detection of cluster changes follows the existing cluster polling cycle. Delivery continues when the browser is closed. Temporary network errors, Slack server errors and rate limits are retried with backoff, up to six attempts. Slack's Retry-After delay is respected. Settings shows delivery errors. Fix the destination and reconnect if a permanent error stops delivery.

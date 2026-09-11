@@ -1280,6 +1280,7 @@ function stateClass(state) {
   if (["local", "on this computer", "recorded", "original recordings saved"].includes(normalized)) return "is-local";
   if (["ready", "prepared", "on cluster", "available", "images ready"].includes(normalized) || /prepared formats?$/.test(normalized)) return "is-running";
   if (/converting|fetching|validating|transferring|verifying|checking/.test(normalized)) return "is-pending";
+  if (normalized.includes("unconfirmed")) return "is-pending";
   if (normalized.includes("idle")) return "is-idle";
   if (normalized.includes("mixed")) return "is-mixed";
   if (normalized.includes("running")) return "is-running";
@@ -5283,6 +5284,10 @@ function experimentLifecycle(experiment) {
   };
 }
 
+function jobStatusLabel(job) {
+  return job?.display_status || job?.status || job?.state || "unknown";
+}
+
 function normalizedRunState(value) {
   return String(value || "").trim().toUpperCase().replace(/[\s-]+/g, "_");
 }
@@ -5361,7 +5366,7 @@ function runHasExplicitPreflightFailure(run, attempts) {
 }
 
 function variantRunDisplayState(run) {
-  const rawState = run?.status || run?.state || "unknown";
+  const rawState = jobStatusLabel(run);
   const state = normalizedRunState(rawState);
   const attempts = runAttemptRecords(run);
   const attemptCount = runAttemptCount(run);
@@ -6263,7 +6268,7 @@ function filteredRuns() {
   const query = elements.runSearch.value.trim().toLowerCase();
   const stateFilter = elements.runStatusFilter.value;
   return runRows.filter((run) => {
-    const state = String(run.status || run.state || "").toLowerCase();
+    const state = jobStatusLabel(run).toLowerCase();
     const haystack = [
       run.id,
       run.run_id,
@@ -6283,7 +6288,7 @@ function filteredRuns() {
 
 function runRowDescriptor(run) {
   const id = String(run.id || run.run_id || "");
-  const state = run.status || run.state || "unknown";
+  const state = jobStatusLabel(run);
   const slurm = run.slurm_job_id || run.job_id || run.latest_attempt?.slurm_job_id || "-";
   const attempt = run.attempt ?? run.attempt_number ?? run.latest_attempt?.attempt_number ?? run.latest_attempt?.number ?? "-";
   const attemptCount = runAttemptCount(run);
@@ -6310,7 +6315,7 @@ function runRowDescriptor(run) {
       { html: `<span class="job-id">${escapeHtml(slurm)}</span><span class="secondary">${escapeHtml(run.latest_attempt?.partition_name || run.partition || run.resources?.partition || "")}</span>` },
       { html: escapeHtml(runResourceLabel(run)) },
       { html: escapeHtml(attemptLabel) },
-      { html: `${eta}${progressCell(progress, progressLabel)}` },
+      { html: run.status_detail ? `<span class="secondary" title="${escapeHtml(run.status_detail)}">Cluster acceptance unconfirmed</span>` : `${eta}${progressCell(progress, progressLabel)}` },
       { html: escapeHtml(formatDate(run.latest_attempt?.started_at)) },
       { html: escapeHtml(progressSummary?.elapsed_seconds == null ? "-" : compactEtaDuration(progressSummary.elapsed_seconds) ?? "-") },
       { html: trackingLinksHtml(run) },
@@ -6326,7 +6331,7 @@ function runRowDescriptor(run) {
 function renderRuns({ background = false } = {}) {
   const knownStates = new Set([...elements.runStatusFilter.options].map(option => option.value));
   for (const run of runRows) {
-    const state = String(run.status || run.state || "").toLowerCase();
+    const state = jobStatusLabel(run).toLowerCase();
     if (!state || state === "succeeded" || knownStates.has(state)) continue;
     elements.runStatusFilter.add(new Option(state.replaceAll("_", " ").replace(/^./, char => char.toUpperCase()), state));
     knownStates.add(state);
@@ -6789,7 +6794,7 @@ function renderRunAttemptMetadata(record) {
     ["Attempt", record.attemptNumber],
     ["Adapter", record.adapterLabel || trainingAdapterLabel({}, attempt)],
     ["Attempt ID", runAttemptValue(attempt, "id", "attempt_id")],
-    ["State", runAttemptValue(attempt, "status", "state")],
+    ["State", jobStatusLabel(attempt)],
     ["Scheduler reason", queueReasonLabel(attempt)],
     ["Slurm job", runAttemptValue(attempt, "slurm_job_id", "job_id")],
     ["Gateway", runAttemptValue(attempt, "gateway")],
@@ -7074,9 +7079,9 @@ function renderRunDetailContent(payload, id, { preserveAttempt = false } = {}) {
     ["Variant", run.variant_name || run.variant_id],
     ["Training Run number", run.run_number],
     ["Restarted from run", run.restarted_from_run_id],
-    ["Training Run state", state],
-    ["Progress", progressSummaryLabel(run.progress_summary)],
-    ["ETA", etaPresentation(run.progress_summary).detail],
+    ["Training Run state", jobStatusLabel(run)],
+    ["Progress", run.status_detail || progressSummaryLabel(run.progress_summary)],
+    ["ETA", run.status_detail ? "—" : etaPresentation(run.progress_summary).detail],
     ["Checkpoint", run.checkpoint_path || run.latest_checkpoint],
     ["Created", formatDate(run.created_at)],
     ["Updated", formatDate(run.updated_at)],
@@ -7146,10 +7151,10 @@ function renderRunDetailContent(payload, id, { preserveAttempt = false } = {}) {
       const attemptActive = activeRunAttemptDisclosure?.attemptId === String(attemptId);
       patchTableRow(row, [
         { html: escapeHtml(attemptNumber) },
-        { html: statusPill(attempt.status || attempt.state || "unknown") },
+        { html: statusPill(jobStatusLabel(attempt)) },
         { html: escapeHtml(attempt.slurm_job_id || attempt.job_id || "-") },
         { html: escapeHtml([attempt.gateway, attempt.node || attempt.node_list].filter(Boolean).join(" / ") || "-") },
-        { html: escapeHtml(formatDate(attempt.started_at || attempt.created_at)) },
+        { html: escapeHtml(formatDate(attempt.started_at)) },
         { html: escapeHtml(formatDate(attempt.ended_at || attempt.finished_at)) },
         { className: "wrap-cell", html: escapeHtml(attempt.error || attempt.failure_reason || attempt.slurm_reason || "-") },
         {
@@ -8134,7 +8139,7 @@ function evaluationPrimaryResult(evaluation) {
 
 function evaluationRowCells(evaluation) {
   const id = evaluation.id || evaluation.evaluation_id;
-  const state = evaluation.status || evaluation.state || "unknown";
+  const state = jobStatusLabel(evaluation);
   const suite = evaluation.suite_name || evaluation.suite_id || evaluation.suite || "-";
   const environment = evaluation.environment || evaluation.evaluator_adapter || "-";
   const progressSummary = evaluation.progress_summary;
@@ -8152,8 +8157,8 @@ function evaluationRowCells(evaluation) {
     `${escapeHtml(evaluation.run_id || "-")}<span class="secondary">${escapeHtml(shortId(evaluation.checkpoint_path || evaluation.checkpoint_id || evaluation.result_path || "", 28))}</span>`,
     `${escapeHtml(suite)}<span class="secondary">${escapeHtml(environment)}</span>`,
     statusPill(state),
-    progressCell(progress, progressLabel),
-    etaCell(progressSummary),
+    evaluation.status_detail ? escapeHtml(evaluation.status_detail) : progressCell(progress, progressLabel),
+    evaluation.status_detail ? "—" : etaCell(progressSummary),
     escapeHtml(evaluationPrimaryResult(evaluation)),
     escapeHtml(formatDate(evaluation.updated_at || evaluation.created_at)),
   ];
@@ -8187,7 +8192,7 @@ function renderEvaluations({ background = false } = {}) {
   const stateFilter = document.querySelector("#evaluation-state-filter");
   const knownStates = new Set([...stateFilter.options].map(option => option.value));
   for (const row of evaluationRows) {
-    const status = String(row.status || row.state || "").toUpperCase();
+    const status = jobStatusLabel(row).toUpperCase();
     if (!status || knownStates.has(status)) continue;
     const option = document.createElement("option");
     option.value = status;
@@ -8198,7 +8203,7 @@ function renderEvaluations({ background = false } = {}) {
   const query = document.querySelector("#evaluation-search").value.trim().toLowerCase();
   const filter = document.querySelector("#evaluation-state-filter").value;
   const filtered = evaluationRows.filter((row) => (!query || [row.id, row.run_id, row.suite_name, row.suite_id].join(" ").toLowerCase().includes(query))
-    && (filter === "all" || String(row.status || row.state).toUpperCase() === filter));
+    && (filter === "all" || jobStatusLabel(row).toUpperCase() === filter));
   const descriptors = filtered.map(evaluationRowDescriptor);
   const countLabel = `${filtered.length} of ${evaluationRows.length} evaluations`;
   const panel = elements.evaluationsBody.closest(".panel") || elements.evaluationsBody;
@@ -8258,7 +8263,7 @@ function updateEvaluationRow(evaluation, { background = false } = {}) {
 }
 
 const EVALUATION_ACTIVE_STATES = new Set([
-  "CREATED", "PENDING", "SUBMITTED", "QUEUED", "CONFIGURING", "RUNNING", "REQUEUED", "RETRY_PENDING", "CANCELLING",
+  "CREATED", "SUBMITTING", "PENDING", "SUBMITTED", "QUEUED", "CONFIGURING", "RUNNING", "REQUEUED", "RETRY_PENDING", "CANCELLING",
 ]);
 const EVALUATION_LIST_POLL_INTERVAL_MS = 5000;
 
@@ -8512,7 +8517,7 @@ function evaluationEpisodeAttempt(evaluation, episode) {
 function renderEvaluationAttempt(attempt) {
   const headings = ["Attempt", "State", "Slurm job", "Gateway / node", "Started", "Ended", "Error"];
   const values = attempt ? [
-    escapeHtml(attempt.attempt_number ?? "—"), statusPill(attempt.status),
+    escapeHtml(attempt.attempt_number ?? "—"), statusPill(jobStatusLabel(attempt)),
     escapeHtml(attempt.slurm_job_id || "—"),
     escapeHtml([attempt.gateway, attempt.node_list || attempt.node].filter(Boolean).join(" / ") || "—"),
     escapeHtml(formatDate(attempt.started_at)), escapeHtml(formatDate(attempt.finished_at || attempt.ended_at)),
@@ -8648,8 +8653,9 @@ function renderEvaluationDetail(evaluation) {
   setHtmlIfChanged(elements.evaluationDetailActions, cancellationActionButton("evaluation", id, evaluation.manual_actions || {}));
   setHtmlIfChanged(elements.evaluationDetailMeta, keyValueHtml([
     ["Run", evaluation.run_id], ["Suite", evaluation.suite_name || evaluation.suite_id || evaluation.suite],
-    ["Progress", progressSummaryLabel(evaluation.progress_summary) || "Waiting"],
-    ["ETA", etaPresentation(evaluation.progress_summary).detail],
+    ["State", jobStatusLabel(evaluation)],
+    ["Progress", evaluation.status_detail || progressSummaryLabel(evaluation.progress_summary) || "Waiting"],
+    ["ETA", evaluation.status_detail ? "—" : etaPresentation(evaluation.progress_summary).detail],
     ["Result", evaluationPrimaryResult(evaluation)],
     ["Updated", formatDate(evaluation.updated_at || evaluation.created_at)],
   ]));

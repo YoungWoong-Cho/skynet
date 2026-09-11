@@ -61,6 +61,7 @@ from .database import Database, canonical_json, content_sha256, utc_now
 from .workspace_schema import visible_sql
 from .workspace_storage import WorkspaceStorage, paths_for_root, validate_work_root
 from .slack_notifications import SlackNotifications
+from .job_status import attach_attempt_display_status, attach_job_display_status
 from .workspaces import WorkspaceServices, require_workspace_records
 from .experiments import (
     CanonicalResult,
@@ -691,6 +692,10 @@ def _attach_run_progress_summaries(database: Database, runs: list[dict[str, Any]
         attempts = row.get("attempts") or []
         run["attempt_count"] = len(attempts)
         run["latest_attempt"] = _latest_attempt(attempts)
+        attach_job_display_status(run, attempts)
+        # Detail responses have separately loaded (and enriched) attempt objects.
+        for attempt in run.get("attempts") or []:
+            attach_attempt_display_status(attempt)
         spec = row.get("resolved_spec_json") or {}
         run["resources"] = spec.get("resources") or {}
         run["progress_summary"] = training_progress_summary(
@@ -711,6 +716,7 @@ def _attach_evaluation_progress_summaries(
     ])
     for evaluation in evaluations:
         row = evidence.get(str(evaluation.get("id") or ""), {})
+        attach_job_display_status(evaluation, row.get("attempts") or [])
         evaluation["progress_summary"] = evaluation_progress_summary(
             evaluation,
             attempts=row.get("attempts") or [],
@@ -11426,6 +11432,7 @@ def get_evaluation(evaluation_id: str) -> dict[str, Any]:
     )
     evaluation["progress_summary"] = evaluation_progress_summary(evaluation)
     evaluation["manual_actions"] = service.evaluation_manual_actions(evaluation, run)
+    attach_job_display_status(evaluation, evaluation["attempts"])
     return {"evaluation": evaluation}
 
 

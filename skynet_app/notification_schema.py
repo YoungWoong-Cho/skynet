@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 
+from .job_status import SUBMISSION_UNKNOWN_PREFIX
+
 EVENT_STATUSES = {
     "RUNNING": "running",
     "CANCELLED": "cancelled",
@@ -110,3 +112,23 @@ def migrate_notifications(connection: sqlite3.Connection) -> None:
             WHERE s.id=NEW.stage_id AND n.enabled=1
                 AND EXISTS (SELECT 1 FROM json_each(n.events_json) WHERE value='running');
         END""")
+    # A lost SSH acknowledgement is actionable even though it is unsafe to
+    # declare the cluster job failed. Keep a separate deduplication category so
+    # a later confirmed failure still produces its own notification.
+    select_unconfirmed = f"""
+        SELECT a.owner_id,a.stage_id,a.id,'submission_unconfirmed','SUBMISSION_UNCONFIRMED'
+        FROM job_attempts a JOIN slack_notifications n ON n.owner_id=a.owner_id
+        WHERE a.status='SUBMITTING' AND (a.slurm_job_id IS NULL OR a.slurm_job_id='')
+            AND a.slurm_reason LIKE '{SUBMISSION_UNKNOWN_PREFIX}%'
+            AND n.enabled=1
+            AND EXISTS (SELECT 1 FROM json_each(n.events_json) WHERE value='failed')
+    """
+    connection.execute(f"""CREATE TRIGGER IF NOT EXISTS notify_submission_unconfirmed
+        AFTER UPDATE OF status,slurm_reason ON job_attempts
+        BEGIN
+            INSERT OR IGNORE INTO notification_outbox(owner_id,stage_id,attempt_key,category,job_status)
+            {select_unconfirmed} AND a.id=NEW.id;
+        END""")
+    # Include unresolved submissions at upgrade; completed history is not replayed.
+    connection.execute(f"""INSERT OR IGNORE INTO notification_outbox
+        (owner_id,stage_id,attempt_key,category,job_status) {select_unconfirmed}""")
