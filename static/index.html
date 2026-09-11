@@ -1681,7 +1681,7 @@
                 <div class="field span-2">
                   <label for="wandb-api-key">API key</label>
                   <input id="wandb-api-key" type="password" autocomplete="new-password" spellcheck="false" placeholder="Paste an API key to connect">
-                  <small>Sent only to the local connection API. It is never saved or prefilled by this browser.</small>
+                  <small>Sent only to the Skynet server connection API. It is never saved or prefilled by this browser.</small>
                 </div>
                 <div class="field">
                   <label for="wandb-base-url">Base URL</label>
@@ -1693,7 +1693,7 @@
                 </div>
                 <label class="check-field credential-persistence span-4">
                   <input id="wandb-remember" type="checkbox" checked>
-                  <span><strong>Remember in this device credential store</strong><small>Turn off to keep the API key in backend session memory only.</small></span>
+                  <span><strong>Remember in the Skynet server credential store</strong><small>Turn off to keep the API key in backend session memory only.</small></span>
                 </label>
               </div>
               <p id="wandb-connection-detail" class="tracking-connection-detail" role="status" aria-live="polite">Connection status has not been loaded.</p>
@@ -1736,7 +1736,7 @@
                 </label>
                 <label class="check-field credential-persistence span-4">
                   <input id="mlflow-remember" type="checkbox" checked>
-                  <span><strong>Remember in this device credential store</strong><small>Turn off to keep authentication in backend session memory only.</small></span>
+                  <span><strong>Remember in the Skynet server credential store</strong><small>Turn off to keep authentication in backend session memory only.</small></span>
                 </label>
               </div>
               <p id="mlflow-connection-detail" class="tracking-connection-detail" role="status" aria-live="polite">Connection status has not been loaded.</p>
@@ -1780,7 +1780,7 @@
 
           <section class="panel contract-note">
 
-            <p>The browser never stores or prefills secrets. Remembering a credential saves it in this device's backend credential store; otherwise it stays in backend session memory. Disconnect removes session and saved-device credentials. Environment credentials remain managed outside Skynet.</p>
+            <p>The browser never stores or prefills secrets. Remembering a credential saves it in your workspace's secure store on the Skynet server; otherwise it stays in server session memory. Disconnect removes that workspace's session and saved credentials. Environment credentials remain managed outside Skynet.</p>
           </section>
         </div>
       </section>

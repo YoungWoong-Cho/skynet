@@ -12225,8 +12225,8 @@ function renderTrackingDraftNotice(provider) {
 
 function trackingCredentialSourceText(source) {
   const normalized = String(source || "none").toLowerCase();
-  if (normalized === "credential_store") return "credential_store (saved on this device)";
-  if (normalized === "keychain") return "keychain (saved on this device)";
+  if (normalized === "credential_store") return "credential_store (saved on the Skynet server)";
+  if (normalized === "keychain") return "keychain (saved on the Skynet server)";
   if (normalized === "session") return "session (backend memory only)";
   if (normalized === "environment") return "environment (managed outside Skynet)";
   return normalized;
