@@ -34,6 +34,7 @@ SESSION_STATES = (
     "FAILED",
     "CANCELLED",
 )
+_CAPTURE_OUTCOME_STATES = frozenset({"CAPTURED", "COMPLETED", "FAILED", "CANCELLED"})
 
 COLLECTION_SCHEMA = """
 CREATE TABLE IF NOT EXISTS collection_adapters (
@@ -256,7 +257,7 @@ class CollectionLauncherStep(BaseModel):
 class CollectionLauncher(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    steps: list[CollectionLauncherStep] = Field(min_length=1)
+    steps: list[CollectionLauncherStep] = Field(default_factory=list)
     operator_steps: list[CollectionLauncherStep] = Field(default_factory=list)
     environment: dict[str, str] = Field(default_factory=dict)
     environment_operations: list[EnvironmentOperation] = Field(default_factory=list)
@@ -301,6 +302,8 @@ class CollectionAdapterManifest(BaseModel):
         if len(capability_ids) != len(set(capability_ids)):
             raise ValueError("capability declaration IDs must be unique")
         if self.runnable:
+            if not self.launcher.steps:
+                raise ValueError("runnable adapters require at least one launcher step")
             unresolved = [
                 stream.name
                 for stream in self.streams
@@ -1071,6 +1074,9 @@ class CollectionStore:
         *,
         details: Mapping[str, Any],
         error: Mapping[str, Any] | None = None,
+        scheduler: bool = False,
+        expected_status: str | None = None,
+        preserve_outcome: bool = False,
     ) -> dict[str, Any]:
         if new_status not in SESSION_STATES:
             raise ValueError("invalid collection session state")
@@ -1088,65 +1094,135 @@ class CollectionStore:
             ).fetchone()
             if row is None:
                 raise KeyError("Collection session not found")
-            fields = {
-                "status": new_status,
-                "error_json": canonical_json(error) if error else None,
-                "updated_at": now,
-                **timestamps,
-            }
-            assignments = ", ".join(f"{key} = ?" for key in fields)
-            connection.execute(
-                f"UPDATE collection_sessions SET {assignments} WHERE id = ?",
-                (*fields.values(), session_id),
-            )
-            self._insert_event(
-                connection,
-                session_id,
-                "STATUS_CHANGED",
-                row["status"],
-                new_status,
-                details,
-            )
+            if preserve_outcome and row["status"] in _CAPTURE_OUTCOME_STATES:
+                result = self.get_session(session_id)
+                assert result is not None
+                return result
+            if expected_status is not None and row["status"] != expected_status:
+                if row["status"] == new_status:
+                    result = self.get_session(session_id)
+                    assert result is not None
+                    return result
+                raise ValueError(
+                    f"Collection session is {row['status']}; expected {expected_status} before {new_status}."
+                )
+            # Scheduler observations cannot undo an operator decision or a
+            # completed capture. Check inside the transaction to cover a refresh
+            # racing completion/cancellation, not only the service's old snapshot.
+            if scheduler and row["status"] in _CAPTURE_OUTCOME_STATES:
+                last = connection.execute(
+                    "SELECT details_json FROM collection_session_events "
+                    "WHERE session_id = ? AND event_type = 'SCHEDULER_OBSERVED' "
+                    "ORDER BY created_at DESC, rowid DESC LIMIT 1", (session_id,),
+                ).fetchone()
+                observation = {**details, "scheduler_status": new_status}
+                if last is None or last["details_json"] != canonical_json(observation):
+                    self._insert_event(
+                        connection, session_id, "SCHEDULER_OBSERVED",
+                        row["status"], row["status"], observation,
+                    )
+            else:
+                fields = {
+                    "status": new_status,
+                    "error_json": canonical_json(error) if error else None,
+                    "updated_at": now,
+                    **timestamps,
+                }
+                assignments = ", ".join(f"{key} = ?" for key in fields)
+                connection.execute(
+                    f"UPDATE collection_sessions SET {assignments} WHERE id = ?",
+                    (*fields.values(), session_id),
+                )
+                self._insert_event(
+                    connection,
+                    session_id,
+                    "STATUS_CHANGED",
+                    row["status"],
+                    new_status,
+                    details,
+                )
         result = self.get_session(session_id)
         assert result is not None
         return result
 
-    def record_registered_capture(
-        self, session_id: str, *, resource_id: str, version_id: str
+    def complete_registered_capture(
+        self, session: Mapping[str, Any], storage: CollectionStorage,
+        request: CollectionCompleteRequest,
     ) -> dict[str, Any]:
-        now = utc_now()
+        """Publish the registry version and capture outcome in one transaction."""
+        session_id = session["id"]
+        target = storage.registration
+        assert target is not None
+        registered = False
         with self.database.transaction() as connection:
-            row = connection.execute(
+            current = connection.execute(
                 "SELECT status, registered_version_id FROM collection_sessions WHERE id = ?",
                 (session_id,),
             ).fetchone()
-            if row is None:
+            if current is None:
                 raise KeyError("Collection session not found")
-            if row["registered_version_id"]:
-                if row["registered_version_id"] != version_id:
-                    raise ValueError("session is already registered to another data version")
-                result = self.get_session(session_id)
-                assert result is not None
-                return result
-            if row["status"] != "CAPTURED":
-                raise ValueError("only a captured session can be completed")
-            connection.execute(
-                "UPDATE collection_sessions SET status = 'COMPLETED', "
-                "registered_resource_id = ?, registered_version_id = ?, "
-                "completed_at = ?, updated_at = ? WHERE id = ?",
-                (resource_id, version_id, now, now, session_id),
-            )
-            self._insert_event(
-                connection,
-                session_id,
-                "RAW_CAPTURE_REGISTERED",
-                "CAPTURED",
-                "COMPLETED",
-                {"resource_id": resource_id, "version_id": version_id},
-            )
+            version_id = current["registered_version_id"]
+            if not version_id:
+                if current["status"] != "CAPTURED":
+                    raise ValueError("only a captured session can be completed")
+                resource = connection.execute(
+                    "SELECT * FROM data_resources WHERE provider = ? AND namespace = ? AND name = ?",
+                    (target.provider, target.namespace, target.name),
+                ).fetchone()
+                if resource is None:
+                    resource = self.database._insert_data_resource(
+                        connection, provider=target.provider, namespace=target.namespace,
+                        name=target.name, kind=target.kind,
+                        description="Native raw captures registered by collection sessions",
+                        metadata={"collection_schema_version": COLLECTION_SCHEMA_VERSION,
+                                  **request.resource_metadata},
+                    )
+                elif resource["kind"] != target.kind:
+                    raise ValueError("existing data resource kind does not match registration target")
+                elif resource["archived_at"] is not None:
+                    raise ValueError("cannot register capture to an archived data resource")
+                revision = request.revision or request.manifest_sha256.lower()
+                version = connection.execute(
+                    "SELECT * FROM data_resource_versions WHERE resource_id = ? AND revision = ? AND format = ?",
+                    (resource["id"], revision, storage.native_format),
+                ).fetchone()
+                if version is not None:
+                    if (version["path"] != storage.output_path
+                            or version["manifest_sha256"] != request.manifest_sha256.lower()):
+                        raise ValueError("existing immutable data version does not match this capture")
+                else:
+                    version = self.database._insert_data_resource_version(
+                        connection, resource["id"], revision=revision, format=storage.native_format,
+                        path=storage.output_path, manifest_sha256=request.manifest_sha256,
+                        size_bytes=request.size_bytes, source_uri=f"collection:{session_id}",
+                        metadata={
+                            "collection_session_id": session_id,
+                            "collection_manifest_sha256": session["manifest_sha256"],
+                            "adapter_manifest_sha256": session["adapter_snapshot"]["manifest_sha256"],
+                            "streams": session["adapter_snapshot"]["manifest"]["streams"],
+                            "calibration": session["calibration_snapshot"],
+                            "capture": session["capture_snapshot"],
+                            "native_raw_preserved": True, **request.version_metadata,
+                        },
+                    )
+                version_id = version["id"]
+                now = utc_now()
+                connection.execute(
+                    "UPDATE collection_sessions SET status = 'COMPLETED', "
+                    "registered_resource_id = ?, registered_version_id = ?, "
+                    "completed_at = ?, updated_at = ? WHERE id = ?",
+                    (resource["id"], version_id, now, now, session_id),
+                )
+                self._insert_event(
+                    connection, session_id, "RAW_CAPTURE_REGISTERED", "CAPTURED", "COMPLETED",
+                    {"resource_id": resource["id"], "version_id": version_id},
+                )
+                registered = True
         result = self.get_session(session_id)
         assert result is not None
-        return result
+        version = self.database.get_data_resource_version(version_id)
+        assert version is not None
+        return {"session": result, "version": version, "registered": registered}
 
 
 _MISSING = object()
@@ -1576,7 +1652,9 @@ class CollectionService:
             return session
         slurm_state = status.get("State", "UNKNOWN").split("+", 1)[0].upper()
         mapped = _SLURM_STATE_MAP.get(slurm_state)
-        if mapped is None or mapped == session["status"]:
+        if mapped is None or (
+            mapped == session["status"] and session["status"] not in _CAPTURE_OUTCOME_STATES
+        ):
             return session
         error = None
         if mapped == "FAILED":
@@ -1591,6 +1669,7 @@ class CollectionService:
             mapped,
             details={"gateway": gateway, "slurm": status},
             error=error,
+            scheduler=True,
         )
 
     def read_log(self, session_id: str, stream: str, lines: int) -> str:
@@ -1611,6 +1690,8 @@ class CollectionService:
         session = self.store.get_session(session_id)
         if session is None:
             raise KeyError("Collection session not found")
+        if session["status"] in _CAPTURE_OUTCOME_STATES:
+            return session
         if not session["slurm_job_id"]:
             raise ValueError("the collection session has no Slurm job")
         actual_gateway = self.cluster.cancel(
@@ -1620,6 +1701,7 @@ class CollectionService:
             session_id,
             "CANCELLED",
             details={"gateway": actual_gateway, "job_id": session["slurm_job_id"]},
+            preserve_outcome=True,
         )
 
     def report_error(
@@ -1643,78 +1725,20 @@ class CollectionService:
                 session["registered_version_id"]
             )
             return {"session": session, "version": version, "registered": False}
+        if session["status"] == "COMPLETED":
+            return {"session": session, "version": None, "registered": False}
         if session["status"] != "CAPTURED":
             raise ValueError("only a captured session can be completed")
         storage = CollectionStorage.model_validate(session["storage_snapshot"])
         if storage.registration is None:
-            raise ValueError("storage.registration is required to register raw capture")
-        target = storage.registration
-        matches = self.database.list_data_resources(
-            provider=target.provider,
-            namespace=target.namespace,
-            include_archived=True,
-        )
-        resource = next((item for item in matches if item["name"] == target.name), None)
-        if resource is None:
-            resource = self.database.create_data_resource(
-                provider=target.provider,
-                namespace=target.namespace,
-                name=target.name,
-                kind=target.kind,
-                description=f"Native raw captures registered by collection sessions",
-                metadata={
-                    "collection_schema_version": COLLECTION_SCHEMA_VERSION,
-                    **request.resource_metadata,
-                },
+            completed = self.store.update_runtime_status(
+                session_id, "COMPLETED",
+                details={"completion": request.model_dump(mode="json"), "registered": False},
+                expected_status="CAPTURED",
             )
-        elif resource["kind"] != target.kind:
-            raise ValueError("existing data resource kind does not match registration target")
-        elif resource["archived_at"] is not None:
-            raise ValueError("cannot register capture to an archived data resource")
+            return {"session": completed, "version": None, "registered": False}
+        return self.store.complete_registered_capture(session, storage, request)
 
-        resource = self.database.get_data_resource(resource["id"])
-        assert resource is not None
-        revision = request.revision or request.manifest_sha256.lower()
-        version = next(
-            (
-                item
-                for item in resource["versions"]
-                if item["revision"] == revision and item["format"] == storage.native_format
-            ),
-            None,
-        )
-        if version is not None:
-            if (
-                version["path"] != storage.output_path
-                or version["manifest_sha256"] != request.manifest_sha256.lower()
-            ):
-                raise ValueError("existing immutable data version does not match this capture")
-        else:
-            version = self.database.create_data_resource_version(
-                resource["id"],
-                revision=revision,
-                format=storage.native_format,
-                path=storage.output_path,
-                manifest_sha256=request.manifest_sha256,
-                size_bytes=request.size_bytes,
-                source_uri=f"collection:{session_id}",
-                metadata={
-                    "collection_session_id": session_id,
-                    "collection_manifest_sha256": session["manifest_sha256"],
-                    "adapter_manifest_sha256": session["adapter_snapshot"][
-                        "manifest_sha256"
-                    ],
-                    "streams": session["adapter_snapshot"]["manifest"]["streams"],
-                    "calibration": session["calibration_snapshot"],
-                    "capture": session["capture_snapshot"],
-                    "native_raw_preserved": True,
-                    **request.version_metadata,
-                },
-            )
-        completed = self.store.record_registered_capture(
-            session_id, resource_id=resource["id"], version_id=version["id"]
-        )
-        return {"session": completed, "version": version, "registered": True}
 
 
 __all__ = [

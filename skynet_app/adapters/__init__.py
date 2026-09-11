@@ -3360,6 +3360,9 @@ def builtin_adapter_manifests() -> list[AdapterManifest]:
                         ],
                         capsule_files={
                             "adapter-support/openpi-libero.py": OPENPI_LIBERO_BRIDGE_SOURCE,
+                            "adapter-support/evaluation_video.py": (
+                                Path(__file__).parent / "evaluation_video.py"
+                            ).read_text(),
                         },
                     ),
                 ),
@@ -3489,6 +3492,12 @@ def apply_pinned_adapter_plan_compatibility(
 ) -> tuple[AdapterPlan, dict[str, Any] | None]:
     """Overlay an allowlisted control-plane integration on an exact pinned plan."""
 
+    from .egoverse_models import execution_compatibility_error
+    compatibility_error = execution_compatibility_error(spec.source.model_dump(mode="python"), spec.native.config)
+    if compatibility_error:
+        return pinned_plan.model_copy(update={
+            "blockers": list(dict.fromkeys([*pinned_plan.blockers, compatibility_error]))
+        }, deep=True), None
     raw_manifest = spec.source.adapter_manifest
     expected = spec.source.adapter_manifest_sha256
     if raw_manifest is None or not expected:
@@ -3514,6 +3523,10 @@ def apply_pinned_adapter_plan_compatibility(
 
 
 def resolve_adapter_plan(spec: ExperimentSpec) -> AdapterPlan:
+    from .egoverse_models import execution_compatibility_error
+    compatibility_error = execution_compatibility_error(spec.source.model_dump(mode="python"), spec.native.config)
+    if compatibility_error:
+        raise AdapterError(compatibility_error)
     if spec.source.adapter_manifest is not None:
         raw_manifest = spec.source.adapter_manifest
         manifest = AdapterManifest.model_validate(raw_manifest)
@@ -3541,6 +3554,13 @@ def resolve_adapter_evaluation_plan(
     context: dict[str, Any],
     manifest: AdapterManifest | dict[str, Any] | None = None,
 ) -> AdapterPlan:
+    from .egoverse_models import execution_compatibility_error
+    source = spec.source.model_dump(mode="python")
+    if manifest is not None:
+        source["adapter_manifest"] = manifest.model_dump(mode="python") if isinstance(manifest, AdapterManifest) else manifest
+    compatibility_error = execution_compatibility_error(source, spec.native.config)
+    if compatibility_error:
+        raise AdapterError(compatibility_error)
     if manifest is None:
         if spec.source.adapter_manifest is None:
             raise AdapterError("evaluation resolution requires a versioned adapter manifest")

@@ -15,11 +15,35 @@ import zarr
 
 from skynet_app.database import Database
 from skynet_app.live_xr_review import LiveReviewService
-from skynet_app.policy_exports import PolicyExportService, digest
+from skynet_app.policy_exports import PolicyExportService, digest, conversion_failure
+from policy_export_offline import prepare as offline_prepare, download as offline_download
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "ops/xr"))
 from images import ImageWriter, ImageRecorder, joint_layout
+
+
+def test_worker_failure_distinguishes_progress_from_termination():
+    log = '\n'.join(['{"episodes_done": 36, "episodes_total": 51}',
+                     'resource_tracker.py: UserWarning: 1 leaked semaphore', 'warnings.warn("cleanup")'])
+    message = conversion_failure(-15, log)
+    assert "SIGTERM" in message and "36/51 episodes" in message
+    assert "without an exception report" in message
+    assert "leaked semaphore" not in message
+    assert "ModuleNotFoundError: missing" in conversion_failure(1, log + '\nModuleNotFoundError: missing')
+
+
+def test_preparation_retries_never_rename_existing_dataset(setup):
+    service, session, _ = setup
+    first = service.create(session["id"], "dp", "Original dataset")
+    before = service.database.get_data_resource(first["resource_id"])
+    service.update(first["id"], state="FAILED", error="Interrupted")
+    second = service.create(session["id"], "act", "Accidental rename", first["resource_id"])
+    after = service.database.get_data_resource(first["resource_id"])
+    assert second["resource_id"] == first["resource_id"]
+    assert second["name"] == "Original dataset"
+    assert after["metadata"] == before["metadata"]
+    assert after["description"] == before["description"]
 
 
 def capture(root, index=0, both=False):
@@ -61,7 +85,20 @@ def setup(tmp_path, monkeypatch):
     live = SimpleNamespace(root=ROOT, database=Database(tmp_path / "db.sqlite"), get=lambda identifier: session, list=lambda: [session], transport=lambda _: Transport())
     service = PolicyExportService(LiveReviewService(live, root=tmp_path / "reviews"), root=tmp_path / "exports")
     monkeypatch.setattr(service, "dispatch", lambda _: None)
-    return service, session, source
+    # Exercise the actual converter locally against tiny synthetic recordings.
+    # Production prepare() exclusively dispatches the remote CPU lifecycle, which
+    # has separate fake-cluster tests; no network belongs in these format tests.
+    monkeypatch.setattr(service, "prepare", offline_prepare.__get__(service))
+    monkeypatch.setattr(service, "download", offline_download.__get__(service), raising=False)
+    service.processes = {}
+    create = service.create
+    def offline_create(*args, **kwargs):
+        explicit_target = "target" in kwargs
+        job = create(*args, **kwargs)
+        return job if explicit_target else service.update(job["id"], target="local")
+    monkeypatch.setattr(service, "create", offline_create)
+    yield service, session, source
+    service.stop()
 
 
 @pytest.mark.parametrize("format", ["xpolicylab", "dp", "act"])
@@ -153,12 +190,15 @@ def test_checksum_failure_does_not_register_a_version_and_can_retry(setup):
     assert service.create(session["id"], "dp", "Retry")["id"] != job["id"]
 
 
-def test_restart_marks_interrupted_job_failed_without_publishing(setup):
+def test_restart_resumes_preparation_without_publishing_unverified_data(setup, monkeypatch):
     service, session, _ = setup
     job = service.create(session["id"], "dp", "Interrupted")
     service.update(job["id"], state="RUNNING")
+    resumed = []
+    monkeypatch.setattr(service, "dispatch", resumed.append)
     service.start()
-    assert service.get(job["id"])["state"] == "FAILED"
+    assert resumed == [job["id"]]
+    assert service.get(job["id"])["state"] == "RUNNING"
     with pytest.raises(ValueError, match="not complete"):
         service.artifact(job["id"], "dataset.zip")
     with pytest.raises(KeyError):
@@ -276,10 +316,14 @@ def test_cluster_copy_checks_the_declared_observation_mode(setup, monkeypatch, f
         if "--verify-only" in command:
             return json.dumps(receipt)
         return json.dumps(dict(verified=True, manifest_sha256=job["manifest_sha256"]))
-    service.cluster = SimpleNamespace(ssh=ssh, write_capsule_file=lambda *args: None)
+    capsules = {}
+    service.cluster = SimpleNamespace(ssh=ssh, write_capsule_file=lambda job, name, content, gateway: capsules.update({name: content}))
     monkeypatch.setattr("skynet_app.policy_exports.upload_capture", lambda *args, **kwargs: "/upload/dataset.zip")
     location = service._transfer_host(job, "test-host")
     assert location["kind"] == "cluster"
+    frozen = (service.root / job["id"] / "worker/training_parallel.py").read_text()
+    assert capsules["adapter-support/training_parallel.py"] == frozen
+    assert "class TrainingContext" in frozen
     if format != "act":
         assert f"--observation-mode {mode}" in commands[-1]
     receipt["observation_mode"] = "state" if mode == "rgb" else "rgb"

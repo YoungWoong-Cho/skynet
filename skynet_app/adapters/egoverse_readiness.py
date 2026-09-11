@@ -21,7 +21,7 @@ def main():
         import torch
         import numpy as np
         import imageio.v2 as imageio
-        for module in ("egomimic.algo.act", "egomimic.algo.hpt", "egomimic.models.diffusion_policy",
+        for module in ("egomimic.algo.act", "egomimic.algo.hpt",
                        "egomimic.pl_utils.pl_model", "egomimic.rldb.zarr.zarr_dataset_multi"):
             importlib.import_module(module)
         checks["native_imports"] = True

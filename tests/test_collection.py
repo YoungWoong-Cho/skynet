@@ -9,6 +9,7 @@ from skynet_app.cluster_runtime import Submission
 from skynet_app.collection import (
     CollectionAdapterManifest,
     CollectionCompleteRequest,
+    CollectionErrorRequest,
     CollectionService,
     CollectionSessionCreate,
     CollectionValidationError,
@@ -53,6 +54,111 @@ class FakeCluster:
 
     def cancel(self, job_id, gateway="auto"):
         return "sky2"
+
+
+@pytest.mark.parametrize("outcome,scheduler_state", [("FAILED", "COMPLETED"), ("CANCELLED", "FAILED"), ("COMPLETED", "COMPLETED")])
+def test_refresh_preserves_operator_outcome_and_records_scheduler_evidence(tmp_path, outcome, scheduler_state):
+    cluster = FakeCluster()
+    service = CollectionService(Database(tmp_path / "test.db"), cluster, seed=False)
+    adapter = service.store.create_adapter(adapter_manifest())
+    session = service.store.create_session(session_request(adapter["id"]))
+    service.prepare(session["id"])
+    service.submit(session["id"])
+    if outcome == "FAILED":
+        service.report_error(session["id"], CollectionErrorRequest(code="OPERATOR_REPORTED", message="Capture invalid"))
+    elif outcome == "CANCELLED":
+        service.cancel(session["id"])
+    else:
+        cluster.state = "COMPLETED"
+        service.refresh(session["id"])
+        service.complete(session["id"], CollectionCompleteRequest(manifest_sha256="b" * 64))
+    before = service.store.get_session(session["id"])
+    cluster.state = scheduler_state
+    result = service.refresh(session["id"])
+    assert result["status"] == outcome
+    assert result["error"] == before["error"]
+    event = result["events"][-1]
+    assert event["event_type"] == "SCHEDULER_OBSERVED"
+    assert event["old_status"] == event["new_status"] == outcome
+    assert event["details"]["slurm"]["State"] == scheduler_state
+    assert len(service.refresh(session["id"])["events"]) == len(result["events"])
+
+
+def test_complete_without_registration_is_terminal_and_idempotent(tmp_path):
+    service = CollectionService(Database(tmp_path / "test.db"), FakeCluster(), seed=False)
+    adapter = service.store.create_adapter(adapter_manifest())
+    request = session_request(adapter["id"])
+    request.storage.registration = None
+    session = service.store.create_session(request)
+    service.store.update_runtime_status(session["id"], "CAPTURED", details={})
+    completion = CollectionCompleteRequest(manifest_sha256="b" * 64, size_bytes=0)
+    result = service.complete(session["id"], completion)
+    assert result["session"]["status"] == "COMPLETED"
+    assert result["registered"] is False and result["version"] is None
+    assert result["session"]["events"][-1]["details"]["completion"]["manifest_sha256"] == "b" * 64
+    assert service.complete(session["id"], completion) == result
+    assert service.database.list_data_resources() == []
+
+
+def test_concurrent_unregistered_completion_writes_one_outcome(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    service = CollectionService(Database(tmp_path / "test.db"), FakeCluster(), seed=False)
+    adapter = service.store.create_adapter(adapter_manifest())
+    request = session_request(adapter["id"])
+    request.storage.registration = None
+    session = service.store.create_session(request)
+    service.store.update_runtime_status(session["id"], "CAPTURED", details={})
+    original_get = service.store.get_session
+    barrier, local = threading.Barrier(2), threading.local()
+
+    def get(identifier):
+        result = original_get(identifier)
+        if not getattr(local, "loaded", False):
+            local.loaded = True
+            barrier.wait(timeout=3)
+        return result
+
+    monkeypatch.setattr(service.store, "get_session", get)
+    completion = CollectionCompleteRequest(manifest_sha256="b" * 64)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(service.complete, session["id"], completion) for _ in range(2)]
+        results = [future.result(timeout=5) for future in futures]
+    assert results[0] == results[1]
+    events = results[0]["session"]["events"]
+    assert len([event for event in events if event["new_status"] == "COMPLETED"]) == 1
+    assert service.database.list_data_resources() == []
+
+
+def test_unregistered_completion_cannot_overwrite_concurrent_cancellation(tmp_path, monkeypatch):
+    service = CollectionService(Database(tmp_path / "test.db"), FakeCluster(), seed=False)
+    adapter = service.store.create_adapter(adapter_manifest())
+    request = session_request(adapter["id"])
+    request.storage.registration = None
+    session = service.store.create_session(request)
+    service.store.update_runtime_status(session["id"], "CAPTURED", details={})
+    original_update = service.store.update_runtime_status
+
+    def update(identifier, state, **kwargs):
+        original_update(identifier, "CANCELLED", details={"operator": "cancelled"})
+        return original_update(identifier, state, **kwargs)
+
+    monkeypatch.setattr(service.store, "update_runtime_status", update)
+    with pytest.raises(ValueError, match="session is CANCELLED"):
+        service.complete(session["id"], CollectionCompleteRequest(manifest_sha256="b" * 64))
+    result = service.store.get_session(session["id"])
+    assert result["status"] == "CANCELLED"
+    assert not any(event["new_status"] == "COMPLETED" for event in result["events"])
+
+
+def test_empty_launcher_is_valid_only_for_non_runnable_draft():
+    draft = adapter_manifest(runnable=False).model_dump()
+    draft["launcher"]["steps"] = []
+    assert CollectionAdapterManifest.model_validate(draft).launcher.steps == []
+    draft["runnable"] = True
+    with pytest.raises(ValueError, match="at least one launcher step"):
+        CollectionAdapterManifest.model_validate(draft)
 
 
 def adapter_manifest(*, display_name="Test collector", runnable=True):
@@ -381,3 +487,103 @@ def test_bundled_templates_can_be_reviewed_without_overwriting_custom_setup(tmp_
     assert service.store.get_adapter(original["id"])["display_name"] == "Operator setup"
     service.store.update_adapter(original["id"], CollectionAdapterManifest.model_validate(template["manifest"]))
     assert service.store.get_session(session["id"])["adapter_snapshot"] == session["adapter_snapshot"]
+
+
+def test_concurrent_registered_completion_is_atomic_across_service_instances(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    path = tmp_path / 'test.db'
+    first = CollectionService(Database(path), FakeCluster(), seed=False)
+    second = CollectionService(Database(path), FakeCluster(), seed=False)
+    adapter = first.store.create_adapter(adapter_manifest())
+    session = first.store.create_session(session_request(adapter['id']))
+    first.store.update_runtime_status(session['id'], 'CAPTURED', details={})
+    barrier = threading.Barrier(2)
+
+    def synchronized_read(original):
+        local = threading.local()
+        def get(identifier):
+            result = original(identifier)
+            if not getattr(local, 'loaded', False):
+                local.loaded = True
+                barrier.wait(timeout=3)
+            return result
+        return get
+
+    for service in (first, second):
+        monkeypatch.setattr(service.store, 'get_session', synchronized_read(service.store.get_session))
+    completion = CollectionCompleteRequest(manifest_sha256='b' * 64)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(service.complete, session['id'], completion) for service in (first, second)]
+        results = [future.result(timeout=5) for future in futures]
+    assert results[0]['session'] == results[1]['session']
+    assert results[0]['version'] == results[1]['version']
+    assert sum(result['registered'] for result in results) == 1
+    resources = first.database.list_data_resources()
+    assert len(resources) == 1 and resources[0]['version_count'] == 1
+    assert len([event for event in results[0]['session']['events'] if event['event_type'] == 'RAW_CAPTURE_REGISTERED']) == 1
+
+
+def test_registered_completion_preserves_cancellation_without_orphan_registry_rows(tmp_path, monkeypatch):
+    service = CollectionService(Database(tmp_path / 'test.db'), FakeCluster(), seed=False)
+    adapter = service.store.create_adapter(adapter_manifest())
+    session = service.store.create_session(session_request(adapter['id']))
+    service.store.update_runtime_status(session['id'], 'CAPTURED', details={})
+    original = service.store.complete_registered_capture
+
+    def complete(*args):
+        service.store.update_runtime_status(session['id'], 'CANCELLED', details={'operator':'cancelled'})
+        return original(*args)
+
+    monkeypatch.setattr(service.store, 'complete_registered_capture', complete)
+    with pytest.raises(ValueError, match='only a captured session'):
+        service.complete(session['id'], CollectionCompleteRequest(manifest_sha256='b' * 64))
+    assert service.store.get_session(session['id'])['status'] == 'CANCELLED'
+    assert service.database.list_data_resources() == []
+
+
+@pytest.mark.parametrize('registered', [True, False])
+def test_late_cancel_acknowledgement_cannot_overwrite_completed_capture(tmp_path, registered):
+    cluster = FakeCluster()
+    service = CollectionService(Database(tmp_path / 'test.db'), cluster, seed=False)
+    adapter = service.store.create_adapter(adapter_manifest())
+    request = session_request(adapter['id'])
+    if not registered:
+        request.storage.registration = None
+    session = service.store.create_session(request)
+    service.prepare(session['id'])
+    service.submit(session['id'])
+    cancelled = []
+
+    def cancel(*args):
+        cancelled.append(args)
+        service.store.update_runtime_status(session['id'], 'CAPTURED', details={})
+        service.complete(session['id'], CollectionCompleteRequest(manifest_sha256='b' * 64))
+        return 'sky2'
+
+    cluster.cancel = cancel
+    result = service.cancel(session['id'])
+    assert result['status'] == 'COMPLETED'
+    assert bool(result['registered_version_id']) is registered
+    assert service.cancel(session['id']) == result
+    assert len(cancelled) == 1
+
+
+def test_failed_registered_completion_rolls_back_registry_publication(tmp_path, monkeypatch):
+    service = CollectionService(Database(tmp_path / 'test.db'), FakeCluster(), seed=False)
+    adapter = service.store.create_adapter(adapter_manifest())
+    session = service.store.create_session(session_request(adapter['id']))
+    service.store.update_runtime_status(session['id'], 'CAPTURED', details={})
+    original = service.store._insert_event
+
+    def event(*args):
+        if args[2] == 'RAW_CAPTURE_REGISTERED':
+            raise RuntimeError('Synthetic event persistence failure')
+        return original(*args)
+
+    monkeypatch.setattr(service.store, '_insert_event', event)
+    with pytest.raises(RuntimeError, match='event persistence failure'):
+        service.complete(session['id'], CollectionCompleteRequest(manifest_sha256='b' * 64))
+    assert service.store.get_session(session['id'])['status'] == 'CAPTURED'
+    assert service.database.list_data_resources() == []

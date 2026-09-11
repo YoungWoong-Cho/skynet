@@ -25,7 +25,7 @@ from typing import Any, Mapping
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse, StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from .adapters import (
     AdapterPlan,
@@ -38,7 +38,9 @@ from .adapters import (
     resolve_adapter_evaluation_plan,
     resolve_adapter_plan,
     resolve_gpu_count,
+    resolve_gpu_type,
 )
+from .gpu_quota import account_gpu_quota, idle_partition_quota
 from .cluster_config import CLUSTER
 from .cluster_runtime import (
     ClusterClient,
@@ -49,6 +51,7 @@ from .cluster_runtime import (
     approved_operator_environment,
 )
 from .data_imports import build_huggingface_import_job
+from .data_paths import validate_mount_path
 from .data_preview import build_data_bundle_preview, resolve_data_bundle_preview_media
 from .credential_store import (
     CredentialStore,
@@ -78,6 +81,7 @@ from .slurm import (
 )
 from .source_control import SourceDiscovery, resolve_runtime
 from .source_metadata_cache import SourceMetadataStore
+from .training_metrics import INTERNAL_PROGRESS_METRICS, is_scalar, recorded_scalar_metrics
 from .source_validation import (
     CACHE_KIND as REPOSITORY_ARGUMENT_VALIDATION_CACHE_KIND,
     repository_argument_validation_cache_parameters,
@@ -318,12 +322,7 @@ def parse_declared_training_progress(
             completed += source.completed_offset
             if completed > total:
                 continue
-            metrics = {
-                target: float(value)
-                for key, target in source.metrics.items()
-                if isinstance((value := row.get(key)), (int, float))
-                and not isinstance(value, bool) and math.isfinite(value)
-            }
+            metrics = recorded_scalar_metrics(row, source.metrics)
             records.append({
                 "completed": completed, "total": total,
                 "elapsed_seconds": None, "metrics": metrics,
@@ -1236,13 +1235,14 @@ def _parse_native(lines: list[str]) -> tuple[dict[str, Any], dict[str, Any], lis
 
 def _sweep_from_frontend(raw: str | None) -> dict[str, Any]:
     if not raw:
-        return {"strategy": "grid", "axes": {}, "seeds": [42], "max_parallel": 2}
+        return {"strategy": "grid", "axes": {}, "max_parallel": 2}
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as error:
         raise ValueError(f"sweep definition must be JSON: {error.msg}") from error
     if not isinstance(parsed, dict):
         raise ValueError("sweep definition must be a JSON object")
+    explicit_seeds = "seed" in parsed or "seeds" in parsed
     seeds = parsed.pop("seed", parsed.pop("seeds", [42]))
     if not isinstance(seeds, list):
         seeds = [seeds]
@@ -1256,7 +1256,7 @@ def _sweep_from_frontend(raw: str | None) -> dict[str, Any]:
     return {
         "strategy": "grid",
         "axes": axes,
-        "seeds": [int(seed) for seed in seeds],
+        **({"seeds": seeds} if explicit_seeds else {}),
         "max_parallel": 2,
         "confirmation_threshold": 20,
     }
@@ -1321,6 +1321,18 @@ class HuggingFaceImportRequest(BaseModel):
     bundle_version: str = Field(min_length=1, max_length=255)
     gateway: str = "auto"
     queue: str = "overcap"
+    cpus: int = Field(default=8, ge=1, le=64)
+    memory_gb: int = Field(default=32, ge=1, le=512)
+    time_limit: str = "04:00:00"
+
+    @field_validator("time_limit")
+    @classmethod
+    def validate_import_time(cls, value: str) -> str:
+        value = value.strip()
+        seconds = parse_slurm_duration(value)
+        if not 60 <= seconds <= 24 * 60 * 60:
+            raise ValueError("Import time limit must be between 1 minute and 24 hours")
+        return value
 
     @field_validator("revision")
     @classmethod
@@ -1376,6 +1388,12 @@ class DataBundleAssignmentRequest(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
 
+    @field_validator("mount_path")
+    @classmethod
+    def validate_relative_mount(cls, value: str | None) -> str | None:
+        return validate_mount_path(value)
+
+
 class DataBundleCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     version: str = Field(min_length=1, max_length=255)
@@ -1398,6 +1416,8 @@ class PipelineService:
         self.credential_store = credential_store or KeyringCredentialStore()
         self.credentials = session_credentials or SESSION_CREDENTIALS
         self._credential_restore_lock = threading.Lock()
+        self._tracking_connection_lock = threading.RLock()
+        self._tracking_connection_revisions = {"mlflow": 0, "wandb": 0}
         self._credentials_restored = False
         self._evaluator_runtime_readiness_lock = threading.Lock()
         self._evaluator_runtime_readiness_cache: dict[
@@ -1408,6 +1428,12 @@ class PipelineService:
         self._reconcile_lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._progress_refresh_lock = threading.Lock()
+        self._progress_refresh_pending: dict[tuple[str, str], int] = {}
+        self._progress_refresh_inflight: set[tuple[str, str]] = set()
+        self._progress_refresh_due: dict[tuple[str, str], float] = {}
+        self._progress_refresh_versions: dict[tuple[str, str], tuple[Any, ...]] = {}
+        self._progress_refresh_workers = 0
         self._seed_registries()
 
     def _seed_registries(self) -> None:
@@ -1425,7 +1451,11 @@ class PipelineService:
         for record in self.database.list_adapter_registry(include_archived=False):
             # Retire only the seeded experiment adapter. Collection adapters use
             # a separate registry; saved experiment versions remain resolvable.
-            if record.get("seed_key") in {"dexverse", "builtin:dexverse", "egoverse", "builtin:egoverse"}:
+            seed_key = str(record.get("seed_key") or "")
+            if seed_key in {"dexverse", "builtin:dexverse", "egoverse", "builtin:egoverse"} or (
+                seed_key.removeprefix("builtin:").startswith("egoverse-")
+                and seed_key.removeprefix("builtin:") not in {"egoverse-act", "egoverse-hpt", "egoverse-pi"}
+            ):
                 self.database.archive_adapter(str(record["id"]))
                 continue
             if not str(record.get("seed_key") or "").startswith("builtin:"):
@@ -1459,6 +1489,8 @@ class PipelineService:
 
     def stop(self) -> None:
         self._stop.set()
+        with self._progress_refresh_lock:
+            self._progress_refresh_pending.clear()
         if self._thread:
             self._thread.join(timeout=3)
 
@@ -2048,6 +2080,10 @@ class PipelineService:
         assignments = bundle.get("assignments") if isinstance(bundle, Mapping) else None
         if not isinstance(assignments, list):
             return canonical
+        for assignment in assignments:
+            if not isinstance(assignment, Mapping):
+                raise ValueError("Dataset bundle assignments must be objects with a role and prepared version.")
+            validate_mount_path(assignment.get("mount_path"))
         if not any(field.data_binding for field in manifest.train.input_fields):
             raise ValueError(
                 "Dataset bundle selection is unsupported by this adapter version: "
@@ -2180,6 +2216,14 @@ class PipelineService:
                     raise ValueError(
                         f"{field.path}: value is not one of the declared choices"
                     )
+
+    @classmethod
+    def _validate_sweep_inputs(cls, spec: ExperimentSpec, manifest: AdapterManifest) -> ExperimentSpec:
+        for variant in expand_sweep(spec):
+            cls._validate_manifest_input_fields(
+                variant.resolved_spec.model_dump(mode="python"), manifest
+            )
+        return spec
 
     @staticmethod
     def _repository_inspection_cache_parameters(
@@ -2378,8 +2422,8 @@ class PipelineService:
             "checkpoint_final_selector": checkpoint.final_selector,
             "remove_training_state_after_success": checkpoint.remove_training_state_after_success,
         }.items():
-            if value is not None:
-                document.setdefault(field, value)
+            if value is not None and _frontend_parameter_is_unset(document.get(field)):
+                document[field] = value
 
         tracking = document.setdefault("tracking", {})
         for field, value in {
@@ -2494,7 +2538,8 @@ class PipelineService:
                     }
                 )
             else:
-                runtime.setdefault("profile", "default")
+                if not runtime.get("profile"):
+                    runtime["profile"] = "default"
             if requested_backend != "uv":
                 runtime.setdefault("bootstrap_uv", False)
             if not runtime.get("resolution"):
@@ -3157,7 +3202,7 @@ class PipelineService:
             canonical.setdefault("resources", {}).setdefault(
                 "queue_policy", CLUSTER.defaults.queue_policy
             )
-            return ExperimentSpec.model_validate(canonical)
+            return self._validate_sweep_inputs(ExperimentSpec.model_validate(canonical), manifest)
 
         requested_hyper = dict(payload.get("hyperparameters") or {})
         explicit_parameters = {
@@ -3424,7 +3469,7 @@ class PipelineService:
         self._validate_manifest_input_fields(canonical, manifest)
         self._validate_repository_input_choices(canonical, source, manifest, gateway)
         self._reject_repository_choice_sweeps(canonical, manifest)
-        return ExperimentSpec.model_validate(canonical)
+        return self._validate_sweep_inputs(ExperimentSpec.model_validate(canonical), manifest)
 
     @staticmethod
     def _project(database: Database, name: str) -> dict[str, Any]:
@@ -3777,8 +3822,10 @@ class PipelineService:
         blockers: list[dict[str, Any]] = []
         argument_validations: list[dict[str, Any]] = []
         for variant in variants:
-            resolved = self._preview_queue(variant.resolved_spec)
+            resolved = variant.resolved_spec
             plan = resolve_adapter_plan(resolved)
+            if not plan.blockers:
+                resolved, _ = self._auto_queue(resolved, plan, resolved.resources.gateway, record_snapshot=False)
             warnings.extend(plan.warnings)
             warnings.extend(plan.todos)
             if plan.blockers:
@@ -3831,23 +3878,37 @@ class PipelineService:
             "resolved_revision": spec.source.revision,
         }
 
-    @staticmethod
-    def _preview_queue(spec: ExperimentSpec) -> ExperimentSpec:
-        if spec.resources.queue_policy != "auto":
-            return spec
-        payload = spec.model_dump(mode="json", by_alias=True)
-        normal_name, normal = next(
-            ((name, queue) for name, queue in CLUSTER.queues.items() if not queue.preemptible),
-            (CLUSTER.defaults.queue_policy, CLUSTER.queue(CLUSTER.defaults.queue_policy)),
+    def _materialize_cleaned_revision(
+        self,
+        revision: Mapping[str, Any],
+        variants: list[dict[str, Any]],
+    ) -> None:
+        """Rebuild draft runs from preserved variants after an explicit Submit."""
+        planned_runs = []
+        for variant in variants:
+            spec = ExperimentSpec.model_validate(variant["resolved_spec_json"])
+            plan = resolve_adapter_plan(spec)
+            planned_runs.append(
+                {
+                    "variant_id": variant["id"],
+                    "resolved_spec_sha256": variant["resolved_spec_sha256"],
+                    "seed": spec.train.seed,
+                    "adapter_name": spec.source.adapter,
+                    "adapter_version": str(spec.source.adapter_version),
+                    "source_commit": spec.source.revision,
+                    "runtime_profile": spec.runtime.profile,
+                    "resolved_config": {
+                        "spec": spec.model_dump(mode="json", by_alias=True),
+                        "plan": plan.model_dump(mode="json"),
+                        "blockers": plan.blockers,
+                    },
+                    "auto_resume": spec.train.checkpoint.auto_resume,
+                    "max_attempts": spec.train.checkpoint.max_attempts,
+                }
+            )
+        self.database.materialize_empty_revision_runs(
+            revision["id"], planned_runs, run_directory_root=f"{WORK_ROOT}/jobs/runs"
         )
-        overflow_name, overflow = next(
-            ((name, queue) for name, queue in CLUSTER.queues.items() if queue.preemptible),
-            (normal_name, normal),
-        )
-        selected = overflow if parse_slurm_duration(spec.resources.time_limit) > normal.max_time_seconds else normal
-        payload["resources"]["account"] = selected.account
-        payload["resources"]["partition"] = selected.partition
-        return ExperimentSpec.model_validate(payload)
 
     def submit_experiment(self, experiment_id: str, gateway: str = "auto") -> dict[str, Any]:
         with self._reconcile_lock:
@@ -3862,6 +3923,9 @@ class PipelineService:
             self._validate_tracking_requirements(
                 ExperimentSpec.model_validate(revision["requested_spec_json"])
             )
+            if not detail["runs"]:
+                self._materialize_cleaned_revision(revision, detail["variants"])
+                detail = self.experiment_detail(experiment_id)
             run_details: list[dict[str, Any]] = []
             candidates: list[tuple[dict[str, Any], dict[str, Any], str]] = []
             for run in detail["runs"]:
@@ -4031,29 +4095,43 @@ class PipelineService:
         )
         try:
             host, output = self.cluster.run_with_fallback(command, gateway, timeout=20)
-            row = next(
-                (
-                    [cell.strip() for cell in line.strip().strip("|").split("|")]
-                    for line in output.splitlines()
-                    if line.lstrip().startswith("|") and line.strip().strip("|").split("|")[0].strip() == normal.account
-                ),
-                None,
-            )
-            if not row:
-                raise ClusterError(f"gpu_usage did not return account {normal.account}")
-            columns = {
-                gpu_type: index + 1
-                for index, gpu_type in enumerate(CLUSTER.dashboard.gpu_usage_columns)
-            }
-            column = columns.get(spec.resources.gpu.gpu_type)
-            if column is None:
-                raise ClusterError(f"gpu_usage has no column for GPU type {spec.resources.gpu.gpu_type}")
-            if column >= len(row):
-                raise ClusterError(f"gpu_usage row for {normal.account} is missing the requested GPU column")
-            match = re.fullmatch(r"\s*(\d+)\s*/\s*(\d+)\s*", row[column])
-            if not match:
-                raise ClusterError(f"gpu_usage returned an invalid quota value for {spec.resources.gpu.gpu_type}: {row[column]}")
-            if int(match.group(1)) + gpu_count > int(match.group(2)):
+            requested_type = resolve_gpu_type(spec, plan)
+            requested_columns = (CLUSTER.dashboard.gpu_usage_columns if requested_type == "any"
+                                 else [requested_type])
+            quotas = account_gpu_quota(output, normal.account, requested_columns,
+                                       fallback_columns=CLUSTER.dashboard.gpu_usage_columns)
+            idle_receipt = None
+            if quotas is None:
+                import inspect
+                program = inspect.getsource(idle_partition_quota) + (
+                    "\nimport json,sys\ntry:\n result=idle_partition_quota(sys.argv[1], sys.argv[2])"
+                    "\nexcept Exception as error:\n result={'error':str(error)}\nprint(json.dumps(result))"
+                )
+                idle_command = (
+                    f"export PATH={shlex.quote(SLURM_BIN)}:${{PATH:-}}; LC_ALL=C python3 -c "
+                    + shlex.quote(program) + " " + shlex.quote(normal.account) + " " + shlex.quote(normal.partition)
+                )
+                host, raw = self.cluster.run_with_fallback(idle_command, host, timeout=55)
+                idle_receipt = json.loads(raw)
+                if not isinstance(idle_receipt, dict):
+                    raise ValueError("Slurm returned an invalid quota verification response")
+                if idle_receipt.get("error"):
+                    raise ValueError(str(idle_receipt["error"]))
+                if (idle_receipt.get("account") != normal.account
+                        or idle_receipt.get("partition") != normal.partition
+                        or idle_receipt.get("active_allocations") != 0):
+                    raise ValueError("Slurm did not confirm an idle normal account")
+                limits = idle_receipt.get("limits") or {}
+                quotas = {}
+                for gpu_type in requested_columns:
+                    candidates = [limits[key] for key in ("gpu", "gpu:" + gpu_type) if key in limits]
+                    if not candidates or any(type(value) is not int or value < 0 for value in candidates):
+                        raise ValueError(f"Slurm did not return an explicit GPU limit for {gpu_type}")
+                    quotas[gpu_type] = (0, min(candidates))
+            available = False
+            for usage, limit in quotas.values():
+                available = available or usage + gpu_count <= limit
+            if not available:
                 if overflow_selection is None:
                     raise ClusterError("GPU quota is exhausted and no preemptible queue is configured")
                 selected_name = overflow_name
@@ -4064,12 +4142,13 @@ class PipelineService:
                         "raw": output,
                         "selected": selected_name,
                         "requested_gpus": gpu_count,
+                        "idle_quota_verification": idle_receipt,
                     },
                     nodes=[],
                     queue=[],
                 )
                 snapshot_id = snapshot["id"]
-        except ClusterError as error:
+        except (ClusterError, ValueError) as error:
             raise ValueError(f"auto queue selection could not verify live GPU quota: {error}") from error
         selected = CLUSTER.queue(selected_name)
         payload = spec.model_dump(mode="json", by_alias=True)
@@ -4488,6 +4567,20 @@ class PipelineService:
                     [adapter_compatibility] if adapter_compatibility else []
                 ),
             }
+        from .adapters.egoverse_models import execution_compatibility_error
+        compatibility_error = execution_compatibility_error(spec.source.model_dump(mode="python"), spec.native.config)
+        if compatibility_error:
+            if plan is None:
+                from .adapters import AdapterCapabilities
+                plan = AdapterPlan(
+                    adapter=spec.source.adapter, adapter_version=spec.source.adapter_version,
+                    argv=[], capabilities=AdapterCapabilities(
+                        name=spec.source.adapter, runtime_backends={"existing"},
+                        supports_multi_gpu_single_node=False, supports_resume=False,
+                    ),
+                )
+            if compatibility_error not in plan.blockers:
+                plan.blockers.append(compatibility_error)
         if plan is None:
             plan = resolve_adapter_plan(spec)
         repository_argument_validation: dict[str, Any] | None = None
@@ -5025,6 +5118,41 @@ class PipelineService:
             return "basic"
         return "none"
 
+    @classmethod
+    def _environment_credentials_for_endpoint(cls, provider: str, endpoint: str | None) -> dict[str, str]:
+        settings = WandBSettings.from_env() if provider == "wandb" else TrackingSettings.from_env()
+        expected = settings.base_url if provider == "wandb" else settings.tracking_uri
+        if not expected or not endpoint or endpoint.rstrip("/") != expected.rstrip("/"):
+            return {}
+        return cls._credentials_for_mode(provider, cls._environment_credentials(provider))
+
+    @classmethod
+    def _credentials_for_mode(cls, provider: str, credentials: Mapping[str, str]) -> dict[str, str]:
+        mode = cls._credential_authentication(provider, credentials)
+        fields = {"api_key": ("api_key",), "token": ("token",), "basic": ("username", "password")}.get(mode, ())
+        return {key: credentials[key] for key in fields if credentials.get(key)}
+
+    def _bound_tracking_credentials(self, provider: str, endpoint: str | None) -> tuple[dict[str, str], str | None]:
+        with self._tracking_connection_lock:
+            connection = self.database.get_tracking_connection(provider) or {}
+            config = connection.get("config_json") or {}
+            if config.get("authentication") == "none":
+                return {}, None
+            current = self.credentials.get(provider)
+            # An endpoint lives with the in-memory secret. A failed database write
+            # must never attach that secret to the previous connection's host.
+            bound_endpoint = self.credentials.endpoint(provider) or connection.get("endpoint")
+            if config.get("credential_source") != "environment" and current and endpoint and bound_endpoint and endpoint.rstrip("/") == str(bound_endpoint).rstrip("/"):
+                mode = self._credential_authentication(provider, current)
+                if config.get("authentication") in (None, mode):
+                    return self._credentials_for_mode(provider, current), self.credentials.source(provider)
+            if config.get("credential_source") not in (None, "environment"):
+                return {}, None
+            environment = self._environment_credentials_for_endpoint(provider, endpoint)
+            if config.get("authentication") not in (None, self._credential_authentication(provider, environment)):
+                return {}, None
+            return environment, "environment" if environment else None
+
     def _ensure_tracking_credentials_restored(self) -> None:
         if self._credentials_restored:
             return
@@ -5039,9 +5167,9 @@ class PipelineService:
                 config = connection.get("config_json") or {}
                 expected_source = config.get("credential_source")
                 authentication = config.get("authentication")
-                environment_credentials = self._environment_credentials(provider)
+                environment_credentials = self._environment_credentials_for_endpoint(provider, connection.get("endpoint"))
                 if expected_source == "environment":
-                    if environment_credentials:
+                    if environment_credentials and authentication in (None, self._credential_authentication(provider, environment_credentials)):
                         self.credentials.mark_connected(provider)
                     else:
                         self.credentials.mark_error(
@@ -5097,7 +5225,7 @@ class PipelineService:
                     )
                     continue
                 self.credentials.replace(
-                    provider, credentials, source="credential_store"
+                    provider, credentials, source="credential_store", endpoint=endpoint
                 )
                 self.credentials.mark_connected(provider)
 
@@ -5109,7 +5237,6 @@ class PipelineService:
         *,
         origin: str | None,
         remember: bool,
-        replace_existing: bool,
     ) -> str | None:
         values = {
             key: str(value)
@@ -5120,125 +5247,151 @@ class PipelineService:
         connection = self.database.get_tracking_connection(provider) or {}
         configured_source = (connection.get("config_json") or {}).get("credential_source")
         persistent = current_source == "credential_store" or configured_source == "credential_store"
-        if not values:
-            if replace_existing:
-                if persistent:
-                    self.credential_store.delete(provider)
-                self.credentials.clear(provider)
-            return None
-        if origin == "environment":
-            return "environment"
+        if not values or origin == "environment":
+            if persistent:
+                self.credential_store.delete(provider)
+            self.credentials.clear(provider)
+            return "environment" if values else None
         if remember:
             self.credential_store.save(provider, endpoint, values)
-            self.credentials.replace(provider, values, source="credential_store")
+            self.credentials.replace(provider, values, source="credential_store", endpoint=endpoint)
             return "credential_store"
         if persistent:
             self.credential_store.delete(provider)
-        self.credentials.replace(provider, values, source="session")
+        self.credentials.replace(provider, values, source="session", endpoint=endpoint)
         return "session"
 
-    def _mlflow_settings(self, provider: Any | None = None) -> TrackingSettings:
-        self._ensure_tracking_credentials_restored()
-        settings = TrackingSettings.from_env()
-        connection = self.database.get_tracking_connection("mlflow") or {}
-        credentials = self.credentials.get("mlflow")
-        requested_uri = self._tracking_provider_value(provider, "tracking_uri") if provider else None
-        trusted_uri = connection.get("endpoint") or settings.tracking_uri
-        if requested_uri and trusted_uri:
-            requested_uri = self._validate_tracking_endpoint(
-                str(requested_uri), "MLflow tracking URI"
-            )
-            if requested_uri.rstrip("/") != str(trusted_uri).rstrip("/"):
-                raise ValueError(
-                    "experiment MLflow URI does not match the validated connection endpoint"
+    def _tracking_connection_snapshot(self, provider: str) -> tuple[TrackingSettings | WandBSettings, int]:
+        with self._tracking_connection_lock:
+            settings = self._wandb_settings() if provider == "wandb" else self._mlflow_settings()
+            return settings, self._tracking_connection_revisions[provider]
+
+    def _commit_tracking_connection(
+        self, provider: str, endpoint: str, credentials: Mapping[str, str | None],
+        *, origin: str | None, remember: bool, verify_tls: bool,
+        expected_settings: TrackingSettings | WandBSettings,
+        expected_revision: int,
+        workspace: str | None = None, public_state: Mapping[str, Any] | None = None,
+    ) -> None:
+        # Only the local commit is serialized; remote verification does not block readers.
+        with self._tracking_connection_lock:
+            current_settings = self._wandb_settings() if provider == "wandb" else self._mlflow_settings()
+            if current_settings != expected_settings or self._tracking_connection_revisions[provider] != expected_revision:
+                raise ValueError("The tracking connection changed while it was connecting; review the current connection and try again")
+            self._tracking_connection_revisions[provider] += 1
+            try:
+                source = self._activate_validated_credentials(
+                    provider, endpoint, credentials, origin=origin, remember=remember,
                 )
-        tracking_uri = trusted_uri or requested_uri
-        return replace(
-            settings,
-            tracking_uri=tracking_uri,
-            token=credentials.get("token") or settings.token,
-            username=credentials.get("username") or settings.username,
-            password=credentials.get("password") or settings.password,
-            verify_tls=bool((connection.get("config_json") or {}).get("verify_tls", settings.verify_tls)),
-        )
+                self.database.upsert_tracking_connection(
+                    provider, endpoint=endpoint, workspace=workspace,
+                    config={"verify_tls": verify_tls,
+                            "authentication": self._credential_authentication(provider, credentials),
+                            "credential_source": source},
+                )
+                self.credentials.mark_connected(provider, **(public_state or {}))
+            except Exception as error:
+                self.credentials.mark_error(provider, sanitize(str(error), secrets=tuple(credentials.values())))
+                raise
+
+    def _mlflow_settings(self, provider: Any | None = None) -> TrackingSettings:
+        with self._tracking_connection_lock:
+            self._ensure_tracking_credentials_restored()
+            settings = TrackingSettings.from_env()
+            connection = self.database.get_tracking_connection("mlflow") or {}
+            requested_uri = self._tracking_provider_value(provider, "tracking_uri") if provider else None
+            trusted_uri = connection.get("endpoint") or settings.tracking_uri
+            if requested_uri and trusted_uri:
+                requested_uri = self._validate_tracking_endpoint(
+                    str(requested_uri), "MLflow tracking URI"
+                )
+                if requested_uri.rstrip("/") != str(trusted_uri).rstrip("/"):
+                    raise ValueError(
+                        "experiment MLflow URI does not match the validated connection endpoint"
+                    )
+            tracking_uri = trusted_uri or requested_uri
+            credentials, _ = self._bound_tracking_credentials("mlflow", tracking_uri)
+            return replace(
+                settings,
+                tracking_uri=tracking_uri,
+                token=credentials.get("token"),
+                username=credentials.get("username"),
+                password=credentials.get("password"),
+                verify_tls=bool((connection.get("config_json") or {}).get("verify_tls", settings.verify_tls)),
+            )
 
     def _wandb_settings(self, provider: Any | None = None) -> WandBSettings:
-        self._ensure_tracking_credentials_restored()
-        settings = WandBSettings.from_env()
-        connection = self.database.get_tracking_connection("wandb") or {}
-        credentials = self.credentials.get("wandb")
-        requested_url = (
-            self._tracking_provider_value(provider, "base_url") if provider else None
-        )
-        trusted_url = connection.get("endpoint") or settings.base_url
-        if requested_url and trusted_url:
-            requested_url = self._validate_tracking_endpoint(
-                str(requested_url), "W&B base URL"
+        with self._tracking_connection_lock:
+            self._ensure_tracking_credentials_restored()
+            settings = WandBSettings.from_env()
+            connection = self.database.get_tracking_connection("wandb") or {}
+            requested_url = (
+                self._tracking_provider_value(provider, "base_url") if provider else None
             )
-            if requested_url.rstrip("/") != str(trusted_url).rstrip("/"):
-                raise ValueError(
-                    "experiment W&B base URL does not match the validated connection endpoint"
+            trusted_url = connection.get("endpoint") or settings.base_url
+            if requested_url and trusted_url:
+                requested_url = self._validate_tracking_endpoint(
+                    str(requested_url), "W&B base URL"
                 )
-        base_url = trusted_url or requested_url
-        entity = (
-            self._tracking_provider_value(provider, "entity") if provider else None
-        ) or connection.get("workspace") or settings.entity
-        return replace(
-            settings,
-            base_url=base_url,
-            entity=entity,
-            api_key=credentials.get("api_key") or settings.api_key,
-            verify_tls=bool((connection.get("config_json") or {}).get("verify_tls", settings.verify_tls)),
-        )
+                if requested_url.rstrip("/") != str(trusted_url).rstrip("/"):
+                    raise ValueError(
+                        "experiment W&B base URL does not match the validated connection endpoint"
+                    )
+            base_url = trusted_url or requested_url
+            credentials, _ = self._bound_tracking_credentials("wandb", base_url)
+            entity = (
+                self._tracking_provider_value(provider, "entity") if provider else None
+            ) or connection.get("workspace") or settings.entity
+            return replace(
+                settings,
+                base_url=base_url,
+                entity=entity,
+                api_key=credentials.get("api_key"),
+                verify_tls=bool((connection.get("config_json") or {}).get("verify_tls", settings.verify_tls)),
+            )
 
     def tracking_connections(self) -> dict[str, Any]:
-        self._ensure_tracking_credentials_restored()
-        results: dict[str, Any] = {}
-        for provider in ("wandb", "mlflow"):
-            runtime = self.credentials.state(provider)
-            credentials = self.credentials.get(provider)
-            if provider == "wandb":
-                settings = self._wandb_settings()
-                environment_credential = bool(os.environ.get("WANDB_API_KEY"))
-                public = {
-                    "provider": provider,
-                    "base_url": settings.public_dict()["base_url"],
-                    "entity": settings.entity,
-                    "configured": settings.configured,
-                }
-            else:
-                settings = self._mlflow_settings()
-                environment_credential = bool(
-                    os.environ.get("MLFLOW_TRACKING_TOKEN")
-                    or os.environ.get("MLFLOW_TRACKING_USERNAME")
-                    or os.environ.get("MLFLOW_TRACKING_PASSWORD")
+        with self._tracking_connection_lock:
+            self._ensure_tracking_credentials_restored()
+            results: dict[str, Any] = {}
+            for provider in ("wandb", "mlflow"):
+                runtime = self.credentials.state(provider)
+                if provider == "wandb":
+                    settings = self._wandb_settings()
+                    public = {
+                        "provider": provider,
+                        "base_url": settings.public_dict()["base_url"],
+                        "entity": settings.entity,
+                        "configured": settings.configured,
+                    }
+                else:
+                    settings = self._mlflow_settings()
+                    public = {
+                        "provider": provider,
+                        "tracking_uri": settings.public_dict()["tracking_uri"],
+                        "username": settings.username,
+                        "configured": settings.configured,
+                    }
+                effective_credentials, credential_source = self._bound_tracking_credentials(provider, settings.base_url if provider == "wandb" else settings.tracking_uri)
+                expected_mode = ((self.database.get_tracking_connection(provider) or {}).get("config_json") or {}).get("authentication")
+                connected = bool(runtime.get("connected")) and (expected_mode in (None, "none") or bool(effective_credentials))
+                configured = bool(public["configured"])
+                status = (
+                    "error" if runtime.get("last_error")
+                    else "connected" if connected
+                    else "configured" if configured
+                    else "not_configured"
                 )
-                public = {
-                    "provider": provider,
-                    "tracking_uri": settings.public_dict()["tracking_uri"],
-                    "configured": settings.configured,
-                }
-            connected = bool(runtime.get("connected"))
-            configured = bool(public["configured"])
-            status = (
-                "error" if runtime.get("last_error")
-                else "connected" if connected
-                else "configured" if configured
-                else "not_configured"
-            )
-            public.update({
-                "connected": connected,
-                "status": status,
-                "credential_source": (
-                    self.credentials.source(provider) if credentials
-                    else "environment" if environment_credential
-                    else None
-                ),
-                "validated_at": runtime.get("validated_at"),
-                "last_error": runtime.get("last_error"),
-            })
-            results[provider] = public
-        return {"connections": results}
+                public.update({
+                    "verify_tls": settings.verify_tls,
+                    "connected": connected,
+                    "status": status,
+                    "credential_source": credential_source,
+                    "validated_at": runtime.get("validated_at"),
+                    "last_error": runtime.get("last_error"),
+                })
+                results[provider] = public
+            return {"connections": results}
 
     def configure_tracking_connection(
         self, provider: str, request: TrackingConnectionRequest
@@ -5249,23 +5402,21 @@ class PipelineService:
         if provider == "wandb":
             if any((request.tracking_uri, request.token, request.username, request.password)):
                 raise ValueError("W&B connection accepts only api_key, base_url, entity, and verify_tls")
+            saved_settings, saved_revision = self._tracking_connection_snapshot("wandb")
+            base_url = self._validate_tracking_endpoint(
+                request.base_url or saved_settings.base_url or "https://api.wandb.ai", "W&B base URL"
+            )
             submitted_key = request.api_key is not None
-            current_credentials = self.credentials.get("wandb")
-            environment_credentials = self._environment_credentials("wandb")
+            if not submitted_key and base_url.rstrip("/") != saved_settings.base_url.rstrip("/"):
+                raise ValueError("Enter a new W&B API key when changing the base URL; saved credentials stay bound to their original endpoint")
             if submitted_key:
                 key = request.api_key.get_secret_value() if request.api_key else ""
                 origin = "session"
-            elif current_credentials.get("api_key"):
-                key = current_credentials["api_key"]
-                origin = self.credentials.source("wandb")
             else:
-                key = environment_credentials.get("api_key", "")
-                origin = "environment" if key else None
+                current_credentials, origin = self._bound_tracking_credentials("wandb", base_url)
+                key = current_credentials.get("api_key", "")
             if not key:
                 raise ValueError("W&B API key is required")
-            base_url = self._validate_tracking_endpoint(
-                request.base_url or "https://api.wandb.ai", "W&B base URL"
-            )
             settings = replace(
                 WandBSettings.from_env(),
                 base_url=base_url,
@@ -5282,32 +5433,16 @@ class PipelineService:
                 bridge.validate_entity(entity)
             except Exception as error:
                 safe_error = str(sanitize(str(error), secrets=(key,)))
-                self.credentials.mark_error("wandb", safe_error)
+                with self._tracking_connection_lock:
+                    if self._wandb_settings() == saved_settings and self._tracking_connection_revisions["wandb"] == saved_revision:
+                        self.credentials.mark_error("wandb", safe_error)
                 raise TrackingRequestError(safe_error) from error
-            try:
-                credential_source = self._activate_validated_credentials(
-                    "wandb",
-                    base_url,
-                    {"api_key": key},
-                    origin=origin,
-                    remember=request.remember,
-                    replace_existing=submitted_key,
-                )
-            except CredentialStoreError as error:
-                self.credentials.mark_error("wandb", error)
-                raise
-            self.database.upsert_tracking_connection(
-                "wandb",
-                endpoint=base_url,
-                workspace=entity,
-                config={
-                    "verify_tls": request.verify_tls,
-                    "authentication": "api_key",
-                    "credential_source": credential_source,
-                },
-            )
-            self.credentials.mark_connected(
-                "wandb", entity=entity, username=identity.get("username")
+            self._commit_tracking_connection(
+                "wandb", base_url, {"api_key": key}, origin=origin,
+                remember=request.remember, verify_tls=request.verify_tls,
+                expected_settings=saved_settings,
+                expected_revision=saved_revision,
+                workspace=entity, public_state={"entity": entity, "username": identity.get("username")},
             )
         else:
             if any((request.api_key, request.base_url, request.entity)):
@@ -5322,21 +5457,30 @@ class PipelineService:
             submitted_authentication = any(
                 value is not None for value in (request.token, request.username, request.password)
             )
-            current_credentials = self.credentials.get("mlflow")
-            environment_credentials = self._environment_credentials("mlflow")
+            saved_settings, saved_revision = self._tracking_connection_snapshot("mlflow")
+            same_endpoint = tracking_uri.rstrip("/") == (saved_settings.tracking_uri or "").rstrip("/")
+            old_credentials, old_origin = self._bound_tracking_credentials("mlflow", saved_settings.tracking_uri)
+            connection = self.database.get_tracking_connection("mlflow") or {}
+            old_mode = (connection.get("config_json") or {}).get("authentication")
+            authenticated = bool(old_credentials) or old_mode in {"token", "basic"}
+            if not same_endpoint and authenticated and not (request.token or request.password):
+                raise ValueError("Enter new MLflow credentials when changing the tracking URI, or disconnect first to use an unauthenticated endpoint")
+            reusable = old_credentials if same_endpoint else {}
+            if request.token and (request.username or request.password):
+                raise ValueError("Choose either token authentication or username and password")
             if submitted_authentication:
+                same_username = request.username == reusable.get("username")
                 credentials = {
                     "token": request.token.get_secret_value() if request.token else None,
                     "username": request.username,
-                    "password": request.password.get_secret_value() if request.password else None,
+                    "password": request.password.get_secret_value() if request.password else (
+                        reusable.get("password") if same_username and not request.token else None
+                    ),
                 }
                 origin = "session"
-            elif current_credentials:
-                credentials = current_credentials
-                origin = self.credentials.source("mlflow")
             else:
-                credentials = environment_credentials
-                origin = "environment" if credentials else None
+                credentials = reusable
+                origin = old_origin if credentials else None
             token = credentials.get("token")
             username = credentials.get("username")
             password = credentials.get("password")
@@ -5354,30 +5498,16 @@ class PipelineService:
                 ).validate_connection()
             except Exception as error:
                 safe_error = str(sanitize(str(error), secrets=(token, password)))
-                self.credentials.mark_error("mlflow", safe_error)
+                with self._tracking_connection_lock:
+                    if self._mlflow_settings() == saved_settings and self._tracking_connection_revisions["mlflow"] == saved_revision:
+                        self.credentials.mark_error("mlflow", safe_error)
                 raise TrackingRequestError(safe_error) from error
-            try:
-                credential_source = self._activate_validated_credentials(
-                    "mlflow",
-                    tracking_uri,
-                    credentials,
-                    origin=origin,
-                    remember=request.remember,
-                    replace_existing=submitted_authentication,
-                )
-            except CredentialStoreError as error:
-                self.credentials.mark_error("mlflow", error)
-                raise
-            self.database.upsert_tracking_connection(
-                "mlflow",
-                endpoint=tracking_uri,
-                config={
-                    "verify_tls": request.verify_tls,
-                    "authentication": self._credential_authentication("mlflow", credentials),
-                    "credential_source": credential_source,
-                },
+            self._commit_tracking_connection(
+                "mlflow", tracking_uri, credentials, origin=origin,
+                remember=request.remember, verify_tls=request.verify_tls,
+                expected_settings=saved_settings,
+                expected_revision=saved_revision,
             )
-            self.credentials.mark_connected("mlflow")
         return {
             "connection": self.tracking_connections()["connections"][provider],
             "flush": self._flush_tracking_provider(provider),
@@ -5385,70 +5515,67 @@ class PipelineService:
 
     def test_tracking_connection(self, provider: str) -> dict[str, Any]:
         if provider == "wandb":
-            settings = self._wandb_settings()
+            settings, tested_revision = self._tracking_connection_snapshot("wandb")
             bridge: Any = WandBBridge(
                 LOCAL_CAPSULE_ROOT / ".tracking-connections" / "wandb", settings
             )
+            secrets = (settings.api_key,)
         elif provider == "mlflow":
-            settings = self._mlflow_settings()
+            settings, tested_revision = self._tracking_connection_snapshot("mlflow")
             bridge = MLflowBridge(
                 LOCAL_CAPSULE_ROOT / ".tracking-connections" / "mlflow", settings
             )
+            secrets = (settings.token, settings.password)
         else:
             raise ValueError(f"unsupported tracking provider: {provider}")
         try:
             result = bridge.validate_connection()
+            if provider == "wandb":
+                entity = settings.entity or str(result["entity"])
+                bridge.validate_entity(entity)
         except Exception as error:
-            secrets = tuple(self.credentials.get(provider).values())
             safe_error = str(sanitize(str(error), secrets=secrets))
-            self.credentials.mark_error(provider, safe_error)
+            with self._tracking_connection_lock:
+                current = self._wandb_settings() if provider == "wandb" else self._mlflow_settings()
+                if current == settings and self._tracking_connection_revisions[provider] == tested_revision:
+                    self.credentials.mark_error(provider, safe_error)
             raise TrackingRequestError(safe_error) from error
-        if provider == "wandb":
-            entity = str(result["entity"])
-            connection = self.database.get_tracking_connection("wandb")
-            bridge.validate_entity(connection.get("workspace") if connection else entity)
+        with self._tracking_connection_lock:
+            current_settings = self._wandb_settings() if provider == "wandb" else self._mlflow_settings()
+            if current_settings != settings or self._tracking_connection_revisions[provider] != tested_revision:
+                raise ValueError("The tracking connection changed while it was being tested; test the current connection again")
+            connection = self.database.get_tracking_connection(provider) or {}
+            endpoint = settings.base_url if provider == "wandb" else settings.tracking_uri
             self.database.upsert_tracking_connection(
-                "wandb",
-                endpoint=(connection or {}).get("endpoint") or settings.base_url,
-                workspace=(connection or {}).get("workspace") or entity,
-                config=(connection or {}).get("config_json") or {
-                    "verify_tls": settings.verify_tls
-                },
+                provider, endpoint=endpoint,
+                workspace=entity if provider == "wandb" else None,
+                config=connection.get("config_json") or {"verify_tls": settings.verify_tls},
             )
-            self.credentials.mark_connected(
-                provider, entity=entity, username=result.get("username")
-            )
-        else:
-            connection = self.database.get_tracking_connection("mlflow")
-            self.database.upsert_tracking_connection(
-                "mlflow",
-                endpoint=(connection or {}).get("endpoint") or settings.tracking_uri,
-                config=(connection or {}).get("config_json") or {
-                    "verify_tls": settings.verify_tls
-                },
-            )
-            self.credentials.mark_connected(provider)
+            self.credentials.mark_connected(provider, **({"entity": entity, "username": result.get("username")} if provider == "wandb" else {}))
+            self._tracking_connection_revisions[provider] += 1
         return {
             "connection": self.tracking_connections()["connections"][provider],
             "flush": self._flush_tracking_provider(provider),
         }
 
     def disconnect_tracking_connection(self, provider: str) -> dict[str, Any]:
-        self._ensure_tracking_credentials_restored()
-        if provider not in {"wandb", "mlflow"}:
-            raise ValueError(f"unsupported tracking provider: {provider}")
-        connection = self.database.get_tracking_connection(provider) or {}
-        configured_source = (connection.get("config_json") or {}).get("credential_source")
-        credential_source = self.credentials.source(provider) or configured_source
-        if credential_source == "credential_store":
-            try:
-                self.credential_store.delete(provider)
-            except CredentialStoreError as error:
-                self.credentials.mark_error(provider, error)
-                raise
-        self.credentials.clear(provider)
-        self.database.delete_tracking_connection(provider)
-        return {"connection": self.tracking_connections()["connections"][provider]}
+        with self._tracking_connection_lock:
+            self._ensure_tracking_credentials_restored()
+            if provider not in {"wandb", "mlflow"}:
+                raise ValueError(f"unsupported tracking provider: {provider}")
+            connection = self.database.get_tracking_connection(provider) or {}
+            configured_source = (connection.get("config_json") or {}).get("credential_source")
+            credential_source = self.credentials.source(provider) or configured_source
+            if credential_source == "credential_store":
+                try:
+                    self.credential_store.delete(provider)
+                except CredentialStoreError as error:
+                    self.credentials.mark_error(provider, error)
+                    raise
+            self._tracking_connection_revisions[provider] += 1
+            self.credentials.clear(provider)
+            self.database.delete_tracking_connection(provider)
+            return {"connection": self.tracking_connections()["connections"][provider]}
 
     def _active_tracking_providers(self, spec: ExperimentSpec) -> list[Any]:
         if spec.tracking.providers:
@@ -6322,11 +6449,6 @@ class PipelineService:
         if resource.get("provider") != "huggingface":
             raise ValueError("only resources with provider=huggingface can use this importer")
         payload = request.model_dump(mode="python")
-        active = self.database.list_data_imports(
-            states=["SUBMITTING", "SUBMITTED", "PENDING", "RUNNING", "FINALIZING"]
-        )
-        if any(item["resource_id"] == resource_id and item["request"] == payload for item in active):
-            raise ValueError("the same immutable Hugging Face import is already active")
         record = self.database.create_data_import(resource_id, request=payload)
         job = build_huggingface_import_job(record["id"], resource, payload)
         try:
@@ -6357,6 +6479,42 @@ class PipelineService:
             stdout_path=stdout_path,
             stderr_path=stderr_path,
         )
+
+    def cancel_data_import(self, import_id: str) -> dict[str, Any]:
+        record = self.database.get_data_import(import_id)
+        if record is None:
+            raise KeyError("Data import not found")
+        if record["state"] in {"CANCELLED", "CANCELLING", "SUCCEEDED", "FAILED", "FINALIZING"}:
+            return record
+        if not record.get("slurm_job_id"):
+            raise ValueError("Import submission is still in progress; refresh before cancelling")
+        claimed = self.database.update_data_import(
+            import_id, expected_states=["SUBMITTED", "PENDING", "RUNNING"],
+            state="CANCELLING", error=None,
+        )
+        if claimed is None:
+            return self.database.get_data_import(import_id)
+        try:
+            gateway = self.cluster.cancel(str(record["slurm_job_id"]), record.get("gateway") or "auto")
+        except Exception as error:
+            self.database.update_data_import(
+                import_id, expected_states=["CANCELLING"], state=record["state"],
+                error=f"Import cancellation failed: {error}",
+            )
+            raise
+        self.database.update_data_import(
+            import_id, expected_states=["CANCELLING"], gateway=gateway, error=None,
+        )
+        return self.database.get_data_import(import_id)
+
+    # Background reconciliation and browser refresh may finalize together.
+    # Share the local publication lock across service instances; remote reads
+    # happen before entering it, and no network work belongs in publication.
+    _data_import_publication_lock = threading.RLock()
+
+    def _update_data_import_observation(self, import_id: str, **changes: Any) -> dict[str, Any]:
+        with self._data_import_publication_lock:
+            return self.database.update_data_import(import_id, **changes)
 
     def _publish_data_import_result(
         self, record: Mapping[str, Any], result: Mapping[str, Any]
@@ -6470,7 +6628,7 @@ class PipelineService:
 
     def reconcile_data_imports(self) -> list[dict[str, Any]]:
         records = self.database.list_data_imports(
-            states=["SUBMITTED", "PENDING", "RUNNING", "FINALIZING"]
+            states=["SUBMITTED", "PENDING", "RUNNING", "FINALIZING", "CANCELLING"]
         )
         for record in records:
             job_id = record.get("slurm_job_id")
@@ -6493,15 +6651,30 @@ class PipelineService:
                 }
                 if slurm_state in ACTIVE_STATES:
                     app_state = "RUNNING" if slurm_state in {"RUNNING", "COMPLETING"} else "PENDING"
-                    self.database.update_data_import(record["id"], state=app_state, **common)
+                    self._update_data_import_observation(record["id"], state=app_state, **common)
+                    continue
+                if slurm_state.startswith("CANCELLED"):
+                    self._update_data_import_observation(record["id"], state="CANCELLED", **common)
                     continue
                 if slurm_state == "COMPLETED":
                     _, payload = self.cluster.read_file(str(record["result_path"]), gateway)
                     result = json.loads(payload)
-                    record = self.database.update_data_import(
-                        record["id"], state="FINALIZING", **common
-                    )
-                    self._publish_data_import_result(record, result)
+                    with self._data_import_publication_lock:
+                        claimed = self.database.update_data_import(
+                            record["id"], state="FINALIZING", **common,
+                            expected_states=["SUBMITTED", "PENDING", "RUNNING", "FINALIZING", "CANCELLING"],
+                        )
+                        if claimed is None or claimed["state"] != "FINALIZING":
+                            continue
+                        try:
+                            self._publish_data_import_result(claimed, result)
+                        except Exception as error:
+                            # Settle a failed local publication before another
+                            # refresh may claim the same unfinished import.
+                            self.database.update_data_import(
+                                record["id"], state="FAILED",
+                                error=f"Import reconciliation failed: {error}",
+                            )
                     continue
                 error = f"Slurm data import ended in {slurm_state} ({status.get('ExitCode') or 'unknown exit'})"
                 try:
@@ -6511,13 +6684,13 @@ class PipelineService:
                 except ClusterError:
                     pass
                 common["error"] = error
-                self.database.update_data_import(record["id"], state="FAILED", **common)
+                self._update_data_import_observation(record["id"], state="FAILED", **common)
             except ClusterError as error:
-                self.database.update_data_import(
+                self._update_data_import_observation(
                     record["id"], error=f"Import status refresh failed: {error}"
                 )
             except Exception as error:
-                self.database.update_data_import(
+                self._update_data_import_observation(
                     record["id"], state="FAILED", error=f"Import reconciliation failed: {error}"
                 )
         return self.database.list_data_imports()
@@ -6827,6 +7000,8 @@ class PipelineService:
                     "recovered_submissions": recovered_submissions,
                     "tracking_bindings_repaired": tracking_bindings_repaired,
                 }
+            _, statuses = self.cluster.job_statuses([row["slurm_job_id"] for row in rows])
+            self._sync_attempt_restart_counts(rows, statuses)
             training_run_ids = {
                 str(row["run_id"])
                 for row in rows
@@ -6838,7 +7013,6 @@ class PipelineService:
                     self._ingest_training_progress(current_run)
                     sync_gpu_statistics(self, current_run, LOCAL_CAPSULE_ROOT)
                 self._publish_training_progress_tracking(training_run_id)
-            _, statuses = self.cluster.job_statuses([row["slurm_job_id"] for row in rows])
             updated = 0
             experiments: set[str] = set(repairs["experiment_ids"])
             for row in rows:
@@ -7121,6 +7295,23 @@ class PipelineService:
         finally:
             self._reconcile_lock.release()
 
+    def _sync_attempt_restart_counts(
+        self, attempts: list[dict[str, Any]], statuses: Mapping[str, Mapping[str, Any]]
+    ) -> None:
+        """Refresh same-job restart metadata before assigning progress samples."""
+        for attempt in attempts:
+            record = statuses.get(str(attempt["slurm_job_id"]), {})
+            count = _progress_integer(record.get("Restarts"))
+            previous = int(attempt.get("restart_count") or 0)
+            if count is None or count <= previous:
+                continue
+            updates: dict[str, Any] = {"restart_count": count}
+            started = self._slurm_accounting_timestamp(record.get("Start"))
+            if started:
+                updates["started_at"] = started
+            self.database.update_job_attempt(attempt["id"], **updates)
+            attempt.update(updates)
+
     def _dispatch_active_experiments(self) -> None:
         for experiment in self.database.list_experiments(status="ACTIVE", limit=1000):
             self._dispatch_experiment(experiment["id"])
@@ -7296,6 +7487,64 @@ class PipelineService:
             None,
         )
 
+    def _queue_list_progress_refresh(self, kind: str, records: list[dict[str, Any]]) -> bool:
+        """Keep optional remote progress reads off the list response path."""
+        now = __import__("time").monotonic()
+        active_states = _PROGRESS_RUNNING_STATES if kind == "training" else {"PENDING", "SUBMITTED", "RUNNING"}
+        eligible = active_states | (_PROGRESS_SUCCESS_STATES | _PROGRESS_FAILURE_STATES if kind == "training" else set())
+        keys = {(kind, str(record["id"])) for record in records}
+        with self._progress_refresh_lock:
+            if self._stop.is_set():
+                return False
+            for record in records:
+                key = (kind, str(record["id"]))
+                status = str(record.get("status") or record.get("state") or "").upper()
+                version = (status, record.get("updated_at"), record.get("completed_at"))
+                if (status not in eligible or key in self._progress_refresh_inflight
+                        or (version == self._progress_refresh_versions.get(key)
+                            and now < self._progress_refresh_due.get(key, 0))):
+                    continue
+                if key in self._progress_refresh_pending or len(self._progress_refresh_pending) < 2000:
+                    self._progress_refresh_pending[key] = 0 if status in active_states else 1
+                    self._progress_refresh_versions[key] = version
+            while self._progress_refresh_pending and self._progress_refresh_workers < 2:
+                self._progress_refresh_workers += 1
+                threading.Thread(target=self._refresh_list_progress, name="skynet-list-progress", daemon=True).start()
+            return bool(keys & (self._progress_refresh_pending.keys() | self._progress_refresh_inflight))
+
+    def _list_progress_refresh_pending(self, kind: str, records: list[dict[str, Any]]) -> bool:
+        keys = {(kind, str(record["id"])) for record in records}
+        with self._progress_refresh_lock:
+            return bool(keys & (self._progress_refresh_pending.keys() | self._progress_refresh_inflight))
+
+    def _refresh_list_progress(self) -> None:
+        while True:
+            with self._progress_refresh_lock:
+                if self._stop.is_set() or not self._progress_refresh_pending:
+                    self._progress_refresh_workers -= 1
+                    return
+                key = min(self._progress_refresh_pending, key=self._progress_refresh_pending.get)
+                priority = self._progress_refresh_pending.pop(key)
+                self._progress_refresh_inflight.add(key)
+            try:
+                kind, identifier = key
+                # Re-read identity/state when work begins; queued observations
+                # must not revive a job that was cancelled in the meantime.
+                record = self.database.get_run(identifier) if kind == "training" else self.database.get_evaluation(identifier)
+                if record:
+                    if kind == "training":
+                        self._ingest_training_progress(record)
+                    else:
+                        self._ingest_evaluation_progress(record)
+            except Exception:
+                # Progress is optional enrichment. Keep the last recorded values
+                # and permit a later retry without failing the list itself.
+                pass
+            finally:
+                with self._progress_refresh_lock:
+                    self._progress_refresh_inflight.discard(key)
+                    self._progress_refresh_due[key] = __import__("time").monotonic() + (4 if priority == 0 else 60)
+
     def _ingest_training_progress(self, value: Mapping[str, Any]) -> int:
         status = str(value.get("status") or value.get("state") or "").upper()
         terminal_states = _PROGRESS_SUCCESS_STATES | _PROGRESS_FAILURE_STATES
@@ -7347,6 +7596,9 @@ class PipelineService:
             return 0
         monotonic_now = __import__("time").monotonic()
         last_reads = getattr(self, "_training_progress_last_reads", {})
+        final_failures = getattr(self, "_training_progress_final_failures", {})
+        if final_read and monotonic_now < final_failures.get(final_key, 0):
+            return 0
         if not final_read and monotonic_now - float(last_reads.get(throttle_key, 0.0)) < source.poll_seconds:
             return 0
         last_reads[throttle_key] = monotonic_now
@@ -7360,12 +7612,16 @@ class PipelineService:
                 **({"contains": json.dumps(source.required_key)} if jsonl else {}),
             )
         except ClusterError:
+            if final_read:
+                final_failures[final_key] = __import__("time").monotonic() + 60
+                self._training_progress_final_failures = final_failures
             return 0
         if final_read:
             # Terminal structured logs are stable. Bypass the live poll throttle once,
             # so short jobs and their final epoch reach both the UI and tracking.
             final_reads.add(final_key)
             self._training_progress_final_reads = final_reads
+            final_failures.pop(final_key, None)
         records = parse_declared_training_progress(
             content, contract, resolved_spec=run.get("resolved_spec_json")
         )
@@ -7376,6 +7632,7 @@ class PipelineService:
             return 0
 
         segment: list[dict[str, Any]] = []
+        reset_detected = False
         for record in records:
             if segment:
                 previous = segment[-1]
@@ -7384,6 +7641,7 @@ class PipelineService:
                     reset = reset or record["elapsed_seconds"] < previous["elapsed_seconds"]
                 if reset:
                     segment = []
+                    reset_detected = True
             segment.append(record)
         latest = segment[-1]
         candidates = segment if jsonl else [latest]
@@ -7394,25 +7652,53 @@ class PipelineService:
             candidates.insert(0, segment[0])
 
         restart_count = _progress_integer(attempt.get("restart_count")) or 0
+        samples = self.database.list_training_progress_samples(
+            str(run["id"]), attempt_id=attempt_id
+        )
         existing = {
-            int(sample["completed"])
-            for sample in self.database.list_training_progress_samples(
-                str(run["id"]), attempt_id=attempt_id
-            )
+            int(sample["completed"]): sample
+            for sample in samples
             if int(sample.get("restart_count") or 0) == restart_count
+        }
+        prior = {
+            int(sample["completed"]): sample
+            for sample in sorted(samples, key=lambda item: int(item.get("restart_count") or 0))
+            if int(sample.get("restart_count") or 0) < restart_count
         }
         observed_now = datetime.now(timezone.utc)
         latest_elapsed = latest.get("elapsed_seconds")
-        inserted = 0
+        changed = 0
+        current_segment_started = reset_detected or any(
+            completed <= candidates[0]["completed"] for completed in existing
+        )
         for record in candidates:
             completed = int(record["completed"])
             if completed in existing:
+                current_segment_started = True
+                if jsonl:
+                    changed += self.database.enrich_training_progress_metrics(
+                        existing[completed]["id"], record["metrics"]
+                    )
                 continue
+            if jsonl and not current_segment_started and completed in prior:
+                previous = prior[completed]
+                previous_metrics = (previous.get("evidence_json") or {}).get("metrics", {})
+                if all(
+                    record["metrics"][key] == value
+                    for key, value in previous_metrics.items() if key in record["metrics"]
+                ):
+                    # Append-only logs retain the previous execution's prefix.
+                    # Enrich those observations instead of relabeling them as a restart.
+                    changed += self.database.enrich_training_progress_metrics(
+                        previous["id"], record["metrics"]
+                    )
+                    continue
+            current_segment_started = True
             recorded_at = observed_now
             elapsed = record.get("elapsed_seconds")
             if latest_elapsed is not None and elapsed is not None and latest_elapsed >= elapsed:
                 recorded_at -= timedelta(seconds=latest_elapsed - elapsed)
-            self.database.record_training_progress_sample(
+            sample = self.database.record_training_progress_sample(
                 str(run["id"]),
                 attempt_id,
                 restart_count=restart_count,
@@ -7429,9 +7715,9 @@ class PipelineService:
                 },
                 recorded_at=_progress_iso(recorded_at),
             )
-            existing.add(completed)
-            inserted += 1
-        return inserted
+            existing[completed] = sample
+            changed += 1
+        return changed
 
     @staticmethod
     def _training_progress_timestamp_ms(value: Any) -> int:
@@ -7447,28 +7733,36 @@ class PipelineService:
 
     @staticmethod
     def _training_progress_metrics(sample: Mapping[str, Any]) -> dict[str, float | int]:
-        completed = int(sample.get("completed") or 0)
-        total = int(sample.get("total") or 0)
-        metrics: dict[str, float | int] = {
-            "training/completed": completed,
-            "training/restart_count": int(sample.get("restart_count") or 0),
-        }
-        if total > 0:
-            metrics["training/total"] = total
-            metrics["training/progress"] = completed / total
         evidence = sample.get("evidence") or sample.get("evidence_json") or {}
-        if isinstance(evidence, Mapping) and evidence.get("elapsed_seconds") is not None:
-            metrics["training/elapsed_seconds"] = float(evidence["elapsed_seconds"])
-        if isinstance(evidence, Mapping) and isinstance(evidence.get("metrics"), Mapping):
-            metrics.update({
-                str(key): float(value)
-                for key, value in evidence["metrics"].items()
-                if isinstance(value, (int, float)) and not isinstance(value, bool)
-                and math.isfinite(value)
-            })
-        return metrics
+        if not isinstance(evidence, Mapping) or not isinstance(evidence.get("metrics"), Mapping):
+            return {}
+        # Scheduling bookkeeping stays in Skynet; tracking charts contain the
+        # actual metrics emitted by the training code.
+        return {
+            str(key): value for key, value in evidence["metrics"].items()
+            if is_scalar(value) and key not in INTERNAL_PROGRESS_METRICS
+        }
+
+    _training_tracking_locks_guard = threading.Lock()
+    _training_tracking_locks: dict[str, Any] = {}
 
     def _publish_training_progress_tracking(
+        self,
+        run_id: str,
+        *,
+        providers: list[Any] | None = None,
+        include_native: bool = False,
+    ) -> int:
+        # Reconciliation and manual sync may overlap. Serialize the read/delta/
+        # append sequence per run, including calls made by another service instance.
+        with self._training_tracking_locks_guard:
+            lock = self._training_tracking_locks.setdefault(run_id, threading.RLock())
+        with lock:
+            return self._publish_training_progress_tracking_locked(
+                run_id, providers=providers, include_native=include_native
+            )
+
+    def _publish_training_progress_tracking_locked(
         self,
         run_id: str,
         *,
@@ -7514,24 +7808,38 @@ class PipelineService:
                     raise ValueError(f"unsupported tracking provider: {name}")
                 if not bridge.binding(run_id):
                     continue
-                emitted = bridge.metric_idempotency_keys()
+                emitted: dict[str, set[str]] = {}
+                for key, names in bridge.metric_names_by_idempotency_key().items():
+                    sample_key = key.split(":metrics:", 1)[0]
+                    emitted.setdefault(sample_key, set()).update(names)
                 for sample in samples:
                     sample_id = str(sample.get("id") or "")
                     if not sample_id:
                         continue
                     idempotency_key = f"training-progress:{sample_id}"
-                    if idempotency_key in emitted:
+                    prior_names = emitted.get(idempotency_key, set())
+                    metrics = {
+                        key: value
+                        for key, value in self._training_progress_metrics(sample).items()
+                        if key not in prior_names
+                    }
+                    if not metrics:
                         continue
+                    sample_key = idempotency_key
+                    if prior_names:
+                        # Enriched samples append only previously omitted metrics,
+                        # retaining their original step/time and existing curves.
+                        idempotency_key += ":metrics:" + content_sha256(canonical_json(metrics))
                     bridge.log_metrics(
                         run_id,
-                        self._training_progress_metrics(sample),
+                        metrics,
                         step=int(sample.get("completed") or 0),
                         timestamp_ms=self._training_progress_timestamp_ms(
                             sample.get("recorded_at")
                         ),
                         idempotency_key=idempotency_key,
                     )
-                    emitted.add(idempotency_key)
+                    emitted.setdefault(sample_key, set()).update(metrics)
                     published += 1
                 if name == "wandb":
                     report = bridge.drain_spool()
@@ -7663,7 +7971,7 @@ class PipelineService:
         if not observed:
             return
         current_evaluation = self.database.get_evaluation(str(evaluation["id"]))
-        if not current_evaluation:
+        if not current_evaluation or current_evaluation.get("status") not in {"PENDING", "SUBMITTED", "RUNNING"}:
             return
         current_by_key = {
             (item["task"], item["seed"], item["episode_index"]): item
@@ -7714,6 +8022,7 @@ class PipelineService:
                 started_at=current.get("started_at") or (recorded_at if isinstance(recorded_at, str) else utc_now()),
                 completed_at=(recorded_at if isinstance(recorded_at, str) else utc_now())
                     if desired["status"] != "RUNNING" else None,
+                expected_parent_states=("PENDING", "SUBMITTED", "RUNNING"),
             )
 
     def _ingest_evaluation_result(
@@ -8677,6 +8986,8 @@ class PipelineService:
         )
         if resources is not None:
             evaluator_document["resources"] = resources.model_dump(mode="json", by_alias=True)
+        # Evaluation uses its episode ledger, not the training checkpoint signal policy.
+        evaluator_document["train"]["checkpoint"]["auto_resume"] = False
         worker_resources = copy.deepcopy(evaluator_document["resources"])
         supports_workers = any(
             entry.environment == environment and suite["name"] in entry.suites
@@ -9174,7 +9485,14 @@ def _http_error(error: Exception) -> HTTPException:
     if isinstance(error, KeyError):
         return HTTPException(status_code=404, detail=str(error).strip("'"))
     if isinstance(error, sqlite3.IntegrityError):
-        return HTTPException(status_code=409, detail=str(error))
+        message = str(error)
+        identities = {
+            "data_resources.provider": "A resource with this provider, namespace, and name already exists. Open that resource or choose another name.",
+            "data_resource_versions.resource_id": "This revision and format are already registered for the resource. Use the existing immutable version or choose a new revision.",
+            "data_bundles.name": "This bundle name and version already exist. Open the existing bundle or choose a new version.",
+        }
+        detail = next((text for key, text in identities.items() if key in message), "This record conflicts with an existing record. Refresh and check its identity before retrying.")
+        return HTTPException(status_code=409, detail=detail)
     if isinstance(error, (ValueError, SlurmCompileError)):
         return HTTPException(status_code=422, detail=str(error))
     if isinstance(error, ClusterError):
@@ -9272,6 +9590,14 @@ def submit_data_import(
 def list_data_imports() -> dict[str, Any]:
     try:
         return {"imports": service.reconcile_data_imports()}
+    except Exception as error:
+        raise _http_error(error) from error
+
+
+@router.post("/data/imports/{import_id}/cancel")
+def cancel_data_import(import_id: str) -> dict[str, Any]:
+    try:
+        return {"import": service.cancel_data_import(import_id)}
     except Exception as error:
         raise _http_error(error) from error
 
@@ -10006,6 +10332,8 @@ def evaluation_suites(
 def preview_experiment(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     try:
         return service.preview(payload)
+    except ValidationError as error:
+        raise HTTPException(status_code=422, detail=error.errors(include_url=False, include_input=False, include_context=False)) from error
     except Exception as error:
         raise _http_error(error) from error
 
@@ -10015,6 +10343,8 @@ def create_experiment(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     try:
         experiment = service.create_experiment(payload)
         return {"experiment": experiment, "id": experiment["id"]}
+    except ValidationError as error:
+        raise HTTPException(status_code=422, detail=error.errors(include_url=False, include_input=False, include_context=False)) from error
     except Exception as error:
         raise _http_error(error) from error
 
@@ -10077,6 +10407,7 @@ def list_runs(
     experiment_revision_id: str | None = Query(default=None),
     variant_id: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    refresh_progress: bool = Query(default=True),
 ) -> dict[str, Any]:
     runs = service.database.list_runs(
         experiment_id=experiment_id,
@@ -10086,11 +10417,12 @@ def list_runs(
         limit=1000,
     )
     connections = service.tracking_connections()["connections"]
+    progress_refresh_pending = (service._queue_list_progress_refresh("training", runs) if refresh_progress
+                                else service._list_progress_refresh_pending("training", runs))
     for run in runs:
-        service._ingest_training_progress(run)
         run["tracking_actions"] = service.run_tracking_actions(run, connections)
     _attach_run_progress_summaries(service.database, runs)
-    return {"runs": runs}
+    return {"runs": runs, "progress_refresh_pending": progress_refresh_pending}
 
 
 _COMMON_HYPERPARAMETER_FIELDS = {
@@ -11046,13 +11378,12 @@ def cancel_run(run_id: str) -> dict[str, Any]:
 
 
 @router.get("/evaluations")
-def list_evaluations() -> dict[str, Any]:
+def list_evaluations(refresh_progress: bool = Query(default=True)) -> dict[str, Any]:
     evaluations = service.database.list_evaluations()
-    for evaluation in evaluations:
-        service._ingest_evaluation_progress(evaluation)
-    evaluations = service.database.list_evaluations()
+    progress_refresh_pending = (service._queue_list_progress_refresh("evaluation", evaluations) if refresh_progress
+                                else service._list_progress_refresh_pending("evaluation", evaluations))
     _attach_evaluation_progress_summaries(service.database, evaluations)
-    return {"evaluations": evaluations}
+    return {"evaluations": evaluations, "progress_refresh_pending": progress_refresh_pending}
 
 
 @router.get("/evaluations/{evaluation_id}")

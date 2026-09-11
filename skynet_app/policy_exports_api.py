@@ -1,6 +1,6 @@
 """Preparation API; the historic exports URL remains a compatible entry point."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from .live_xr_api import checked, reviews
@@ -58,7 +58,7 @@ def delete_format(identifier: str):
 
 @router.get("/{identifier}")
 def status(identifier: str):
-    return checked(service.get, identifier)
+    return checked(service.status, identifier)
 
 
 @router.post("/{identifier}/retry", status_code=202)
@@ -72,7 +72,11 @@ def remove_local_copy(identifier: str):
 
 
 @router.get("/{identifier}/{name}")
-def artifact(identifier: str, name: str):
+def artifact(identifier: str, name: str, request: Request):
+    remote = checked(service.remote_artifact, identifier, name)
+    if remote:
+        media = "application/zip" if name == "dataset.zip" else "application/json" if name == "manifest.json" else "text/plain"
+        return checked(lambda: remote.response(request, media_type=media, filename=name))
     return FileResponse(
         checked(service.artifact, identifier, name),
         filename=name,

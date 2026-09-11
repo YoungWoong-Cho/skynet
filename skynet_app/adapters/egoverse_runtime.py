@@ -11,10 +11,16 @@ from pathlib import Path
 import subprocess
 import sys
 
+try:
+    from .egoverse_models import model_algorithm, NATIVE_TARGETS
+except ImportError:  # Frozen run capsule modules live beside the entrypoint.
+    from egoverse_models import model_algorithm, NATIVE_TARGETS
+
 REVISION = "e17cf98fe4bc234c564b37abc9e155f25e76d566"
 JOINT_CONTRACT = "skynet.egoverse-rgb-joints/v1"
-JOINT_MODELS = {"act", "hpt_joints", "dp_joints"}
+JOINT_MODELS = {"act", "hpt_joints"}
 CAMERAS = ["scene_front", "scene_left", "scene_right"]
+HPT_JOINT_STATE_KEY = "state_joint_positions"
 
 
 def register_joint_domain():
@@ -105,7 +111,7 @@ def joint_data(root, batch, workers, horizon=100, reject_outliers=True):
     }
 
 
-def map_joint_model(model, dimension, diffusion=False):
+def map_joint_model(model, dimension):
     """Keep native HPT architecture; bind the actual joint/camera domain."""
     m = model["robomimic_model"]
     domain = "skynet_joints"
@@ -113,7 +119,8 @@ def map_joint_model(model, dimension, diffusion=False):
         "front_img_1": "scene_front",
         "left_wrist_img": "scene_left",
         "right_wrist_img": "scene_right",
-        "state_ee_pose": "joint_positions",
+        # HPT._robomimic_to_hpt_data prefixes proprioceptive keys with state_.
+        "state_ee_pose": HPT_JOINT_STATE_KEY,
     }
     m["6dof"] = False
     m["domains"] = [domain]
@@ -122,33 +129,25 @@ def map_joint_model(model, dimension, diffusion=False):
     for key in ("shared_stem_specs", "encoder_specs"):
         m[key] = {renames[k]: v for k, v in m[key].items()}
     stems = {renames[k]: v for k, v in m["stem_specs"]["eva_bimanual"].items()}
-    stems["joint_positions"]["input_dim"] = dimension
+    stems[HPT_JOINT_STATE_KEY]["input_dim"] = dimension
     m["stem_specs"] = {domain: stems}
     head = m["head_specs"]["eva_bimanual"]
     head["infer_ac_dims"] = {domain: dimension}
     head["model"]["act_dim"] = dimension
-    if diffusion:
-        # EgoVerse supplies the head but no training YAML for it. These wiring
-        # values are an explicit Skynet preset, never an upstream/paper preset.
-        head = {
-            "_target_": "egomimic.models.diffusion_policy.DiffusionPolicy",
-            "action_horizon": 100,
-            "num_inference_steps": 50,
-            "pooling": "flatten",
-            "infer_ac_dims": {domain: dimension},
-            "noise_scheduler": {
-                "_target_": "diffusers.DDPMScheduler",
-                "num_train_timesteps": 100,
-            },
-            "model": {
-                "_target_": "egomimic.models.denoising_nets.ConditionalUnet1D",
-                "input_dim": dimension,
-                "cond_dim": 256,
-                "ac_latent_seq": 64,
-            },
-        }
     m["head_specs"] = {domain: head}
     return model
+
+
+def validate_hpt_joint_inputs(model, *, checkpoint=False):
+    """Reject the old mapping, which native HPT silently skips as missing."""
+    stems = model.get("robomimic_model", {}).get("stem_specs", {}).get("skynet_joints", {})
+    if HPT_JOINT_STATE_KEY not in stems or "joint_positions" in stems:
+        subject = "Checkpoint" if checkpoint else "HPT recorded-joint configuration"
+        raise ValueError(
+            f"{subject} has an incompatible joint-input mapping. "
+            "Use the latest EgoVerse HPT adapter and start a fresh training run; "
+            "the previous mapping omitted joint-state inputs."
+        )
 
 
 def validate_episode_split(root, manifest):
@@ -171,6 +170,7 @@ def validate_episode_split(root, manifest):
 
 
 def validate_manifest(root, sha, model):
+    model_algorithm(model)
     from artifacts import verify
 
     manifest = verify(Path(root), sha)
@@ -187,12 +187,37 @@ def validate_manifest(root, sha, model):
     return manifest
 
 
+def model_settings(value):
+    overrides = json.loads(value)
+    if not isinstance(overrides, dict):
+        raise ValueError("Model overrides must be a JSON object")
+
+    def changes_target(item):
+        if isinstance(item, dict):
+            return any("_target_" in key or changes_target(child) for key, child in item.items())
+        if isinstance(item, list):
+            return any(changes_target(child) for child in item)
+        return False
+
+    for key, value in overrides.items():
+        if (
+            not key.startswith(("robomimic_model.", "optimizer.", "scheduler."))
+            or "_target_" in key
+            or changes_target(value)
+        ):
+            raise ValueError("Use native model, optimizer or scheduler settings without replacing architecture targets")
+    return overrides
+
+
 def build_config(args, manifest):
+    algorithm = model_algorithm(args.model)
+    if getattr(args, "algorithm", None) not in {None, algorithm}:
+        raise ValueError("Model preset does not belong to the selected native EgoVerse algorithm")
     from hydra import compose, initialize_config_dir
     from omegaconf import OmegaConf, open_dict
 
     native_model = (
-        "hpt_bc_flow_eva" if args.model in {"hpt_joints", "dp_joints"} else args.model
+        "hpt_bc_flow_eva" if args.model == "hpt_joints" else args.model
     )
     with initialize_config_dir(
         config_dir=str(Path(args.repository) / "egomimic/hydra_configs"),
@@ -210,6 +235,8 @@ def build_config(args, manifest):
                 ),
             ],
         )
+    if cfg.model.robomimic_model._target_ != NATIVE_TARGETS[algorithm]:
+        raise ValueError("The selected preset does not use its declared native EgoVerse algorithm")
     with open_dict(cfg):
         cfg.paths.output_dir = args.output
         cfg.paths.work_dir = args.repository
@@ -253,7 +280,6 @@ def build_config(args, manifest):
                 cfg.model = map_joint_model(
                     OmegaConf.to_container(cfg.model, resolve=True),
                     len(manifest["policy_to_source_indices"]),
-                    args.model == "dp_joints",
                 )
             cfg.evaluator = {"_target_": "egoverse_runtime.JointEvaluator"}
         else:
@@ -330,19 +356,18 @@ def build_config(args, manifest):
                     "π0.5 pretrained weights are missing from the selected cluster directory"
                 )
             cfg.model.robomimic_model.config.pytorch_weight_path = args.weights
-        overrides = json.loads(args.model_overrides)
-        if not isinstance(overrides, dict):
-            raise ValueError("Model overrides must be a JSON object")
-        for key, value in overrides.items():
-            if (
-                not key.startswith(("robomimic_model.", "optimizer.", "scheduler."))
-                or "_target_" in key
-            ):
-                raise ValueError(
-                    "Use native model, optimizer or scheduler setting paths"
-                )
+        for key, value in model_settings(args.model_overrides).items():
             OmegaConf.update(cfg.model, key, value, merge=False)
+        expected_target = (
+            "egoverse_runtime.make_act"
+            if algorithm == "act" and manifest["contract"] == JOINT_CONTRACT
+            else NATIVE_TARGETS[algorithm]
+        )
+        if cfg.model.robomimic_model._target_ != expected_target:
+            raise ValueError("Model settings changed the selected native EgoVerse algorithm")
         if manifest["contract"] == JOINT_CONTRACT:
+            if args.model == "hpt_joints":
+                validate_hpt_joint_inputs(cfg.model)
             horizon = (
                 cfg.model.robomimic_model.chunk_size
                 if args.model == "act"
@@ -436,6 +461,7 @@ def parser():
         p.add_argument("--" + key, required=True)
     p.add_argument("--revision", default=REVISION)
     p.add_argument("--model", default="act")
+    p.add_argument("--algorithm", choices=["act", "hpt", "pi"])
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--gpu-count", type=int, default=1)
     p.add_argument("--num-workers", type=int, default=6)
@@ -462,6 +488,7 @@ def parser():
 
 def main():
     args = parser().parse_args()
+    model_algorithm(args.model)
     actual = subprocess.check_output(
         ["git", "-C", args.repository, "rev-parse", "HEAD"], text=True
     ).strip()
@@ -475,6 +502,15 @@ def main():
 
     manifest = validate_manifest(args.dataset, args.manifest_sha, args.model)
     cfg = build_config(args, manifest)
+    if args.checkpoint:
+        import torch
+        saved = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+        receipt = saved.get("skynet") or {}
+        model_algorithm(receipt.get("model"))
+        if receipt.get("model") != args.model or receipt.get("manifest_sha256") != args.manifest_sha:
+            raise ValueError("Resume checkpoint model or dataset differs from the selected native configuration")
+        if args.model == "hpt_joints":
+            validate_hpt_joint_inputs(receipt.get("config", {}).get("model", {}), checkpoint=True)
     from omegaconf import OmegaConf
 
     output = Path(args.output)

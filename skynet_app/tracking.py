@@ -419,6 +419,19 @@ class MLflowBridge:
                 and payload.get("idempotency_key")
             }
 
+    def metric_names_by_idempotency_key(self) -> dict[str, set[str]]:
+        """Include queued and delivered fields so enrichment cannot duplicate them."""
+        with self._locked():
+            return {
+                str(payload["idempotency_key"]): {
+                    str(metric["key"]) for metric in payload.get("metrics", [])
+                }
+                for event in self._read_events_unlocked()
+                if event.get("operation") == "log_batch"
+                and isinstance((payload := event.get("payload")), Mapping)
+                and payload.get("idempotency_key")
+            }
+
     def ensure_experiment(
         self,
         name: str,
@@ -940,6 +953,7 @@ class SessionCredentialStore:
         self._lock = threading.RLock()
         self._credentials: dict[str, dict[str, str]] = {}
         self._credential_sources: dict[str, str] = {}
+        self._credential_endpoints: dict[str, str] = {}
         self._connection_state: dict[str, dict[str, Any]] = {}
 
     def replace(
@@ -948,6 +962,7 @@ class SessionCredentialStore:
         credentials: Mapping[str, str | None],
         *,
         source: str = "session",
+        endpoint: str | None = None,
     ) -> None:
         values = {
             str(key): str(value)
@@ -956,6 +971,10 @@ class SessionCredentialStore:
         }
         with self._lock:
             self._credentials[provider] = values
+            if values and endpoint:
+                self._credential_endpoints[provider] = endpoint.rstrip("/")
+            else:
+                self._credential_endpoints.pop(provider, None)
             if values:
                 self._credential_sources[provider] = source
             else:
@@ -969,11 +988,16 @@ class SessionCredentialStore:
         with self._lock:
             self._credentials.pop(provider, None)
             self._credential_sources.pop(provider, None)
+            self._credential_endpoints.pop(provider, None)
             self._connection_state.pop(provider, None)
 
     def source(self, provider: str) -> str | None:
         with self._lock:
             return self._credential_sources.get(provider)
+
+    def endpoint(self, provider: str) -> str | None:
+        with self._lock:
+            return self._credential_endpoints.get(provider)
 
     def mark_connected(self, provider: str, **public_state: Any) -> None:
         with self._lock:
@@ -1382,6 +1406,17 @@ class WandBBridge:
                 str(payload["idempotency_key"])
                 for event in self._events_unlocked()
                 if event.get("operation") in {"log_metrics", "log_system_metrics"}
+                and isinstance((payload := event.get("payload")), Mapping)
+                and payload.get("idempotency_key")
+            }
+
+    def metric_names_by_idempotency_key(self) -> dict[str, set[str]]:
+        """Include queued and delivered fields so enrichment cannot duplicate them."""
+        with self._locked():
+            return {
+                str(payload["idempotency_key"]): set(payload.get("metrics") or {})
+                for event in self._events_unlocked()
+                if event.get("operation") == "log_metrics"
                 and isinstance((payload := event.get("payload")), Mapping)
                 and payload.get("idempotency_key")
             }

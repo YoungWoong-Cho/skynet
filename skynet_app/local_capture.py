@@ -8,15 +8,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import shutil
 import threading
 from pathlib import Path
 from typing import Any, Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from .database import Database, canonical_json, utc_now
+from .local_capture_storage import CaptureStorage, MemoryCapture, MAX_CAPTURE_BYTES
 
-MAX_CAPTURE_BYTES = 512 * 1024 * 1024
 MAX_LINE_BYTES = 256 * 1024
 
 
@@ -141,10 +140,11 @@ PROVIDERS: dict[str, CaptureProvider] = {"visionpro-local": VisionProTracking()}
 
 
 class LocalCaptureService:
-    def __init__(self, database: Database, root: Path | None = None):
+    def __init__(self, database: Database, root: Path | None = None, *, storage=None):
         self.database = database
+        # Only used to identify legacy files during explicit verified migration.
         self.root = root or database.path.parent / "local-captures"
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.storage = storage or CaptureStorage()
         self._lock = threading.RLock()
         with database.transaction() as connection:
             connection.execute("""CREATE TABLE IF NOT EXISTS local_captures (
@@ -158,79 +158,132 @@ class LocalCaptureService:
             rows = connection.execute("SELECT * FROM local_captures ORDER BY created_at DESC").fetchall()
         return [self._public(row) for row in rows]
 
-    @staticmethod
-    def _public(row: Any) -> dict[str, Any]:
+    def _public(self, row: Any) -> dict[str, Any]:
         item = dict(row)
         item["summary"] = json.loads(item.pop("summary_json"))
-        item["location"] = "This computer"
+        item["location"] = "sky2" if self._location(item) else "Awaiting cluster migration"
         return item
 
+    def _location(self, row):
+        version = self.database.get_data_resource_version(row["version_id"])
+        expected = self.storage.path(row["sha256"])
+        return next((location for location in (version or {}).get("locations", [])
+                     if location["kind"] == "cluster" and location["host"] == "skynet"
+                     and location["status"] == "AVAILABLE" and location["path"] == expected
+                     and location["manifest_sha256"] == row["sha256"]), None)
+
+    @staticmethod
+    def _record_location(connection, row, path):
+        version = connection.execute("SELECT manifest_sha256,size_bytes FROM data_resource_versions WHERE id=?", (row["version_id"],)).fetchone()
+        if version is None or version["manifest_sha256"] != row["sha256"] or version["size_bytes"] != row["size_bytes"]:
+            raise ValueError("Recording registration no longer matches its original bytes")
+        connection.execute("""INSERT INTO data_locations VALUES (?,?,?,?,?,?,?,?)
+            ON CONFLICT(version_id,host,path) DO UPDATE SET status=excluded.status,verified_at=excluded.verified_at""",
+            (str(uuid4()), row["version_id"], "cluster", "skynet", path, row["sha256"], "AVAILABLE", utc_now()))
+
     def import_file(self, provider_key: str, path: Path) -> dict[str, Any]:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("Choose a regular recording file")
+        if path.stat().st_size > MAX_CAPTURE_BYTES:
+            raise ValueError("Recording exceeds the 512 MB import limit. Record shorter sessions.")
+        with path.open("rb") as stream:
+            data = stream.read(MAX_CAPTURE_BYTES + 1)
+        return self.import_bytes(provider_key, data)
+
+    def import_bytes(self, provider_key: str, data: bytes) -> dict[str, Any]:
         provider = PROVIDERS.get(provider_key)
         if provider is None:
             raise ValueError(f"Unsupported collection provider: {provider_key}")
-        size = path.stat().st_size
-        if size > MAX_CAPTURE_BYTES:
+        if len(data) > MAX_CAPTURE_BYTES:
             raise ValueError("Recording exceeds the 512 MB import limit. Record shorter sessions.")
-        with path.open("rb") as stream:
-            digest = hashlib.file_digest(stream, "sha256").hexdigest()
-        # An identical byte stream has already passed provider validation. Hash
-        # once, then reuse its stored summary instead of parsing every frame again.
+        digest = hashlib.sha256(data).hexdigest()
         with self._lock:
-            existing = self._existing_capture(digest, provider_key, path)
-            if existing is not None:
-                return existing
-        summary = provider.inspect(path)
-        with self._lock:
-            # Another upload may have finished while this one was inspected.
-            existing = self._existing_capture(digest, provider_key, path)
-            if existing is not None:
-                return existing
             with self.database.connection() as connection:
-                conflict = connection.execute("SELECT sha256 FROM local_captures WHERE provider = ? AND session_id = ?",
-                                              (provider_key, summary["header"]["session_id"])).fetchone()
-            if conflict:
+                existing = connection.execute("SELECT * FROM local_captures WHERE sha256=?", (digest,)).fetchone()
+            if existing is not None and existing["provider"] != provider_key:
+                raise ValueError(f"This file was imported with provider {existing['provider']}; choose that collection provider")
+            summary = json.loads(existing["summary_json"]) if existing else provider.inspect(MemoryCapture(data))
+            session_id = summary["header"]["session_id"]
+            with self.database.connection() as connection:
+                conflict = connection.execute("SELECT sha256 FROM local_captures WHERE provider=? AND session_id=?",
+                                              (provider_key, session_id)).fetchone()
+            if conflict is not None and conflict["sha256"] != digest:
                 raise ValueError("This session ID was already imported with different contents. The original capture is immutable.")
-            destination = self.root / f"{digest}.jsonl"
-            shutil.copyfile(path, destination)
-            resource_name = summary["header"]["session_id"]
-            resources = self.database.list_data_resources(provider="collection", namespace=provider_key, include_archived=True)
-            resource = next((item for item in resources if item["name"] == resource_name), None)
-            if resource is None:
-                resource = self.database.create_data_resource(provider="collection", namespace=provider_key,
-                    name=resource_name, kind="raw_capture", description=summary["header"]["task"], metadata={"storage_location": "local"})
-            versions = self.database.get_data_resource(resource["id"])["versions"]
-            version = next((item for item in versions if item["revision"] == digest), None)
-            if version is None:
-                version = self.database.create_data_resource_version(resource["id"], revision=digest,
-                    format=provider.native_format, path=str(destination), manifest_sha256=digest,
-                    status="LOCAL", size_bytes=size, source_uri=f"collection:{provider_key}:{resource_name}",
-                    metadata={"native_raw_preserved": True, "storage_location": "local", "capture_summary": summary,
-                              "training_blocker": summary["training_compatibility"]})
+            # Transfer before the atomic local metadata publication. No database lock spans SSH.
+            destination = self.storage.publish(data, digest)
             with self.database.transaction() as connection:
-                connection.execute("INSERT INTO local_captures VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (digest, provider_key, resource_name, destination.name, size, canonical_json(summary), version["id"], utc_now()))
-                row = connection.execute("SELECT * FROM local_captures WHERE sha256 = ?", (digest,)).fetchone()
-            return {"capture": self._public(row), "imported": True}
+                existing = connection.execute("SELECT * FROM local_captures WHERE sha256=?", (digest,)).fetchone()
+                conflict = connection.execute("SELECT sha256 FROM local_captures WHERE provider=? AND session_id=?",
+                                              (provider_key, session_id)).fetchone()
+                if conflict is not None and conflict["sha256"] != digest:
+                    raise ValueError("This session ID was already imported with different contents. The original capture is immutable.")
+                if existing is not None:
+                    self._record_location(connection, existing, destination)
+                    row, imported = existing, False
+                else:
+                    resource = connection.execute("SELECT id FROM data_resources WHERE provider='collection' AND namespace=? AND name=?",
+                                                  (provider_key, session_id)).fetchone()
+                    if resource is None:
+                        resource = self.database._insert_data_resource(connection, provider="collection", namespace=provider_key,
+                            name=session_id, kind="raw_capture", description=summary["header"]["task"], metadata={"storage_location": "cluster"})
+                    version = connection.execute("SELECT id FROM data_resource_versions WHERE resource_id=? AND revision=?",
+                                                 (resource["id"], digest)).fetchone()
+                    if version is None:
+                        version = self.database._insert_data_resource_version(connection, resource["id"], revision=digest,
+                            format=provider.native_format, path=destination, manifest_sha256=digest,
+                            status="READY", size_bytes=len(data), source_uri=f"collection:{provider_key}:{session_id}",
+                            metadata={"native_raw_preserved": True, "storage_location": "cluster", "capture_summary": summary,
+                                      "training_blocker": summary["training_compatibility"]})
+                    connection.execute("INSERT INTO local_captures VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (digest, provider_key, session_id, f"{digest}.jsonl", len(data), canonical_json(summary), version["id"], utc_now()))
+                    row = connection.execute("SELECT * FROM local_captures WHERE sha256=?", (digest,)).fetchone()
+                    self._record_location(connection, row, destination)
+                    imported = True
+            return {"capture": self._public(row), "imported": imported}
 
-    def _existing_capture(self, digest: str, provider_key: str, source: Path) -> dict[str, Any] | None:
+    def _row(self, digest):
         with self.database.connection() as connection:
-            existing = connection.execute("SELECT * FROM local_captures WHERE sha256 = ?", (digest,)).fetchone()
-        if existing is None:
-            return None
-        if existing["provider"] != provider_key:
-            raise ValueError(f"This file was imported with provider {existing['provider']}; choose that collection provider")
-        saved_path = self.root / existing["filename"]
-        if not saved_path.is_file():
-            shutil.copyfile(source, saved_path)
-        return {"capture": self._public(existing), "imported": False}
-
-    def file(self, digest: str) -> Path:
-        with self.database.connection() as connection:
-            row = connection.execute("SELECT filename FROM local_captures WHERE sha256 = ?", (digest,)).fetchone()
+            row = connection.execute("SELECT * FROM local_captures WHERE sha256=?", (digest,)).fetchone()
         if row is None:
             raise KeyError("Capture not found")
+        return row
+
+    def file(self, digest):
+        row = self._row(digest)
+        if not self._location(row):
+            raise ValueError("This recording is awaiting verified migration to sky2. Its saved original has not been removed.")
+        return self.storage.artifact(digest, row["size_bytes"])
+
+    def read(self, digest):
+        row = self._row(digest)
+        data = self.file(digest).read_bytes()
+        if len(data) != row["size_bytes"] or hashlib.sha256(data).hexdigest() != digest:
+            raise ValueError("Original recording size or checksum changed on sky2")
+        return MemoryCapture(data)
+
+    def stage(self, digest, run_id, gateway):
+        row = self._row(digest)
+        if not self._location(row):
+            raise ValueError("Migrate the original recording to sky2 before processing")
+        return self.storage.stage(digest, row["size_bytes"], run_id, gateway)
+
+    def migrate_capture(self, digest):
+        """Verify and publish one exact legacy file; deletion remains a separate step."""
+        row = self._row(digest)
+        if row["filename"] != f"{digest}.jsonl":
+            raise ValueError("Legacy recording filename does not match its registered identity")
         path = self.root / row["filename"]
-        if not path.is_file():
-            raise ValueError("The registered recording is missing from this computer. Restore the original file.")
-        return path
+        if path.is_symlink() or not path.is_file():
+            if self._location(row):
+                self.storage.verify(digest, row["size_bytes"])
+                return self._public(row)
+            raise ValueError("The legacy recording is missing; no local file was removed")
+        if path.stat().st_size != row["size_bytes"]:
+            raise ValueError("Legacy recording size does not match its registration")
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise ValueError("Legacy recording checksum does not match its registration")
+        destination = self.storage.publish(data, digest)
+        with self.database.transaction() as connection:
+            self._record_location(connection, row, destination)
+        return self._public(row)

@@ -1,57 +1,15 @@
 """One declaration factory for EgoVerse model adapters."""
 
-from skynet_app.model_io import adapter_io_contract
-
 from pathlib import Path
+
+from skynet_app.model_io import adapter_io_contract
+from .egoverse_models import ALGORITHMS, MODEL_LEARNING_RATES, model_contracts
 
 REPOSITORY = "https://github.com/GaTech-RL2/EgoVerse"
 REVISION = "e17cf98fe4bc234c564b37abc9e155f25e76d566"
 RUNTIME = "egoverse-native"
 FORMAT = "egoverse-episodes-zarr/v1"
 CONTRACT = "skynet.egoverse-rgb-joints/v1"
-MODEL_LEARNING_RATES = {
-    "act": 5e-5,
-    "hpt_bc_keypoints_base": 5e-5,
-    "hpt_cotrain_enc_dec_base": 5e-5,
-    "hpt_bc_flow_aria": 3e-4,
-    "hpt_bc_flow_human": 3e-4,
-    "hpt_bc_flow_mecka": 3e-4,
-    "hpt_bc_flow_scale": 3e-4,
-    "hpt_cotrain_flow_seperate_head": 3e-4,
-    "hpt_bc_pickplace_qwen_pertoken": 2e-4,
-    "hpt_bc_pickplace_qwen_pooled": 2e-4,
-}
-
-# The incomplete PI base and the EgoBridge alias are not duplicate models.
-MODELS = {
-    "act": ("ACT", True),
-    "hpt_joints": ("HPT flow · recorded joints", True),
-    "dp_joints": ("Diffusion Policy · recorded joints", True),
-    **{
-        name: (label, False)
-        for name, label in [
-            ("hpt_bc_flow_aria", "HPT flow · Aria"),
-            ("hpt_bc_flow_eva", "HPT flow · EVA"),
-            ("hpt_bc_flow_human", "HPT flow · human"),
-            ("hpt_bc_flow_mecka", "HPT flow · Mecka"),
-            ("hpt_bc_flow_scale", "HPT flow · Scale"),
-            ("hpt_bc_keypoints_base", "HPT flow · human keypoints"),
-            ("hpt_cotrain_enc_dec_base", "HPT co-training · encoder-decoder"),
-            ("hpt_bc_pickplace_qwen_pertoken", "HPT · Qwen per token"),
-            ("hpt_bc_pickplace_qwen_pooled", "HPT · Qwen pooled"),
-            ("hpt_cotrain_flow_seperate_head", "HPT co-training · separate heads"),
-            ("hpt_cotrain_flow_shared_head", "HPT co-training · shared head"),
-            ("hpt_cotrain_mecka_flow_shared_head", "HPT co-training · Mecka"),
-            ("hpt_cotrain_scale_flow_shared_head", "HPT co-training · Scale"),
-            ("pi0.5_bc_aria", "π0.5 · Aria"),
-            ("pi0.5_bc_eva", "π0.5 · EVA"),
-            ("pi0.5_bc_mecka", "π0.5 · Mecka"),
-            ("pi0.5_bc_scale", "π0.5 · Scale"),
-            ("pi0.5_cotrain_eva_aria", "π0.5 co-training · EVA / Aria"),
-            ("pi0.5_cotrain_mecka_scale", "π0.5 co-training · Mecka / Scale"),
-        ]
-    },
-}
 
 
 def support_files():
@@ -60,9 +18,11 @@ def support_files():
         "adapter-support/" + name: (root / name).read_text()
         for name in (
             "egoverse_runtime.py",
+            "egoverse_models.py",
             "egoverse_evaluation.py",
             "egoverse_data.py",
             "egoverse_readiness.py",
+            "evaluation_video.py",
         )
     } | {
         "adapter-support/artifacts.py": (
@@ -90,8 +50,10 @@ def manifests():
     )
     from skynet_app.training_contracts import DatasetRequirement
 
-    for model, (label, recorded) in MODELS.items():
-        slug = "egoverse-" + model.replace("_", "-").replace(".", "")
+    for algorithm, (label, models) in ALGORITHMS.items():
+        model = models[0]
+        recorded = algorithm in {"act", "hpt"}
+        slug = "egoverse-" + algorithm
         lr = MODEL_LEARNING_RATES.get(model, 3e-5 if model.startswith("pi") else 1e-4)
         fields = [
             AdapterInputField(
@@ -102,9 +64,9 @@ def manifests():
                 data_binding=DataBundleInputBinding(
                     role="training_data",
                     formats=[FORMAT],
-                    contracts=(
-                        [CONTRACT] if recorded else [f"egoverse.native-{model}/v1"]
-                    ),
+                    contracts=model_contracts(model),
+                    contract_selector="native.config.model_preset",
+                    contract_choices={name: model_contracts(name) for name in models},
                     value_path=value,
                 ),
             )
@@ -117,6 +79,12 @@ def manifests():
                 ),
             ]
         ]
+        fields.insert(0, AdapterInputField(
+            path="native.config.model_preset", label="Native model preset",
+            kind="string", required=True, default=model, choices=models,
+            help=("HPT recorded joints binds the native EVA flow model to recorded joint/camera names. " if algorithm == "hpt" else "")
+            + "Other presets require their matching native dataset contract.",
+        ))
         settings = [
             ("epochs", "Epochs", 2000, 1),
             ("validation_every", "Validate every epochs", 200, 1),
@@ -169,6 +137,7 @@ def manifests():
                 )
             )
         flags = {
+            "native.config.model_preset": "model",
             "train.batch.value": "batch-size",
             "train.learning_rate": "learning-rate",
             "train.seed": "seed",
@@ -195,24 +164,15 @@ def manifests():
             "{{native.config.dataset_manifest_sha256}}",
             "--output",
             "{{tokens.run_dir}}/artifacts",
-            "--model",
-            model,
+            "--algorithm",
+            algorithm,
             "--gpu-count",
             "{{computed.gpu_count}}",
         ]
         yield AdapterManifest(
             slug=slug,
-            display_name="EgoVerse · " + MODELS[model][0],
-            description=(
-                "EgoVerse diffusion head with a Skynet HPT configuration. "
-                if model == "dp_joints"
-                else "Native EgoVerse training and held-out evaluation. "
-            )
-            + (
-                "RGB and recorded joints."
-                if recorded
-                else "Requires the model’s native data."
-            ),
+            display_name="EgoVerse · " + label,
+            description=f"Native EgoVerse {label} training and held-out evaluation. Select a compatible model preset and dataset.",
             default_repository=REPOSITORY,
             repository_patterns=[REPOSITORY],
             capabilities=AdapterCapabilities(
@@ -252,11 +212,7 @@ def manifests():
                 checkpoint_globs=["artifacts/checkpoints/last.ckpt"],
                 data_requirements=DatasetRequirement(
                     description=(
-                        "RGB and joints."
-                        if recorded
-                        else "Native EgoVerse data.yaml, evaluator.yaml and Zarr episodes for "
-                        + model
-                        + "."
+                        "The selected model preset defines the verified dataset contract. Recorded joints are supported by ACT and the HPT recorded-joints configuration; other presets require native data.yaml, evaluator.yaml and Zarr episodes."
                     )
                 ),
                 batch_compatibility=AdapterBatchCompatibility(

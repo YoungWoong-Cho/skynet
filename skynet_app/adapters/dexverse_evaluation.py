@@ -163,6 +163,7 @@ def main():
         import torch
         import gymnasium as gym
         import imageio.v2 as imageio
+        from evaluation_video import compose_camera_views
         import dexverse.tasks
         from dexverse.tasks.utils import parse_env_cfg, prune_stale_obs_refs
         from isaaclab.managers import ManagerTermBase, TerminationTermCfg
@@ -310,7 +311,9 @@ def main():
                                     .copy()
                                 )
                             if step % 2 == 0:
-                                writer.append_data(images["scene_front"])
+                                video_views = (images if os.environ["SKYNET_POLICY_IMAGES"] == "1"
+                                               else {"scene_front": images["scene_front"]})
+                                writer.append_data(compose_camera_views(video_views))
                             state = (
                                 env.scene["robot"]
                                 .data.joint_pos[0, ids]

@@ -1,3 +1,25 @@
+/* One keyboard convention for primary and workspace tabs. */
+function installTabKeyboardNavigation(buttons, select) {
+  buttons.forEach((button, index) => button.addEventListener("keydown", (event) => {
+    if (event.key === " ") {
+      event.preventDefault();
+      select(button);
+      return;
+    }
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+      : (index + (event.key === "ArrowRight" ? 1 : -1) + buttons.length) % buttons.length;
+    select(buttons[next]);
+    buttons[next].focus({ preventScroll: true });
+    buttons[next].scrollIntoView({ block: "nearest", inline: "nearest" });
+  }));
+}
+installTabKeyboardNavigation(
+  [...document.querySelectorAll('.tab-nav [role="tab"]')],
+  (button) => activateTab(button.dataset.tabTarget),
+);
+
 /* Shared workspace tabs, history and keyboard navigation for Data and Experiments. */
 function createWorkspaceNavigation({
   page,
@@ -48,21 +70,9 @@ function createWorkspaceNavigation({
   }
   buttons.forEach((button) => {
     button.addEventListener("click", () => select(buttonView(button)));
-    button.addEventListener("keydown", (event) => {
-      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key))
-        return;
-      event.preventDefault();
-      const index = views.indexOf(buttonView(button));
-      const next =
-        event.key === "Home"
-          ? 0
-          : event.key === "End"
-            ? views.length - 1
-            : (index + (event.key === "ArrowRight" ? 1 : -1) + views.length) %
-              views.length;
-      select(views[next], { focus: true });
-    });
   });
+  installTabKeyboardNavigation(buttons, (button) => select(buttonView(button)));
+
   return { viewForTab, url, render, select };
 }
 

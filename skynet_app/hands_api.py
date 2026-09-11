@@ -76,6 +76,20 @@ def save_pose(key: str, side: str, pose: Pose):
     return checked(library.save_pose, key, side, pose.name, pose.joints, pose.revision)
 
 
+class PoseName(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+@router.patch("/{key}/{side}/poses/{pose_id}")
+def rename_pose(key: str, side: str, pose_id: str, pose: PoseName):
+    return checked(library.rename_pose, key, side, pose_id, pose.name)
+
+
+@router.delete("/{key}/{side}/poses/{pose_id}")
+def delete_pose(key: str, side: str, pose_id: str):
+    return checked(library.delete_pose, key, side, pose_id)
+
+
 @router.get("/{key}/{side}/export")
 def export_pose(
     key: str, side: str, revision: str, joints: str = Query(max_length=16384)

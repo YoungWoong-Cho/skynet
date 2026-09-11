@@ -36,14 +36,16 @@ _LEDGER_SCHEMA = "skynet.openpi-libero-progress/v2"
 _RESUME_GRANULARITY = "task_seed_group"
 
 # This adapter-owned proxy intentionally delegates the rollout to the pinned
-# upstream OpenPI client. It changes only the benchmark view so the upstream
-# loop can execute an exact canonical subset rather than every suite task.
+# upstream OpenPI client. It limits task selection and composes replay frames;
+# the upstream loop still owns policy inference and simulator stepping.
 _FILTERED_CLIENT_SOURCE = r'''from __future__ import annotations
 
 import argparse
+import ast
 import dataclasses
 import hashlib
 import importlib.util
+import inspect
 import json
 import logging
 from pathlib import Path
@@ -61,6 +63,30 @@ EXPECTED_ARGS = {
     "video_out_path",
     "seed",
 }
+
+
+def include_policy_views(module):
+    """Replace only the upstream replay frame; policy observations stay intact."""
+    from evaluation_video import compose_camera_views
+
+    source = inspect.getsource(module.eval_libero)
+    tree = ast.parse(source)
+    replacements = 0
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "replay_images" and node.func.attr == "append"
+                and len(node.args) == 1 and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == "img"):
+            node.args[0] = ast.parse(
+                '_skynet_camera_views({"agentview_image": img, '
+                '"robot0_eye_in_hand_image": wrist_img})', mode="eval"
+            ).body
+            replacements += 1
+    if replacements != 1:
+        raise RuntimeError("Pinned OpenPI replay camera interface changed")
+    module._skynet_camera_views = compose_camera_views
+    exec(compile(ast.fix_missing_locations(tree), inspect.getsourcefile(module.eval_libero), "exec"), module.__dict__)
 
 
 def load_upstream(path: Path):
@@ -164,6 +190,7 @@ def main() -> int:
         print("SKYNET_TASK_CATALOG_JSON=" + json.dumps(catalog, separators=(",", ":")))
         return 0
 
+    include_policy_views(module)
     selected = list(arguments.task_id) if arguments.task_id else list(catalog)
     filtered = FilteredSuite(upstream_suite, catalog, selected)
     original_get_benchmark_dict = module.benchmark.get_benchmark_dict

@@ -318,13 +318,14 @@ class HandLibrary:
         return candidate
 
     def poses(self, key, side):
-        self.entry(key, side)
-        folder = self.root / "poses" / key / side
-        return sorted(
-            (json.loads(p.read_text()) for p in folder.glob("*.json")),
-            key=lambda p: p["created_at"],
-            reverse=True,
-        )
+        with self.lock:
+            self.entry(key, side)
+            folder = self.root / "poses" / key / side
+            return sorted(
+                (json.loads(p.read_text()) for p in folder.glob("*.json")),
+                key=lambda p: p["created_at"],
+                reverse=True,
+            )
 
     def validate_pose(self, key, side, values, revision):
         model = self.model(key, side)
@@ -361,22 +362,56 @@ class HandLibrary:
         )
 
     def save_pose(self, key, side, name, values, revision):
-        self.validate_pose(key, side, values, revision)
+        with self.lock:
+            self.validate_pose(key, side, values, revision)
+            name = self.validate_pose_name(key, side, name)
+            pose = dict(
+                id=uuid.uuid4().hex,
+                key=key,
+                side=side,
+                name=name,
+                revision=revision,
+                joints=values,
+                created_at=time.time(),
+                units="radians; prismatic joints in meters",
+            )
+            folder = self.root / "poses" / key / side
+            folder.mkdir(parents=True, exist_ok=True)
+            with (folder / (pose["id"] + ".json")).open("x") as stream:
+                json.dump(pose, stream, allow_nan=False)
+            return pose
+
+    def validate_pose_name(self, key, side, name, exclude_id=None):
         name = name.strip()
         if not name or len(name) > 80:
             raise ValueError("Give the pose a name of 1–80 characters")
-        pose = dict(
-            id=uuid.uuid4().hex,
-            key=key,
-            side=side,
-            name=name,
-            revision=revision,
-            joints=values,
-            created_at=time.time(),
-            units="radians; prismatic joints in meters",
-        )
-        folder = self.root / "poses" / key / side
-        folder.mkdir(parents=True, exist_ok=True)
-        with (folder / (pose["id"] + ".json")).open("x") as stream:
-            json.dump(pose, stream, allow_nan=False)
-        return pose
+        if any(p["id"] != exclude_id and p["name"].casefold() == name.casefold()
+               for p in self.poses(key, side)):
+            raise ValueError("A pose with this name already exists for this hand and side. Choose a different name.")
+        return name
+
+    def pose_file(self, key, side, pose_id):
+        self.entry(key, side)
+        if not re.fullmatch(r"[a-f0-9]{32}", pose_id):
+            raise ValueError("Invalid saved pose identifier")
+        path = self.root / "poses" / key / side / (pose_id + ".json")
+        if not path.is_file():
+            raise ValueError("Saved pose was not found for this hand and side")
+        return path
+
+    def rename_pose(self, key, side, pose_id, name):
+        with self.lock:
+            path = self.pose_file(key, side, pose_id)
+            name = self.validate_pose_name(key, side, name, exclude_id=pose_id)
+            pose = json.loads(path.read_text())
+            pose["name"] = name
+            pose["updated_at"] = time.time()
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(pose, allow_nan=False))
+            temporary.replace(path)
+            return pose
+
+    def delete_pose(self, key, side, pose_id):
+        with self.lock:
+            self.pose_file(key, side, pose_id).unlink()
+            return {"deleted": pose_id}

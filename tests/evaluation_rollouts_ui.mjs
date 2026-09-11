@@ -60,7 +60,9 @@ try {
  void w.viewEvaluation('other-eval',otherButton);
  assert.equal(el('evaluation-detail').hidden,false,'one click switches to another evaluation');
  assert.equal(el('evaluation-detail-title').textContent,'other-eval','the newly clicked evaluation opens immediately');
- assert.equal(el('evaluation-detail').closest('tr').previousElementSibling.dataset.evaluationId,'other-eval');
+ assert.equal(el('evaluation-detail').closest('tbody'),null,'result content stays outside the scrolling table');
+ assert.equal(el('evaluation-detail').previousElementSibling,el('evaluations-body').closest('.table-scroll'));
+ assert.equal(otherButton.getAttribute('aria-expanded'),'true','matching row remains selected');
  resolveDetail({evaluation:{...other,episodes:[]}});
  await flush();
  assert.equal(el('evaluation-detail').hidden,false,'switch remains open after the response');
@@ -99,13 +101,13 @@ try {
    assert.equal(el('evaluation-search').value,'');
    assert.equal(el('evaluation-state-filter').value,'all');
    const row=el('evaluations-body').querySelector(`[data-evaluation-id="${id}"]`);
-   assert.equal(row.nextElementSibling.querySelector('#evaluation-detail'),el('evaluation-detail'),'submitted details sit immediately below their row');
+   assert.equal(el('evaluation-detail').previousElementSibling,el('evaluations-body').closest('.table-scroll'),'submitted details sit outside table scrolling');
    assert.equal(el('evaluation-detail').hidden,false,'submission opens before detail response');
    assert.equal(row.querySelector('button').getAttribute('aria-expanded'),'true');
    resolveDetail({evaluation:{...submitted,episodes:[]}});
    await flush();
    w.setupEvaluationTest([submitted,base,other]);
-   assert.equal(row.nextElementSibling.querySelector('#evaluation-detail'),el('evaluation-detail'),'refresh preserves the submitted row placement');
+   assert.equal(el('evaluation-detail').previousElementSibling,el('evaluations-body').closest('.table-scroll'),'refresh preserves independent detail placement');
    row.querySelector('button').click();
    assert.equal(el('evaluation-detail').hidden,true,'the submitted row closes with one click');
  }

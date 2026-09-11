@@ -4,6 +4,7 @@ import base64
 import hashlib
 import os
 import re
+import select
 import shlex
 import subprocess
 import time
@@ -574,6 +575,7 @@ done
             ("AllocTRES", "AllocTRES"),
             ("Partition", "Partition"),
             ("Account", "Account"),
+            ("Restarts", "Restarts"),
         )
         fields = ",".join(spec for _, spec in field_specs)
         command = (
@@ -586,9 +588,14 @@ done
         names = tuple(name for name, _ in field_specs)
         for line in output.splitlines():
             values = line.rstrip("|").split("|")
-            if len(values) != len(names):
+            # Restart telemetry is optional: an absent accounting value must
+            # remain unavailable rather than looking like a measured zero.
+            if len(values) not in {len(names), len(names) - 1}:
                 continue
-            record = dict(zip(names, values, strict=True))
+            record = dict(zip(names[:len(values)], values, strict=True))
+            restarts = record.pop("Restarts", "").strip()
+            if re.fullmatch(r"[0-9]+", restarts):
+                record["Restarts"] = str(int(restarts))
             job_id = record.pop("JobIDRaw")
             raw_state = record["State"].strip()
             state_match = re.match(r"[A-Za-z_]+", raw_state)
@@ -673,6 +680,7 @@ done
         start: int,
         end: int,
         chunk_size: int = 1_048_576,
+        cancel_event=None,
     ) -> Iterable[bytes]:
         """Stream an inclusive byte range from a previously resolved gateway."""
 
@@ -710,11 +718,25 @@ done
         completed = False
         try:
             while remaining:
-                block = process.stdout.read(min(chunk_size, remaining))
+                if cancel_event is not None:
+                    if cancel_event.is_set():
+                        return
+                    if not select.select([process.stdout], [], [], 0.1)[0]:
+                        continue
+                    block = os.read(process.stdout.fileno(), min(chunk_size, remaining))
+                else:
+                    block = process.stdout.read(min(chunk_size, remaining))
                 if not block:
                     break
                 remaining -= len(block)
                 yield block
+            if cancel_event is not None:
+                deadline = time.monotonic() + 10
+                while process.poll() is None:
+                    if cancel_event.wait(0.1):
+                        return
+                    if time.monotonic() >= deadline:
+                        raise ClusterError(f"{host}: remote video stream did not close")
             return_code = process.wait(timeout=10)
             completed = True
             if return_code != 0 or remaining:

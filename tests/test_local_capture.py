@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from skynet_app.database import Database
 from skynet_app.local_capture import LocalCaptureService, VisionProTracking
+from capture_storage_fake import MemoryStorage
 
 
 def records():
@@ -28,7 +29,7 @@ def save(tmp_path, data):
 
 
 def test_import_preserves_native_data_and_is_idempotent(tmp_path):
-    service = LocalCaptureService(Database(tmp_path / 'test.db'))
+    service = LocalCaptureService(Database(tmp_path / 'test.db'), storage=MemoryStorage())
     path = save(tmp_path, records())
     result = service.import_file('visionpro-local', path)
     assert result['imported']
@@ -37,7 +38,9 @@ def test_import_preserves_native_data_and_is_idempotent(tmp_path):
     assert service.import_file('visionpro-local', path)['imported'] is False
     assert len(service.list()) == 1
     version = service.database.get_data_resource_version(capture['version_id'])
-    assert version['status'] == 'LOCAL'
+    assert version['status'] == 'READY'
+    assert version['locations'][0]['kind'] == 'cluster'
+    assert not service.root.exists()
     assert version['format'] == 'visionpro_tracking_jsonl_v1'
     assert version['metadata']['native_raw_preserved'] is True
     assert capture['summary']['warnings'] == ['No right hand frames were tracked.']
@@ -73,7 +76,7 @@ def test_receive_clock_orders_frames_without_rewriting_source_time(tmp_path):
 
 
 def test_changed_session_cannot_overwrite_original(tmp_path):
-    service = LocalCaptureService(Database(tmp_path / 'test.db'))
+    service = LocalCaptureService(Database(tmp_path / 'test.db'), storage=MemoryStorage())
     data = records()
     first = service.import_file('visionpro-local', save(tmp_path, data))
     data[0]['task'] = 'changed'
@@ -84,7 +87,7 @@ def test_changed_session_cannot_overwrite_original(tmp_path):
 
 def test_api_import_and_download(tmp_path, monkeypatch):
     from skynet_app import local_capture_api
-    service = LocalCaptureService(Database(tmp_path / 'test.db'))
+    service = LocalCaptureService(Database(tmp_path / 'test.db'), storage=MemoryStorage())
     monkeypatch.setattr(local_capture_api, 'service', service)
     app = FastAPI(); app.include_router(local_capture_api.router)
     with TestClient(app) as client:
@@ -117,12 +120,12 @@ def test_distinct_hand_and_head_clocks_are_preserved(tmp_path):
         VisionProTracking().inspect(save(tmp_path, data))
 
 
-def test_identical_recording_reuses_validation_and_restores_missing_file(tmp_path, monkeypatch):
-    service = LocalCaptureService(Database(tmp_path / 'test.db'))
+def test_identical_recording_reuses_validation_and_restores_missing_remote_file(tmp_path, monkeypatch):
+    service = LocalCaptureService(Database(tmp_path / 'test.db'), storage=MemoryStorage())
     path = save(tmp_path, records())
     first = service.import_file('visionpro-local', path)
     stored = service.file(first['capture']['sha256'])
-    stored.unlink()
+    del service.storage.files[stored.path]
     def unexpected(*args):
         pytest.fail('unchanged recording was reparsed')
     monkeypatch.setattr(VisionProTracking, 'inspect', unexpected)
@@ -132,17 +135,18 @@ def test_identical_recording_reuses_validation_and_restores_missing_file(tmp_pat
     assert repeated['capture']['summary'] == first['capture']['summary']
 
 
-def test_import_disk_error_is_actionable_and_cleans_upload(tmp_path, monkeypatch):
+def test_import_cluster_error_is_actionable_and_never_creates_upload(tmp_path, monkeypatch):
     import errno
     from skynet_app import local_capture_api
-    service = LocalCaptureService(Database(tmp_path / 'test.db'))
+    service = LocalCaptureService(Database(tmp_path / 'test.db'), storage=MemoryStorage())
     monkeypatch.setattr(local_capture_api, 'service', service)
     def full(*args):
         raise OSError(errno.ENOSPC, 'No space left')
-    monkeypatch.setattr(service, 'import_file', full)
+    monkeypatch.setattr(service, 'import_bytes', full)
     app = FastAPI(); app.include_router(local_capture_api.router)
     with TestClient(app) as client:
         response = client.post('/api/collection/local/captures/visionpro-local', content=b'upload')
-    assert response.status_code == 507
-    assert 'free disk space' in response.json()['detail']
+    assert response.status_code == 503
+    assert 'sky2' in response.json()['detail']
+    assert 'No local copy' in response.json()['detail']
     assert not list(service.root.glob('*.upload'))

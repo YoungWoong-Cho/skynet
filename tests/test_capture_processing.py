@@ -12,6 +12,7 @@ from skynet_app.capture_processing.visionpro import (
 )
 from skynet_app.database import Database
 from skynet_app.local_capture import LocalCaptureService
+from capture_storage_fake import MemoryStorage
 from skynet_app.capture_processing.service import ProcessingService
 
 
@@ -139,7 +140,7 @@ def test_rotation_near_half_turn(m, expected):
 
 
 def processor(tmp_path, monkeypatch):
-    captures = LocalCaptureService(Database(tmp_path / "test.db"))
+    captures = LocalCaptureService(Database(tmp_path / "test.db"), storage=MemoryStorage())
     _, save = recording(tmp_path)
     capture = captures.import_file("visionpro-local", save())["capture"]
     config = Path(__file__).resolve().parents[1] / "config/capture_pipelines.json"

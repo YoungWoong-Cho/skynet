@@ -102,7 +102,7 @@ def export(request):
     (output / "README.txt").write_text(
         "EgoVerse Zarr episodes. Native joint order and three calibrated scene cameras.\n"
         "Train and validation episodes are separate. Native training computes normalization from training data only.\n"
-        "Compatible with EgoVerse ACT, HPT recorded joints, and DP recorded joints adapters.\n"
+        "Compatible with native EgoVerse ACT and the HPT recorded-joints configuration.\n"
     )
     manifest = dict(
         format="egoverse-episodes-zarr/v1",

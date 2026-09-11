@@ -46,10 +46,10 @@ def test_changed_dataset_binding_cannot_borrow_dimensions(manifests, bundle, val
 
 
 def test_native_heads_are_not_assumed_to_match_state_size(manifests):
-    summary = resolve_model_io(manifests["egoverse-hpt-cotrain-flow-shared-head"])
+    summary = resolve_model_io(manifests["egoverse-hpt"], preview_spec({"native.config.model_preset": "hpt_cotrain_flow_shared_head"}))
     assert "1 × 12" in dict(summary["entries"])["Input · human_bimanual · state_ee_pose"]
     assert "100 × 14" in dict(summary["entries"])["Output · human_bimanual actions"]
-    pi = resolve_model_io(manifests["egoverse-pi05-bc-aria"])
+    pi = resolve_model_io(manifests["egoverse-pi"])
     assert "100 × 32" in dict(pi["entries"])["Output · Padded action tensor"]
     for slug, manifest in manifests.items():
         summary = resolve_model_io(manifest)

@@ -13,6 +13,7 @@
   let reviewSession;
   let videoToken = 0,
     videoTimer,
+    videoGeneration = "",
     mediaTimer,
     mediaTime = 0,
     mediaLabel = "",
@@ -26,6 +27,7 @@
     video.pause();
     el("live-review-video-status").textContent = message;
     el("live-review-video-retry").hidden = false;
+    el("live-review-video-retry").textContent = "Retry video";
   }
   function watchMedia(message) {
     if (!mediaCurrent() || mediaTimer !== undefined) return;
@@ -39,9 +41,13 @@
     stopMediaWatch();
     el("live-review-video-status").textContent = mediaLabel;
     el("live-review-video-retry").hidden = true;
+    el("live-review-video-cancel").hidden = true;
+    el("live-review-video-retry").textContent = "Retry video";
   }
   function clearVideo() {
     ++videoToken;
+    videoGeneration = "";
+    el("live-review-video-cancel").disabled = false;
     clearTimeout(videoTimer);
     stopMediaWatch();
     mediaTime = 0;
@@ -52,6 +58,7 @@
     video.hidden = true;
     el("live-review-video-download").hidden = true;
     el("live-review-video-retry").hidden = true;
+    el("live-review-video-cancel").hidden = true;
   }
   async function loadVideo(ownToken, ownVideoToken, index, start = false) {
     clearTimeout(videoTimer);
@@ -64,6 +71,13 @@
       );
       if (!current()) return;
       el("live-review-video-retry").hidden = true;
+      videoGeneration = result.generation || "";
+      const cancel = el("live-review-video-cancel");
+      cancel.hidden = !["QUEUED", "STARTING", "PREPARING", "WAITING_GPU", "CANCELLING", "INTERRUPTED"].includes(result.state);
+      cancel.disabled = result.state === "CANCELLING" && !result.can_cancel;
+      cancel.textContent = result.state === "CANCELLING"
+        ? (result.can_cancel ? "Retry cancellation" : "Cancelling…")
+        : "Cancel video preparation";
       if (result.state === "READY") {
         const url =
           base +
@@ -87,11 +101,18 @@
         video.load();
       } else if (result.state === "FAILED") {
         throw new Error(result.error);
-      } else if (result.state === "NOT_PREPARED") {
-        await loadVideo(ownToken, ownVideoToken, index, true);
+      } else if (["NOT_PREPARED", "CANCELLED"].includes(result.state)) {
+        el("live-review-video-status").textContent =
+          (result.state === "CANCELLED" ? "Video preparation cancelled. " : "Video is not prepared. ") +
+          "Prepare video to download it or render recorded states on the collection workstation. Browsing recorded values does not start video work.";
+        el("live-review-video-retry").textContent = "Prepare video";
+        el("live-review-video-retry").hidden = false;
       } else {
         el("live-review-video-status").textContent =
-          result.detail || "Preparing video…";
+          (result.detail || (result.state === "STARTING" ? "Starting video preparation…" : "Preparing video…")) +
+          (["CANCELLING", "INTERRUPTED"].includes(result.state)
+            ? ""
+            : " You can cancel preparation. It continues if you close this review.");
         videoTimer = setTimeout(
           () => loadVideo(ownToken, ownVideoToken, index),
           1500,
@@ -102,6 +123,7 @@
       el("live-review-video-status").textContent =
         "Video unavailable: " + error.message;
       el("live-review-video-retry").hidden = false;
+      el("live-review-video-retry").textContent = "Retry video";
     }
   }
   video.addEventListener("error", () => {
@@ -140,16 +162,36 @@
   });
   el("live-review-video-retry").onclick = () => {
     clearVideo();
-    el("live-review-video-status").textContent = "Retrying video…";
+    el("live-review-video-status").textContent = "Requesting video preparation…";
     loadVideo(token, videoToken, Number(el("live-review-episode").value), true);
+  };
+  el("live-review-video-cancel").onclick = async () => {
+    const ownToken = token;
+    const ownVideoToken = ++videoToken;
+    clearTimeout(videoTimer);
+    const current = () => ownToken === token && ownVideoToken === videoToken && dialog.open;
+    const button = el("live-review-video-cancel");
+    if (button.disabled) return;
+    button.disabled = true;
+    try {
+      await request(base + `/video?episode=${Number(el("live-review-episode").value)}` +
+        (videoGeneration ? `&generation=${encodeURIComponent(videoGeneration)}` : ""), {
+        method: "DELETE",
+      }, 65000);
+      if (current()) await loadVideo(ownToken, ownVideoToken, Number(el("live-review-episode").value));
+    } catch (error) {
+      if (current()) el("live-review-video-status").textContent = error.message;
+    } finally {
+      if (current() && button.textContent !== "Cancelling…") button.disabled = false;
+    }
   };
   const status = (message) => {
     el("live-review-status").textContent = message;
   };
-  async function request(path, options = {}) {
+  async function request(path, options = {}, timeout = 40000) {
     const response = await fetch(path, {
       ...options,
-      signal: AbortSignal.timeout(40000),
+      signal: AbortSignal.timeout(timeout),
     });
     const result = await response.json();
     if (!response.ok)
@@ -311,7 +353,7 @@
       } else if (result.state === "FAILED") throw new Error(result.error);
       else if (result.state === "NOT_DOWNLOADED") await load(ownToken, true);
       else {
-        status("Downloading recording…");
+        status("Loading recorded values…");
         timer = setTimeout(() => load(ownToken), 1500);
       }
     } catch (error) {
@@ -332,8 +374,10 @@
     el("live-review-retry").hidden = true;
     el("live-review-context").textContent =
       `Session ${reviewSession.id.slice(0, 8)} · Recording ${index + 1}`;
-    status("Checking the local recording copy…");
-    load(ownToken);
+    status("Checking the saved recording…");
+    // One idempotent request per user selection retains READY copies and
+    // retries saved failures with current connection settings. Polls use GET.
+    load(ownToken, true);
   }
   window.openLiveReview = (session, index = 0) => {
     reviewSession = session;

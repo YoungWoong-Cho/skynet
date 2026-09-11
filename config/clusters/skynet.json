@@ -303,7 +303,7 @@
           "suite": "egoverse_held_out",
           "adapter": "egoverse-act",
           "capsule_asset": "adapter-support/egoverse_readiness.py",
-          "capsule_sha256": "e8b6f39b3453a5770433231b5a3e026088b36f88d84c0968bc847871566fac1f",
+          "capsule_sha256": "b4ac096512eae9c44a1dc8936d5751290e615917fb8bff14764cc7599b17ee56",
           "argv": [
             "{{runtime.python_executable}}",
             "{{smoke.asset_path}}",
@@ -375,7 +375,7 @@
           "suite": "egoverse_held_out",
           "adapter": "egoverse-act",
           "capsule_asset": "adapter-support/egoverse_readiness.py",
-          "capsule_sha256": "e8b6f39b3453a5770433231b5a3e026088b36f88d84c0968bc847871566fac1f",
+          "capsule_sha256": "b4ac096512eae9c44a1dc8936d5751290e615917fb8bff14764cc7599b17ee56",
           "argv": [
             "{{runtime.python_executable}}",
             "{{smoke.asset_path}}",

@@ -478,7 +478,7 @@ function setEvaluationTaskCreateValidity(valid) {
 }
 
 function applyEvaluationTaskSelectionPolicy(changedInput = null) {
-  const inputs = [...elements.evaluationTasksOptions.querySelectorAll('input[type="checkbox"]')];
+  const inputs = [...elements.evaluationTasksOptions.querySelectorAll("input")];
   const policy = renderedEvaluationTaskPolicy;
   const checked = inputs.filter((input) => input.checked);
   const invalidSingle = policy.mode === "single" && inputs.length > 1 && checked.length !== 1;
@@ -499,6 +499,8 @@ function applyEvaluationTaskSelectionPolicy(changedInput = null) {
   elements.evaluationTasksFilter.setAttribute("aria-disabled", String(!inputs.length || (policy.mode === "all_only" && !invalidAllOnly)));
   elements.evaluationTasksFilter.setAttribute("aria-invalid", String(invalid));
   elements.evaluationTasksAll.hidden = policy.mode !== "subset";
+  const defaults = selectedEvaluationSuite()?.default_tasks || selectedEvaluationSuite()?.config_json?.default_tasks || [];
+  elements.evaluationTasksClear.hidden = policy.mode === "single" && inputs.length > 1 && defaults.length !== 1;
   updateEvaluationTaskLabel();
 
   const modeStatus = invalidPolicy
@@ -576,7 +578,9 @@ function installStructuredEvaluationTaskOptions() {
     basePopulateEvaluationTasks(normalizedSuite, { preserve: false });
     const retained = new Set(retainedSelection);
     const optionsById = new Map(taskOptions.map((option) => [option.id, option]));
-    elements.evaluationTasksOptions.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+    elements.evaluationTasksOptions.querySelectorAll("input").forEach((input) => {
+      input.type = renderedEvaluationTaskPolicy.mode === "single" ? "radio" : "checkbox";
+      input.name = "evaluation-task";
       input.checked = retained.has(input.value);
       const option = optionsById.get(input.value);
       const label = input.closest("label")?.querySelector("span");
@@ -596,7 +600,7 @@ function installStructuredEvaluationTaskOptions() {
     renderedEvaluationTaskSuiteId = suiteId;
   };
   elements.evaluationTasksOptions.addEventListener("change", (event) => {
-    const changedInput = event.target.closest('input[type="checkbox"]');
+    const changedInput = event.target.closest('input');
     if (!changedInput) return;
     delete elements.evaluationSuite.dataset.taskSelectionError;
     applyEvaluationTaskSelectionPolicy(changedInput);
@@ -713,9 +717,12 @@ function installViewportFilterMenus() {
     });
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key !== "Escape") return;
+    if (event.key !== "Escape" || event.defaultPrevented || SkynetDialog.fullscreenOwnsEscape()) return;
+    if (document.querySelector("dialog[open]")) return;
     const open = filters.findLast((details) => details.open);
     if (!open) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
     open.open = false;
     open.querySelector(":scope > summary")?.focus();
   });
@@ -923,6 +930,7 @@ let evaluationDetailPollTimer = null;
 let activeEvaluationDetailId = null;
 let evaluationListPollTimer = null;
 let evaluationListPollInFlight = null;
+let evaluationProgressRefreshPending = false;
 const cancellationRequests = new Set();
 let sourceBranches = [];
 let sourceCommits = [];
@@ -1139,7 +1147,22 @@ function dismissToast(toast) {
   elements.toast.hidden = elements.toast.childElementCount === 0;
 }
 
-function showToast(message, isError = false) {
+function clearNotificationScope(scope) {
+  if (!scope) return;
+  document.querySelectorAll("[data-notification-scope]").forEach((item) => {
+    if (item.dataset.notificationScope !== scope) return;
+    if (item.classList.contains("toast")) dismissToast(item);
+    else if (item.classList.contains("notice-item")) dismissNoticeItem(item.parentElement, item);
+  });
+}
+
+function showToast(message, isError = false, { scope = "" } = {}) {
+  if (scope) {
+    if (!isError) clearNotificationScope(scope);
+    else elements.toast.querySelectorAll(".toast").forEach((item) => {
+      if (item.dataset.notificationScope === scope) dismissToast(item);
+    });
+  }
   const modal = document.querySelector("dialog[data-panel-dialog][open]");
   if (modal && isError) {
     let notice = modal.querySelector(".dialog-notice");
@@ -1149,7 +1172,7 @@ function showToast(message, isError = false) {
       notice.setAttribute("role", "alert");
       modal.querySelector(".panel-heading").after(notice);
     }
-    showNotice(notice, message);
+    showNotice(notice, message, { scope });
     notice.scrollIntoView({block: "nearest"});
     return;
   }
@@ -1158,6 +1181,7 @@ function showToast(message, isError = false) {
   }
   const toast = document.createElement("div");
   toast.className = `toast${isError ? " is-error" : ""}`;
+  if (scope) toast.dataset.notificationScope = scope;
   toast.setAttribute("role", isError ? "alert" : "status");
   toast.setAttribute("aria-live", isError ? "assertive" : "polite");
 
@@ -1189,10 +1213,14 @@ function dismissNoticeItem(element, item) {
   delete element.dataset.persistentError;
 }
 
-function showNotice(element, message, { title = "" } = {}) {
+function showNotice(element, message, { title = "", scope = "" } = {}) {
+  if (scope) element.querySelectorAll(".notice-item").forEach((item) => {
+    if (item.dataset.notificationScope === scope) dismissNoticeItem(element, item);
+  });
   const normalizedMessage = String(message);
   const duplicate = [...element.querySelectorAll(".notice-item")].some((item) => (
     item.dataset.message === normalizedMessage && item.dataset.title === title
+      && (item.dataset.notificationScope || "") === scope
   ));
   if (duplicate) {
     element.hidden = false;
@@ -1203,6 +1231,7 @@ function showNotice(element, message, { title = "" } = {}) {
   item.className = "notice-item";
   item.dataset.message = normalizedMessage;
   item.dataset.title = title;
+  if (scope) item.dataset.notificationScope = scope;
   if (title) {
     const heading = document.createElement("strong");
     heading.textContent = title;
@@ -1226,7 +1255,6 @@ function showNotice(element, message, { title = "" } = {}) {
 }
 
 function clearNotice(element) {
-  if (element.dataset.persistentError === "true" && !element.hidden) return;
   element.hidden = true;
   element.replaceChildren();
   delete element.dataset.persistentError;
@@ -1255,7 +1283,7 @@ function shortId(value, size = 12) {
 
 function stateClass(state) {
   const normalized = String(state || "").toLowerCase().replaceAll("_", " ");
-  if (/fail|error|cancel|unavailable|missing|invalid|incomplete|attention|blocked/.test(normalized)) return "is-failed";
+  if (/fail|error|cancel|unavailable|missing|invalid|incomplete|not completed|attention|blocked/.test(normalized)) return "is-failed";
   if (["local", "on this computer", "recorded", "original recordings saved"].includes(normalized)) return "is-local";
   if (["ready", "prepared", "on cluster", "available", "images ready"].includes(normalized) || /prepared formats?$/.test(normalized)) return "is-running";
   if (/converting|fetching|validating|transferring|verifying|checking/.test(normalized)) return "is-pending";
@@ -3033,6 +3061,7 @@ function applySelectedAdapter({ loadSource = true } = {}) {
   setManifestDefault(elements.checkpointMode, manifestDefault(manifest, "checkpoint", "mode"));
   setManifestDefault(elements.checkpointPath, manifestDefault(manifest, "checkpoint", "path"));
   setManifestDefault(elements.checkpointMaxAttempts, manifestDefault(manifest, "checkpoint", "max_attempts"));
+  document.querySelector("#checkpoint-warning-seconds").value = manifestDefault(manifest, "checkpoint", "save_before_timeout_seconds") ?? 300;
   configureCanonicalHyperparameterFields(manifest);
   setManifestCheckbox(elements.checkpointAutoResume, manifestDefault(manifest, "checkpoint", "auto_resume"));
   setManifestCheckbox(elements.mlflowEnabled, manifestDefault(manifest, "tracking", "enabled"));
@@ -3077,7 +3106,10 @@ function applySelectedAdapter({ loadSource = true } = {}) {
   const keepSource = previousSource === defaults.url && previousWorkdir === defaults.workdir
     && /^[a-f0-9]{40}$/i.test(elements.experimentRevision.value)
     && (manifest.runtime?.allowed_backends || []).includes(elements.experimentRuntime.value);
-  if (loadSource && !keepSource) loadSourceBranches();
+  if (loadSource) {
+    if (keepSource) inspectRepositoryRuntime();
+    else loadSourceBranches();
+  }
 }
 
 function renderAdapters() {
@@ -3257,6 +3289,7 @@ function setAdapterEditorMode(mode) {
 
 const revealedPanelLaunchers = new WeakMap();
 const revealedPanelGenerations = new WeakMap();
+const closedPanelGenerations = new WeakMap();
 
 function currentRevealLauncher() {
   return document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -3278,11 +3311,13 @@ function rowDisclosureHome(panel) {
 function unmountRowDisclosure(panel) {
   if (!panel) return false;
   const companion = panel.closest("tr.row-disclosure-companion");
-  if (!companion || companion.dataset.disclosurePanel !== (panel.id || "row-disclosure")) return false;
+  const detached = panel.classList.contains("row-disclosure-detached");
+  if (!detached && (!companion || companion.dataset.disclosurePanel !== (panel.id || "row-disclosure"))) return false;
   const home = rowDisclosureHomes.get(panel);
   if (home?.anchor?.parentNode) home.anchor.after(panel);
   else if (home?.parent?.isConnected) home.parent.append(panel);
-  companion.remove();
+  companion?.remove();
+  panel.classList.remove("row-disclosure-detached");
   return true;
 }
 
@@ -3292,6 +3327,17 @@ function mountRowDisclosure(panel, launcher) {
   const tableBody = selectedRow?.parentElement;
   if (!selectedRow || tableBody?.tagName !== "TBODY") return false;
   rowDisclosureHome(panel);
+  const scroller = selectedRow.closest(".table-scroll, .table-frame");
+  if (scroller) {
+    // Detail content must not inherit the wide table's horizontal scroll offset,
+    // and replacing tbody rows must never remove an active form or detail panel.
+    if (panel.previousElementSibling !== scroller) {
+      unmountRowDisclosure(panel);
+      scroller.after(panel);
+    }
+    panel.classList.add("row-disclosure-detached");
+    return true;
+  }
   const currentRow = panel.closest("tr.row-disclosure-companion");
   if (currentRow?.previousElementSibling === selectedRow) return true;
   unmountRowDisclosure(panel);
@@ -3366,14 +3412,17 @@ function revealPanel(panel, { focusTarget = null, launcher = null, scroll = true
   panel.hidden = false;
   if (modal) SkynetDialog.open(modal, {launcher: actualLauncher});
   window.requestAnimationFrame(() => {
-      if (panel.hidden || revealedPanelGenerations.get(panel) !== generation) return;
-      const tutorialOwnsViewport = document.body.classList.contains("has-active-tutorial");
-      if (tutorialOwnsViewport) return;
-      if (scroll && !modal) {
-        const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-        panel.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "nearest", inline: "nearest" });
-      }
-      const target = focusTarget || panel;
+    if (panel.hidden || revealedPanelGenerations.get(panel) !== generation) return;
+    const tutorialOwnsViewport = document.body.classList.contains("has-active-tutorial");
+    if (tutorialOwnsViewport) return;
+    // Row details now live after the whole table. Even callers that previously
+    // relied on inline placement must reveal the heading when opening them.
+    const detachedRowDetail = panel.classList.contains("row-disclosure-detached");
+    if ((scroll || detachedRowDetail) && !modal) {
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      panel.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: detachedRowDetail ? "start" : "nearest", inline: "nearest" });
+    }
+    const target = focusTarget || panel;
     if (!target.matches("a[href], button, input, select, textarea, [tabindex]")) target.tabIndex = -1;
     target.focus?.({ preventScroll: true });
   });
@@ -3381,6 +3430,7 @@ function revealPanel(panel, { focusTarget = null, launcher = null, scroll = true
 
 function hideRevealedPanel(panel, fallbackLauncher = null, { restoreFocus = true, fromDisclosure = false } = {}) {
   if (!panel) return;
+  closedPanelGenerations.set(panel, (closedPanelGenerations.get(panel) || 0) + 1);
   if (!fromDisclosure && activeDisclosure?.panel === panel) {
     closeActiveDisclosure({ restoreFocus });
     return;
@@ -3390,14 +3440,20 @@ function hideRevealedPanel(panel, fallbackLauncher = null, { restoreFocus = true
   const modal = panel.closest("dialog[data-panel-dialog]");
   if (modal) SkynetDialog.close(modal);
   if (panel === elements.dataBundlePreview) resetDataBundlePreviewMedia();
+  const detachedRowDetail = panel.classList.contains("row-disclosure-detached");
   unmountRowDisclosure(panel);
   if (panel === elements.evaluationDetail) stopEvaluationDetailPolling();
   const recordedLauncher = revealedPanelLaunchers.get(panel);
   const launcher = recordedLauncher?.isConnected ? recordedLauncher : fallbackLauncher;
   revealedPanelLaunchers.delete(panel);
   if (!restoreFocus) return;
+  const closedGeneration = revealedPanelGenerations.get(panel);
   window.requestAnimationFrame(() => {
-    if (launcher?.isConnected) launcher.focus({ preventScroll: true });
+    if (!panel.hidden || revealedPanelGenerations.get(panel) !== closedGeneration) return;
+    if (launcher?.isConnected) {
+      if (detachedRowDetail) launcher.scrollIntoView({ behavior: "auto", block: "center", inline: "nearest" });
+      launcher.focus({ preventScroll: true });
+    }
   });
 }
 
@@ -3419,12 +3475,14 @@ function disclosureRevealIsCurrent(panel, launcher = null) {
 }
 
 function disclosureToken(panel, launcher = null) {
-  if (!activeDisclosure || activeDisclosure.panel !== panel) return null;
-  if (launcher && activeDisclosure.launcher !== launcher) return null;
+  if (!activeDisclosure || activeDisclosure.panel !== panel || (launcher && activeDisclosure.launcher !== launcher))
+    return { closedGeneration: closedPanelGenerations.get(panel) || 0 };
   return activeDisclosure.token;
 }
 
 function disclosureTokenIsCurrent(panel, token) {
+  if (token && typeof token === "object")
+    return token.closedGeneration === (closedPanelGenerations.get(panel) || 0);
   return token == null || Boolean(
     activeDisclosure
     && activeDisclosure.panel === panel
@@ -3682,7 +3740,8 @@ function installDisclosureBehavior() {
     }
   }, true);
   document.addEventListener("keydown", (event) => {
-    if (event.key !== "Escape") return;
+    if (event.key !== "Escape" || event.defaultPrevented || SkynetDialog.fullscreenOwnsEscape()) return;
+    if (document.querySelector("dialog[open]")) return;
     if (activeRunAttemptDisclosure) {
       event.preventDefault();
       closeRunAttemptDisclosure();
@@ -4374,7 +4433,7 @@ async function inspectRepositoryRuntime(forceRefresh = false) {
     projectSubdirectory,
     adapter,
   );
-  if (!forceRefresh && runtimeInspectionKey === key) {
+  if (!forceRefresh && runtimeInspectionKey === key && repositoryInputOptionsState?.scopeKey === adapterInputOptionsScopeKey(adapter, repository, revision, projectSubdirectory)) {
     if (repositoryInputOptionsState && adapterScope) {
       repositoryInputOptionsState = {
         ...repositoryInputOptionsState,
@@ -4805,7 +4864,7 @@ function experimentPayload() {
     checkpoint_save_steps: elements.checkpointSaveSteps.disabled
       ? null
       : numberOrNull(elements.checkpointSaveSteps),
-    checkpoint_warning_seconds: preservedCheckpoint.save_before_timeout_seconds ?? null,
+    checkpoint_warning_seconds: numberOrNull(document.querySelector("#checkpoint-warning-seconds")),
     checkpoint_keep_last: preservedCheckpoint.keep_last ?? null,
     checkpoint_final_selector: preservedCheckpoint.final_selector ?? null,
     remove_training_state_after_success: preservedCheckpoint.remove_training_state_after_success ?? null,
@@ -4848,6 +4907,7 @@ function validateExperiment({ notify = true, batchValidation = null } = {}) {
   }
   elements.sweepDefinition.setCustomValidity(sweepError);
   if (sweepError) return reject(sweepError);
+  elements.hpLearningRate.setCustomValidity(!elements.hpLearningRate.disabled && elements.hpLearningRate.value !== "" && Number(elements.hpLearningRate.value) <= 0 ? "Learning rate must be greater than zero." : "");
   const batchState = batchValidation || updateBatchCompatibility();
   if (!batchState.valid) return reject(batchState.errors[0]);
   const declared = collectAdapterDeclaredOverrides();
@@ -4889,7 +4949,9 @@ function validateExperiment({ notify = true, batchValidation = null } = {}) {
   for (const provider of selectedTrackingProviders()) {
     const connection = trackingConnections.get(provider);
     if (!connection || connection.connected !== true) {
-      return reject(`${trackingProviderLabel(provider)} is selected but not connected. Connect and test it in Settings.`);
+      return reject(["error", "unknown", "unavailable"].includes(connection?.status)
+        ? `${trackingProviderLabel(provider)} connection status is unavailable. Refresh Settings to verify it.`
+        : `${trackingProviderLabel(provider)} is selected but not connected. Connect and test it in Settings.`);
     }
     if (provider === "wandb" && !connection.entity) {
       return reject("The W&B connection did not return a verified entity. Reconnect it in Settings.");
@@ -4901,6 +4963,7 @@ function validateExperiment({ notify = true, batchValidation = null } = {}) {
   return true;
 }
 
+let loadedExperimentOrigin = null;
 let experimentPreviewSignature = null;
 let experimentPreviewScripts = [];
 
@@ -4936,7 +4999,8 @@ function updateExperimentSubmitState() {
     const revisionLabel = nextRevision === null ? "a new revision" : `revision ${nextRevision}`;
     elements.saveExperimentButton.textContent = "Create draft revision";
     elements.submitExperimentButton.textContent = "Create revision and submit";
-    elements.experimentRevisionIntent.textContent = `This project/name already exists. The action will create ${revisionLabel}; submitted revisions remain locked.`;
+    const origin = loadedExperimentOrigin?.id === String(existingExperiment.id || existingExperiment.experiment_id) ? `Loaded revision ${loadedExperimentOrigin.revision}. ` : "";
+    elements.experimentRevisionIntent.textContent = `${origin}This project/name already exists. The action will create ${revisionLabel}; submitted revisions remain locked.`;
   } else {
     elements.saveExperimentButton.textContent = "Create draft";
     elements.submitExperimentButton.textContent = "Create and submit";
@@ -4961,11 +5025,10 @@ function setExperimentBusy(busy) {
 }
 
 async function previewExperiment() {
+  const scope = "experiment-preview";
   invalidateExperimentPreview();
   if (!validateExperiment()) { updateExperimentSubmitState(); return; }
   const signature = JSON.stringify(experimentPayload());
-  elements.toast.replaceChildren();
-  elements.toast.hidden = true;
   setExperimentBusy(true);
   try {
     const result = await api("/api/experiments/preview", {
@@ -4973,6 +5036,7 @@ async function previewExperiment() {
       body: JSON.stringify(experimentPayload()),
     });
     if (signature !== JSON.stringify(experimentPayload())) return;
+    clearNotificationScope(scope);
     const responseScripts = Array.isArray(result.scripts)
       ? result.scripts.filter((script) => typeof script === "string")
       : [];
@@ -5013,7 +5077,7 @@ async function previewExperiment() {
     elements.experimentPreviewEmpty.hidden = true;
     elements.experimentPreviewPanel.hidden = false;
   } catch (error) {
-    showToast(`Preview failed: ${error.message}`, true);
+    if (signature === JSON.stringify(experimentPayload())) showToast(`Preview failed: ${error.message}`, true, { scope });
   } finally {
     setExperimentBusy(false);
   }
@@ -5145,9 +5209,14 @@ async function openSubmittedTrainingRun({ experimentId, revisionNumber = null, r
     return;
   }
   const runId = String(selectedRecords[0].id || selectedRecords[0].run_id);
+  const created = runRows.find((run) => String(run.id || run.run_id) === runId);
+  if (created) {
+    resetTrainingRunListFilters();
+    renderRuns();
+  }
   const launcher = [...elements.runsBody.querySelectorAll("[data-run-action='view']")]
     .find((candidate) => String(candidate.dataset.id) === runId);
-  if (!launcher) {
+  if (!created || !launcher) {
     showNotice(elements.runsError, `Training Run ${runId} was created but is not present in the Training Run list response.`);
     return;
   }
@@ -5781,6 +5850,7 @@ async function hydrateExperimentConfiguration(spec, request) {
       ? checkpoint.save_every_steps
       : null,
   );
+  setLoadedControlValue(document.querySelector("#checkpoint-warning-seconds"), checkpoint.save_before_timeout_seconds ?? 300);
   setLoadedControlValue(elements.checkpointMaxAttempts, checkpoint.max_attempts);
   elements.checkpointAutoResume.checked = Boolean(checkpoint.auto_resume);
   const initialCheckpoint = nativeSpec.config?.initial_checkpoint;
@@ -5858,6 +5928,7 @@ async function hydrateExperimentConfiguration(spec, request) {
 }
 
 async function loadExperimentConfiguration(id, revisionNumber, launcher = null) {
+  const scope = "experiment-load";
   invalidateExperimentPreview();
   const request = ++experimentConfigurationLoadRequest;
   const originalLabel = launcher?.textContent || "Load configuration";
@@ -5872,14 +5943,16 @@ async function loadExperimentConfiguration(id, revisionNumber, launcher = null) 
     const loaded = requestedExperimentRevision(experiment, revisionNumber);
     const hydrated = await hydrateExperimentConfiguration({ ...loaded.spec, name: loaded.spec.name || experiment.name }, request);
     if (!hydrated || request !== experimentConfigurationLoadRequest) return;
+    loadedExperimentOrigin = { id: String(id), revision: loaded.revisionNumber || "latest" };
+    updateExperimentSubmitState();
     elements.experimentName.focus({ preventScroll: true });
     elements.experimentName.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
-    showToast(`Loaded ${loaded.spec.name || experiment.name || id}, revision ${loaded.revisionNumber || "latest"}.`);
+    showToast(`Loaded ${loaded.spec.name || experiment.name || id}, revision ${loaded.revisionNumber || "latest"}.`, false, { scope });
   } catch (error) {
     if (request !== experimentConfigurationLoadRequest) return;
     loadedExperimentCanonicalContext = null;
-    showNotice(elements.experimentsError, `Experiment configuration could not be loaded: ${error.message}`);
-    showToast(`Experiment configuration load failed: ${error.message}`, true);
+    showNotice(elements.experimentsError, `Experiment configuration could not be loaded: ${error.message}`, { scope });
+    showToast(`Experiment configuration load failed: ${error.message}`, true, { scope });
   } finally {
     if (launcher?.isConnected) {
       launcher.disabled = false;
@@ -6240,6 +6313,9 @@ function runRowDescriptor(run) {
   const progressSummary = run.progress_summary;
   const progress = progressSummary ?? run.progress ?? run.metrics?.progress;
   const progressLabel = progressSummaryLabel(progressSummary) || run.progress_label || run.current_step;
+  const eta = String(state).toUpperCase() === "RUNNING"
+    ? `<div class="progress-eta">ETA ${etaCell(progressSummary)}</div>`
+    : "";
   const runLabel = run.run_number ? `Training Run ${run.run_number}` : shortId(id, 18);
   const runSecondary = [run.run_number ? shortId(id, 18) : "", run.kind || run.stage || "train"].filter(Boolean).join(" / ");
   const experimentRevision = run.experiment_revision_number ? `Revision ${run.experiment_revision_number}` : "";
@@ -6254,10 +6330,10 @@ function runRowDescriptor(run) {
       { html: `<span class="job-id">${escapeHtml(slurm)}</span><span class="secondary">${escapeHtml(run.latest_attempt?.partition_name || run.partition || run.resources?.partition || "")}</span>` },
       { html: escapeHtml(runResourceLabel(run)) },
       { html: escapeHtml(attemptLabel) },
-      { html: progressCell(progress, progressLabel) },
-      { html: etaCell(progressSummary) },
+      { html: `${eta}${progressCell(progress, progressLabel)}` },
+      { html: escapeHtml(formatDate(run.latest_attempt?.started_at)) },
+      { html: escapeHtml(progressSummary?.elapsed_seconds == null ? "-" : compactEtaDuration(progressSummary.elapsed_seconds) ?? "-") },
       { html: trackingLinksHtml(run) },
-      { html: escapeHtml(formatDate(run.updated_at || run.started_at || run.created_at)) },
       {
         className: "row-actions",
         preserve: active,
@@ -6268,6 +6344,13 @@ function runRowDescriptor(run) {
 }
 
 function renderRuns({ background = false } = {}) {
+  const knownStates = new Set([...elements.runStatusFilter.options].map(option => option.value));
+  for (const run of runRows) {
+    const state = String(run.status || run.state || "").toLowerCase();
+    if (!state || state === "succeeded" || knownStates.has(state)) continue;
+    elements.runStatusFilter.add(new Option(state.replaceAll("_", " ").replace(/^./, char => char.toUpperCase()), state));
+    knownStates.add(state);
+  }
   const rows = filteredRuns();
   const descriptors = rows.map(runRowDescriptor);
   const countLabel = rows.length === runRows.length
@@ -6320,28 +6403,43 @@ function renderRuns({ background = false } = {}) {
   }, { background });
 }
 
-async function loadRuns(force = false, { background = false } = {}) {
-  if (loadedTabs.has("runs") && !force) return;
+let runProgressRefreshPending = false;
+let runProgressRefreshTimer = null;
+function scheduleRunProgressRefresh() {
+  window.clearTimeout(runProgressRefreshTimer);
+  runProgressRefreshTimer = null;
+  if (!runProgressRefreshPending || activeTab !== "runs" || document.visibilityState !== "visible") return;
+  runProgressRefreshTimer = window.setTimeout(() => {
+    runProgressRefreshTimer = null;
+    if (activeTab === "runs" && document.visibilityState === "visible") loadRuns(true, { background: true, progressOnly: true }).catch(() => {});
+  }, 1500);
+}
+
+async function loadRuns(force = false, { background = false, progressOnly = false } = {}) {
+  const scope = "runs-list";
+  if (loadedTabs.has("runs") && !force) { scheduleRunProgressRefresh(); return; }
   if (!background) {
     elements.refreshRuns.disabled = true;
-    clearNotice(elements.runsError);
   }
   try {
-    const payload = await api("/api/runs");
+    const payload = await api(progressOnly ? "/api/runs?refresh_progress=false" : "/api/runs");
+    runProgressRefreshPending = payload.progress_refresh_pending === true;
     runRows = listFrom(payload, ["runs"]);
     renderRuns({ background });
     loadedTabs.add("runs");
+    clearNotificationScope(scope);
   } catch (error) {
     if (background) {
-      showNotice(elements.runsError, `Training Run refresh failed: ${error.message}`);
+      showNotice(elements.runsError, `Training Run refresh failed: ${error.message}`, { scope });
       throw error;
     }
     runRows = [];
     elements.runsBody.innerHTML = emptyRow(11, "Training Run data could not be loaded.");
     elements.runCount.textContent = "Unavailable";
-    showNotice(elements.runsError, `Training Run API unavailable: ${error.message}`);
+    showNotice(elements.runsError, `Training Run API unavailable: ${error.message}`, { scope });
   } finally {
     if (!background) elements.refreshRuns.disabled = false;
+    scheduleRunProgressRefresh();
   }
 }
 
@@ -6587,14 +6685,15 @@ async function resolveRunAttemptCommonHyperparameters(record, action) {
       || runAttemptValue(record.attempt, "id", "attempt_id")
       || "",
   );
+  const scope = `run-values:${runId}:${attemptId}`;
   if (!runId || !attemptId || !activeRunAttemptMatches(runId, attemptId)) {
-    showNotice(elements.runsError, "Cannot resolve values because the selected run attempt is no longer open.");
+    showNotice(elements.runsError, "Cannot resolve values because the selected run attempt is no longer open.", { scope });
     return;
   }
   if (!action || typeof action !== "object" || String(action.method).toUpperCase() !== "POST" || !action.path) {
     const message = "The server returned an invalid common-hyperparameter resolution action.";
-    showNotice(elements.runsError, message);
-    showToast(message, true);
+    showNotice(elements.runsError, message, { scope });
+    showToast(message, true, { scope });
     return;
   }
   const body = action.body && typeof action.body === "object" ? action.body : {};
@@ -6641,13 +6740,13 @@ async function resolveRunAttemptCommonHyperparameters(record, action) {
     }
     startRunDetailPolling(runId, detail.state);
     window.scrollTo(scrollPosition.left, scrollPosition.top);
-    showToast("Actual common hyperparameter values resolved.");
+    showToast("Actual common hyperparameter values resolved.", false, { scope });
   } catch (error) {
     pendingCommonHyperparameterResolutions.delete(key);
     const message = error instanceof Error ? error.message : String(error);
     setCommonHyperparameterResolutionError(key, message);
-    showNotice(elements.runsError, `Common hyperparameter resolution failed: ${message}`);
-    showToast(`Common hyperparameter resolution failed: ${message}`, true);
+    showNotice(elements.runsError, `Common hyperparameter resolution failed: ${message}`, { scope });
+    showToast(`Common hyperparameter resolution failed: ${message}`, true, { scope });
   } finally {
     pendingCommonHyperparameterResolutions.delete(key);
   }
@@ -7120,18 +7219,21 @@ function renderRunDetailContent(payload, id, { preserveAttempt = false } = {}) {
   return { run, state: String(state).toUpperCase(), latestRecord };
 }
 
+function updateRunSummary(run, id) {
+  const index = runRows.findIndex((item) => String(item.id || item.run_id) === String(id));
+  if (index < 0) return;
+  runRows[index] = { ...runRows[index], ...run };
+  const summaryRow = elements.runsBody.querySelector(`:scope > tr[data-run-id="${CSS.escape(String(id))}"]`);
+  if (summaryRow) patchTableRow(summaryRow, runRowDescriptor(runRows[index]).cells);
+}
+
 function renderRunDetail(payload, id, { preserveAttempt = false, background = false } = {}) {
   const run = entityFrom(payload, "run");
   const attempts = runAttemptRecords({...run, attempts: Array.isArray(run.attempts) ? run.attempts : listFrom(payload, ["attempts"])});
   const panel = elements.runsBody.closest(".panel") || elements.runDetail;
   let rendered = null;
   commitPanelRefresh(panel, `run-detail:${id}`, { run, attempts }, () => {
-    const index = runRows.findIndex((item) => String(item.id || item.run_id) === String(id));
-    if (index >= 0) {
-      runRows[index] = { ...runRows[index], ...run };
-      const summaryRow = elements.runsBody.querySelector(`:scope > tr[data-run-id="${CSS.escape(String(id))}"]`);
-      if (summaryRow) patchTableRow(summaryRow, runRowDescriptor(runRows[index]).cells);
-    }
+    updateRunSummary(run, id);
     rendered = renderRunDetailContent(payload, id, { preserveAttempt });
   }, { background });
   if (rendered) return rendered;
@@ -7149,12 +7251,14 @@ function logContent(payload) {
 }
 
 async function viewRun(id, launcher = null) {
+  const scope = `run-detail:${id}`;
   const revealLauncher = launcher || currentRevealLauncher();
   resetRunAttemptContext(id);
   mountRunDetailBelow(revealLauncher);
   const requestToken = disclosureToken(elements.runDetail, revealLauncher);
   elements.runDetailTitle.textContent = id;
   elements.runDetailActions.innerHTML = "";
+  elements.runDetailTracking.replaceChildren();
   elements.runDetailMeta.innerHTML = keyValueHtml([["Status", "Loading run..."]]);
   elements.attemptsBody.innerHTML = emptyRow(8, "Loading attempts...");
   revealPanel(elements.runDetail, { focusTarget: elements.runDetailTitle, launcher: revealLauncher, scroll: false });
@@ -7164,13 +7268,14 @@ async function viewRun(id, launcher = null) {
   if (!disclosureTokenIsCurrent(elements.runDetail, requestToken)) return;
   if (detailResult.status === "fulfilled") {
     try {
-        const detail = renderRunDetail(detailResult.value, id);
-        if (!disclosureTokenIsCurrent(elements.runDetail, requestToken)) return;
+      const detail = renderRunDetail(detailResult.value, id);
+      if (!disclosureTokenIsCurrent(elements.runDetail, requestToken)) return;
+      clearNotificationScope(scope);
       startRunDetailPolling(id, detail.state);
     } catch (error) {
       elements.runDetailMeta.innerHTML = keyValueHtml([["Detail error", error.message]]);
       elements.attemptsBody.innerHTML = emptyRow(8, "Training Run detail could not be rendered.");
-      showToast(`Training Run detail failed: ${error.message}`, true);
+      showToast(`Training Run detail failed: ${error.message}`, true, { scope });
     }
   } else {
     elements.runDetailMeta.innerHTML = keyValueHtml([["Detail error", detailResult.reason.message]]);
@@ -7180,29 +7285,35 @@ async function viewRun(id, launcher = null) {
 }
 
 async function attachRunTracking(id, provider, actionPath, button) {
+  const scope = `run-tracking:${id}:${provider}`;
   if (!id || !provider || !actionPath) {
-    showToast("Tracking attachment action is incomplete; refresh the Training Run detail.", true);
+    showToast("Tracking attachment action is incomplete; refresh the Training Run detail.", true, { scope });
     return;
   }
   const expectedPrefix = `/api/runs/${encodeURIComponent(id)}/tracking/`;
   if (!actionPath.startsWith(expectedPrefix) || !actionPath.endsWith("/attach")) {
-    showToast("Tracking attachment action was rejected because its server path is invalid.", true);
+    showToast("Tracking attachment action was rejected because its server path is invalid.", true, { scope });
     return;
   }
   const originalLabel = button.textContent;
+  const requestToken = disclosureToken(elements.runDetail);
   button.disabled = true;
   button.setAttribute("aria-busy", "true");
   button.textContent = `Connecting ${trackingProviderLabel(provider)}...`;
   try {
     const payload = await api(actionPath, { method: "POST" });
-    const detail = renderRunDetail(payload, id, { preserveAttempt: true });
-    clearNotice(elements.runsError);
-    showToast(`${trackingProviderLabel(provider)} connected to this Training Run.`);
-    startRunDetailPolling(id, detail.state);
+    if (activeRunDetailId === String(id) && !elements.runDetail.hidden
+      && disclosureTokenIsCurrent(elements.runDetail, requestToken)) {
+      const detail = renderRunDetail(payload, id, { preserveAttempt: true });
+      startRunDetailPolling(id, detail.state);
+    } else {
+      updateRunSummary(entityFrom(payload, "run"), id);
+    }
+    showToast(`${trackingProviderLabel(provider)} connected to Training Run ${shortId(id)}.`, false, { scope });
   } catch (error) {
-    const message = `Tracking attachment failed: ${error.message}`;
-    showNotice(elements.runsError, message);
-    showToast(message, true);
+    const message = `Tracking attachment failed for Training Run ${shortId(id)}: ${error.message}`;
+    showNotice(elements.runsError, message, { scope });
+    showToast(message, true, { scope });
     if (button.isConnected) {
       button.disabled = false;
       button.removeAttribute("aria-busy");
@@ -7244,6 +7355,7 @@ function startRunDetailPolling(runId, state = null, { initialDelay = null, inclu
 }
 
 async function pollRunDetail(generation, runId, { finalCycle = false, includeList = true } = {}) {
+  const scope = `run-detail:${runId}`;
   if (generation !== runDetailPollGeneration || !runDetailPollEligible(runId)) return;
   if (
     runDetailPollInFlight
@@ -7261,11 +7373,11 @@ async function pollRunDetail(generation, runId, { finalCycle = false, includeLis
       .catch((reason) => ({ status: "rejected", reason }));
     if (generation !== runDetailPollGeneration || !runDetailPollEligible(runId)) return;
     if (detailResult.status === "rejected") {
-      showNotice(elements.runsError, `Live run update failed; displayed data may be stale: ${detailResult.reason.message}. Retrying automatically.`);
+      showNotice(elements.runsError, `Live run update failed; displayed data may be stale: ${detailResult.reason.message}. Retrying automatically.`, { scope });
       scheduleRunDetailPoll(RUN_DETAIL_POLL_INTERVAL_MS, { includeList: true });
       return;
     }
-    if (elements.runsError.textContent.startsWith("Live run update failed")) clearNotice(elements.runsError);
+    clearNotificationScope(scope);
     const detail = renderRunDetail(detailResult.value, runId, { preserveAttempt: true, background: true });
     if (!detail.latestRecord) {
       closeRunAttemptDisclosure({ restoreFocus: false });
@@ -7466,16 +7578,16 @@ function evaluationSuiteTasks(suite) {
 }
 
 function checkedEvaluationTaskIds() {
-  return [...elements.evaluationTasksOptions.querySelectorAll('input[type="checkbox"]:checked')]
+  return [...elements.evaluationTasksOptions.querySelectorAll("input:checked")]
     .map((input) => input.value);
 }
 
 function updateEvaluationTaskLabel() {
-  const total = elements.evaluationTasksOptions.querySelectorAll('input[type="checkbox"]').length;
+  const total = elements.evaluationTasksOptions.querySelectorAll("input").length;
   const selected = checkedEvaluationTaskIds().length;
   elements.evaluationTasksFilterLabel.textContent = selected
     ? `${selected} of ${total} task${total === 1 ? "" : "s"}`
-    : "Suite default";
+    : renderedEvaluationTaskPolicy.mode === "single" && total > 1 ? "Choose one task" : "Suite default";
 }
 
 function populateEvaluationTasks(suite, { preserve = false } = {}) {
@@ -7561,6 +7673,19 @@ function initializeEvaluationResources() {
 }
 initializeEvaluationResources();
 
+function validateEvaluationResources() {
+  const time = document.querySelector("#evaluation-resource-time");
+  const raw = time.value.trim();
+  const match = /^(?:(\d+)-)?(\d{1,2}):(\d{2}):(\d{2})$/.exec(raw);
+  const seconds = match ? Number(match[1] || 0) * 86400 + Number(match[2]) * 3600 + Number(match[3]) * 60 + Number(match[4]) : 0;
+  const valid = Boolean(match && Number(match[3]) < 60 && Number(match[4]) < 60 && seconds > 0);
+  time.setCustomValidity(valid ? "" : "Enter a positive wall time as HH:MM:SS or D-HH:MM:SS.");
+  time.setAttribute("aria-invalid", String(!valid));
+  const budget = document.querySelector("#evaluation-resource-summary");
+  if (!valid) budget.textContent = time.validationMessage;
+  return valid;
+}
+
 function evaluationResources() {
   const value = name => document.getElementById(`evaluation-resource-${name}`).value;
   return {
@@ -7621,6 +7746,11 @@ async function validateEvaluationTarget(request, signature) {
   const runId = elements.evaluationRunId.value.trim();
   const checkpointPath = elements.evaluationCheckpoint.value.trim();
   const suiteId = elements.evaluationSuite.value;
+  if (!validateEvaluationResources()) {
+    evaluationTargetValidationState = { pending: false, valid: false, planValid: false, signature };
+    updateEvaluationSubmitState();
+    return false;
+  }
   let commandOverrides;
   try {
     commandOverrides = evaluationCommandOverrides();
@@ -7712,9 +7842,9 @@ async function validateEvaluationTarget(request, signature) {
     return valid;
   } catch (error) {
     if (request !== evaluationTargetValidationRequest || signature !== evaluationTargetSignature()) return false;
-    setEvaluationFieldValidation(elements.evaluationRunId, elements.evaluationRunValidation, "invalid", `Validation failed: ${error.message}`);
-    setEvaluationFieldValidation(elements.evaluationCheckpoint, elements.evaluationCheckpointValidation, "invalid", "Checkpoint was not validated.");
-    setEvaluationFieldValidation(elements.evaluationPlanStatus, elements.evaluationPlanStatus, "invalid", "Evaluator readiness was not validated.");
+    setEvaluationFieldValidation(elements.evaluationRunId, elements.evaluationRunValidation, "", "Run validation could not be completed.");
+    setEvaluationFieldValidation(elements.evaluationCheckpoint, elements.evaluationCheckpointValidation, "", "Checkpoint validation could not be completed.");
+    setEvaluationFieldValidation(elements.evaluationPlanStatus, elements.evaluationPlanStatus, "invalid", `Validation failed: ${error.message}`);
     evaluationTargetValidationState = { pending: false, valid: false, planValid: false, signature };
     updateEvaluationSubmitState();
     return false;
@@ -7813,6 +7943,7 @@ async function startEvaluationForRun(id) {
 }
 
 async function recoverRunSubmission(id, button) {
+  const scope = `run-recovery:${id}`;
   if (submissionRecoveryRequests.has(id)) return;
   if (!(await askUserDialog(`Recover this unconfirmed submission through ${elements.gateway.value}? The exact saved script and original submission identity will be reused.`))) return;
   submissionRecoveryRequests.add(id);
@@ -7824,8 +7955,8 @@ async function recoverRunSubmission(id, button) {
     });
     await loadRuns(true);
     if (activeRunDetailId === id) startRunDetailPolling(id, null, {initialDelay: 0, includeList: false});
-    showToast(`Submission recovered: Slurm job ${result.slurm_job_id}.`);
-  } catch (error) { showNotice(elements.runsError, `Submission recovery failed: ${error.message}`); }
+    showToast(`Submission recovered: Slurm job ${result.slurm_job_id}.`, false, { scope });
+  } catch (error) { showNotice(elements.runsError, `Submission recovery failed: ${error.message}`, { scope }); }
   finally {
     submissionRecoveryRequests.delete(id);
     if (activeRunDetailId === id) startRunDetailPolling(id, null, {initialDelay: 0, includeList: false});
@@ -7833,6 +7964,7 @@ async function recoverRunSubmission(id, button) {
 }
 
 async function resumeRun(id, reason = "") {
+  const scope = `run-resume:${id}`;
   const actionLabel = /no usable|from scratch|initial pinned/i.test(reason) ? "Restart training from beginning / new attempt" : "Resume Training Run / new attempt";
   const explanation = reason.trim() ? `\n\n${reason.trim()}` : "";
   if (!(await askUserDialog(`${actionLabel} for run ${id}?${explanation}`))) return;
@@ -7846,10 +7978,10 @@ async function resumeRun(id, reason = "") {
     if (activeRunDetailId === id) startRunDetailPolling(id, null, { initialDelay: 0, includeList: false });
     else await viewRun(id);
     const feedback = submissionFeedback(result);
-    if (feedback.error) showNotice(elements.runsError, `Attempt failed: ${feedback.message}`);
-    else showToast(feedback.message);
+    if (feedback.error) showNotice(elements.runsError, `Attempt failed: ${feedback.message}`, { scope });
+    else showToast(feedback.message, false, { scope });
   } catch (error) {
-    showToast(`Resume failed: ${error.message}`, true);
+    showToast(`Resume failed: ${error.message}`, true, { scope });
   }
 }
 
@@ -7890,6 +8022,7 @@ function restoreCancellationButton(kind, id) {
 
 async function requestCancellation(kind, id, button, reason = "") {
   const key = cancellationRequestKey(kind, id);
+  const notificationScope = `cancel:${key}`;
   if (button.disabled || cancellationRequests.has(key)) return;
   const subject = kind === "run" ? "Training Run" : "evaluation";
   const explanation = reason.trim() ? `\n\n${reason.trim()}` : "";
@@ -7910,7 +8043,7 @@ async function requestCancellation(kind, id, button, reason = "") {
       { method: "POST" },
     );
     cancellationRequests.delete(key);
-    showToast(`Cancellation requested for ${subject} ${id}.`);
+    showToast(`Cancellation requested for ${subject} ${id}.`, false, { scope: notificationScope });
     if (kind === "run") {
       const returnedRun = payload?.run;
       if (returnedRun && typeof returnedRun === "object") {
@@ -7938,7 +8071,7 @@ async function requestCancellation(kind, id, button, reason = "") {
   } catch (error) {
     cancellationRequests.delete(key);
     restoreCancellationButton(kind, id);
-    showToast(`Cancellation request failed: ${error.message}`, true);
+    showToast(`Cancellation request failed: ${error.message}`, true, { scope: notificationScope });
   }
 }
 
@@ -7954,6 +8087,7 @@ function handleCancellationAction(event) {
 }
 
 async function rerunRun(id, reason = "") {
+  const scope = `run-rerun:${id}`;
   const actionLabel = "Start new Training Run from pinned variant";
   const explanation = reason.trim() ? `\n\n${reason.trim()}` : "";
   if (!(await askUserDialog(`${actionLabel} for run ${id}?${explanation}`))) return;
@@ -7964,7 +8098,7 @@ async function rerunRun(id, reason = "") {
     });
     const run = entityFrom(result, "run");
     const newRunId = run.id || run.run_id || result.id || result.run_id;
-    showToast(`New Training Run${newRunId ? ` ${newRunId}` : ""} created from the pinned variant of ${id}.`);
+    showToast(`New Training Run${newRunId ? ` ${newRunId}` : ""} created from the pinned variant of ${id}.`, false, { scope });
     await loadRuns(true);
     if (newRunId) {
       const launcher = [...elements.runsBody.querySelectorAll("[data-run-action='view']")]
@@ -7972,7 +8106,7 @@ async function rerunRun(id, reason = "") {
       if (launcher) await viewRun(newRunId, launcher);
     }
   } catch (error) {
-    showToast(`New Training Run failed: ${error.message}`, true);
+    showToast(`New Training Run failed: ${error.message}`, true, { scope });
   }
 }
 
@@ -8120,6 +8254,14 @@ const EVALUATION_ACTIVE_STATES = new Set([
 ]);
 const EVALUATION_LIST_POLL_INTERVAL_MS = 5000;
 
+function revalidateFinishedEvaluation(previous, next) {
+  const runId = elements.evaluationRunId.value.trim();
+  if (previous.some(row => String(row.run_id) === runId && EVALUATION_ACTIVE_STATES.has(String(row.status || row.state).toUpperCase()))
+      && !next.some(row => String(row.run_id) === runId && EVALUATION_ACTIVE_STATES.has(String(row.status || row.state).toUpperCase()))) {
+    scheduleEvaluationTargetValidation({ immediate: true });
+  }
+}
+
 function stopEvaluationListPolling() {
   window.clearTimeout(evaluationListPollTimer);
   evaluationListPollTimer = null;
@@ -8129,9 +8271,9 @@ function evaluationListPollEligible() {
   return Boolean(
     document.visibilityState === "visible"
     && activeTab === "evaluations"
-    && evaluationRows.some((evaluation) => EVALUATION_ACTIVE_STATES.has(
+    && (evaluationProgressRefreshPending || evaluationRows.some((evaluation) => EVALUATION_ACTIVE_STATES.has(
       String(evaluation.status || evaluation.state || "").toUpperCase(),
-    )),
+    ))),
   );
 }
 
@@ -8142,10 +8284,13 @@ function scheduleEvaluationListPolling(delay = EVALUATION_LIST_POLL_INTERVAL_MS)
     evaluationListPollTimer = null;
     if (!evaluationListPollEligible()) return;
     if (!evaluationListPollInFlight) {
-      evaluationListPollInFlight = api("/api/evaluations")
+      evaluationListPollInFlight = api(evaluationProgressRefreshPending ? "/api/evaluations?refresh_progress=false" : "/api/evaluations")
         .then((payload) => {
+          evaluationProgressRefreshPending = payload.progress_refresh_pending === true;
           if (elements.evaluationsError.textContent.startsWith("Live evaluation update failed")) clearNotice(elements.evaluationsError);
-          evaluationRows = listFrom(payload, ["evaluations"]);
+          const next = listFrom(payload, ["evaluations"]);
+          revalidateFinishedEvaluation(evaluationRows, next);
+          evaluationRows = next;
           renderEvaluations({ background: true });
         })
         .catch(error => showNotice(elements.evaluationsError, `Live evaluation update failed; displayed data may be stale: ${error.message}. Retrying automatically.`))
@@ -8173,7 +8318,10 @@ async function loadEvaluations(force = false) {
   } catch (error) { showNotice(elements.evaluationsError, `Training run suggestions could not be loaded: ${error.message}. You can enter a known run ID manually.`); }
   try {
     const payload = await api("/api/evaluations");
-    evaluationRows = listFrom(payload, ["evaluations"]);
+    evaluationProgressRefreshPending = payload.progress_refresh_pending === true;
+    const next = listFrom(payload, ["evaluations"]);
+    revalidateFinishedEvaluation(evaluationRows, next);
+    evaluationRows = next;
     renderEvaluations();
     loadedTabs.add("evaluations");
     scheduleEvaluationListPolling();
@@ -8373,7 +8521,7 @@ function renderEvaluationRolloutModal(evaluation, episode) {
   const key = `${evaluation.id}:${episode.id}:${episode.video_path || ""}`;
   video.hidden = !episode.video_path;
   empty.hidden = Boolean(episode.video_path);
-  empty.textContent = ["FAILED", "CANCELLED", "BLOCKED"].includes(evaluation.status)
+  empty.textContent = !EVALUATION_ACTIVE_STATES.has(String(evaluation.status || evaluation.state).toUpperCase())
     ? "No video was recorded for this episode."
     : "The video will appear when this episode finishes.";
   if (video.dataset.videoKey !== key) {
@@ -8519,7 +8667,10 @@ async function viewEvaluation(id, launcher = null, { polling = false } = {}) {
     if (!current()) return;
     evaluation = entityFrom(payload, "evaluation");
     const index = evaluationRows.findIndex(row => String(row.id || row.evaluation_id) === String(id));
-    if (index >= 0) evaluationRows[index] = {...evaluationRows[index], ...evaluation};
+    if (index >= 0) {
+      revalidateFinishedEvaluation([evaluationRows[index]], [evaluation]);
+      evaluationRows[index] = {...evaluationRows[index], ...evaluation};
+    }
     errorBox.hidden = true;
     renderEvaluationDetail(evaluation);
   } catch (error) {
@@ -8690,6 +8841,13 @@ function dataVersionStatus(version) {
   return version?.status || "READY";
 }
 
+function dataVersionPath(version) {
+  const locations = version.locations || [];
+  const available = locations.filter(location => location.status === "AVAILABLE" && location.path);
+  const location = available.find(location => location.kind === "cluster") || available[0];
+  return location?.path || (locations.length ? "No available copy" : version.path || "-");
+}
+
 function renderDataResources() {
   elements.dataResourceCount.textContent = `${dataResourceRows.length} resource${dataResourceRows.length === 1 ? "" : "s"}`;
   elements.dataResourcesBody.innerHTML = dataResourceRows.length
@@ -8703,9 +8861,9 @@ function renderDataResources() {
         <td>${escapeHtml(resource.provider || "-")}</td>
         <td>${escapeHtml(versionCount)}</td>
         <td>${latest ? `${escapeHtml(shortId(latest.revision, 16))}<span class="secondary">${escapeHtml(latest.format || "-")}</span>` : '<span class="secondary">No versions</span>'}</td>
-        <td>${latest ? statusPill(dataVersionStatus(latest)) : '<span class="secondary">-</span>'}</td>
+        <td>${resource.archived_at ? statusPill("ARCHIVED") : latest ? statusPill(dataVersionStatus(latest)) : '<span class="secondary">-</span>'}</td>
         <td>${escapeHtml(formatDate(resource.updated_at || resource.created_at))}</td>
-        <td class="row-actions data-resource-row-actions"><button type="button" data-resource-action="dataset" data-id="${escapeHtml(id)}">${resource.kind === "simulation_assets" ? "View versions" : "View dataset"}</button>${resource.provider === "huggingface" ? `<button type="button" data-resource-action="import" data-id="${escapeHtml(id)}">Import</button>` : ""}<button type="button" data-resource-action="version" data-id="${escapeHtml(id)}">Add version</button><button type="button" data-resource-action="edit" data-id="${escapeHtml(id)}">View / edit</button><button type="button" data-resource-action="archive" data-id="${escapeHtml(id)}">Archive</button></td>
+        <td class="row-actions data-resource-row-actions"><button type="button" data-resource-action="dataset" data-id="${escapeHtml(id)}">${resource.kind === "simulation_assets" ? "View versions" : "View dataset"}</button>${!resource.archived_at && resource.provider === "huggingface" ? `<button type="button" data-resource-action="import" data-id="${escapeHtml(id)}">Import</button>` : ""}${resource.archived_at ? "" : `<button type="button" data-resource-action="version" data-id="${escapeHtml(id)}">Add version</button>`}<button type="button" data-resource-action="edit" data-id="${escapeHtml(id)}">View / edit</button><button type="button" data-resource-action="${resource.archived_at ? "restore" : "archive"}" data-id="${escapeHtml(id)}">${resource.archived_at ? "Restore" : "Archive"}</button></td>
       </tr>`;
     }).join("")
     : emptyRow(8, "No source resources have been registered.");
@@ -8726,7 +8884,7 @@ function renderDataImports() {
       <td>${escapeHtml(item.slurm_job_id || "-")}<span class="secondary">${escapeHtml([item.gateway, item.node_list].filter(Boolean).join(" / ") || item.slurm_state || "-")}</span></td>
       <td>${escapeHtml(request.bundle_name || "-")}<span class="secondary">${escapeHtml(request.bundle_version || "-")}</span></td>
       <td>${escapeHtml(formatDate(item.updated_at || item.created_at))}</td>
-      <td class="row-actions"><button type="button" data-import-action="detail" data-id="${escapeHtml(item.id)}">Detail</button></td>
+      <td class="row-actions"><button type="button" data-import-action="detail" data-id="${escapeHtml(item.id)}">Detail</button>${dataImportCancelButton(item)}</td>
     </tr>`;
     return row;
   }).join("");
@@ -8741,10 +8899,35 @@ function renderDataImportDetail() {
     const error = item.error ? `<div class="notice notice-error">${escapeHtml(item.error)}</div>` : "";
     document.getElementById("data-import-detail-content").innerHTML = `
       ${error}
+      <p>${statusPill(item.state)} ${dataImportCancelButton(item)}</p>
+      <p>Allocation: ${escapeHtml(item.request?.cpus ?? 8)} CPUs · ${escapeHtml(item.request?.memory_gb ?? 32)} GB · ${escapeHtml(item.request?.time_limit || "legacy queue default")} · no GPUs</p>
       <p>Logs are read through the import job’s recorded gateway (${escapeHtml(item.gateway || "auto")}). <button type="button" class="button button-outline" data-import-action="logs" data-id="${escapeHtml(item.id)}"${cached.loading ? " disabled" : ""}>${cached.loading ? "Loading logs..." : "Refresh logs"}</button></p>
       <div class="key-value-grid"><div class="key-value"><span>Result path</span><strong>${escapeHtml(item.result_path || "-")}</strong></div><div class="key-value"><span>Published version</span><strong>${escapeHtml(item.version_id || "-")}</strong></div><div class="key-value"><span>Bundle</span><strong>${escapeHtml(item.bundle_id || "-")}</strong></div></div>
       <div class="attempt-log-grid"><section><div class="panel-heading"><h3>stdout</h3></div><pre class="log-view">${escapeHtml(cached.loading ? "Loading stdout..." : cached.stdout ?? "Click Refresh logs to load stdout.")}</pre></section><section><div class="panel-heading"><h3>stderr</h3></div><pre class="log-view">${escapeHtml(cached.loading ? "Loading stderr..." : cached.stderr ?? "Click Refresh logs to load stderr.")}</pre></section></div>
     `;
+}
+
+function renderDataImportBudget() {
+  document.querySelector("#data-import-budget").textContent = `Allocation: 1 node, ${document.querySelector("#data-import-cpus").value} CPUs, ${document.querySelector("#data-import-memory").value} GB memory, no GPUs; time limit ${document.querySelector("#data-import-time").value}. Queue: ${elements.dataImportQueue.value}. Cancel is available while the import is active.`;
+}
+
+function dataImportCanCancel(item) {
+  return Boolean(item.slurm_job_id) && ["SUBMITTED", "PENDING", "RUNNING"].includes(item.state);
+}
+
+function dataImportCancelButton(item) {
+  return dataImportCanCancel(item) ? `<button type="button" class="button button-outline" data-import-action="cancel" data-id="${escapeHtml(item.id)}">Cancel import</button>` : "";
+}
+
+async function cancelDataImport(id, button) {
+  if (!(await askUserDialog("Cancel this import job? Published versions and existing files are retained."))) return;
+  button.disabled = true;
+  try {
+    await api(`/api/data/imports/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+    await loadDataRegistry(true);
+    showToast("Import cancellation requested. Refresh to confirm its final state.");
+  } catch (error) { showToast(`Import cancellation failed: ${error.message}`, true); }
+  finally { if (button.isConnected) button.disabled = false; }
 }
 
 function selectDataResourceForImport(id, launcher = null) {
@@ -8754,6 +8937,7 @@ function selectDataResourceForImport(id, launcher = null) {
     return;
   }
   elements.dataImportForm.reset();
+  renderDataImportBudget();
   elements.dataImportResourceId.value = id;
   elements.dataImportResourceLabel.textContent = `Import ${dataResourceIdentity(resource)}`;
   revealPanel(elements.dataImportForm, { focusTarget: elements.dataImportRevision, launcher });
@@ -8776,6 +8960,9 @@ async function submitDataImport(event) {
         bundle_version: elements.dataImportBundleVersion.value.trim(),
         gateway: elements.dataImportGateway.value,
         queue: elements.dataImportQueue.value,
+        cpus: Number(document.querySelector("#data-import-cpus").value),
+        memory_gb: Number(document.querySelector("#data-import-memory").value),
+        time_limit: document.querySelector("#data-import-time").value.trim(),
       }),
     });
     const item = entityFrom(result, "import");
@@ -8804,7 +8991,12 @@ async function loadDataImportLogs(id) {
   const load = async (stream) => {
     try {
       const response = await fetch(`/api/data/imports/${encodeURIComponent(id)}/logs?stream=${stream}&lines=500`);
-      if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`);
+      if (!response.ok) {
+        const text = await response.text();
+        let detail;
+        try { detail = JSON.parse(text); } catch { detail = text; }
+        throw new Error(apiErrorMessage(detail) || `HTTP ${response.status}`);
+      }
       return (await response.text()) || `No ${stream} output recorded.`;
     } catch (error) {
       return `Unable to load ${stream}: ${error.message}`;
@@ -8823,7 +9015,7 @@ function renderDataVersions() {
       <td>${escapeHtml(version.format || "-")}</td>
       <td>${statusPill(dataVersionStatus(version))}</td>
       <td>${escapeHtml(formatDataBytes(version.size_bytes))}</td>
-      <td class="wrap-cell"><code>${escapeHtml(version.path || "-")}</code></td>
+      <td class="wrap-cell"><code>${escapeHtml(dataVersionPath(version))}</code></td>
       <td><code>${escapeHtml(shortId(version.manifest_sha256, 16))}</code></td>
       <td>${escapeHtml(formatDate(version.created_at))}</td>
     </tr>`).join("")
@@ -8831,7 +9023,7 @@ function renderDataVersions() {
 
   const picker = document.querySelector("#data-bundle-version-picker");
   const previousVersion = picker.value;
-  picker.innerHTML = '<option value="">Choose a version</option>' + dataVersionRows.filter(version => version.status === "READY").map(version => `<option value="${escapeHtml(version.id || version.version_id)}">${escapeHtml(dataVersionLabel(version))} / ${escapeHtml(version.format)}</option>`).join("");
+  picker.innerHTML = '<option value="">Choose a version</option>' + dataVersionRows.filter(version => !(version._resource || version.resource)?.archived_at && (version.status === "READY" || (version.locations || []).some(location => location.kind === "cluster" && location.status === "AVAILABLE"))).map(version => `<option value="${escapeHtml(version.id || version.version_id)}">${escapeHtml(dataVersionLabel(version))} / ${escapeHtml(version.format)}</option>`).join("");
   if ([...picker.options].some(option => option.value === previousVersion)) picker.value = previousVersion;
   const formats = new Set(dataVersionRows.map(version => version.format).filter(Boolean));
   adapterRows.forEach(adapter => declaredAdapterInputFields(adapter).forEach(field => (field.data_binding?.formats || []).forEach(format => formats.add(format))));
@@ -9214,7 +9406,7 @@ function renderDataBundlePreview(payload) {
   const warnings = dataBundlePreviewArray(preview.warnings).map((warning) => dataBundlePreviewDisplay(warning));
   assignments.forEach((assignment) => {
     const inspection = assignment.inspection && typeof assignment.inspection === "object" ? assignment.inspection : {};
-    if (inspection.status && String(inspection.status).toLowerCase() !== "ready") {
+    if (inspection.status && String(inspection.status).toLowerCase() !== "ready" && !(inspection.warnings || []).length) {
       warnings.push(`${dataBundlePreviewAssignmentLabel(assignment)} inspection: ${inspection.status}`);
     }
     dataBundlePreviewArray(inspection.warnings).forEach((warning) => {
@@ -9233,7 +9425,7 @@ function renderDataBundlePreview(payload) {
     }
   });
   elements.dataBundlePreviewWarnings.innerHTML = warnings.length
-    ? `<strong>Preview warnings</strong><ul>${warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>`
+    ? `<strong>Preview warnings</strong><ul>${[...new Set(warnings)].map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>`
     : "";
   elements.dataBundlePreviewWarnings.hidden = !warnings.length;
 }
@@ -9279,18 +9471,22 @@ window.openConvertedDataset = async job => {
   setTimeout(() => row.classList.remove('converted-dataset-highlight'), 5000);
 };
 
+let dataRegistryGeneration = 0;
+
 async function loadDataRegistry(force = false) {
   if (loadedTabs.has("datasets") && !force) return;
+  const generation = ++dataRegistryGeneration;
   if (force) dataBundlePreviewCache.clear();
   elements.refreshDataRegistry.disabled = true;
   clearNotice(elements.dataRegistryError);
   try {
     const [resourcePayload, importPayload, derivationPayload, bundlePayload] = await Promise.all([
-      api("/api/data/resources"),
+      api(`/api/data/resources?include_archived=${Boolean(document.querySelector("#data-show-archived").checked)}`),
       api("/api/data/imports"),
       api("/api/data/derivations"),
       api("/api/data/bundles"),
     ]);
+    if (generation !== dataRegistryGeneration) return;
     const resources = listFrom(resourcePayload, ["resources"]);
     const details = await Promise.all(resources.map(async (resource) => {
       if (Array.isArray(resource.versions)) return resource;
@@ -9301,6 +9497,7 @@ async function loadDataRegistry(force = false) {
         throw new Error(`Versions for ${dataResourceIdentity(resource)} could not be loaded: ${error.message}`);
       }
     }));
+    if (generation !== dataRegistryGeneration) return;
     dataResourceRows = details;
     dataImportRows = listFrom(importPayload, ["imports"]);
     if (selectedDataImportId && !dataImportRows.some((item) => String(item.id) === String(selectedDataImportId))) selectedDataImportId = null;
@@ -9317,6 +9514,7 @@ async function loadDataRegistry(force = false) {
     renderDataBundles();
     loadedTabs.add("datasets");
   } catch (error) {
+    if (generation !== dataRegistryGeneration) return;
     elements.dataResourcesBody.innerHTML = emptyRow(8, "Dataset registry could not be loaded.");
     elements.dataImportsBody.innerHTML = emptyRow(7, "Dataset import jobs could not be loaded.");
     elements.dataVersionsBody.innerHTML = emptyRow(7, "Dataset registry could not be loaded.");
@@ -9324,7 +9522,7 @@ async function loadDataRegistry(force = false) {
     elements.dataBundlesBody.innerHTML = emptyRow(5, "Dataset registry could not be loaded.");
     showNotice(elements.dataRegistryError, `Dataset Registry API unavailable: ${error.message}`);
   } finally {
-    elements.refreshDataRegistry.disabled = false;
+    if (generation === dataRegistryGeneration) elements.refreshDataRegistry.disabled = false;
   }
 }
 
@@ -9466,12 +9664,19 @@ function addDataBundleAssignment() {
   const role = document.querySelector("#data-bundle-role-picker").value;
   const mountPath = document.querySelector("#data-bundle-mount-picker").value.trim();
   if (!versionId) { showToast("Choose a registered version to add.", true); return; }
+  if (mountPath && (/[\\:\x00-\x1f]/.test(mountPath) || mountPath.split("/").some(part => ["", ".", ".."].includes(part)))) {
+    showToast("Mount path must be a relative directory without empty, '.' or '..' components.", true);
+    document.querySelector("#data-bundle-mount-picker").focus();
+    return;
+  }
   try {
     const assignments = parseDataJson(elements.dataBundleAssignments, "Bundle assignments", []);
     if (!Array.isArray(assignments)) throw new Error("Bundle assignments must be a JSON list.");
     if (assignments.some(item => item.version_id === versionId && item.role === role)) throw new Error("This version is already assigned to that role.");
     const positions = assignments.filter(item => item.role === role).map(item => Number(item.position || 0));
-    assignments.push({ role, version_id: versionId, mount_path: mountPath || `data/${role}/${positions.length}`, required: true, position: positions.length ? Math.max(...positions) + 1 : 0 });
+    const version = dataVersionRows.find(item => String(item.id || item.version_id) === versionId);
+    const location = (version?.locations || []).find(item => item.kind === "cluster" && item.status === "AVAILABLE");
+    assignments.push({ role, version_id: versionId, ...(location ? { config: { location_id: location.id } } : {}), mount_path: mountPath || `data/${role}/${positions.length}`, required: true, position: positions.length ? Math.max(...positions) + 1 : 0 });
     elements.dataBundleAssignments.value = JSON.stringify(assignments, null, 2);
     elements.dataBundleAssignments.setCustomValidity("");
   } catch (error) { showToast(error.message, true); }
@@ -9495,7 +9700,7 @@ async function createDataBundle(event) {
       body: JSON.stringify({
         name: elements.dataBundleName.value.trim(),
         version: elements.dataBundleVersion.value.trim(),
-        description: elements.dataBundleDescription.value.trim() || null,
+        description: elements.dataBundleDescription.value.trim(),
         assignments,
       }),
       });
@@ -9670,7 +9875,7 @@ function updateCollectionCapabilityEvidence(force = false) {
   const adapter = collectionAdapterRows.find((candidate) => String(candidate.id || candidate.adapter_id) === String(elements.collectionSessionAdapter.value));
   const declarations = Array.isArray(collectionAdapterManifest(adapter).capabilities) ? collectionAdapterManifest(adapter).capabilities : [];
   const runnable = Boolean(adapter && !adapter.archived_at && collectionAdapterManifest(adapter).runnable);
-  elements.createCollectionSession.disabled = !runnable;
+  elements.createCollectionSession.disabled = !runnable || elements.collectionSessionForm.dataset.submitting === "true";
   document.querySelector("#collection-session-availability").textContent = runnable ? "Create a draft first, then check setup and submit from its details." : "Session creation is unavailable. Select a runnable adapter; draft adapters need their launcher and stream definitions completed first.";
   if (!adapter) {
     elements.collectionCapabilitiesHelp.textContent = "Select an adapter to see its declared capability IDs. Use verified only with who verified it and when.";
@@ -9824,6 +10029,8 @@ function reviewCollectionTemplate(id, launcher) {
 
 async function saveCollectionAdapter(event) {
   event.preventDefault();
+  if (elements.saveCollectionAdapter.disabled) return;
+  const scope = "collection-adapter-save";
   if (!elements.collectionAdapterForm.reportValidity()) return;
   let manifest;
   try {
@@ -9843,7 +10050,7 @@ async function saveCollectionAdapter(event) {
       metadata: collectionParseObject(elements.collectionAdapterMetadata, "Metadata"),
     };
   } catch (error) {
-    showToast(error.message, true);
+    showToast(error.message, true, { scope });
     return;
   }
   const id = elements.collectionAdapterId.value;
@@ -9853,12 +10060,12 @@ async function saveCollectionAdapter(event) {
       method: id ? "PUT" : "POST",
       body: JSON.stringify(manifest),
       });
-      showToast(`Collection adapter ${id ? "updated" : "created"}.`);
+      showToast(`Collection adapter ${id ? "updated" : "created"}.`, false, { scope });
       hideRevealedPanel(elements.collectionAdapterForm, elements.addCollectionAdapter);
       loadedTabs.delete("collection");
     await loadCollection(true);
   } catch (error) {
-    showToast(`Adapter save failed: ${error.message}`, true);
+    showToast(`Adapter save failed: ${error.message}`, true, { scope });
   } finally {
     elements.saveCollectionAdapter.disabled = false;
   }
@@ -9890,6 +10097,7 @@ function updateCollectionRegistrationFields() {
 
 async function createCollectionSession(event) {
   event.preventDefault();
+  if (elements.collectionSessionForm.dataset.submitting === "true") return;
   if (!elements.collectionSessionForm.reportValidity()) return;
   let config;
   let software;
@@ -9960,17 +10168,26 @@ async function createCollectionSession(event) {
     },
     capabilities,
   };
+  elements.collectionSessionForm.dataset.submitting = "true";
   elements.createCollectionSession.disabled = true;
   try {
     const result = await api("/api/collection/sessions", { method: "POST", body: JSON.stringify(payload) });
     const session = entityFrom(result, "session");
+    // Return a row-mounted editor to its home before replacing the table rows.
+    closeDisclosurePanel(elements.collectionSessionForm);
+    elements.collectionSessionForm.reset();
     showToast("Collection draft created. Review it, then prepare and submit.");
     loadedTabs.delete("collection");
     await loadCollection(true);
-    await viewCollectionSession(session.id || session.session_id);
+    const id = session.id || session.session_id;
+    const launcher = [...elements.collectionSessionsBody.querySelectorAll("[data-collection-session-action=view]")]
+      .find(button => button.dataset.id === id);
+    if (launcher) toggleDisclosure(elements.collectionSessionDetail, `collection-session:${id}`, launcher, {rowOwned: true});
+    await viewCollectionSession(id, launcher);
   } catch (error) {
     showToast(`Session creation failed: ${error.message}`, true);
   } finally {
+    delete elements.collectionSessionForm.dataset.submitting;
     updateCollectionCapabilityEvidence(false);
   }
 }
@@ -10027,6 +10244,8 @@ function renderCollectionSessionDetail(session, launcher = null) {
     : "Open registered data";
 
   elements.collectionCompleteForm.hidden = state !== "CAPTURED";
+  elements.collectionCompleteForm.querySelector("button[type=submit]").textContent = storage.registration
+    ? "Complete and register native data" : "Complete without registration";
   elements.collectionCompleteManifest.value = "";
   elements.collectionCompleteRevision.value = "";
   elements.collectionCompleteSize.value = "";
@@ -10047,7 +10266,7 @@ function renderCollectionSessionDetail(session, launcher = null) {
   const events = Array.isArray(session.events) ? session.events : [];
   elements.collectionEventsBody.innerHTML = events.length ? events.map((item) => `<tr>
     <td>${escapeHtml(item.event_type || item.type || item.action || "event")}</td>
-    <td>${escapeHtml([item.from_status, item.to_status].filter(Boolean).join(" -> ") || item.status || "-")}</td>
+    <td>${escapeHtml([item.old_status ?? item.from_status, item.new_status ?? item.to_status].filter(Boolean).join(" → ") || item.status || "-")}</td>
     <td class="wrap-cell">${escapeHtml(item.message || compactJson(item.details || item.payload, 240))}</td>
     <td>${escapeHtml(formatDate(item.created_at || item.timestamp))}</td>
   </tr>`).join("") : emptyRow(4, "No lifecycle events recorded.");
@@ -10130,8 +10349,12 @@ async function loadCollectionLog(stream) {
 
 async function completeCollectionSession(event) {
   event.preventDefault();
+  if (elements.collectionCompleteForm.dataset.submitting === "true") return;
   if (!activeCollectionSession || !elements.collectionCompleteForm.reportValidity()) return;
   const id = activeCollectionSession.id || activeCollectionSession.session_id;
+  const button = elements.collectionCompleteForm.querySelector("button[type=submit]");
+  elements.collectionCompleteForm.dataset.submitting = "true";
+  button.disabled = true;
   try {
     const size = numberOrNull(elements.collectionCompleteSize);
     const result = await api(`/api/collection/sessions/${encodeURIComponent(id)}/complete`, {
@@ -10152,6 +10375,9 @@ async function completeCollectionSession(event) {
     showToast(result.registered ? "Native capture completed and registered." : "Native capture completed without registration.");
   } catch (error) {
     showToast(`Completion failed: ${error.message}`, true);
+  } finally {
+    delete elements.collectionCompleteForm.dataset.submitting;
+    button.disabled = false;
   }
 }
 
@@ -10260,8 +10486,8 @@ const interactiveTutorialTours = {
       { id: "revision", selector: "#experiment-revision", gate: "field", title: "Pin a returned commit", instruction: "Select the exact commit. A moving branch name is not reproducible.", validate: tutorialNonEmpty },
       { id: "runtime", selector: "#experiment-runtime", gate: "field", title: "Choose a runnable runtime", instruction: "Select a detected runnable candidate; resolve adapter evidence first if none exists.", validate: tutorialNonEmpty },
       { id: "adapter-fields", selector: "#adapter-declared-fields", gate: "field", title: "Set adapter-declared inputs", instruction: "Review the typed values declared by this adapter. Required fields must be valid; Use tutorial values only applies examples explicitly supplied by the manifest. If none is supplied, choose the real value yourself.", validate: tutorialAdapterDeclaredFieldsValid, applyValue: tutorialApplyAdapterDeclaredValues },
-      { id: "learning-rate", selector: "#hp-learning-rate", gate: "field", title: "Set a smoke-test learning rate", instruction: "Enter a deliberate value. The generated value is only a starting point.", useValue: () => "0.0003", validate: tutorialPositiveNumber },
-      { id: "max-steps", selector: "#hp-max-steps", gate: "field", title: "Keep the first run short", instruction: "Use a small maximum step count while validating the pipeline.", useValue: () => "10", validate: tutorialPositiveNumber },
+      { id: "learning-rate", selector: "#hp-learning-rate", skipIf: () => elements.hpLearningRate.disabled, gate: "field", title: "Set a smoke-test learning rate", instruction: "Enter a deliberate value. The generated value is only a starting point.", useValue: () => "0.0003", validate: tutorialPositiveNumber },
+      { id: "max-steps", selector: () => !elements.hpMaxSteps.disabled ? "#hp-max-steps" : '#adapter-declared-fields input[data-adapter-input-path="native.config.epochs"]', skipIf: () => elements.hpMaxSteps.disabled && !document.querySelector('#adapter-declared-fields input[data-adapter-input-path="native.config.epochs"]'), gate: "field", title: "Keep the first run short", instruction: "Use a small step or epoch count supported by this adapter.", useValue: () => elements.hpMaxSteps.disabled ? "1" : "10", validate: tutorialPositiveNumber },
       { id: "resource-policy", selector: "#resource-policy", gate: "field", title: "Choose resource policy", instruction: "Change or confirm automatic allocation unless you have a reason to pin hardware.", useValue: () => "auto", validate: tutorialNonEmpty },
       { id: "preview", selector: "#experiment-preview-button", gate: "action", title: "Generate the real preview", instruction: "Click Preview. This performs only POST /api/experiments/preview and must return a canonical script before the tour advances.", request: { method: "POST", path: "/api/experiments/preview", success: tutorialHasExperimentPreview } },
       { id: "save-boundary", selector: "#experiment-workspace .page-heading h1", title: "Saving is outside this tutorial", instruction: "The verified preview is the safe endpoint. Saving creates a permanent experiment with no cleanup API, and submitting can launch Slurm, so neither action is part of this tutorial." },
@@ -10287,7 +10513,7 @@ const interactiveTutorialTours = {
     title: "Collection",
     steps: [
       { id: "open-adapter", selector: "#add-collection-adapter", gate: "action", title: "Open a local adapter draft", instruction: "Click New adapter. This opens the editor without writing to the database." },
-      { id: "key", selector: "#collection-adapter-key", reveal: ["#collection-adapter-form"], gate: "field", title: "Set a unique adapter key", instruction: "The generated key is isolated to this tutorial session.", useValue: ({ token }) => `${token}-collection-adapter`, validate: tutorialNonEmpty },
+      { id: "key", selector: "#collection-adapter-key", reveal: ["#collection-adapter-form"], gate: "field", title: "Set a unique adapter key", instruction: "The generated key is isolated to this tutorial session.", useValue: ({ token }) => tutorialAdapterSlug(token, "collection-adapter"), validate: tutorialNonEmpty },
       { id: "display-name", selector: "#collection-adapter-name", gate: "field", title: "Name the adapter", instruction: "Use a clear display name that carries the tutorial token.", useValue: ({ token }) => `${token} inert collection adapter`, validate: tutorialNonEmpty },
       { id: "version", selector: "#collection-adapter-version", gate: "field", title: "Set the first version", instruction: "Start the disposable adapter at a deliberate version.", useValue: () => "0.0.1", validate: tutorialNonEmpty },
       { id: "runnable", selector: "#collection-adapter-runnable", gate: "field", title: "Keep it non-runnable", instruction: "This tutorial adapter must remain inert and cannot launch collection work.", useValue: () => false, validate: (target) => !target.checked },
@@ -10302,7 +10528,7 @@ const interactiveTutorialTours = {
       { id: "update", selector: "#save-collection-adapter", gate: "action", risk: "persistent", confirmVerb: "UPDATE", requiresOwned: "collectionAdapterId", title: "Save the adapter update", instruction: "Confirm and click Save again. The matching PUT must return the same adapter ID.", request: { method: "PUT", path: ({ bindings }) => `/api/collection/adapters/${encodeURIComponent(bindings.collectionAdapterId)}`, bind: "collectionAdapterId", entity: "adapter", identity: tutorialCollectionAdapterIdentity } },
       { id: "archive", selector: ({ bindings }) => tutorialBoundSelector("collection-adapter-id", bindings.collectionAdapterId, "[data-collection-adapter-action=\"archive\"]"), gate: "action", risk: "cleanup", confirmVerb: "ARCHIVE", requiresOwned: "collectionAdapterId", waitForTarget: true, title: "Archive the inert adapter", instruction: "Confirm and click Archive again. This is final cleanup; the tutorial never restores it automatically.", request: { method: "DELETE", path: ({ bindings }) => `/api/collection/adapters/${encodeURIComponent(bindings.collectionAdapterId)}`, bind: "collectionAdapterId", entity: "adapter", identity: tutorialCollectionAdapterIdentity, cleanupBinding: "collectionAdapterId" } },
       { id: "session-name", selector: "#collection-session-name", gate: "field", optional: true, title: "Optional immutable session draft", instruction: "You may fill a session using a real runnable adapter, operator, calibration, native format, timing, and storage path. Skip if those facts are unavailable.", useValue: ({ token }) => `${token}-session` },
-      { id: "session-boundary", selector: "#collection .page-heading h1", title: "Session creation is outside this tutorial", instruction: "Collection sessions are immutable and have no cleanup endpoint. Prepare, submit, cancel, restart, fail, and complete can also change state or contact Slurm, so the tutorial stops before them." },
+      { id: "session-boundary", selector: "#data .page-heading h1", title: "Session creation is outside this tutorial", instruction: "Collection sessions are immutable and have no cleanup endpoint. Prepare, submit, cancel, restart, fail, and complete can also change state or contact Slurm, so the tutorial stops before them." },
     ],
   },
   runs: {
@@ -10330,7 +10556,7 @@ const interactiveTutorialTours = {
     title: "Adapters",
     steps: [
       { id: "open", selector: "#add-adapter", gate: "action", title: "Open a local adapter draft", instruction: "Click New adapter. No record exists until the save step succeeds." },
-      { id: "slug", selector: "#adapter-editor-slug", reveal: ["#adapter-editor"], gate: "field", title: "Set a unique slug", instruction: "The token isolates this adapter from production definitions.", useValue: ({ token }) => `${token}-adapter`, validate: tutorialNonEmpty },
+      { id: "slug", selector: "#adapter-editor-slug", reveal: ["#adapter-editor"], gate: "field", title: "Set a unique slug", instruction: "The token isolates this adapter from production definitions.", useValue: ({ token }) => tutorialAdapterSlug(token, "adapter"), validate: tutorialNonEmpty },
       { id: "name", selector: "#adapter-editor-name", gate: "field", title: "Name the adapter", instruction: "Use a clear tutorial-only display name.", useValue: ({ token }) => `${token} experiment adapter`, validate: tutorialNonEmpty },
       { id: "manifest", selector: "#adapter-manifest", gate: "field", title: "Review the generated manifest", instruction: "The normal Add flow provides the valid minimal manifest. Use tutorial value only to acknowledge that exact local text; it does not invent commands.", useValue: (_context, target) => target.value, validate: tutorialJsonObject },
       { id: "description", selector: "#adapter-description", gate: "field", title: "Tag ownership", instruction: "Retain the tutorial token so read, update, and archive can stay bound to this record.", useValue: ({ token }) => `Disposable experiment adapter ${token}`, validate: tutorialContainsToken },
@@ -10371,6 +10597,7 @@ const tutorialState = {
   sessionGeneration: null,
   gateGeneration: 0,
   pendingAttempt: null,
+  inflightClaim: null,
   attemptTimer: 0,
   confirmationArmed: false,
   applyingValue: false,
@@ -10419,15 +10646,21 @@ function tutorialResourceIdentity({ token }) {
   return [{ paths: ["name"], value: `${token}-resource` }];
 }
 
+function tutorialAdapterSlug(token, suffix) {
+  // Legacy saved tutorials used uppercase timestamp characters. Keep their
+  // ownership token intact while generating a valid adapter identifier.
+  return `${String(token).toLowerCase()}-${suffix}`;
+}
+
 function tutorialCollectionAdapterIdentity({ token }) {
   return [
-    { paths: ["adapter_key", "key", "manifest.key"], value: `${token}-collection-adapter` },
+    { paths: ["adapter_key", "key", "manifest.key"], value: tutorialAdapterSlug(token, "collection-adapter") },
     { paths: ["manifest.metadata.tutorial_token"], value: token },
   ];
 }
 
 function tutorialExperimentAdapterIdentity({ token }) {
-  return [{ paths: ["slug", "manifest.slug"], value: `${token}-adapter` }];
+  return [{ paths: ["slug", "manifest.slug"], value: tutorialAdapterSlug(token, "adapter") }];
 }
 
 function tutorialResourceFormIdentity({ token }) {
@@ -10435,12 +10668,12 @@ function tutorialResourceFormIdentity({ token }) {
 }
 
 function tutorialCollectionAdapterFormIdentity({ token }) {
-  if (document.querySelector("#collection-adapter-key")?.value !== `${token}-collection-adapter`) return false;
+  if (document.querySelector("#collection-adapter-key")?.value !== tutorialAdapterSlug(token, "collection-adapter")) return false;
   try { return JSON.parse(document.querySelector("#collection-adapter-metadata")?.value || "{}").tutorial_token === token; } catch { return false; }
 }
 
 function tutorialExperimentAdapterFormIdentity({ token }) {
-  return document.querySelector("#adapter-editor-slug")?.value === `${token}-adapter`;
+  return document.querySelector("#adapter-editor-slug")?.value === tutorialAdapterSlug(token, "adapter");
 }
 
 function tutorialContext() {
@@ -10470,7 +10703,7 @@ function tutorialUniqueId(prefix) {
 function tutorialToken() {
   const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
   const suffix = tutorialUniqueId("token").replace(/[^a-z0-9]/gi, "").slice(-12).toLowerCase();
-  return `tutorial-${stamp}-${suffix}`;
+  return `tutorial-${stamp}-${suffix}`.toLowerCase();
 }
 
 function newTutorialSession(page, retainedRecords = []) {
@@ -10532,11 +10765,51 @@ function resetTutorialAttempt(message = "") {
   if (tutorialState.attemptTimer) window.clearTimeout(tutorialState.attemptTimer);
   tutorialState.attemptTimer = 0;
   tutorialState.pendingAttempt = null;
+  tutorialState.inflightClaim = null;
   tutorialState.confirmationArmed = false;
   tutorialUi.confirmPanel.hidden = true;
   tutorialUi.confirmInput.value = "";
   if (message && tutorialState.active) tutorialUi.gateStatus.textContent = message;
 }
+
+function scheduleTutorialAttemptExpiry(attempt) {
+  if (tutorialState.attemptTimer) window.clearTimeout(tutorialState.attemptTimer);
+  tutorialState.attemptTimer = window.setTimeout(() => {
+    if (tutorialState.pendingAttempt !== attempt || attempt.claimed || !tutorialGenerationMatches(attempt)) return;
+    if (Date.now() <= attempt.expiresAt) {
+      scheduleTutorialAttemptExpiry(attempt);
+      return;
+    }
+    const confirmation = attempt.confirmationDialog;
+    resetTutorialAttempt("Action expired; retype the confirmation and click again");
+    if (confirmation?.open) SkynetDialog.close(confirmation, "cancel");
+  }, Math.max(0, attempt.expiresAt - Date.now()) + 50);
+}
+
+document.addEventListener("skynet:confirmation-open", (event) => {
+  const attempt = tutorialState.pendingAttempt;
+  const dialog = event.detail?.dialog;
+  if (!attempt?.confirmationWindowOpen || attempt.claimed || !tutorialGenerationMatches(attempt)
+      || !dialog?.matches("dialog[data-app-confirmation][open]")) return;
+  attempt.confirmationDialog = dialog;
+  attempt.expiresAt = attempt.confirmationDeadline;
+  tutorialUi.gateStatus.textContent = "Review the application confirmation; this action remains available for up to two minutes.";
+  scheduleTutorialAttemptExpiry(attempt);
+});
+
+document.addEventListener("skynet:confirmation-close", (event) => {
+  const attempt = tutorialState.pendingAttempt;
+  if (!attempt || attempt.confirmationDialog !== event.detail?.dialog || !tutorialGenerationMatches(attempt)) return;
+  if (!event.detail.accepted || Date.now() > attempt.confirmationDeadline) {
+    if (event.detail.accepted) event.preventDefault();
+    resetTutorialAttempt(event.detail.accepted ? "Confirmation expired; retype the phrase and click again" : "Action cancelled; retype the phrase before trying again");
+    return;
+  }
+  attempt.confirmationDialog = null;
+  attempt.expiresAt = Date.now() + 8000;
+  tutorialUi.gateStatus.textContent = "Confirmed; waiting for the exact API request";
+  scheduleTutorialAttemptExpiry(attempt);
+});
 
 function invalidateTutorialGate() {
   tutorialState.gateGeneration += 1;
@@ -10567,12 +10840,24 @@ function tutorialClaimCanSettle(claim) {
   return true;
 }
 
+function tutorialActionIsPending() {
+  return Boolean(
+    (tutorialState.pendingAttempt?.confirmationDialog && tutorialGenerationMatches(tutorialState.pendingAttempt))
+    || tutorialClaimCanSettle(tutorialState.inflightClaim)
+  );
+}
+
 function completeTutorialGate(message = "Completed", snapshot = null) {
   if (snapshot && !tutorialGenerationMatches(snapshot)) return;
   const step = tutorialStep();
   if (!step || !tutorialState.session) return;
   if (!tutorialState.session.completedStepIds.includes(step.id)) tutorialState.session.completedStepIds.push(step.id);
   tutorialState.gateComplete = true;
+  if (!tutorialVisibleRect(tutorialState.target)) {
+    tutorialState.target = workspaceHeading(tutorialState.page) || document.querySelector(".topbar") || document.body;
+    SkynetDialog.placeGuide(elements.tutorialLayer, tutorialState.target);
+    elements.tutorialLayer.classList.add("is-fallback");
+  }
   elements.tutorialNext.disabled = false;
   elements.tutorialNext.textContent = tutorialState.index === tutorialTours[tutorialState.page].steps.length - 1 ? "Finish" : "Next";
   tutorialUi.gateStatus.textContent = message;
@@ -10645,7 +10930,7 @@ function tutorialPathMatches(expected, actual) {
 
 function tutorialObserveApiStart(path, options = {}) {
   const attempt = tutorialState.pendingAttempt;
-  if (!attempt || attempt.claimed || !tutorialGenerationMatches(attempt)) return null;
+  if (!attempt || attempt.claimed || !tutorialGenerationMatches(attempt) || attempt.confirmationDialog?.open) return null;
   if (Date.now() > attempt.expiresAt) {
     resetTutorialAttempt("Action expired; type the confirmation and click again");
     return null;
@@ -10665,7 +10950,9 @@ function tutorialObserveApiStart(path, options = {}) {
   if (tutorialState.attemptTimer) window.clearTimeout(tutorialState.attemptTimer);
   tutorialState.attemptTimer = 0;
   tutorialUi.gateStatus.textContent = `Waiting for ${method} ${actualPath}`;
-  return { ...attempt, method, path: actualPath, boundId, settled: false };
+  const claim = { ...attempt, method, path: actualPath, boundId, settled: false };
+  tutorialState.inflightClaim = claim;
+  return claim;
 }
 
 function tutorialEntityId(payload, entity) {
@@ -10717,6 +11004,7 @@ function beginTutorialRecovery(record) {
   tutorialState.session.bindings[record.binding] = String(record.id);
   tutorialState.session.recoveryRecordId = `${record.binding}:${record.id}`;
   tutorialState.session.stepId = "read";
+  tutorialState.session.completedStepIds = tutorialState.session.completedStepIds.filter((stepId) => stepId !== "read");
   tutorialState.session.finished = false;
   tutorialState.sessionGeneration = tutorialUniqueId("recovery");
   tutorialState.session.sessionGeneration = tutorialState.sessionGeneration;
@@ -10856,7 +11144,17 @@ function tutorialObserveApiSuccess(claim, payload) {
     }
     if (request.bind && identityToVerify.length && !request.cleanupBinding && !request.establishBinding) {
       tutorialState.ownedVerified.set(request.bind, { id: String(id), ownerToken: record?.ownerToken || claim.ownerToken, expectedIdentity: identityToVerify });
-      if (record?.cleanup === "archive") record.cleanupState = "cleanup pending";
+      if (record?.cleanup === "archive") {
+        // Only this exact, identity-verified GET can reconcile missed cleanup.
+        // No archive/restore request is issued as part of recovery.
+        const alreadyArchived = request.method === "GET" && Boolean(entity?.archived_at);
+        record.cleanupState = alreadyArchived ? "archived" : "cleanup pending";
+        if (alreadyArchived) {
+          const cleanupStep = tutorialTours[tutorialState.page].steps.find((step) => step.request?.cleanupBinding === request.bind);
+          if (cleanupStep && !tutorialState.session.completedStepIds.includes(cleanupStep.id)) tutorialState.session.completedStepIds.push(cleanupStep.id);
+          delete tutorialState.session.recoveryRecordId;
+        }
+      }
     }
     tutorialCleanupSuccess(request.cleanupBinding, id);
     renderTutorialRecords();
@@ -10868,7 +11166,9 @@ function tutorialObserveApiSuccess(claim, payload) {
       if (readIndex >= 0) tutorialState.session.stepId = "read";
       persistTutorialSession();
     } else if (request.render) waitForTutorialRender(request.render, claim);
-    else completeTutorialGate(id ? `Succeeded: ${id}` : "Request succeeded", claim);
+    else completeTutorialGate(record?.cleanupState === "archived" && request.method === "GET"
+      ? `Already archived: ${id}; cleanup verified by the exact Read. Continue after cleanup.`
+      : id ? `Succeeded: ${id}` : "Request succeeded", claim);
 }
 
 function tutorialObserveApiFailure(claim, error) {
@@ -10960,6 +11260,8 @@ function onTutorialInteraction(event) {
     stepId: step.id,
     attemptId,
     expiresAt,
+    confirmationDeadline: Date.now() + 120000,
+    confirmationWindowOpen: true,
     claimed: false,
     request: step.request,
     expectedPath: tutorialRequestPath(step.request),
@@ -10967,13 +11269,12 @@ function onTutorialInteraction(event) {
     bindings: { ...tutorialState.session.bindings },
     ownerToken: tutorialRecordFor(step.request.bind, tutorialState.session.bindings[step.request.bind])?.ownerToken || tutorialState.session.token,
   };
-  if (tutorialState.attemptTimer) window.clearTimeout(tutorialState.attemptTimer);
-  tutorialState.attemptTimer = window.setTimeout(() => {
-    const pending = tutorialState.pendingAttempt;
-    if (pending?.attemptId === attemptId && !pending.claimed && tutorialGenerationMatches(pending)) {
-      resetTutorialAttempt("Action expired or its native confirmation was cancelled; retype the phrase and click again");
-    }
-  }, 8050);
+  const attempt = tutorialState.pendingAttempt;
+  // A native event can run a microtask checkpoint between capture and bubble
+  // listeners. Keep this window for the event task so its normal action handler
+  // can open the confirmation; unrelated later tasks cannot extend it.
+  window.setTimeout(() => { attempt.confirmationWindowOpen = false; }, 0);
+  scheduleTutorialAttemptExpiry(attempt);
   tutorialUi.gateStatus.textContent = "Action accepted; waiting for its exact API request";
 }
 
@@ -11009,6 +11310,15 @@ function useTutorialValue(event) {
     target.focus({ preventScroll: true });
 }
 
+function collectionTutorialResumeIndex(session, requestedIndex) {
+  if (session.bindings?.collectionAdapterId || requestedIndex === 0) return requestedIndex;
+  // Unsaved editor values are deliberately not persisted. Reopen a clean
+  // draft, rather than skipping hidden fields to a Read step with no record.
+  session.completedStepIds = [];
+  session.stepId = "open-adapter";
+  return 0;
+}
+
 function ensureInteractiveTutorialControls() {
   if (tutorialState.controlsBound) return;
   tutorialState.controlsBound = true;
@@ -11022,7 +11332,8 @@ function ensureInteractiveTutorialControls() {
       if (!event.isTrusted || !tutorialState.active || !tutorialState.session) return;
       const recovery = tutorialRecoverableRecord();
       if (recovery && beginTutorialRecovery(recovery)) return;
-      const index = Math.max(0, tutorialTours[tutorialState.page].steps.findIndex((step) => step.id === tutorialState.session.stepId));
+      let index = Math.max(0, tutorialTours[tutorialState.page].steps.findIndex((step) => step.id === tutorialState.session.stepId));
+      if (tutorialState.page === "collection") index = collectionTutorialResumeIndex(tutorialState.session, index);
     tutorialState.session.finished = false;
     tutorialState.sessionGeneration = tutorialUniqueId("resume");
     tutorialState.session.sessionGeneration = tutorialState.sessionGeneration;
@@ -11051,7 +11362,10 @@ function showTutorialResumeChoice() {
   elements.tutorialTitle.textContent = recovery ? "Verify or clean up the bound record" : "Resume or restart";
   elements.tutorialInstruction.textContent = recovery
     ? `Resume cleanup opens the exact ${recovery.kind} ${recovery.id} Read step. You must click its real row control; only a successful exact GET with matching structured identity can unlock archive. Restart creates a new token and retains this ledger entry for later review.`
-    : "Resume uses the saved step and bound record IDs but never restores field values or replays a request. Restart creates a new token and retains every prior cleanup ledger entry.";
+    : tutorialState.page === "collection" && !tutorialState.session.bindings?.collectionAdapterId
+      ? "This adapter has not been created. Resume opens a clean draft using the same tutorial token so you can re-enter the required fields. No saved record or request is replayed."
+      : "Resume uses the saved step and bound record IDs but never restores field values or replays a request. Restart creates a new token and retains every prior cleanup ledger entry.";
+  tutorialUi.resume.hidden = false;
   tutorialUi.resume.textContent = recovery ? "Resume cleanup" : "Resume";
   tutorialUi.useValue.hidden = true;
   tutorialUi.confirmPanel.hidden = true;
@@ -11111,6 +11425,14 @@ async function updateDataResource(id) {
     await loadDataRegistry(true);
     showToast("Resource updated.");
   } catch (error) { showToast(`Resource update failed: ${error.message}`, true); }
+}
+
+async function restoreDataResource(id) {
+  try {
+    await api(`/api/data/resources/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ archived: false }) });
+    await loadDataRegistry(true);
+    showToast("Resource restored, including its existing versions.");
+  } catch (error) { showToast(`Resource restore failed: ${error.message}`, true); }
 }
 
 async function archiveDataResource(id) {
@@ -11295,6 +11617,7 @@ function positionTutorial() {
       positionTutorialBlockers(viewport, viewport.left, viewport.top, viewport.left, viewport.top);
       return;
     }
+    if (tutorialActionIsPending()) return;
     if (!tutorialState.recovering) {
       tutorialState.recovering = true;
       const snapshot = { sessionGeneration: tutorialState.sessionGeneration, gateGeneration: tutorialState.gateGeneration, stepId: tutorialStep()?.id };
@@ -11367,24 +11690,39 @@ function focusTutorialStepTarget(target) {
 }
 
 function showTutorialUnavailableStep(step, index) {
+  if (index === tutorialState.index && tutorialActionIsPending()) return;
+  if (index === tutorialState.index && tutorialState.gateComplete && tutorialState.session?.completedStepIds.includes(step.id)) {
+    completeTutorialGate("Completed; continue when ready");
+    return;
+  }
   invalidateTutorialGate();
   tutorialState.target?.removeAttribute("data-tutorial-active-target");
   tutorialState.index = index;
+  const completed = Boolean(tutorialState.session?.completedStepIds.includes(step.id));
+  tutorialState.gateComplete = completed;
   const snapshot = { sessionGeneration: tutorialState.sessionGeneration, gateGeneration: tutorialState.gateGeneration, stepId: step.id };
-  tutorialState.target = workspaceHeading(tutorialState.page)?.querySelector("h1");
+  tutorialState.target = workspaceHeading(tutorialState.page)?.querySelector("h1") || workspaceHeading(tutorialState.page) || document.body;
   tutorialState.target?.setAttribute("data-tutorial-active-target", "true");
   elements.tutorialPage.textContent = tutorialTours[tutorialState.page].title;
   elements.tutorialProgress.textContent = `Step ${index + 1} of ${tutorialTours[tutorialState.page].steps.length}`;
   elements.tutorialTitle.textContent = step.title;
-  elements.tutorialInstruction.textContent = `${step.instruction} The required record or control is not currently available. Refresh the page or create the prerequisite, then this step will reconnect without making a request itself.`;
+  elements.tutorialInstruction.textContent = completed ? `${step.instruction} This step is already complete; no further action is needed.`
+    : `${step.instruction} The required record or control is not currently available. Refresh the page or verify the saved record to recover without replaying the action.`;
   elements.tutorialBack.hidden = false;
   elements.tutorialBack.disabled = index === 0;
   elements.tutorialNext.hidden = false;
-  elements.tutorialNext.disabled = true;
+  elements.tutorialNext.disabled = !completed;
+  elements.tutorialNext.textContent = index === tutorialTours[tutorialState.page].steps.length - 1 ? "Finish" : "Next";
   tutorialUi.useValue.hidden = true;
   tutorialUi.confirmPanel.hidden = true;
   tutorialUi.resumePanel.hidden = true;
-  tutorialUi.gateStatus.textContent = "Waiting for the required control";
+  tutorialUi.gateStatus.textContent = completed ? "Completed; continue when ready" : "The saved control is unavailable. Verify the saved record or restart to recover.";
+  tutorialUi.resumePanel.hidden = false;
+  tutorialUi.resume.hidden = completed || !tutorialRecoverableRecord();
+  tutorialUi.resume.textContent = "Verify saved record";
+  tutorialUi.restart.hidden = false;
+  SkynetDialog.placeGuide(elements.tutorialLayer, tutorialState.target);
+  SkynetDialog.openGuide(elements.tutorialLayer);
   elements.tutorialSpotlight.hidden = true;
   elements.tutorialLayer.classList.add("is-fallback");
   tutorialState.session.stepId = step.id;
@@ -11411,6 +11749,7 @@ function showTutorialStep(requestedIndex, direction = 1) {
   let target = null;
   while (index >= 0 && index < tour.steps.length) {
     const candidateStep = tour.steps[index];
+    if (candidateStep.skipIf?.()) { index += direction; continue; }
     target = prepareTutorialTarget(candidateStep);
     if (tutorialVisibleRect(target)) break;
     if (candidateStep.waitForTarget) {
@@ -11476,12 +11815,19 @@ function advanceTutorial(direction = 1) {
     return false;
   }
   if (direction > 0 && tutorialState.index >= tour.steps.length - 1) {
-    if (!tutorialVisibleRect(tutorialState.target)) return false;
+    if (!tutorialState.gateComplete && !tutorialVisibleRect(tutorialState.target)) return false;
     invalidateTutorialGate();
     endTutorial(true);
     return true;
   }
-  const nextIndex = tutorialState.index + (direction < 0 ? -1 : 1);
+  let nextIndex = tutorialState.index + (direction < 0 ? -1 : 1);
+  if (direction > 0 && step?.request?.method === "GET" && step.request.bind && tutorialBindingIsOwned(step.request.bind)) {
+    const record = tutorialRecordFor(step.request.bind, tutorialState.session.bindings[step.request.bind]);
+    if (record?.cleanupState === "archived") {
+      const cleanupIndex = tour.steps.findIndex((candidate) => candidate.request?.cleanupBinding === step.request.bind);
+      if (cleanupIndex > tutorialState.index) nextIndex = cleanupIndex;
+    }
+  }
   if (nextIndex < 0 || nextIndex >= tour.steps.length) return false;
   invalidateTutorialGate();
   showTutorialStep(nextIndex, direction < 0 ? -1 : 1);
@@ -11490,6 +11836,7 @@ function advanceTutorial(direction = 1) {
 
 function onTutorialKeydown(event) {
   if (!tutorialState.active) return;
+  if (document.querySelector("dialog[data-app-confirmation][open]")) return;
   if (event.key === "Tab") {
     const controls = tutorialFocusables();
     if (!controls.length) return;
@@ -11860,6 +12207,21 @@ function trackingConnectionElements(provider) {
       };
 }
 
+function renderTrackingDraftNotice(provider) {
+  const ui = trackingConnectionElements(provider);
+  let notice = ui.form.querySelector(".tracking-draft-notice");
+  if (!notice) {
+    notice = document.createElement("p");
+    notice.className = "tracking-draft-notice registry-section-help";
+    notice.setAttribute("role", "status");
+    ui.form.append(notice);
+  }
+  const dirty = Boolean(ui.form.querySelector('[data-dirty="true"]')) || ui.secrets.some(input => input.value);
+  notice.textContent = dirty
+    ? "Unsaved changes. Connect validates and saves these fields. Test saved connection uses the last saved settings."
+    : "Test saved connection checks the last saved settings. Connect validates and saves changes.";
+}
+
 function trackingCredentialSourceText(source) {
   const normalized = String(source || "none").toLowerCase();
   if (normalized === "credential_store") return "credential_store (saved on this device)";
@@ -11886,8 +12248,8 @@ function renderTrackingConnection(provider, connection) {
   ui.detail.classList.toggle("is-error", status === "error");
   ui.source.dataset.source = credentialSource;
   ui.source.textContent = `Credential source: ${trackingCredentialSourceText(credentialSource)}`;
-  ui.test.disabled = !normalized.configured;
-  ui.disconnect.disabled = !normalized.configured && !normalized.connected;
+  ui.test.disabled = ui.form.dataset.busy === "true" || !normalized.configured;
+  ui.disconnect.disabled = ui.form.dataset.busy === "true" || (!normalized.configured && !normalized.connected);
   ui.disconnect.textContent = ["credential_store", "keychain"].includes(credentialSource) ? "Disconnect & forget" : "Disconnect";
   ui.disconnect.title = credentialSource === "environment"
     ? "Disconnect this connection; remove environment credentials outside Skynet."
@@ -11901,11 +12263,14 @@ function renderTrackingConnection(provider, connection) {
   } else {
     const uri = normalized.tracking_uri || normalized.base_url || "";
     if (!elements.mlflowConnectionUri.dataset.dirty) elements.mlflowConnectionUri.value = uri;
+    if (!elements.mlflowConnectionUsername.dataset.dirty) elements.mlflowConnectionUsername.value = normalized.username || "";
+    if (!elements.mlflowVerifyTls.dataset.dirty) elements.mlflowVerifyTls.checked = normalized.verify_tls !== false;
     elements.mlflowUri.value = uri;
     elements.mlflowExperimentConnection.textContent = normalized.connected
       ? `Connected: ${uri || "endpoint verified"}`
       : "Not connected; configure in Settings";
   }
+  renderTrackingDraftNotice(provider);
   renderTrackingNamePreview();
   updateExperimentSubmitState();
 }
@@ -11919,6 +12284,7 @@ function renderTrackingConnections(payload) {
 function renderTrackingConnectionsUnavailable(message) {
   ["wandb", "mlflow"].forEach((provider) => {
     const ui = trackingConnectionElements(provider);
+    trackingConnections.set(provider, { ...(trackingConnections.get(provider) || {}), status: "unavailable", connected: false, last_error: message });
     ui.status.className = "state-pill is-failed";
     ui.status.textContent = "Unavailable";
     ui.detail.textContent = message;
@@ -11965,7 +12331,9 @@ function trackingConnectionPayload(provider) {
 
 function setTrackingConnectionBusy(provider, busy) {
   const ui = trackingConnectionElements(provider);
-  [...ui.form.querySelectorAll("button")].forEach((button) => { button.disabled = busy; });
+  ui.form.dataset.busy = String(busy);
+  ui.form.setAttribute("aria-busy", String(busy));
+  [...ui.form.querySelectorAll("button, input")].forEach(control => { control.disabled = busy; });
   if (!busy) {
     const connection = trackingConnections.get(provider) || {};
     ui.test.disabled = !connection.configured;
@@ -11979,16 +12347,18 @@ function clearTrackingSecrets(provider) {
 
 async function submitTrackingConnection(provider, action) {
   const ui = trackingConnectionElements(provider);
+  const notificationScope = `tracking:${provider}`;
+  if (ui.form.dataset.busy === "true") return;
   const payload = action === "connect" ? trackingConnectionPayload(provider) : null;
   const credentialSourceBeforeAction = String(trackingConnections.get(provider)?.credential_source || "none").toLowerCase();
   if (action === "connect") {
     if (provider === "wandb" && !payload.api_key && !trackingConnections.get(provider)?.configured) {
-      showToast("Enter a W&B API key to connect.", true);
+      showToast("Enter a W&B API key to connect.", true, { scope: notificationScope });
       elements.wandbApiKey.focus();
       return;
     }
     if (provider === "mlflow" && !payload.tracking_uri) {
-      showToast("Enter the MLflow tracking URI.", true);
+      showToast("Enter the MLflow tracking URI.", true, { scope: notificationScope });
       elements.mlflowConnectionUri.focus();
       return;
     }
@@ -12005,19 +12375,25 @@ async function submitTrackingConnection(provider, action) {
       ...(action === "connect" ? { body: JSON.stringify(payload) } : {}),
     });
     if (!result?.connection) throw new Error('Tracking response did not contain "connection".');
+    if (action !== "test") ui.form.querySelectorAll("[data-dirty]").forEach(input => delete input.dataset.dirty);
     renderTrackingConnection(provider, result.connection);
     trackingConnectionsLoaded = true;
     if (action !== "test") clearTrackingSecrets(provider);
+    renderTrackingDraftNotice(provider);
+    await refreshResolvedSettings();
     const disconnectResult = credentialSourceBeforeAction === "environment"
       ? "disconnect completed; environment credential remains externally managed"
       : ["credential_store", "keychain"].includes(credentialSourceBeforeAction)
         ? "disconnected; saved credential removed"
         : "session disconnected";
-    showToast(`${trackingProviderLabel(provider)} ${action === "disconnect" ? disconnectResult : action === "test" ? "connection verified" : "connected"}.`);
+    showToast(`${trackingProviderLabel(provider)} ${action === "disconnect" ? disconnectResult : action === "test" ? "connection verified" : "connected"}.`, false, { scope: notificationScope });
   } catch (error) {
+    // Failed validation changes the canonical status; every view must see it.
+    await loadTrackingConnections(true).catch(() => {});
+    await refreshResolvedSettings();
     ui.detail.textContent = error.message;
     ui.detail.classList.add("is-error");
-    showToast(`${trackingProviderLabel(provider)} ${action} failed: ${error.message}`, true);
+    showToast(`${trackingProviderLabel(provider)} ${action} failed: ${error.message}`, true, { scope: notificationScope });
   } finally {
     setTrackingConnectionBusy(provider, false);
   }
@@ -12079,27 +12455,38 @@ function renderSettings(payload) {
     : emptyRow(2, "No settings were returned.");
 }
 
+async function refreshResolvedSettings() {
+  try {
+    renderSettings(await api("/api/settings"));
+    clearNotificationScope("settings:resolved");
+  } catch (error) {
+    elements.settingsBody.innerHTML = emptyRow(2, "Settings could not be loaded.");
+    showNotice(elements.settingsError, `Settings: ${error.message}`, { scope: "settings:resolved" });
+  }
+}
+
 async function loadSettings(force = false) {
   if (loadedTabs.has("settings") && !force) return;
   elements.refreshSettings.disabled = true;
-  clearNotice(elements.settingsError);
   try {
     const [settingsResult, connectionsResult] = await Promise.allSettled([
       api("/api/settings"),
       loadTrackingConnections(force),
     ]);
-    const errors = [];
-    if (settingsResult.status === "fulfilled") renderSettings(settingsResult.value);
+    if (settingsResult.status === "fulfilled") {
+      renderSettings(settingsResult.value);
+      clearNotificationScope("settings:resolved");
+    }
     else {
       elements.settingsBody.innerHTML = emptyRow(2, "Settings could not be loaded.");
-      errors.push(`Settings: ${settingsResult.reason.message}`);
+      showNotice(elements.settingsError, `Settings: ${settingsResult.reason.message}`, { scope: "settings:resolved" });
     }
-    if (connectionsResult.status === "rejected") errors.push(`Tracking: ${connectionsResult.reason.message}`);
-    if (errors.length) showNotice(elements.settingsError, errors.join(" / "));
+    if (connectionsResult.status === "rejected") showNotice(elements.settingsError, `Tracking: ${connectionsResult.reason.message}`, { scope: "settings:connections" });
+    else clearNotificationScope("settings:connections");
     loadedTabs.add("settings");
   } catch (error) {
     elements.settingsBody.innerHTML = emptyRow(2, "Settings could not be loaded.");
-    showNotice(elements.settingsError, `Settings API unavailable: ${error.message}`);
+    showNotice(elements.settingsError, `Settings API unavailable: ${error.message}`, { scope: "settings:resolved" });
   } finally {
     elements.refreshSettings.disabled = false;
   }
@@ -12173,7 +12560,10 @@ function activateTab(tab, updateHash = true, requestedView = null) {
       : link.dataset.tabGroup === "experiments" ? isExperiments
       : link.dataset.tabTarget === next;
     link.classList.toggle("is-active", selected);
-    if (link.getAttribute("role") === "tab") link.setAttribute("aria-selected", String(selected));
+    if (link.getAttribute("role") === "tab") {
+      link.setAttribute("aria-selected", String(selected));
+      link.tabIndex = selected ? 0 : -1;
+    }
   });
   const destination = navigation ? navigation.url(view).href : new URL(`#${next}`, location.href).href;
   if (location.href !== destination) {
@@ -12449,12 +12839,14 @@ elements.evaluationTasksOptions.addEventListener("change", () => {
   scheduleEvaluationTargetValidation();
 });
 elements.evaluationTasksAll.addEventListener("click", () => {
-  elements.evaluationTasksOptions.querySelectorAll('input[type="checkbox"]').forEach((input) => { input.checked = true; });
+  elements.evaluationTasksOptions.querySelectorAll("input").forEach((input) => { input.checked = true; });
   updateEvaluationTaskLabel();
   scheduleEvaluationTargetValidation();
 });
 elements.evaluationTasksClear.addEventListener("click", () => {
-  elements.evaluationTasksOptions.querySelectorAll('input[type="checkbox"]').forEach((input) => { input.checked = false; });
+  const defaults = selectedEvaluationSuite()?.default_tasks || selectedEvaluationSuite()?.config_json?.default_tasks || [];
+  elements.evaluationTasksOptions.querySelectorAll("input").forEach((input) => { input.checked = defaults.includes(input.value); });
+  applyEvaluationTaskSelectionPolicy();
   updateEvaluationTaskLabel();
   scheduleEvaluationTargetValidation();
 });
@@ -12468,6 +12860,7 @@ elements.evaluationsBody.addEventListener("click", (event) => {
 elements.evaluationDetailActions.addEventListener("click", handleCancellationAction);
 
 elements.refreshDataRegistry.addEventListener("click", () => loadDataRegistry(true));
+document.querySelector("#data-show-archived").addEventListener("change", () => loadDataRegistry(true));
 elements.dataResourceForm.addEventListener("submit", createDataResource);
 if (elements.showDataResourceForm) {
   elements.showDataResourceForm.addEventListener("click", (event) => {
@@ -12483,17 +12876,21 @@ elements.dataResourcesBody.addEventListener("click", (event) => {
   if (button.dataset.resourceAction === "version") selectDataResourceForVersion(button.dataset.id, button);
   if (button.dataset.resourceAction === "edit") openDataResourceEditor(button.dataset.id, button);
   if (button.dataset.resourceAction === "archive") archiveDataResource(button.dataset.id);
+  if (button.dataset.resourceAction === "restore") restoreDataResource(button.dataset.id);
 });
 elements.dataVersionForm.addEventListener("submit", createDataVersion);
 elements.dataImportForm.addEventListener("submit", submitDataImport);
+elements.dataImportForm.addEventListener("input", renderDataImportBudget);
 elements.closeDataImportForm.addEventListener("click", () => hideRevealedPanel(elements.dataImportForm));
 elements.dataImportsBody.addEventListener("click", (event) => {
   const button = event.target.closest("[data-import-action]");
   if (button?.dataset.importAction === "detail") openDataImportDetail(button.dataset.id, button);
+  if (button?.dataset.importAction === "cancel") cancelDataImport(button.dataset.id, button);
 });
 document.getElementById("data-import-detail-content").addEventListener("click", event => {
-  const button = event.target.closest('[data-import-action="logs"]');
-  if (button) loadDataImportLogs(button.dataset.id);
+  const button = event.target.closest('[data-import-action]');
+  if (button?.dataset.importAction === "logs") loadDataImportLogs(button.dataset.id);
+  if (button?.dataset.importAction === "cancel") cancelDataImport(button.dataset.id, button);
 });
 document.getElementById("data-import-detail-dialog").addEventListener("close", () => { selectedDataImportId = null; });
 
@@ -12538,6 +12935,7 @@ document.querySelector("#evaluation-state-filter").addEventListener("change", ()
 elements.refreshCollection.addEventListener("click", () => {
   window.loadLiveXR?.();
   loadCollection(true);
+  document.dispatchEvent(new CustomEvent("dataset-preparation-refresh-requested"));
 });
 elements.addCollectionAdapter.addEventListener("click", (event) => fillCollectionAdapterForm(null, event.currentTarget));
 elements.closeCollectionAdapter.addEventListener("click", () => {
@@ -12590,8 +12988,12 @@ elements.testWandbConnection.addEventListener("click", () => submitTrackingConne
 elements.testMlflowConnection.addEventListener("click", () => submitTrackingConnection("mlflow", "test"));
 elements.disconnectWandb.addEventListener("click", () => submitTrackingConnection("wandb", "disconnect"));
 elements.disconnectMlflow.addEventListener("click", () => submitTrackingConnection("mlflow", "disconnect"));
-[elements.wandbBaseUrl, elements.wandbEntity, elements.mlflowConnectionUri, elements.mlflowConnectionUsername].forEach((input) => {
-  input.addEventListener("input", () => { input.dataset.dirty = "true"; });
+["wandb", "mlflow"].forEach(provider => {
+  trackingConnectionElements(provider).form.addEventListener("input", event => {
+    if (!event.target.matches("input")) return;
+    event.target.dataset.dirty = "true";
+    renderTrackingDraftNotice(provider);
+  });
 });
 
 elements.refreshAdapters.addEventListener("click", () => loadAdapters(true));

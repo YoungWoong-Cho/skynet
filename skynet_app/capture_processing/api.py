@@ -99,6 +99,8 @@ def logs(identifier: str):
         )
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from error
     except ClusterError as error:
         raise HTTPException(503, str(error)) from error
 
@@ -163,7 +165,7 @@ def artifact(identifier: str, name: str, request: Request):
             "Content-Length": str(end - start + 1),
             "Content-Disposition": disposition,
             "X-Content-Type-Options": "nosniff",
-            "Cache-Control": "private, max-age=3600",
+            "Cache-Control": "no-store",
             "ETag": '"' + expected["sha256"] + '"',
         }
         if partial:
@@ -176,6 +178,8 @@ def artifact(identifier: str, name: str, request: Request):
         )
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from error
     except ClusterError as error:
         raise HTTPException(503, str(error)) from error
 

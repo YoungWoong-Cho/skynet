@@ -1,22 +1,27 @@
 # EgoVerse model adapters
 
 The adapters use EgoVerse revision `e17cf98fe4bc234c564b37abc9e155f25e76d566`.
-`egoverse_manifest.py` defines the model inventory once. All entries share the
-same native trainer bridge, dataset checks, checkpoint receipt and evaluator.
-Model implementations remain in EgoVerse's `egomimic/algo/` and `egomimic/models/`.
+`egoverse_models.py` defines the native ACT, HPT and PI inventory. These three
+adapters share the trainer bridge, dataset checks, checkpoint receipt and evaluator.
+Their algorithm implementations are `egomimic.algo.act.ACT`,
+`egomimic.algo.hpt.HPT`, and `egomimic.algo.pi.PI`.
 
 ## From recorded demonstrations
 
 1. Data → Recording → the session's **Prepare for training**.
 2. Choose **EgoVerse · RGB and joints** and prepare the dataset.
 3. Once ready, choose **Use in experiment**. This binds the verified cluster copy.
-4. Select **EgoVerse · ACT**, **HPT flow · recorded joints**, or
-   **Diffusion Policy · recorded joints**. Keep the pinned repository revision
-   and **EgoVerse native** runtime.
+4. Select **EgoVerse · ACT**, or **EgoVerse · HPT** with the `hpt_joints`
+   model configuration. The latter binds the native EVA flow HPT to the recorded
+   joint and camera domain. Keep the pinned revision and **EgoVerse native** runtime.
 5. Set the training values and GPU allocation, preview, and submit.
 6. From the completed Training Run, choose **Start evaluation**, select
    **EgoVerse held-out predictions**, choose episodes/seeds/resources and submit.
 7. Open the evaluation row, then an episode's **Detail** for metrics, video and logs.
+
+New evaluation videos display every camera used by the saved policy together,
+with view labels. Up to three cameras appear side by side; larger sets use a grid.
+Previously generated videos keep their original layout.
 
 The existing dataset registry owns immutable versions, verified locations,
 training references and deletion protection. Conversion preserves the original
@@ -26,13 +31,16 @@ Native normalization is computed from training episodes only.
 
 ## Model coverage
 
-The registry exposes 22 entries: 20 complete upstream model configurations plus
-recorded-joint HPT and diffusion configurations. The incomplete `pi0.5_base`
-configuration and the `egobridge` alias are not duplicate adapter entries.
+The registry exposes exactly three algorithm adapters. Their model selector
+contains the 20 complete upstream configurations plus the HPT recorded-joints
+data binding. The incomplete `pi0.5_base` and duplicate `egobridge` alias are
+excluded. A selected configuration controls its dataset contract and I/O summary.
+Old per-configuration adapter versions remain pinned in history but are hidden
+from the new-experiment catalog.
 
 | Group | Input |
 | --- | --- |
-| ACT; HPT flow recorded joints; diffusion recorded joints | Converted teleoperation RGB, measured joints and commanded joints |
+| ACT; HPT recorded-joints configuration | Converted teleoperation RGB, measured joints and commanded joints |
 | HPT flow Aria, EVA, human, Mecka, Scale, human keypoints | The matching native embodiment schema |
 | HPT co-training encoder-decoder, separate/shared heads, Mecka, Scale | Matching datasets for every configured domain |
 | HPT Qwen per-token and pooled | Native robot data with language annotations; Qwen model assets |
@@ -42,10 +50,10 @@ Recorded robot joints cannot provide missing human poses, Cartesian actions,
 language labels or additional co-training domains. These adapters reject the
 recorded-joint contract instead of relabeling its values as another embodiment.
 
-The diffusion adapter uses EgoVerse's native `DiffusionPolicy` head with its HPT
-backbone. The upstream repository does not contain a model YAML selecting that
-head. Its wiring is an explicitly labeled Skynet configuration, not an upstream
-benchmark preset. It is independent of the XPolicyLab DP implementation.
+The synthetic EgoVerse diffusion adapter has been removed. Its old runs, metrics,
+checkpoints and videos remain historical records. New training, resume, and
+evaluation are blocked, including requests using a frozen old adapter plan.
+The separate XPolicyLab DP integration is unaffected.
 
 ## Native dataset imports
 
@@ -77,7 +85,10 @@ normalization and never recomputes it from held-out data.
 The bridge invokes native `trainHydra.train`, `ModelWrapper`, optimizers, schedulers
 and Lightning checkpointing. Source defaults remain visible: 2,000 epochs,
 100 training batches per epoch, 80 validation batches, validation every 200 epochs,
-and batch size 32 per GPU. Learning rates follow each model YAML.
+and batch size 32 per GPU. The displayed algorithm defaults are ACT `5e-5`,
+HPT `1e-4`, and PI `3e-5`; explicit common training values apply to the selected
+native configuration. Select a learning rate appropriate to a different native
+preset when using one.
 There is no added early-stopping rule. Precision defaults to native BF16; choose
 FP32 explicitly for older GPUs such as the cluster's RTX 6000.
 
@@ -86,6 +97,21 @@ parameters for optional model heads. Cluster transport settings are inherited
 from the existing shared training environment. Slurm launch variables are removed
 inside the native trainer so its workers are not mistaken for independent Slurm
 allocations. The native final checkpoint is saved even for a short test run.
+
+For recorded-joint HPT, the native batch adapter converts `joint_positions` to
+`state_joint_positions`. Its proprioceptive stem must use that prefixed name;
+the dataset and ACT retain the original `joint_positions` key. The old unprefixed
+HPT stem was silently skipped. Checkpoints made with that mapping cannot recover
+the missing conditioning by resuming; start a fresh run using the current adapter.
+New training/evaluation code rejects those incompatible checkpoint receipts.
+
+`ops/verify_egoverse_hpt_inputs.py` exercises the native HPT with real prepared
+recordings inside a one-GPU allocation. It reproduces the old omission as a
+negative control, checks a nonzero joint-stem gradient, changes only joint state
+while keeping cameras and the random seed fixed, and verifies that predictions
+change. It also checks 16 joint tokens, 128 total trunk tokens, and identical
+predictions after saving/reloading native model state. The normalization checkpoint
+supplies only dataset statistics; no weights from the defective model are reused.
 
 The native training outlier filter is enabled by default and exposed explicitly.
 It can reject all samples in small collections. Disable **Filter training outliers**
@@ -102,22 +128,23 @@ forward/backward execution, and video encoding/decoding on an allocated GPU.
 
 This integration performs **offline held-out prediction evaluation**. Recorded-joint
 models report raw joint MSE over real future frames, excluding end padding. Native
-embodiment models use their supplied native evaluator and visualization.
-Videos show recorded observations/predictions. They are not autonomous simulator
+embodiment models use their supplied native evaluator for metrics.
+Videos show the recorded camera observations together. They are not autonomous simulator
 rollouts and do not report a fabricated task success rate. An episode's prediction
 metric is shown in the existing result table and Detail modal.
 
 ## Validation
 
 Browser verification used the real Shadow right-hand collection `6a257afb`:
-51 episodes converted, with 41 training and 10 held-out episodes. Bounded native
-training tests completed for ACT (Slurm 3802608, four A40s), HPT flow (3802923,
-four A40s), and diffusion (3802925, one A40). These one-epoch tests validate
+51 episodes converted, with 41 training and 10 held-out episodes. Earlier bounded native training tests completed for ACT (Slurm 3802608,
+four A40s) and HPT flow (3802923, four A40s). These one-epoch tests validate
 execution and checkpoint production, not policy quality or convergence.
 
-Held-out ACT (3802739), HPT (3802937), and diffusion (3802940) evaluation
-completed through the browser; their episode
+Held-out ACT (3802739) and HPT (3802937) evaluation completed through the browser; their episode
 modals displayed the numeric prediction error, playable video, and Slurm logs.
-The separate native and π0.5 runtimes passed GPU readiness probes. Actual π0.5
+The separate native and π0.5 runtimes previously passed GPU readiness probes.
+The updated native-algorithm readiness capsule requires fresh attestation; this
+catalog change did not run remote GPU jobs. Former synthetic diffusion run
+3802925 and evaluation 3802940 are retained only as historical evidence. Actual π0.5
 training still requires pretrained weights, and the other native embodiment
 models require their matching datasets before end-to-end validation.

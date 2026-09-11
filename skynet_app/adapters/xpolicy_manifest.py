@@ -63,6 +63,9 @@ def evaluation(policy):
             "adapter-support/dexverse_evaluation.py": (
                 SUPPORT / "dexverse_evaluation.py"
             ).read_text(),
+            "adapter-support/evaluation_video.py": (
+                SUPPORT / "evaluation_video.py"
+            ).read_text(),
             "adapter-support/images.py": (
                 SUPPORT.parents[1] / "ops/xr/images.py"
             ).read_text(),

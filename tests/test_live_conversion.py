@@ -4,6 +4,9 @@ import importlib.util
 import json
 from pathlib import Path
 import pickle
+import shlex
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -20,6 +23,48 @@ spec = importlib.util.spec_from_file_location(
 )
 worker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(worker)
+
+
+class LocalCluster:
+    """Run the exact remote verification scripts against an isolated filesystem."""
+
+    def __init__(self, root):
+        self.root = root
+        self.submissions = []
+
+    def path(self, remote):
+        return self.root / remote.lstrip("/")
+
+    def write(self, remote, value):
+        path = self.path(remote)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(value)
+
+    def ssh(self, gateway, command, *, stdin, timeout):
+        request = json.loads(stdin)
+        if "repository" in request:
+            return canonical_json(dict(runtime=True, converter=True, revision=request["source_revision"]))
+        request["root"] = str(self.path(request["root"]))
+        if "sources" in request:
+            request["sources"] = [dict(s, source=str(self.path(s["source"]))) for s in request["sources"]]
+        return subprocess.run(
+            [sys.executable, "-c", shlex.split(command)[2]],
+            input=canonical_json(request), capture_output=True, text=True,
+            check=True, timeout=timeout,
+        ).stdout
+
+    def write_capsule_file(self, identifier, name, content, gateway):
+        self.write(f"{WORK_ROOT}/jobs/runs/{identifier}/{name}", content.encode())
+
+    def submit_script(self, script, identifier, gateway, **kwargs):
+        self.submissions.append(identifier)
+        return SimpleNamespace(job_id="1234")
+
+    def file_size(self, remote, gateway):
+        return gateway, self.path(remote).stat().st_size
+
+    def stream_file_range(self, remote, gateway, *, start, end):
+        yield self.path(remote).read_bytes()[start:end + 1]
 
 
 @pytest.fixture
@@ -241,7 +286,7 @@ def metadata(job, raw):
     )
 
 
-def test_verified_download_registers_dataset_bundle_and_lineage_once(conversion):
+def test_cluster_verified_result_registers_dataset_bundle_and_lineage_once(conversion, tmp_path):
     service, _, _ = conversion
     job = service.create("session", "Shadow cube")
     raw = b"\x89HDF\r\n\x1a\n" + b"test download transport" * 10
@@ -251,12 +296,11 @@ def test_verified_download_registers_dataset_bundle_and_lineage_once(conversion)
         job["dataset_root"] + "/dataset.hdf5": raw,
         job["dataset_root"] + "/manifest.json": manifest,
     }
-    transport = SimpleNamespace(
-        file_size=lambda path, host: (host, len(files[path])),
-        stream_file_range=lambda path, host, **_: iter(
-            [files[path][:10], files[path][10:]]
-        ),
-    )
+    files[job["dataset_root"] + "/source-manifest.json"] = canonical_json(job["sources"]).encode()
+    transport = LocalCluster(tmp_path / "cluster")
+    service.cluster = transport
+    for path, value in files.items():
+        transport.write(path, value)
     result = dict(
         metadata=m,
         manifest=dict(
@@ -274,27 +318,29 @@ def test_verified_download_registers_dataset_bundle_and_lineage_once(conversion)
     assert version["metadata"]["storage_location"] == "cluster"
     assert version["path"] == job["dataset_root"] + "/dataset.hdf5"
     assert version["derivation_id"]
+    assert [item["kind"] for item in version["locations"]] == ["cluster"]
     assert len(service.database.list_data_bundles()) == 1
-    assert service.artifact(job["id"], "dataset.hdf5").read_bytes() == raw
+    artifact = service.artifact(job["id"], "dataset.hdf5")
+    assert artifact.path == job["dataset_root"] + "/dataset.hdf5"
+    assert artifact.transport is transport
+    assert not (service.root / job["id"] / "dataset.hdf5").exists()
+    assert not (service.root / job["id"] / "manifest.json").exists()
     with pytest.raises(KeyError):
         service.artifact(job["id"], "../worker-sources.json")
 
 
-def test_truncated_download_is_never_published(conversion):
+def test_truncated_cluster_result_is_never_published(conversion, tmp_path):
     service, _, _ = conversion
     job = service.create("session", "Cube")
     raw = b"0123456789"
-    transport = SimpleNamespace(
-        file_size=lambda path, host: (host, len(raw)),
-        stream_file_range=lambda *a, **k: iter([raw[:4]]),
-    )
-    with pytest.raises(OSError, match="Incomplete"):
-        service.download(
-            job,
-            "dataset.hdf5",
-            dict(sha256=hashlib.sha256(raw).hexdigest(), size_bytes=10),
-            transport,
-        )
+    m = metadata(job, raw)
+    manifest = canonical_json(m).encode()
+    transport = LocalCluster(tmp_path / "cluster")
+    transport.write(job["dataset_root"] + "/manifest.json", manifest)
+    transport.write(job["dataset_root"] + "/dataset.hdf5", raw[:4])
+    with pytest.raises(ValueError, match="artifact size changed"):
+        service.finish(job, dict(metadata=m, manifest=worker.file_info(transport.path(job["dataset_root"] + "/manifest.json"))), transport)
+    assert not service.database.list_data_resources()
     assert not (service.root / job["id"] / "dataset.hdf5").exists()
     assert not (service.root / job["id"] / "dataset.part").exists()
 
@@ -363,36 +409,6 @@ def test_shared_storage_delay_recovers_same_completed_job(conversion, monkeypatc
     service.work(job["id"])
     assert completed == ["1234"]
     assert len(service.list()) == 1
-
-
-def test_corrupt_cached_input_cannot_be_submitted(conversion):
-    service, _, _ = conversion
-    job = service.create("session", "Cube")
-    directory = service.reviews.directory("session", 0)
-    directory.mkdir(parents=True)
-    (directory / "recording.pkl").write_bytes(b"changed")
-    with pytest.raises(ValueError, match="checksum changed"):
-        service.local_recording(job, job["sources"][0])
-
-
-def test_input_copy_failure_can_retry_without_submitting_a_gpu_job(
-    conversion, monkeypatch
-):
-    service, _, _ = conversion
-    job = service.create("session", "Cube")
-    calls = []
-    monkeypatch.setattr(
-        service.reviews,
-        "status",
-        lambda *_: {"state": "FAILED", "error": "Source server unavailable"},
-    )
-    monkeypatch.setattr(service.reviews, "create", lambda *args: calls.append(args))
-    assert service.local_recording(job, job["sources"][0]) is None
-    job = service.get(job["id"])
-    with pytest.raises(ValueError, match="Source server unavailable"):
-        service.local_recording(job, job["sources"][0])
-    assert calls == [("session", 0)]
-    assert not job.get("job_id")
 
 
 @pytest.fixture

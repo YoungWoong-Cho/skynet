@@ -1,5 +1,5 @@
 from typing import Literal
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse, FileResponse
 from pydantic import BaseModel, ConfigDict, model_validator
 from .collection_api import service as collection
@@ -9,12 +9,19 @@ from .live_xr_catalog import catalog
 from .live_xr_review import LiveReviewService
 from .live_xr_video import LiveVideoService
 from .live_conversion import LiveConversionService
+from .live_xr_archive import LiveArchiveService
+from .remote_artifacts import RemoteArtifact
 
 router = APIRouter(prefix="/api/collection/live", tags=["collection"])
 service = LiveXRService(collection.database)
+archive = service.archive = LiveArchiveService(service)
 reviews = LiveReviewService(service)
 videos = LiveVideoService(reviews)
 conversions = LiveConversionService(reviews)
+service.conversions = conversions
+archive.busy = lambda identifier: (
+    any(key[0] == identifier for key in reviews.active | videos.active)
+)
 
 
 class StartRequest(BaseModel):
@@ -130,9 +137,12 @@ def conversion_logs(identifier: str):
 
 
 @router.get("/conversions/{identifier}/{name}")
-def conversion_artifact(identifier: str, name: str):
+def conversion_artifact(identifier: str, name: str, request: Request):
+    artifact = checked(conversions.artifact, identifier, name)
+    if isinstance(artifact, RemoteArtifact):
+        return checked(lambda: artifact.response(request, filename=name))
     return FileResponse(
-        checked(conversions.artifact, identifier, name),
+        artifact,
         filename=name,
         headers={"X-Content-Type-Options": "nosniff"},
     )
@@ -158,11 +168,19 @@ def video_create(identifier: str, index: int, episode: int = 0):
     return checked(videos.create, identifier, index, episode)
 
 
+@router.delete("/sessions/{identifier}/recordings/{index}/video")
+def video_cancel(identifier: str, index: int, episode: int = 0, generation: str | None = None):
+    return checked(videos.cancel, identifier, index, episode, generation)
+
+
 @router.get("/sessions/{identifier}/recordings/{index}/{name}")
-def review_file(identifier: str, index: int, name: str, episode: int = 0):
+def review_file(identifier: str, index: int, name: str, request: Request, episode: int = 0):
     if name == "video.mp4":
+        artifact = checked(videos.artifact, identifier, index, episode)
+        if isinstance(artifact, RemoteArtifact):
+            return checked(lambda: artifact.response(request, media_type="video/mp4"))
         return FileResponse(
-            checked(videos.artifact, identifier, index, episode),
+            artifact,
             media_type="video/mp4",
             headers={
                 "X-Content-Type-Options": "nosniff",
@@ -170,6 +188,10 @@ def review_file(identifier: str, index: int, name: str, episode: int = 0):
             },
         )
     path = checked(reviews.artifact, identifier, index, name)
+    if isinstance(path, RemoteArtifact):
+        return checked(lambda: path.response(
+            request, media_type="application/json" if name.endswith(".json") else "application/octet-stream",
+            filename=None if name == "review.json" else f"{identifier[:8]}-{index}-{name}"))
     return FileResponse(
         path,
         media_type="application/json"

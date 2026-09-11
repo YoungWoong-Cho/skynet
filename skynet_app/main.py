@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import json
 import subprocess
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -17,6 +18,7 @@ from .local_capture_api import router as local_capture_router
 from .hands_api import router as hands_router
 from .live_xr_api import router as live_xr_router
 from .live_xr_api import conversions as live_conversions
+from .live_xr_api import archive as live_archive
 from .policy_exports_api import router as policy_exports_router, service as policy_exports
 from .pipeline_api import router as pipeline_router
 from .pipeline_api import service as pipeline_service
@@ -70,9 +72,12 @@ async def lifespan(_: FastAPI):
     pipeline_service.start()
     live_conversions.start()
     policy_exports.start()
+    storage = json.loads((APP_ROOT / "config/live_storage.json").read_text())
+    live_archive.start(enabled=storage["enabled"], cleanup_enabled=storage["cleanup_source"])
     try:
         yield
     finally:
+        live_archive.stop()
         policy_exports.stop()
         live_conversions.stop()
         pipeline_service.stop()

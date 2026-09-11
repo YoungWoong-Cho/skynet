@@ -124,7 +124,7 @@ def download_subset(request, work_root):
         return filename, Path(cached)
 
     downloaded = {}
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=int(request.get("cpus", 8))) as executor:
         futures = [executor.submit(download, filename) for filename in files]
         for completed, future in enumerate(as_completed(futures), start=1):
             filename, cached = future.result()
@@ -333,12 +333,15 @@ def build_huggingface_import_job(
         "bundle_version": str(request["bundle_version"]),
         "work_root": CLUSTER.paths.work_root,
         "huggingface_hub_version": HUGGINGFACE_HUB_VERSION,
+        "cpus": int(request.get("cpus", 8)),
     }
     request_b64 = base64.b64encode(
         (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
     ).decode("ascii")
     program_b64 = base64.b64encode(_IMPORT_PROGRAM.encode("utf-8")).decode("ascii")
-    time_limit = "04:00:00" if not queue.preemptible else "24:00:00"
+    time_limit = str(request.get("time_limit") or ("04:00:00" if not queue.preemptible else "24:00:00"))
+    cpus = int(request.get("cpus", 8))
+    memory_gb = int(request.get("memory_gb", 32))
     script = dedent(
         f"""\
         #!/usr/bin/env bash
@@ -347,8 +350,8 @@ def build_huggingface_import_job(
         #SBATCH --account={queue.account}
         #SBATCH --nodes=1
         #SBATCH --ntasks=1
-        #SBATCH --cpus-per-task=8
-        #SBATCH --mem=32G
+        #SBATCH --cpus-per-task={cpus}
+        #SBATCH --mem={memory_gb}G
         #SBATCH --time={time_limit}
         #SBATCH --requeue
         #SBATCH --chdir={CLUSTER.paths.workspace}

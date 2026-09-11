@@ -52,12 +52,16 @@ export SKYNET_DATABASE_PATH="$PWD/data/skynet.db"
 uv run uvicorn skynet_app.main:app --reload --reload-dir skynet_app --reload-dir ops --host 127.0.0.1 --port 8080
 ```
 
-Open `http://127.0.0.1:8080`. The generated API documentation is available at `http://127.0.0.1:8080/docs`.
+Open `http://127.0.0.1:8080`. The generated API documentation is available at `http://127.0.0.1:8080/api/docs`.
 
 Run the test suite:
 
 ```bash
 uv run pytest
+npm ci
+npm run test:live
+npm run test:hands
+npm run test:shared
 ```
 
 The tests use temporary databases and mocked transports where appropriate. Cluster integration tests require active SSH access and submit real Slurm jobs, so review their markers and payloads before running them.
@@ -65,7 +69,7 @@ The tests use temporary databases and mocked transports where appropriate. Clust
 ## UI workflow
 
 1. Open the cluster dashboard and select one or more partitions to filter the job queue.
-2. Confirm the account capacity, GPU users, free GPU segments, pending reasons, and gateway health.
+2. Confirm the account GPU usage and limits, GPU users, pending reasons, and gateway health.
 3. Open **Experiments → Adapters** to review, clone, edit, or validate the versioned repository adapter that will compile the workload.
 4. Open **Experiments**, select a repository branch and exact commit, then choose automatic or explicit runtime resolution and provide resources, hyperparameters, checkpoint policy, sweep axes, and evaluation plan.
 5. Preview the resolved variants and canonical `sbatch` before submission.
@@ -310,7 +314,7 @@ The UI uses the same JSON API exposed to automation:
 - Evaluation list, create, and submit endpoints live under `/api/evaluations`.
 - Cluster, workspace, and direct job endpoints remain available for dashboard and low-level operation.
 
-Use `/docs` for request schemas and the precise cancel/resume/evaluation route suffixes.
+Use `/api/docs` for request schemas and the precise cancel/resume/evaluation route suffixes.
 
 ## Real Slurm behavior
 

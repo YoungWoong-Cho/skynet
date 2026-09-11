@@ -11,6 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
+from .data_paths import validate_mount_path
+from .training_metrics import is_scalar
+
 
 APP_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATABASE_PATH = APP_ROOT / "data" / "skynet.db"
@@ -1614,6 +1617,97 @@ class Database:
         assert result is not None
         return result
 
+    def materialize_empty_revision_runs(
+        self,
+        revision_id: str,
+        planned_runs: Sequence[Mapping[str, Any]],
+        *,
+        run_directory_root: str,
+    ) -> bool:
+        """Restore a saved definition only on explicit Submit after history cleanup.
+
+        The entire draft graph is committed once across independent service
+        instances. Existing execution records always win over rematerialization.
+        """
+        with self.transaction() as connection:
+            revision = connection.execute(
+                "SELECT id FROM experiment_revisions WHERE id = ?", (revision_id,)
+            ).fetchone()
+            if revision is None:
+                raise KeyError("Experiment revision not found")
+            existing = connection.execute(
+                """
+                SELECT 1 FROM runs r
+                JOIN variants v ON v.id = r.variant_id
+                WHERE v.experiment_revision_id = ? LIMIT 1
+                """,
+                (revision_id,),
+            ).fetchone()
+            if existing is not None:
+                return False
+            variants = {
+                row["id"]: row
+                for row in connection.execute(
+                    """
+                    SELECT id, resolved_spec_sha256 FROM variants
+                    WHERE experiment_revision_id = ?
+                    """,
+                    (revision_id,),
+                )
+            }
+            if (
+                not variants
+                or len(planned_runs) != len(variants)
+                or {item["variant_id"] for item in planned_runs} != set(variants)
+            ):
+                raise ValueError(
+                    "The saved experiment variants are incomplete; "
+                    "load its configuration and save a new revision"
+                )
+            for item in planned_runs:
+                saved = variants[item["variant_id"]]
+                if item["resolved_spec_sha256"] != saved["resolved_spec_sha256"]:
+                    raise ValueError(
+                        "The saved variant changed before its new run was created"
+                    )
+            for item in planned_runs:
+                identifier, timestamp = new_id(), utc_now()
+                self._insert(
+                    connection,
+                    "runs",
+                    {
+                        "id": identifier,
+                        "variant_id": item["variant_id"],
+                        "seed": item["seed"],
+                        "run_number": 1,
+                        "status": "DRAFT",
+                        "adapter_name": item["adapter_name"],
+                        "adapter_version": item["adapter_version"],
+                        "source_commit": item["source_commit"],
+                        "runtime_profile": item["runtime_profile"],
+                        "run_directory": run_directory_root.rstrip("/") + "/" + identifier,
+                        "created_at": timestamp,
+                        "updated_at": timestamp,
+                    },
+                )
+                self._insert(
+                    connection,
+                    "workflow_stages",
+                    {
+                        "id": new_id(),
+                        "run_id": identifier,
+                        "stage_type": "TRAIN",
+                        "name": "train",
+                        "status": "DRAFT",
+                        "resolved_config_json": canonical_json(item["resolved_config"]),
+                        "auto_resume": int(item["auto_resume"]),
+                        "max_attempts": item["max_attempts"],
+                        "created_at": timestamp,
+                        "updated_at": timestamp,
+                    },
+                )
+            return True
+
     def list_runs(
         self,
         *,
@@ -2749,6 +2843,16 @@ class Database:
                     ).get("aggregate", [])
             return evaluations
 
+    @staticmethod
+    def _unfinished_evaluation_episode_state(status: str) -> tuple[str, str] | None:
+        status = str(status).upper()
+        if status not in {"SUCCEEDED", "FAILED", "CANCELLED", "BLOCKED", "TIMEOUT", "SUBMISSION_FAILED"}:
+            return None
+        return (
+            "CANCELLED" if status == "CANCELLED" else "NOT_COMPLETED",
+            f"Evaluation ended ({status.lower()}) before this episode completed.",
+        )
+
     def get_evaluation(self, evaluation_id: str) -> dict[str, Any] | None:
         with self.connection() as connection:
             evaluation = self._row_by_id(connection, "evaluations", evaluation_id)
@@ -2758,6 +2862,14 @@ class Database:
                 "SELECT * FROM evaluation_episodes WHERE evaluation_id = ? ORDER BY task, seed, episode_index",
                 (evaluation_id,),
             ).fetchall())
+            # Older terminal records may predate episode finalization. Present
+            # their effective state without changing the stored historical row.
+            terminal = self._unfinished_evaluation_episode_state(evaluation["status"])
+            if terminal:
+                for episode in evaluation["episodes"]:
+                    if episode["status"] in {"PENDING", "RUNNING"}:
+                        episode["status"] = terminal[0]
+                        episode["failure_reason"] = episode.get("failure_reason") or terminal[1]
             return evaluation
 
     def evaluation_progress_evidence(
@@ -2802,7 +2914,26 @@ class Database:
         }), json_fields=frozenset({"task_selection_json", "seeds_json"}))
         encoded["updated_at"] = utc_now()
         with self.transaction() as connection:
-            return self._update(connection, "evaluations", evaluation_id, encoded)
+            result = self._update(connection, "evaluations", evaluation_id, encoded)
+            status = str(fields.get("status", "")).upper()
+            terminal = self._unfinished_evaluation_episode_state(status)
+            if terminal:
+                connection.execute(
+                    """UPDATE evaluation_episodes
+                       SET status = ?, failure_reason = COALESCE(failure_reason, ?),
+                           completed_at = COALESCE(completed_at, ?), updated_at = ?
+                       WHERE evaluation_id = ? AND status IN ('PENDING', 'RUNNING')""",
+                    (*terminal,
+                     encoded["updated_at"], encoded["updated_at"], evaluation_id),
+                )
+            elif status in {"PENDING", "SUBMITTED"}:
+                connection.execute(
+                    """UPDATE evaluation_episodes SET status = 'PENDING',
+                       failure_reason = NULL, completed_at = NULL, updated_at = ?
+                       WHERE evaluation_id = ? AND status IN ('CANCELLED', 'NOT_COMPLETED')""",
+                    (encoded["updated_at"], evaluation_id),
+                )
+            return result
 
     def upsert_evaluation_episode(
         self,
@@ -2822,9 +2953,14 @@ class Database:
         raw_result_path: str | None = None,
         started_at: str | None = None,
         completed_at: str | None = None,
-    ) -> dict[str, Any]:
+        expected_parent_states: Sequence[str] | None = None,
+    ) -> dict[str, Any] | None:
         now = utc_now()
         with self.transaction() as connection:
+            if expected_parent_states is not None:
+                parent = connection.execute("SELECT status FROM evaluations WHERE id = ?", (evaluation_id,)).fetchone()
+                if parent is None or parent["status"] not in expected_parent_states:
+                    return None
             existing = connection.execute("""
                 SELECT id FROM evaluation_episodes
                 WHERE evaluation_id = ? AND task = ? AND seed = ? AND episode_index = ?
@@ -2933,6 +3069,40 @@ class Database:
             ).fetchone())
         assert result is not None
         return result
+
+    def enrich_training_progress_metrics(
+        self, sample_id: str, metrics: Mapping[str, float | int]
+    ) -> bool:
+        """Add missing metrics without changing the sample's original observations."""
+        additions = {
+            key: value
+            for key, value in metrics.items()
+            if isinstance(key, str) and is_scalar(value)
+        }
+        if not additions:
+            return False
+        with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT evidence_json FROM training_progress_samples WHERE id = ?",
+                (sample_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            evidence = json.loads(row["evidence_json"])
+            if not isinstance(evidence, dict):
+                return False
+            existing = evidence.get("metrics", {})
+            if not isinstance(existing, dict):
+                return False
+            additions = {key: value for key, value in additions.items() if key not in existing}
+            if not additions:
+                return False
+            evidence["metrics"] = {**existing, **additions}
+            connection.execute(
+                "UPDATE training_progress_samples SET evidence_json = ? WHERE id = ?",
+                (canonical_json(evidence), sample_id),
+            )
+        return True
 
     def list_training_progress_samples(
         self, run_id: str, *, attempt_id: str | None = None
@@ -3727,8 +3897,9 @@ class Database:
             result["versions"] = versions
         return result
 
-    def create_data_resource(
+    def _insert_data_resource(
         self,
+        connection: sqlite3.Connection,
         *,
         provider: str,
         namespace: str,
@@ -3750,11 +3921,28 @@ class Database:
             "updated_at": now,
             "archived_at": None,
         }
+        self._insert(connection, "data_resources", values)
+        row = connection.execute(
+            "SELECT * FROM data_resources WHERE id = ?", (values["id"],)
+        ).fetchone()
+        assert row is not None
+        return self._data_resource_payload(connection, row, include_versions=True)
+
+    def create_data_resource(
+        self,
+        *,
+        provider: str,
+        namespace: str,
+        name: str,
+        kind: str,
+        description: str = "",
+        metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         with self.transaction() as connection:
-            self._insert(connection, "data_resources", values)
-        result = self.get_data_resource(values["id"])
-        assert result is not None
-        return result
+            return self._insert_data_resource(
+                connection, provider=provider, namespace=namespace, name=name,
+                kind=kind, description=description, metadata=metadata,
+            )
 
     def list_data_resources(
         self,
@@ -3816,6 +4004,47 @@ class Database:
         assert result is not None
         return result
 
+    def _insert_data_resource_version(
+        self,
+        connection: sqlite3.Connection,
+        resource_id: str,
+        *,
+        revision: str,
+        format: str,
+        path: str,
+        manifest_sha256: str,
+        status: str = "READY",
+        size_bytes: int | None = None,
+        source_uri: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        resource = connection.execute(
+            "SELECT * FROM data_resources WHERE id = ?", (resource_id,)
+        ).fetchone()
+        if resource is None:
+            raise KeyError(f"Data resource not found: {resource_id}")
+        if resource["archived_at"] is not None:
+            raise ValueError("cannot add a version to an archived data resource")
+        values = {
+            "id": new_id(),
+            "resource_id": resource_id,
+            "revision": revision,
+            "format": format,
+            "path": path,
+            "source_uri": source_uri,
+            "manifest_sha256": manifest_sha256.lower(),
+            "status": status.upper(),
+            "size_bytes": size_bytes,
+            "metadata_json": canonical_json(dict(metadata or {})),
+            "created_at": utc_now(),
+        }
+        self._insert(connection, "data_resource_versions", values)
+        row = connection.execute(
+            "SELECT * FROM data_resource_versions WHERE id = ?", (values["id"],)
+        ).fetchone()
+        assert row is not None
+        return self._public_data_version(connection, row, include_resource=True)
+
     def create_data_resource_version(
         self,
         resource_id: str,
@@ -3830,32 +4059,11 @@ class Database:
         metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self.transaction() as connection:
-            resource = connection.execute(
-                "SELECT * FROM data_resources WHERE id = ?", (resource_id,)
-            ).fetchone()
-            if resource is None:
-                raise KeyError(f"Data resource not found: {resource_id}")
-            if resource["archived_at"] is not None:
-                raise ValueError("cannot add a version to an archived data resource")
-            values = {
-                "id": new_id(),
-                "resource_id": resource_id,
-                "revision": revision,
-                "format": format,
-                "path": path,
-                "source_uri": source_uri,
-                "manifest_sha256": manifest_sha256.lower(),
-                "status": status.upper(),
-                "size_bytes": size_bytes,
-                "metadata_json": canonical_json(dict(metadata or {})),
-                "created_at": utc_now(),
-            }
-            self._insert(connection, "data_resource_versions", values)
-            row = connection.execute(
-                "SELECT * FROM data_resource_versions WHERE id = ?", (values["id"],)
-            ).fetchone()
-            assert row is not None
-            return self._public_data_version(connection, row, include_resource=True)
+            return self._insert_data_resource_version(
+                connection, resource_id, revision=revision, format=format, path=path,
+                manifest_sha256=manifest_sha256, status=status, size_bytes=size_bytes,
+                source_uri=source_uri, metadata=metadata,
+            )
 
     def record_data_location(self, version_id, *, kind, host, path, manifest_sha256, status="AVAILABLE"):
         version = self.get_data_resource_version(version_id)
@@ -3885,7 +4093,7 @@ class Database:
             if (resource["provider"], resource["namespace"]) != (
                 "collection",
                 "datasets",
-            ) or not json.loads(resource["metadata_json"]).get("managed_dataset"):
+            ):
                 raise ValueError(
                     "Only prepared collection datasets can be deleted here"
                 )
@@ -3903,6 +4111,24 @@ class Database:
                     (resource_id,),
                 )
             ]
+            if not json.loads(resource["metadata_json"]).get("managed_dataset"):
+                # Older collections can predate the display metadata flag. The
+                # preparation ledger and immutable version backlinks establish
+                # ownership without trusting a label or widening file access.
+                owned_versions = {
+                    (job["id"], job.get("version_id")) for job in jobs
+                }
+                if not jobs or any(
+                    version["format"] != "skynet.episodes/v1"
+                    and (
+                        json.loads(version["metadata_json"]).get("export_id"),
+                        version["id"],
+                    ) not in owned_versions
+                    for version in versions
+                ):
+                    raise ValueError(
+                        "Only prepared collection datasets can be deleted here"
+                    )
             if identifier is not None:
                 selected = next((j for j in jobs if j["id"] == identifier), None)
                 if selected is None:
@@ -4145,6 +4371,21 @@ class Database:
                 raise KeyError(f"Data resource not found: {resource_id}")
             if resource["archived_at"] is not None:
                 raise ValueError("cannot import into an archived data resource")
+            # Resource budgets and gateway choices do not change the immutable
+            # output identity. Claim it in the same transaction as insertion.
+            identity_fields = (
+                "revision", "subset", "format", "role", "bundle_name", "bundle_version",
+            )
+            identity = tuple(request.get(key) for key in identity_fields)
+            active = connection.execute(
+                """SELECT request_json FROM data_imports WHERE resource_id = ?
+                   AND state IN ('SUBMITTING', 'SUBMITTED', 'PENDING', 'RUNNING', 'FINALIZING', 'CANCELLING')""",
+                (resource_id,),
+            ).fetchall()
+            for row in active:
+                existing_request = json.loads(row["request_json"])
+                if tuple(existing_request.get(key) for key in identity_fields) == identity:
+                    raise ValueError("the same immutable Hugging Face import is already active")
             values = {
                 "id": new_id(),
                 "resource_id": resource_id,
@@ -4174,7 +4415,10 @@ class Database:
             assert row is not None
             return self._public_data_import(row)
 
-    def update_data_import(self, import_id: str, **changes: Any) -> dict[str, Any]:
+    def update_data_import(
+        self, import_id: str, *, expected_states: Sequence[str] | None = None, **changes: Any
+    ) -> dict[str, Any] | None:
+        """Update atomically; conditional callers receive None if another transition won."""
         allowed = {
             "state", "result", "gateway", "slurm_job_id", "slurm_state", "exit_code",
             "node_list", "run_directory", "script_path", "result_path", "stdout_path",
@@ -4190,6 +4434,23 @@ class Database:
             )
         fields["updated_at"] = utc_now()
         with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM data_imports WHERE id = ?", (import_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Data import not found: {import_id}")
+            if expected_states is not None and row["state"] not in expected_states:
+                return None
+            if row["state"] in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                return self._public_data_import(row)
+            # Scheduler observations can lag a cancellation or finalization.
+            # A conditional transition can explicitly roll back a failed cancel.
+            if (
+                expected_states is None
+                and row["state"] in {"CANCELLING", "FINALIZING"}
+                and fields.get("state") in {"SUBMITTING", "SUBMITTED", "PENDING", "RUNNING"}
+            ):
+                fields.pop("state")
             self._update(connection, "data_imports", import_id, fields)
             row = connection.execute(
                 "SELECT * FROM data_imports WHERE id = ?", (import_id,)
@@ -4458,7 +4719,7 @@ class Database:
                     "role": role,
                     "position": position,
                     "version_id": str(item["version_id"]),
-                    "mount_path": item.get("mount_path"),
+                    "mount_path": validate_mount_path(item.get("mount_path")),
                     "required": bool(item.get("required", True)),
                     "config": dict(item.get("config") or {}),
                 })

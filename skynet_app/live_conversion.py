@@ -5,7 +5,7 @@ from functools import cached_property
 import hashlib
 import inspect
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 import subprocess
@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from .database import canonical_json, utc_now
 from .live_xr import TERMINAL
+from .live_xr_archive import is_archived
 from .live_xr_review import ArrayUnpickler
 from .cluster_runtime import (
     ClusterClient,
@@ -22,8 +23,8 @@ from .cluster_runtime import (
     SubmissionOutcomeUnknown,
     WORK_ROOT,
 )
-from .capture_processing.service import upload_capture
 from .capture_processing.slurm import compile_isaac_job
+from .remote_artifacts import RemoteArtifact
 from .simulation_hands import upload as upload_hand
 
 FORMAT = "dexverse-demo-hdf5/v1"
@@ -33,8 +34,66 @@ PENDING = {
     "SUBMISSION_UNKNOWN",
     "QUEUED",
     "RUNNING",
+    "VERIFYING",
     "DOWNLOADING",
 }
+
+
+STAGE_ARCHIVED_RECORDINGS = """import hashlib,json,os,shutil,sys,tempfile
+from pathlib import Path
+p=json.load(sys.stdin)
+def check(path, expected):
+ if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= 100*1024*1024:
+  raise ValueError('Recording is missing, unsafe, empty, or exceeds 100 MB')
+ with path.open('rb') as stream:
+  if hashlib.file_digest(stream,'sha256').hexdigest()!=expected:
+   raise ValueError('Recording checksum changed; no conversion was submitted')
+try:
+ root=Path(p['root']); root.mkdir(parents=True,exist_ok=True,mode=0o700)
+ for item in p['sources']:
+  source=Path(item['source']); target=root/(str(item['index'])+'.pkl')
+  check(source,item['sha256'])
+  if target.exists() or target.is_symlink():
+   check(target,item['sha256']); continue
+  descriptor,name=tempfile.mkstemp(prefix='.stage-',dir=root); os.close(descriptor)
+  temporary=Path(name)
+  try:
+   shutil.copyfile(source,temporary); check(temporary,item['sha256'])
+   try: os.link(temporary,target)
+   except FileExistsError: check(target,item['sha256'])
+  finally: temporary.unlink(missing_ok=True)
+ print(json.dumps({'staged':len(p['sources'])}))
+except (OSError,ValueError) as error:
+ print(json.dumps({'error':str(error)}))
+"""
+
+
+VERIFY_CONVERTED_DATASET = """import hashlib,json,sys
+from pathlib import Path
+p=json.load(sys.stdin); root=Path(p['root'])
+def check(name,expected):
+ path=root/name
+ if path.is_symlink() or not path.is_file() or path.stat().st_size!=expected['size_bytes']:
+  raise ValueError('Converted artifact size changed: '+name)
+ with path.open('rb') as stream:
+  if hashlib.file_digest(stream,'sha256').hexdigest()!=expected['sha256']:
+   raise ValueError('Converted artifact checksum changed: '+name)
+ return path
+try:
+ manifest=check('manifest.json',p['manifest'])
+ if json.loads(manifest.read_text())!=p['metadata']:
+  raise ValueError('Dataset manifest differs from the conversion result')
+ dataset=check('dataset.hdf5',p['metadata']['artifact'])
+ with dataset.open('rb') as stream:
+  if stream.read(8)!=b'\\x89HDF\\r\\n\\x1a\\n':
+   raise ValueError('Converted dataset is not an HDF5 file')
+ source=check('source-manifest.json',p['source_manifest'])
+ if json.loads(source.read_text())!=p['metadata']['sources']:
+  raise ValueError('Source manifest differs from the requested recordings')
+ print(json.dumps({'verified':True,'manifest':p['manifest'],'artifact':p['metadata']['artifact']}))
+except (OSError,ValueError) as error:
+ print(json.dumps({'error':str(error)}))
+"""
 
 
 def pinned_converter_digest(profile):
@@ -192,7 +251,17 @@ class LiveConversionService:
         profile = self.profile(session)
         sources = []
         for i in sorted(indices):
-            _, path = self.reviews.source(session_id, i)
+            relative = PurePosixPath(files[i])
+            if (
+                relative.is_absolute()
+                or ".." in relative.parts
+                or not relative.is_relative_to("recordings")
+                or relative.suffix != ".pkl"
+            ):
+                raise ValueError("Invalid saved recording path")
+            # Storage may move; the frozen identity continues to name the
+            # original execution location and checksum, including for retries.
+            path = session["root"] + "/output/" + str(relative)
             checksum = session.get("recording_checksums", {}).get(files[i])
             if not re.fullmatch(r"[a-f0-9]{64}", str(checksum or "")):
                 raise ValueError(
@@ -325,46 +394,68 @@ class LiveConversionService:
         )
         (directory / "job.sbatch").write_text(script)
 
-    def local_recording(self, job, source):
-        directory = self.reviews.directory(job["session_id"], source["index"])
-        path = directory / "recording.pkl"
-        if path.is_file():
-            if not 0 < path.stat().st_size <= 100 * 1024 * 1024:
-                raise ValueError("Recording is empty or exceeds 100 MB")
-            with path.open("rb") as stream:
-                digest = hashlib.file_digest(stream, "sha256").hexdigest()
-            if digest != source["sha256"]:
-                raise ValueError(
-                    "Cached recording checksum changed; original data was preserved"
-                )
-            return path
-        # Download-only reuse of the existing review service. No GPU work runs
-        # on the collection host; only the original bytes are retrieved.
-        status = self.reviews.status(job["session_id"], source["index"])
-        requested = job.get("requested_inputs", [])
-        if status["state"] == "FAILED" and source["index"] in requested:
-            raise ValueError(
-                f"Could not copy recording {source['index'] + 1} from {job['source_gateway']}: "
-                + status["error"]
+    def archived_sources(self, job):
+        session = self.live.get(job["session_id"])
+        archive = getattr(self.live, "archive", None)
+        if archive is None:
+            raise ValueError("Cluster archival is not configured for these recordings")
+        if not is_archived(session):
+            archive.ensure(session["id"])
+            self.update(
+                job["id"],
+                detail="Waiting for recordings to finish moving to the cluster…",
+                connection_error=None,
             )
-        if source["index"] not in requested:
-            self.update(job["id"], requested_inputs=[*requested, source["index"]])
-        self.reviews.create(job["session_id"], source["index"])
-        return None
+            return None
+        original = PurePosixPath(session["root"]) / "output"
+        sources = []
+        for source in job["sources"]:
+            path = PurePosixPath(source["path"])
+            if ".." in path.parts or not path.is_relative_to(original):
+                raise ValueError("Saved recording is outside its original session")
+            relative = str(path.relative_to(original))
+            if session.get("recording_checksums", {}).get(relative) != source["sha256"]:
+                raise ValueError("Recording checksum differs from the frozen conversion")
+            _, _, resolved = archive.resolve(session, relative)
+            sources.append(dict(source, source=ClusterClient._remote_path(resolved)))
+        return sources
+
+    @staticmethod
+    def remote_check(transport, gateway, script, payload, *, timeout=120):
+        result = json.loads(transport.ssh(
+            gateway, "python3 -c " + shlex.quote(script),
+            stdin=canonical_json(payload), timeout=timeout,
+        ))
+        if result.get("error"):
+            raise ValueError(result["error"])
+        return result
+
+    def ensure_hand(self, profile, transport, gateway):
+        if profile.get("hand_bundle"):
+            bundle = profile["hand_bundle"]
+            local = (
+                self.live.root
+                / "data/simulation-hands"
+                / profile["robot"]
+                / bundle["digest"]
+            )
+            if not (local / "manifest.json").is_file():
+                raise ValueError(
+                    "The recording's original hand bundle is missing locally; a different model cannot be substituted"
+                )
+            if (
+                upload_hand(local, WORK_ROOT, transport, gateway)
+                != bundle["root"]
+            ):
+                raise ValueError(
+                    "Uploaded hand bundle path differs from the saved request"
+                )
 
     def launch(self, job, transport):
         if not job.get("staged"):
-            paths = []
-            for source in job["sources"]:
-                path = self.local_recording(job, source)
-                if path is None:
-                    self.update(
-                        job["id"],
-                        detail=f"Copying recording {source['index'] + 1} from {job['source_gateway']}…",
-                        connection_error=None,
-                    )
-                    return False
-                paths.append(path)
+            sources = self.archived_sources(job)
+            if sources is None:
+                return False
             profile = job["profile"]
             probe = """import json,sys
 from pathlib import Path
@@ -387,38 +478,19 @@ print(json.dumps({'runtime':(runtime/'bin/python').is_file(), 'revision':(repo/'
                 raise ValueError(
                     "The configured Slurm DexVerse runtime/source is not ready. Use the existing DexVerse setup before retrying."
                 )
-            if profile.get("hand_bundle"):
-                bundle = profile["hand_bundle"]
-                local = (
-                    self.live.root
-                    / "data/simulation-hands"
-                    / profile["robot"]
-                    / bundle["digest"]
-                )
-                if not (local / "manifest.json").is_file():
-                    raise ValueError(
-                        "The recording's original hand bundle is missing locally; a different model cannot be substituted"
-                    )
-                if (
-                    upload_hand(local, WORK_ROOT, transport, job["gateway"])
-                    != bundle["root"]
-                ):
-                    raise ValueError(
-                        "Uploaded hand bundle path differs from the saved request"
-                    )
-            for number, (source, path) in enumerate(zip(job["sources"], paths), 1):
+            self.ensure_hand(profile, transport, job["gateway"])
+            for number, source in enumerate(sources, 1):
                 self.update(
                     job["id"],
-                    detail=f"Uploading recording {number} of {len(paths)} to {job['gateway']}…",
+                    detail=f"Checking recording {number} of {len(sources)} on the cluster…",
                 )
-                upload_capture(
-                    transport,
-                    path,
-                    job["id"],
-                    source["sha256"],
-                    job["gateway"],
-                    relative_path=f"recordings/{source['index']}.pkl",
+                receipt = self.remote_check(
+                    transport, job["gateway"], STAGE_ARCHIVED_RECORDINGS,
+                    {"root": ClusterClient._remote_path(job["root"] + "/recordings"),
+                     "sources": [source]},
                 )
+                if receipt.get("staged") != 1:
+                    raise ValueError("Cluster did not confirm the staged recording")
             directory = self.root / job["id"]
             files = json.loads((directory / "worker-sources.json").read_text())
             if (
@@ -520,7 +592,7 @@ else: print('{}')
                     return
                 self.update(
                     identifier,
-                    state="DOWNLOADING",
+                    state="VERIFYING",
                     detail="Verifying and registering dataset…",
                 )
                 self.finish(job, result, transport)
@@ -576,46 +648,7 @@ else: print('{}')
             with self.lock:
                 self.active.discard(identifier)
 
-    def download(self, job, name, expected, transport):
-        directory = self.root / job["id"]
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / name
-        size = expected.get("size_bytes")
-        digest = expected.get("sha256", "")
-        if (
-            not re.fullmatch("[a-f0-9]{64}", digest)
-            or type(size) is not int
-            or not 0 < size <= 1024**3
-        ):
-            raise ValueError("Invalid converted artifact size/checksum")
-        if path.is_file() and path.stat().st_size == size:
-            with path.open("rb") as stream:
-                if hashlib.file_digest(stream, "sha256").hexdigest() == digest:
-                    return path
-        remote = job.get("dataset_root", job["root"]) + "/" + name
-        _, actual_size = transport.file_size(remote, job["gateway"])
-        if actual_size != size:
-            raise ValueError("Converted artifact size changed")
-        temp = path.with_suffix(".part")
-        try:
-            received, checksum = 0, hashlib.sha256()
-            with temp.open("wb") as f:
-                for chunk in transport.stream_file_range(
-                    remote, job["gateway"], start=0, end=size - 1
-                ):
-                    received += len(chunk)
-                    if received > size:
-                        raise ValueError("Download exceeds the saved artifact size")
-                    f.write(chunk)
-                    checksum.update(chunk)
-            if received != size or checksum.hexdigest() != digest:
-                raise OSError("Incomplete dataset download; refresh to retry")
-            temp.replace(path)
-        finally:
-            temp.unlink(missing_ok=True)
-        return path
-
-    def finish(self, job, result, transport):
+    def verify_result(self, job, result, transport):
         m = result["metadata"]
         if (
             m.get("format"),
@@ -635,19 +668,42 @@ else: print('{}')
             )
         if m.get("episodes", 0) < len(job["sources"]) or m.get("steps", 0) <= 0:
             raise ValueError("Converted dataset is incomplete")
-        manifest = self.download(job, "manifest.json", result["manifest"], transport)
-        if json.loads(manifest.read_text()) != m:
-            raise ValueError("Dataset manifest differs from the conversion result")
-        dataset = self.download(job, "dataset.hdf5", m["artifact"], transport)
-        with dataset.open("rb") as stream:
-            if stream.read(8) != b"\x89HDF\r\n\x1a\n":
-                raise ValueError("Converted dataset is not an HDF5 file")
+        for expected, maximum in ((result["manifest"], 2_000_000), (m["artifact"], 1024**3)):
+            if (
+                not re.fullmatch("[a-f0-9]{64}", str(expected.get("sha256", "")))
+                or type(expected.get("size_bytes")) is not int
+                or not 0 < expected["size_bytes"] <= maximum
+            ):
+                raise ValueError("Invalid converted artifact size/checksum")
+        sources = canonical_json(job["sources"]).encode()
+        receipt = self.remote_check(
+            transport, job["gateway"], VERIFY_CONVERTED_DATASET,
+            dict(
+                root=ClusterClient._remote_path(job.get("dataset_root", job["root"])),
+                metadata=m, manifest=result["manifest"],
+                source_manifest=dict(
+                    size_bytes=len(sources), sha256=hashlib.sha256(sources).hexdigest(),
+                ),
+            ),
+        )
+        if (
+            receipt.get("verified") is not True
+            or receipt.get("manifest") != result["manifest"]
+            or receipt.get("artifact") != m["artifact"]
+        ):
+            raise ValueError("Cluster did not confirm the exact converted dataset")
+        return m
+
+    def finish(self, job, result, transport):
+        m = self.verify_result(job, result, transport)
         version, bundle = self.register(job, m, result["manifest"]["sha256"])
         self.update(
             job["id"],
             state="READY",
             detail=f"{m['episodes']} episodes converted",
             metadata=m,
+            manifest=result["manifest"],
+            storage_location="cluster",
             version_id=version["id"],
             resource_id=version["resource_id"],
             bundle_id=bundle["id"],
@@ -692,6 +748,10 @@ else: print('{}')
                     "training_compatibility": "DexVerse state HDF5 trainer required. GR00T/OpenPI formats are unsupported.",
                 },
             )
+        location = db.record_data_location(
+            version["id"], kind="cluster", host="skynet",
+            path=version["path"], manifest_sha256=manifest_sha,
+        )
         if not db.get_data_resource_version(version["id"]).get("derivation_id"):
             originals = db.list_data_resources(
                 provider="collection",
@@ -762,7 +822,10 @@ else: print('{}')
             bundle = db.create_data_bundle(
                 name=job["name"],
                 version=job["id"][:8],
-                assignments=[dict(version_id=version["id"], role="training_data")],
+                assignments=[dict(
+                    version_id=version["id"], role="training_data",
+                    config={"location_id": location["id"]},
+                )],
                 description="Converted DexVerse demonstrations",
                 metadata={"conversion_id": job["id"], "gateway": job["gateway"]},
             )
@@ -774,14 +837,51 @@ else: print('{}')
             raise KeyError("Dataset artifact not found")
         if job["state"] != "READY":
             raise ValueError("Dataset conversion is not complete")
-        path = self.root / identifier / name
-        if not path.is_file():
-            self.update(
-                identifier, state="DOWNLOADING", detail="Restoring dataset download…"
+        return RemoteArtifact(
+            self.cluster, job["gateway"],
+            ClusterClient._remote_path(job.get("dataset_root", job["root"]) + "/" + name),
+            max_bytes=2_000_000 if name == "manifest.json" else None,
+        )
+
+    def remove_local_copies(self, identifier):
+        """Remove legacy payload copies only after verifying the registered cluster result."""
+        with self.lock:
+            job = self.get(identifier)
+            if job["state"] != "READY" or identifier in self.active:
+                raise ValueError("Wait for conversion to finish before removing its local copy")
+        version = self.database.get_data_resource_version(job["version_id"])
+        if not version:
+            raise ValueError("Converted dataset is not registered")
+        manifest = job.get("manifest")
+        if not manifest:
+            _, size = self.cluster.file_size(
+                job.get("dataset_root", job["root"]) + "/manifest.json", job["gateway"],
             )
-            self.dispatch(identifier)
-            raise ValueError("Dataset cache is being restored. Retry shortly.")
-        return path
+            manifest = {"sha256": version["manifest_sha256"], "size_bytes": size}
+        if manifest["sha256"] != version["manifest_sha256"]:
+            raise ValueError("Cluster manifest differs from the registered dataset")
+        self.verify_result(job, {"metadata": job["metadata"], "manifest": manifest}, self.cluster)
+        directory = self.root / identifier
+        if directory.is_symlink() or directory.resolve().parent != self.root.resolve():
+            raise ValueError("Invalid local conversion directory")
+        with self.lock:
+            if identifier in self.active or self.get(identifier)["state"] != "READY":
+                raise ValueError("Conversion changed while checking its cluster copy")
+            paths = []
+            for name, expected in (("manifest.json", manifest), ("dataset.hdf5", job["metadata"]["artifact"])):
+                path = directory / name
+                if not path.exists() and not path.is_symlink():
+                    continue
+                if path.is_symlink() or not path.is_file():
+                    raise ValueError("Invalid local converted artifact")
+                with path.open("rb") as stream:
+                    digest = hashlib.file_digest(stream, "sha256").hexdigest()
+                if path.stat().st_size != expected["size_bytes"] or digest != expected["sha256"]:
+                    raise ValueError("Local artifact differs from the verified cluster copy; preserved it")
+                paths.append(path)
+            for path in paths:
+                path.unlink()
+        return self.update(identifier, storage_location="cluster", local_copy_removed_at=utc_now())
 
     def logs(self, identifier):
         job = self.get(identifier)

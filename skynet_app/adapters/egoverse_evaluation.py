@@ -9,6 +9,21 @@ import subprocess
 import sys
 
 
+def policy_camera_views(model, sample):
+    """Read the model's camera selection, including per-embodiment policies."""
+    keys = model.camera_keys
+    if isinstance(keys, dict):
+        embodiment = sample["embodiment"]
+        if hasattr(embodiment, "reshape"):
+            embodiment = embodiment.reshape(-1)[0].item()
+        keys = keys[int(embodiment)]
+    # HPT's dataset may contain cameras which are not wired to a policy stem.
+    encoders = getattr(model, "encoders", None)
+    if encoders is not None:
+        keys = [key for key in keys if key.rsplit(".", 1)[-1] in encoders]
+    return {key: sample[key] for key in keys}
+
+
 def write_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -23,7 +38,10 @@ def evaluate(context, repository):
     import numpy as np
     from omegaconf import OmegaConf
     from artifacts import digest, verify
-    from egoverse_runtime import register_joint_domain, JOINT_CONTRACT
+    from egoverse_runtime import (
+        register_joint_domain, JOINT_CONTRACT, model_algorithm, validate_hpt_joint_inputs,
+    )
+    from evaluation_video import compose_camera_views, rgb_frame
 
     checkpoint = context["checkpoint"]
     if digest(checkpoint["path"]) != checkpoint["sha256"]:
@@ -41,6 +59,9 @@ def evaluate(context, repository):
         raise ValueError(
             "Checkpoint has no dataset/configuration receipt; use an EgoVerse model adapter checkpoint"
         )
+    model_algorithm(receipt.get("model"))
+    if receipt.get("model") == "hpt_joints":
+        validate_hpt_joint_inputs(receipt.get("config", {}).get("model", {}), checkpoint=True)
     actual_revision = subprocess.check_output(
         ["git", "-C", repository, "rev-parse", "HEAD"], text=True
     ).strip()
@@ -89,7 +110,6 @@ def evaluate(context, repository):
         torch.manual_seed(seed)
         np.random.seed(seed)
         for index, episode in enumerate(episodes[:requested]):
-            import cv2
             import imageio.v2 as imageio
 
             video = output / "videos" / f"held-out-{seed}-{index}.mp4"
@@ -112,19 +132,21 @@ def evaluate(context, repository):
                         k: v.to(device) if isinstance(v, torch.Tensor) else v
                         for k, v in sample.items()
                     }
+                    # Capture raw observations before policy preprocessing can
+                    # normalize or mutate them; use the checkpoint's camera list.
+                    video_views = {
+                        key: rgb_frame(value, channel_first=True)
+                        for key, value in policy_camera_views(model.model, sample).items()
+                    }
                     with torch.no_grad():
                         batch = model.model.process_batch_for_training({domain: sample})
                         if not recorded:
-                            metrics, images = evaluator.compute_metrics_and_viz(batch)
+                            metrics, _ = evaluator.compute_metrics_and_viz(batch)
                             for key, value in metrics.items():
                                 observed_metrics.setdefault(key, []).append(
                                     float(value)
                                 )
-                            writer.append_data(
-                                np.asarray(
-                                    next(iter(images.values()))[0], dtype=np.uint8
-                                )
-                            )
+                            writer.append_data(compose_camera_views(video_views))
                             continue
                         preds = model.model.forward_eval(batch)
                     if hasattr(model.model, "data_schematic"):
@@ -138,29 +160,11 @@ def evaluate(context, repository):
                     error = (actual[:, :length] - expected[:, :length]).float()
                     squared += float(error.square().sum())
                     elements += error.numel()
-                    rgb = sample["scene_front"][0].detach().cpu().numpy()
-                    rgb = np.ascontiguousarray(
-                        np.moveaxis(rgb, 0, -1) * 255, dtype=np.uint8
-                    )
-                    cv2.putText(
-                        rgb,
-                        f"Held-out prediction: {frame + 1}/{episode['steps']}",
-                        (5, 18),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.4,
-                        (255, 255, 255),
-                        1,
-                    )
-                    cv2.putText(
-                        rgb,
-                        f"Joint MSE: {squared / elements:.5f}",
-                        (5, 38),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.4,
-                        (255, 255, 255),
-                        1,
-                    )
-                    writer.append_data(rgb)
+                    writer.append_data(compose_camera_views(
+                        video_views,
+                        captions=(f"Held-out prediction: {frame + 1}/{episode['steps']}",
+                                  f"Joint MSE: {squared / elements:.5f}"),
+                    ))
             row = dict(
                 task="held_out",
                 seed=seed,

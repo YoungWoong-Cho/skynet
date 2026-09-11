@@ -6,7 +6,7 @@ from skynet_app.experiments import evaluation_task_catalog_sha256
 
 
 def bound_metadata(spec, binding):
-    assignments = (spec.get("data") or {}).get("bundle", {}).get("assignments", [])
+    assignments = ((spec.get("data") or {}).get("bundle") or {}).get("assignments", [])
     candidates = [a for a in assignments if a.get("role") == binding["role"]]
     if len(candidates) != 1:
         raise ValueError("Evaluation requires one registered training dataset")

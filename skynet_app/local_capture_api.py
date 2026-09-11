@@ -1,24 +1,25 @@
 from __future__ import annotations
 
-import errno
 import platform
 import subprocess
-import tempfile
+import threading
 import time
 import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
 
 from .collection_api import service as collection_service
 from .local_capture import LocalCaptureService, MAX_CAPTURE_BYTES
+from .cluster_runtime import ClusterError
 
 router = APIRouter(prefix="/api/collection/local", tags=["collection"])
 service = LocalCaptureService(collection_service.database)
 APP_ROOT = Path(__file__).resolve().parent.parent
 _setup_cache: tuple[float, dict] | None = None
+_import_slot = threading.BoundedSemaphore(1)
 
 
 @router.get("/setup")
@@ -42,7 +43,7 @@ def setup(force: bool = False) -> dict:
     ])
     result = {"checks": checks, "checked_at": time.time(), "cache_seconds": 60,
               "native_minimum_visionos": "2.0", "source_project": str(APP_ROOT / "visionpro/SkynetCapture.xcodeproj"),
-              "storage_path": str(service.root), "headset_verified": False}
+              "storage_path": "sky2 · " + service.storage.root, "headset_verified": False}
     _setup_cache = (time.monotonic(), result)
     return result
 
@@ -69,32 +70,31 @@ def captures() -> dict:
 
 @router.post("/captures/{provider}", status_code=201)
 async def import_capture(provider: str, request: Request) -> dict:
-    path = None
+    # One bounded memory upload per server, never a temporary collection file.
+    if not _import_slot.acquire(blocking=False):
+        raise HTTPException(429, "Another recording is being imported. Wait for it to finish and retry.")
     try:
-        with tempfile.NamedTemporaryFile(dir=service.root, suffix=".upload", delete=False) as target:
-            path = Path(target.name)
-            size = 0
-            async for chunk in request.stream():
-                size += len(chunk)
-                if size > MAX_CAPTURE_BYTES:
-                    raise HTTPException(413, "Recording exceeds the 512 MB import limit. Record shorter sessions.")
-                target.write(chunk)
-        return await run_in_threadpool(service.import_file, provider, path)
+        data = bytearray()
+        async for chunk in request.stream():
+            if len(data) + len(chunk) > MAX_CAPTURE_BYTES:
+                raise HTTPException(413, "Recording exceeds the 512 MB import limit. Record shorter sessions.")
+            data.extend(chunk)
+        return await run_in_threadpool(service.import_bytes, provider, bytes(data))
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
-    except OSError as error:
-        raise HTTPException(507 if error.errno == errno.ENOSPC else 503,
-            "Cannot save the recording on this computer. Check free disk space and the collection folder's permissions, then retry.") from error
+    except (ClusterError, OSError) as error:
+        raise HTTPException(503, "Cannot store the recording on sky2. Check the cluster connection and retry. No local copy was saved.") from error
     finally:
-        if path is not None:
-            path.unlink(missing_ok=True)
+        _import_slot.release()
 
 
 @router.get("/captures/{digest}/download")
-def download_capture(digest: str) -> FileResponse:
+def download_capture(digest: str, request: Request):
     try:
-        return FileResponse(service.file(digest), media_type="application/x-ndjson", filename=f"capture-{digest[:12]}.jsonl")
+        return service.file(digest).response(request, media_type="application/x-ndjson", filename=f"capture-{digest[:12]}.jsonl")
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
     except ValueError as error:
         raise HTTPException(409, str(error)) from error
+    except ClusterError as error:
+        raise HTTPException(503, "The recording on sky2 is temporarily unavailable. Retry when the cluster connection is restored.") from error

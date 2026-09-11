@@ -20,6 +20,7 @@ from skynet_app.cluster_runtime import (
     WORK_ROOT,
 )
 from skynet_app.database import canonical_json, utc_now
+from skynet_app.cluster_config import CLUSTER
 from .visionpro import convert
 from .dexverse_runner import TASK, ROBOT, REVISION
 from .slurm import compile_isaac_job
@@ -101,6 +102,25 @@ class ProcessingService:
                 state TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
 
     def transport(self, job):
+        if job.get("archive"):
+            # Public jobs omit large manifests. Validate the persisted descriptor,
+            # never reinterpret the frozen execution profile as its storage host.
+            saved = self.get(job["id"], private=True)
+            archive = saved.get("archive") or {}
+            manifest, checksum = archive.get("manifest"), archive.get("manifest_sha256", "")
+            if (saved["state"] not in TERMINAL or archive.get("state") not in {"VERIFIED", "READY"}
+                    or not isinstance(manifest, dict) or manifest.get("schema") != "skynet.live-archive/v1"
+                    or manifest.get("session_id") != saved["id"]
+                    or not re.fullmatch(r"[a-f0-9]{64}", checksum)
+                    or hashlib.sha256(canonical_json(manifest).encode()).hexdigest() != checksum):
+                raise ValueError("The saved processing archive has not been verified")
+            expected = f"{CLUSTER.paths.datasets}/raw/dexverse-live/{saved['id']}/{checksum}/output"
+            root = str(Path(expected).parent)
+            if (archive.get("gateway") != "sky2" or archive.get("root") != expected
+                    or saved.get("root") != root or saved.get("gateway") != "sky2"
+                    or job.get("root") != root or job.get("gateway") != "sky2"):
+                raise ValueError("The saved processing archive location does not match its verified manifest")
+            return self.cluster
         if job["config"]["pipeline"].get("execution") == "workstation":
             from skynet_app.live_xr_workstation import WorkstationClient
 
@@ -123,6 +143,8 @@ class ProcessingService:
         item.update(json.loads(item.pop("payload_json")))
         item.pop("script", None)
         item.pop("runner_source", None)
+        if isinstance(item.get("archive"), dict):
+            item["archive"] = {key: value for key, value in item["archive"].items() if key != "manifest"}
         return item
 
     def get(self, identifier, private=False):
@@ -254,7 +276,7 @@ class ProcessingService:
             cfg = job["config"]
             profile = cfg["pipeline"]
             gateway = job["gateway"]
-            path = self.captures.file(job["capture_sha256"])
+            path = self.captures.read(job["capture_sha256"])
             converted = convert(path, hand=profile["hand"], fps=60)
             if converted["source_sha256"] != job["capture_sha256"]:
                 raise ValueError("Original recording checksum changed")
@@ -279,11 +301,9 @@ class ProcessingService:
                     + str(error)
                 ) from error
             self.update(
-                identifier, preparation="Uploading and verifying the original recording"
+                identifier, preparation="Staging and verifying the original recording on sky2"
             )
-            upload_capture(
-                self.cluster, path, identifier, job["capture_sha256"], gateway
-            )
+            self.captures.stage(job["capture_sha256"], identifier, gateway)
             self.cluster.write_capsule_file(
                 identifier, "tracking.json", canonical_json(converted), gateway
             )
@@ -582,6 +602,8 @@ print('verified')
 
     def retry(self, identifier):
         job = self.get(identifier, private=True)
+        if job.get("archive"):
+            raise ValueError("This completed cycle has been archived. Create a new cycle to run it again; archived files are read-only.")
         if job["state"] not in ("FAILED", "SUBMISSION_UNKNOWN"):
             raise ValueError(
                 "Only a failed preparation or uncertain submission can be recovered"

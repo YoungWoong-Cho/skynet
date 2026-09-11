@@ -84,11 +84,14 @@ class LiveXRService:
 
     @staticmethod
     def public(job):
-        return {
+        result = {
             k: v
             for k, v in job.items()
             if k not in {"worker", "script", "hand_bundle_path"}
         }
+        if result.get("archive"):
+            result["archive"] = {k: v for k, v in result["archive"].items() if k != "manifest"}
+        return result
 
     def get(self, identifier):
         with self.database.connection() as c:
@@ -612,6 +615,11 @@ print(json.dumps(value))
 
     def logs(self, identifier):
         job = self.get(identifier)
+        transport, gateway, root = self.transport(job), job["gateway"], job["root"]
+        archive = getattr(self, "archive", None)
+        if archive is not None and archive.is_archived(job):
+            transport, gateway = archive.cluster, job["archive"]["gateway"]
+            root = archive.session_root(job)
         parts = []
         for name in (
             "stderr.log",
@@ -620,10 +628,10 @@ print(json.dumps(value))
             "output/simulation.log",
             "output/images.log",
         ):
-            path = shlex.quote(job["root"] + "/" + name)
+            path = shlex.quote(root + "/" + name)
             parts.append(f"if test -f {path}; then tail -c 16000 {path}; fi")
         return (
-            self.transport(job).ssh(job["gateway"], "\n".join(parts), timeout=20)
+            transport.ssh(gateway, "\n".join(parts), timeout=20)
             or job.get("error")
             or "No logs yet."
         )

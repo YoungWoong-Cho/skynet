@@ -45,7 +45,7 @@ RECIPES = {
         id="egoverse", name="EgoVerse · RGB and joints", observations=["state", "rgb"],
         format="egoverse-episodes-zarr/v1", container="Zarr", contract="skynet.egoverse-rgb-joints/v1",
         adapter="egoverse-act", trainable=True,
-        description="Native episodes for EgoVerse ACT, HPT flow and diffusion policy.",
+        description="Native episodes for EgoVerse ACT and the HPT recorded-joints configuration.",
         training_setup=dict(adapter="egoverse-act", repository="https://github.com/GaTech-RL2/EgoVerse",
             revision="e17cf98fe4bc234c564b37abc9e155f25e76d566", runtime="existing", runtime_profile="egoverse-native"),
         conversion_dependencies=["numpy==2.2.6", "zarr==3.1.5", "simplejpeg==1.8.2", "h5py==3.13.0", "opencv-python-headless==4.11.0.86"],

@@ -1384,6 +1384,7 @@ details.evaluation-task-select.is-disabled > summary::after { content: ""; }
 .log-view, .result-view { min-height: 150px; max-height: 430px; padding: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .progress-cell { min-width: 110px; display: grid; grid-template-columns: 75px auto; align-items: center; gap: 6px; font: 8px var(--mono); }
+.progress-eta { margin-bottom: 6px; color: var(--muted); font: 9px var(--mono); }
 .progress-track { height: 5px; }
 .workspace-card {
   display: flex;
@@ -1762,3 +1763,58 @@ footer {
 .app-dialog .dialog-notice { margin-bottom: 14px; }
 
 .app-dialog .dialog-body > .form-actions { margin-top: 14px; }
+
+/* Shared readable table/detail geometry. Overflow belongs to the data table;
+   its expanded content remains in the containing panel's normal layout. */
+:root {
+  --table-action-height: 32px;
+}
+.row-disclosure-detached { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.row-disclosure-detached :is(.panel-heading, .panel-heading-actions, .form-actions, .log-heading) { flex-wrap: wrap; gap: 8px; }
+.row-disclosure-detached :is(.panel-heading > div, .row-disclosure-body, .table-scroll) { min-width: 0; max-width: 100%; }
+.row-disclosure-detached .run-live-status { text-align: left; }
+.row-actions :is(button, .row-action-link), .disclosure-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--table-action-height);
+  padding: 6px 9px;
+  font-size: 11px;
+  line-height: 1.25;
+}
+.cluster-table { min-width: 640px; }
+.cluster-table.usage-table th:first-child,
+.cluster-table.usage-table td:first-child { width: 22%; white-space: normal; overflow-wrap: anywhere; }
+.cluster-table.job-table { min-width: 820px; }
+table:has(> tbody#settings-body) { table-layout: fixed; min-width: 560px; }
+table:has(> tbody#settings-body) :is(th, td) { white-space: normal; overflow-wrap: anywhere; }
+table:has(> tbody#settings-body) :is(th, td):first-child { width: 40%; }
+table:has(> tbody#settings-body) :is(th, td):last-child { width: 60%; }
+.registry-section > .table-scroll > table { min-width: 840px; }
+table:has(> tbody#data-bundles-body) { table-layout: fixed; min-width: 1020px; }
+table:has(> tbody#data-bundles-body) :is(th, td):nth-child(1) { width: 25%; white-space: normal; overflow-wrap: anywhere; }
+table:has(> tbody#data-bundles-body) :is(th, td):nth-child(2) { width: 32%; white-space: normal; overflow-wrap: anywhere; }
+table:has(> tbody#data-bundles-body) :is(th, td):nth-child(3) { width: 16%; }
+table:has(> tbody#data-bundles-body) :is(th, td):nth-child(4) { width: 17%; }
+table:has(> tbody#data-bundles-body) :is(th, td):nth-child(5) { width: 10%; }
+.dataset-preview-section .table-scroll > table { min-width: 680px; }
+.prepared-dataset-table { table-layout: fixed; min-width: 1000px; }
+.prepared-dataset-table :is(th, td):nth-child(1) { width: 17%; }
+.prepared-dataset-table :is(th, td):nth-child(2) { width: 13%; }
+.prepared-dataset-table :is(th, td):nth-child(3) { width: 28%; }
+.prepared-dataset-table :is(th, td):nth-child(4) { width: 8%; }
+.prepared-dataset-table :is(th, td):nth-child(5) { width: 14%; }
+.prepared-dataset-table :is(th, td):nth-child(6) { width: 20%; }
+.hand-pose-details .inline-alert { margin-top: 10px; }
+@media (max-width: 820px), (pointer: coarse) {
+  :root { --table-action-height: 44px; }
+  .row-actions :is(button, .row-action-link), .disclosure-close, .row-disclosure :is(button, .row-action-link) {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 10px;
+    font-size: 12px;
+    line-height: 1.25;
+  }
+  .row-disclosure .text-button { display: inline-flex; align-items: center; justify-content: center; }
+  .row-disclosure-detached .row-disclosure-heading { flex-direction: column; align-items: stretch; }
+}

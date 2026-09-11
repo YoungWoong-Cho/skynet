@@ -9,13 +9,24 @@
     viewer = null,
     request = 0,
     polling = null,
-    poses = [];
+    poses = [],
+    refreshing = false;
   const error = (message) => {
     el("hands-error").textContent = message || "";
     el("hands-error").hidden = !message;
   };
   const status = (message) => {
     el("hand-status").textContent = message;
+  };
+  const poseError = (message, { nameInvalid = false } = {}) => {
+    el("hand-pose-error").textContent = message || "";
+    el("hand-pose-error").hidden = !message;
+    el("hand-pose-name").setAttribute("aria-invalid", String(Boolean(message) && nameInvalid));
+  };
+  const clearPoseFeedback = () => {
+    error(null);
+    poseError(null);
+    el("hand-pose-message").textContent = "";
   };
   const endpoint = () => `/api/hands/${selected.key}/${side}`;
   async function api(url, options = {}) {
@@ -66,7 +77,8 @@
       button.className = "button button-outline";
       button.type = "button";
       button.textContent = hand.key === selected?.key ? "Selected" : "View";
-      button.setAttribute("aria-label", `View ${hand.name}`);
+      button.disabled = hand.key === selected?.key;
+      button.setAttribute("aria-label", `${button.disabled ? "Selected" : "View"} ${hand.name}`);
       button.addEventListener("click", () => choose(hand.key));
       action.append(button);
       row.append(info, action);
@@ -74,8 +86,24 @@
     }
   }
   async function load(force = false) {
+    if (refreshing) return;
+    refreshing = true;
+    el("hands-refresh").disabled = true;
+    const selectionToken = request;
+    const preserved = metadata && {
+      revision: metadata.revision,
+      joints: { ...values },
+      joint: el("hand-joint").value,
+      poseName: el("hand-pose-name").value,
+      poseId: el("hand-pose-list").value,
+    };
     try {
-      if (!catalog.length || force) catalog = (await api("/api/hands")).hands;
+      if (!catalog.length || force) {
+        const nextCatalog = (await api("/api/hands")).hands;
+        if (selectionToken !== request) return;
+        catalog = nextCatalog;
+      }
+      if (selectionToken !== request) return;
       renderCatalog();
       if (!selected) {
         const params = new URLSearchParams(location.search);
@@ -83,17 +111,32 @@
           ? params.get("hand")
           : "shadow";
         await choose(key, params.get("side") || undefined);
-      } else if (force) await choose(selected.key, side);
-      else viewer?.render();
+      } else if (force) {
+        const refreshed = catalog.find((hand) => hand.key === selected.key);
+        if (metadata && refreshed?.revision === metadata.revision && refreshed.variants[side]?.state === "READY") {
+          // Refresh catalog/poses without replacing an already loaded, pinned model.
+          // This also preserves edits if refreshing the pose list fails.
+          selected = refreshed;
+          error(null);
+          await loadPoses(selectionToken, preserved?.poseId);
+          viewer?.render();
+        } else await choose(selected.key, side, preserved);
+      } else viewer?.render();
     } catch (e) {
-      error(e.message);
+      if (selectionToken === request) error(e.message);
+    } finally {
+      refreshing = false;
+      el("hands-refresh").disabled = false;
     }
   }
-  async function choose(key, chosenSide) {
+  async function choose(key, chosenSide, preserved = null) {
     const token = ++request;
     clearTimeout(polling);
-    error(null);
+    clearPoseFeedback();
     metadata = null;
+    poses = [];
+    el("hand-pose-list").replaceChildren(new Option("Loading saved poses…", ""));
+    updatePoseActions();
     el("hand-use-simulation").hidden = true;
     values = {};
     viewer?.clear();
@@ -187,8 +230,18 @@
       status(
         `${model.mesh_count} mesh assets · ${model.joints.length - linked} adjustable joints${linked ? ` · ${linked} linked joints` : ""}`,
       );
+      if (preserved?.revision === model.revision) {
+        for (const joint of model.joints) {
+          if (!joint.mimic && Number.isFinite(preserved.joints[joint.name]))
+            values[joint.name] = Math.max(joint.lower, Math.min(joint.upper, preserved.joints[joint.name]));
+        }
+        if (Object.hasOwn(values, preserved.joint)) el("hand-joint").value = preserved.joint;
+        el("hand-pose-name").value = preserved.poseName;
+        viewer.setJoints(values);
+      } else if (preserved) {
+        error("The model revision changed. The refreshed model starts with its neutral pose; saved poses are still available.");
+      }
       updateJoint();
-      await loadPoses(token);
     } catch (e) {
       if (token === request) {
         viewer?.clear();
@@ -197,18 +250,35 @@
         status("Unable to display this model");
         error(e.message);
       }
+      return;
+    }
+    // Saved-pose availability does not determine whether the loaded model works.
+    // Keep the canvas and joint controls usable when only this secondary read fails.
+    try {
+      await loadPoses(token, preserved?.poseId);
+    } catch (e) {
+      if (token === request) {
+        el("hand-pose-list").replaceChildren(new Option("Saved poses unavailable — use Refresh", ""));
+        updatePoseActions();
+        error(`Saved poses could not be loaded: ${e.message}`);
+      }
     }
   }
   async function refreshDownload() {
     if (el("hands").hidden) return;
+    const token = request;
     try {
-      catalog = (await api("/api/hands")).hands;
+      const nextCatalog = (await api("/api/hands")).hands;
+      if (token !== request) return;
+      catalog = nextCatalog;
       await choose(selected.key, side);
     } catch (e) {
+      if (token !== request) return;
       error(e.message);
       status("Could not check download. Use Refresh to retry.");
     }
   }
+  const displayJointValue = (value) => Number(value.toFixed(6));
   function updateJoint() {
     const joint = metadata?.joints.find(
       (j) => j.name === el("hand-joint").value,
@@ -218,12 +288,13 @@
     el("hand-value-label").textContent =
       joint.type === "prismatic" ? "Position (mm)" : "Angle (degrees)";
     for (const input of [el("hand-value"), el("hand-angle")]) {
-      input.min = joint.lower * factor;
-      input.max = joint.upper * factor;
-      input.value = (values[joint.name] * factor).toFixed(2);
+      input.min = displayJointValue(joint.lower * factor);
+      input.max = displayJointValue(joint.upper * factor);
+      input.step = "any";
+      input.value = String(displayJointValue(values[joint.name] * factor));
     }
     el("hand-joint-note").textContent =
-      `Limits: ${(joint.lower * factor).toFixed(1)} to ${(joint.upper * factor).toFixed(1)} ${joint.type === "prismatic" ? "mm" : "degrees"}.${metadata.joints.some((j) => j.mimic) ? " Linked joints move automatically." : ""}`;
+      `Limits: ${displayJointValue(joint.lower * factor)} to ${displayJointValue(joint.upper * factor)} ${joint.type === "prismatic" ? "mm" : "degrees"}.${metadata.joints.some((j) => j.mimic) ? " Linked joints move automatically." : ""}`;
   }
   function adjust(event) {
     const joint = metadata?.joints.find(
@@ -231,20 +302,22 @@
     );
     if (!joint) return;
     const input = event.target;
-    if (input.value === "") return;
+    if (input.value === "" || !Number.isFinite(Number(input.value))) {
+      if (event.type !== "input") updateJoint();
+      return;
+    }
     const number = Number(input.value);
     if (!Number.isFinite(number)) return;
     const factor = joint.type === "prismatic" ? 1000 : 180 / Math.PI;
-    values[joint.name] = Math.max(
-      joint.lower,
-      Math.min(joint.upper, number / factor),
-    );
+    values[joint.name] = number === Number(input.max) ? joint.upper
+      : number === Number(input.min) ? joint.lower
+        : Math.max(joint.lower, Math.min(joint.upper, number / factor));
     viewer.setJoints(values);
     if (input === el("hand-value") && event.type === "input")
-      el("hand-angle").value = values[joint.name] * factor;
+      el("hand-angle").value = displayJointValue(values[joint.name] * factor);
     else updateJoint();
   }
-  async function loadPoses(token = request) {
+  async function loadPoses(token = request, selectedId = "") {
     const result = await api(endpoint() + "/poses");
     if (token !== request) return;
     poses = result.poses;
@@ -252,9 +325,18 @@
     select.replaceChildren(
       new Option(poses.length ? "Choose a saved pose…" : "No saved poses", ""),
     );
-    for (const pose of poses) select.add(new Option(pose.name, pose.id));
-    el("hand-pose-load").disabled = true;
+    for (const pose of poses) {
+      const date = new Date(pose.created_at * 1000).toLocaleString();
+      select.add(new Option(`${pose.name} · ${date} · ${pose.id.slice(0, 8)}`, pose.id));
+    }
+    if (poses.some((pose) => pose.id === selectedId)) select.value = selectedId;
+    updatePoseActions();
   }
+  function updatePoseActions() {
+    for (const id of ["hand-pose-load", "hand-pose-rename", "hand-pose-delete"])
+      el(id).disabled = !el("hand-pose-list").value;
+  }
+  el("hand-pose-name").addEventListener("input", () => poseError(null));
   el("hands-refresh").addEventListener("click", () => load(true));
   el("hand-side").addEventListener("change", (e) =>
     choose(selected.key, e.target.value),
@@ -276,6 +358,9 @@
   el("hand-angle").addEventListener("input", adjust);
   el("hand-value").addEventListener("change", adjust);
   el("hand-value").addEventListener("input", adjust);
+  el("hand-value").addEventListener("blur", () => {
+    if (el("hand-value").value === "" || !Number.isFinite(Number(el("hand-value").value))) updateJoint();
+  });
   el("hand-reset").addEventListener("click", () => {
     if (!metadata) return;
     values = Object.fromEntries(
@@ -287,13 +372,14 @@
     updateJoint();
   });
   el("hand-pose-list").addEventListener("change", () => {
-    el("hand-pose-load").disabled = !el("hand-pose-list").value;
+    updatePoseActions();
   });
   el("hand-pose-load").addEventListener("click", () => {
     const pose = poses.find((p) => p.id === el("hand-pose-list").value);
     if (!pose) return;
+    clearPoseFeedback();
     if (pose.revision !== metadata.revision) {
-      error("This pose belongs to another model version.");
+      poseError("This pose belongs to another model version.");
       return;
     }
     values = { ...pose.joints };
@@ -304,30 +390,72 @@
   el("hand-pose-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!metadata) return;
+    clearPoseFeedback();
+    updateJoint();
+    const name = el("hand-pose-name").value.trim();
+    if (!name || name.length > 80) {
+      poseError("Give the pose a name of 1–80 characters.", { nameInvalid: true });
+      el("hand-pose-name").focus();
+      return;
+    }
     const token = request,
-      button = event.submitter;
+      button = event.submitter || el("hand-pose-form").querySelector('[type="submit"]');
+    if (button.disabled) return;
     button.disabled = true;
     try {
       const pose = await api(endpoint() + "/poses", {
         method: "POST",
         body: JSON.stringify({
-          name: el("hand-pose-name").value,
+          name,
           revision: metadata.revision,
           joints: values,
         }),
       });
       if (token !== request) return;
-      await loadPoses(token);
+      await loadPoses(token, pose.id);
+      if (token !== request) return;
       el("hand-pose-message").textContent = `Saved “${pose.name}” locally.`;
       el("hand-pose-name").value = "";
     } catch (e) {
-      if (token === request) error(e.message);
+      if (token === request) {
+        poseError(e.message);
+        el("hand-pose-name").focus();
+      }
     } finally {
       button.disabled = false;
     }
   });
+  async function maintainPose(action) {
+    const pose = poses.find((p) => p.id === el("hand-pose-list").value);
+    if (!pose) return;
+    const token = request;
+    const url = `${endpoint()}/poses/${encodeURIComponent(pose.id)}`;
+    clearPoseFeedback();
+    const answer = await askUserDialog(
+      action === "rename" ? "New pose name" : `Delete “${pose.name}”? This removes the saved local pose permanently.`,
+      action === "rename" ? pose.name : null,
+    );
+    if (token !== request || answer === null || answer === false) return;
+    const button = el(`hand-pose-${action}`);
+    button.disabled = true;
+    try {
+      await api(url, action === "rename"
+        ? { method: "PATCH", body: JSON.stringify({ name: answer.trim() }) }
+        : { method: "DELETE" });
+      if (token !== request) return;
+      await loadPoses(token, action === "rename" ? pose.id : "");
+      if (token === request) el("hand-pose-message").textContent = action === "rename" ? "Pose renamed." : "Pose deleted.";
+    } catch (e) {
+      if (token === request) poseError(e.message);
+    } finally {
+      if (token === request) updatePoseActions();
+    }
+  }
+  el("hand-pose-rename").addEventListener("click", () => maintainPose("rename"));
+  el("hand-pose-delete").addEventListener("click", () => maintainPose("delete"));
   el("hand-pose-export").addEventListener("click", () => {
     if (!metadata) return;
+    updateJoint();
     const url = new URL(endpoint() + "/export", location.origin);
     url.searchParams.set("revision", metadata.revision);
     url.searchParams.set("joints", JSON.stringify(values));

@@ -104,7 +104,7 @@
                   <summary><span id="jobs-account-filter-label">All accounts</span></summary>
                   <div id="jobs-account-filter-options" class="filter-options"></div>
                 </details>
-                <span class="quiet-label">Pending jobs only; running allocations appear in node usage.</span>
+                <span class="quiet-label">Pending jobs only. Running jobs are included in account usage above.</span>
               </div>
             </div>
             <div class="table-scroll">
@@ -148,11 +148,11 @@
               <div id="hand-canvas" class="hand-canvas" hidden></div>
               <div id="hand-view-help" class="hand-view-help" hidden>Drag to rotate · scroll or pinch to zoom · right-drag to pan</div>
               <div id="hand-controls" class="hand-controls" hidden>
-                <div class="form-grid"><div class="field span-2"><label for="hand-joint">Joint</label><select id="hand-joint"></select></div><div class="field"><label id="hand-value-label" for="hand-value">Angle (degrees)</label><input id="hand-value" type="number" step="0.1"></div><div class="field"><label for="hand-angle">Adjust joint</label><input id="hand-angle" type="range" step="0.1"></div></div>
+                <div class="form-grid"><div class="field span-2"><label for="hand-joint">Joint</label><select id="hand-joint"></select></div><div class="field"><label id="hand-value-label" for="hand-value">Angle (degrees)</label><input id="hand-value" type="number" step="any"></div><div class="field"><label for="hand-angle">Adjust joint</label><input id="hand-angle" type="range" step="any"></div></div>
                 <div class="hand-control-footer"><span id="hand-joint-note" class="secondary"></span><button id="hand-reset" type="button" class="button button-outline">Reset pose</button></div>
-                <details class="hand-pose-details"><summary>Saved poses</summary><form id="hand-pose-form" class="form-grid"><div class="field span-2"><label for="hand-pose-name">Pose name</label><input id="hand-pose-name" maxlength="80" required placeholder="e.g. Relaxed grip"></div><div class="field"><label>&nbsp;</label><button class="button" type="submit">Save pose</button></div></form><div class="form-grid"><div class="field span-2"><label for="hand-pose-list">Saved for this model and side</label><select id="hand-pose-list"><option value="">No saved poses</option></select></div><div class="field"><label>&nbsp;</label><button id="hand-pose-load" class="button button-outline" type="button" disabled>Load pose</button></div><div class="field"><label>&nbsp;</label><button id="hand-pose-export" class="button button-outline" type="button">Export current pose</button></div></div><p id="hand-pose-message" class="secondary" role="status"></p></details>
+                <details class="hand-pose-details"><summary>Saved poses</summary><form id="hand-pose-form" class="form-grid"><div class="field span-2"><label for="hand-pose-name">Pose name</label><input id="hand-pose-name" maxlength="80" aria-describedby="hand-pose-error" required placeholder="e.g. Relaxed grip"></div><div class="field"><label>&nbsp;</label><button class="button" type="submit">Save new pose</button></div></form><div class="form-grid"><div class="field span-2"><label for="hand-pose-list">Saved for this model and side</label><select id="hand-pose-list"><option value="">No saved poses</option></select></div><div class="field"><label>&nbsp;</label><button id="hand-pose-load" class="button button-outline" type="button" disabled>Load pose</button></div><div class="field"><label>&nbsp;</label><button id="hand-pose-export" class="button button-outline" type="button">Export current pose</button></div></div><div class="form-actions"><button id="hand-pose-rename" class="button button-outline" type="button" disabled>Rename pose</button><button id="hand-pose-delete" class="button button-danger" type="button" disabled>Delete pose</button></div><p id="hand-pose-error" class="inline-alert" role="alert" hidden></p><p id="hand-pose-message" class="secondary" role="status"></p></details>
               </div>
-              <div class="hand-model-info"><p id="hand-model-notes"></p><p class="secondary">This viewer shows joint motion and geometry. It does not simulate contact or send commands to a robot. DexVerse control is currently integrated only for its Shadow right-hand pipeline; the other models need their own control and retargeting adapters.</p><div class="form-actions"><a id="hand-source-link" target="_blank" rel="noreferrer">Source description ↗</a><a id="hand-license-link" target="_blank" rel="noreferrer" hidden>Model license ↗</a><span id="hand-revision" class="secondary"></span></div></div>
+              <div class="hand-model-info"><p id="hand-model-notes"></p><p class="secondary">This viewer shows joint motion and geometry. It does not simulate contact or send commands to a robot. Use in simulation selects this hand and side in Data Collect when a simulation integration is available. Starting a session also requires a reachable simulation host; a viewer pose is not automatically applied to a simulation.</p><div class="form-actions"><a id="hand-source-link" target="_blank" rel="noreferrer">Source description ↗</a><a id="hand-license-link" target="_blank" rel="noreferrer" hidden>Model license ↗</a><span id="hand-revision" class="secondary"></span></div></div>
             </section>
           </div>
         </div>
@@ -406,6 +406,11 @@
                       aria-describedby="checkpoint-save-steps-default"
                     >
                     <small id="checkpoint-save-steps-default">Default: not declared.</small>
+                  </div>
+                  <div class="field">
+                    <label for="checkpoint-warning-seconds">Checkpoint warning / seconds before timeout</label>
+                    <input id="checkpoint-warning-seconds" type="number" min="60" max="1800" step="1" value="300" required>
+                    <small>Used for training auto-resume; must be shorter than wall time.</small>
                   </div>
                   <div class="field">
                     <label for="checkpoint-max-attempts">Maximum automatic attempts</label>
@@ -716,6 +721,12 @@
                   <option value="all">All states</option>
                   <option value="running">Running</option>
                   <option value="pending">Pending</option>
+                  <option value="submitting">Submitting</option>
+                  <option value="submitted">Submitted</option>
+                  <option value="cancelling">Cancelling</option>
+                  <option value="retry_pending">Retry pending</option>
+                  <option value="submission_failed">Submission failed</option>
+                  <option value="blocked">Blocked</option>
                   <option value="failed">Failed</option>
                   <option value="completed">Completed</option>
                   <option value="preempted">Preempted</option><option value="draft">Draft</option><option value="cancelled">Cancelled</option><option value="timeout">Timed out</option>
@@ -734,9 +745,9 @@
                     <th>Resources</th>
                     <th>Latest attempt</th>
                     <th>Progress</th>
-                    <th>ETA</th>
+                    <th title="Start time of the latest attempt">Started</th>
+                    <th title="Time spent in the latest attempt">Elapsed</th>
                     <th>Tracking</th>
-                    <th>Updated</th>
                     <th></th>
                   </tr>
                 </thead>
@@ -1039,7 +1050,7 @@
               <div class="field"><label for="live-review-episode">Demonstration</label><select id="live-review-episode"></select></div>
               <video id="live-review-video" controls playsinline preload="metadata" hidden aria-label="Recorded demonstration video"></video>
               <p id="live-review-video-status" class="secondary" role="status"></p>
-              <div class="live-review-downloads"><button id="live-review-video-retry" class="button button-outline" type="button" hidden>Retry video</button><a id="live-review-video-download" class="text-button" download hidden>Download video</a></div>
+              <div class="live-review-downloads"><button id="live-review-video-retry" class="button button-outline" type="button" hidden>Prepare video</button><button id="live-review-video-cancel" class="button button-outline" type="button" hidden>Cancel queued video</button><a id="live-review-video-download" class="text-button" download hidden>Download video</a></div>
               <details id="live-review-data"><summary>Recorded values</summary>
               <div class="live-review-downloads"><a id="live-review-original" class="text-button" download>Download original (.pkl)</a><a id="live-review-summary" class="text-button" download>Download summary</a><a id="live-review-json" class="text-button" download>Download preview values</a></div>
               <div class="live-review-controls"><button id="live-review-prev" type="button" class="button button-outline">Previous frame</button><button id="live-review-play" type="button" class="button button-outline">Play values</button><button id="live-review-next" type="button" class="button button-outline">Next frame</button><output id="live-review-frame" aria-live="off"></output></div>
@@ -1103,7 +1114,7 @@
               <fieldset class="form-section">
                 <legend>Identity</legend>
                 <div class="form-grid">
-                  <div class="field"><label for="collection-adapter-key">Key</label><input id="collection-adapter-key" placeholder="vendor-system" required></div>
+                  <div class="field"><label for="collection-adapter-key">Key</label><input id="collection-adapter-key" placeholder="vendor-system" pattern="[a-z0-9][a-z0-9-]{1,63}" maxlength="64" title="Use 2–64 lowercase letters, digits, or hyphens; start with a letter or digit." required></div>
                   <div class="field"><label for="collection-adapter-name">Display name</label><input id="collection-adapter-name" required></div>
                   <div class="field"><label for="collection-adapter-version">Adapter version</label><input id="collection-adapter-version" value="1" required></div>
                   <label class="check-field"><input id="collection-adapter-runnable" type="checkbox"> Runnable now</label>
@@ -1227,10 +1238,10 @@
                               <div class="field"><label for="collection-account">Account</label><input id="collection-account" value="rl2-lab" required></div>
                               <div class="field"><label for="collection-partition">Partition</label><input id="collection-partition" value="rl2-lab" required></div>
                               <div class="field"><label for="collection-node">Node</label><input id="collection-node" placeholder="Auto"></div>
-                              <div class="field"><label for="collection-gpu-count">GPUs</label><input id="collection-gpu-count" type="number" value="1" min="0" required></div>
+                              <div class="field"><label for="collection-gpu-count">GPUs</label><input id="collection-gpu-count" type="number" value="1" min="1" max="16" required><small>Collection requires at least one GPU.</small></div>
                               <div class="field"><label for="collection-gpu-type">GPU type</label><input id="collection-gpu-type" value="l40s" required></div>
-                              <div class="field"><label for="collection-cpu-count">CPUs</label><input id="collection-cpu-count" type="number" value="16" min="1" required></div>
-                              <div class="field"><label for="collection-memory-gb">Memory / GB</label><input id="collection-memory-gb" type="number" value="64" min="1" required></div>
+                              <div class="field"><label for="collection-cpu-count">CPUs</label><input id="collection-cpu-count" type="number" value="16" min="1" max="256" required></div>
+                              <div class="field"><label for="collection-memory-gb">Memory / GB</label><input id="collection-memory-gb" type="number" value="64" min="1" max="2048" required></div>
                               <div class="field"><label for="collection-time-limit">Time limit</label><input id="collection-time-limit" value="04:00:00" required></div>
                             </div>
                           </fieldset>
@@ -1308,6 +1319,7 @@
                 <p class="registry-section-help">A resource is a named data item, such as a dataset or simulator asset. Its exact files live in immutable versions. Imports normally register resources automatically.</p>
               </div>
               <div class="panel-heading-actions">
+                <label class="checkbox-label"><input id="data-show-archived" type="checkbox"> Show archived</label>
                 <span id="data-resource-count" class="quiet-label">Not loaded</span>
                 <button id="show-data-resource-form" class="button button-accent disclosure-launcher" type="button" aria-controls="data-resource-form" aria-expanded="false">Register a source resource</button>
               </div>
@@ -1410,6 +1422,12 @@
                   <div class="field"><label for="data-import-gateway">SSH gateway</label><select id="data-import-gateway"><option value="auto">Auto: sky1, then sky2</option><option value="sky1">sky1</option><option value="sky2">sky2</option></select></div>
                   <div class="field"><label for="data-import-queue">Slurm queue</label><select id="data-import-queue"><option value="overcap">overcap (preemptible)</option><option value="normal">rl2-lab</option></select></div>
                 </div>
+                <div class="form-grid">
+                  <div class="field"><label for="data-import-cpus">CPUs</label><input id="data-import-cpus" type="number" min="1" max="64" value="8" required></div>
+                  <div class="field"><label for="data-import-memory">Memory / GB</label><input id="data-import-memory" type="number" min="1" max="512" value="32" required></div>
+                  <div class="field"><label for="data-import-time">Time limit</label><input id="data-import-time" value="04:00:00" required><small>Slurm duration, from 1 minute to 24 hours.</small></div>
+                </div>
+                <p id="data-import-budget" class="registry-section-help" aria-live="polite"></p>
                 <div class="form-actions"><button id="submit-data-import" class="button button-accent" type="submit">Submit import job</button></div>
               </div>
             </form></dialog>
@@ -1661,7 +1679,7 @@
               <p id="wandb-credential-source" class="tracking-credential-source" data-source="none">Credential source: none</p>
               <div class="form-actions tracking-connection-actions">
                 <button class="button button-accent" type="submit">Connect</button>
-                <button id="test-wandb-connection" class="button button-outline" type="button">Test</button>
+                <button id="test-wandb-connection" class="button button-outline" type="button">Test saved connection</button>
                 <button id="disconnect-wandb" class="button button-quiet" type="button">Disconnect</button>
               </div>
             </form>
@@ -1704,7 +1722,7 @@
               <p id="mlflow-credential-source" class="tracking-credential-source" data-source="none">Credential source: none</p>
               <div class="form-actions tracking-connection-actions">
                 <button class="button button-accent" type="submit">Connect</button>
-                <button id="test-mlflow-connection" class="button button-outline" type="button">Test</button>
+                <button id="test-mlflow-connection" class="button button-outline" type="button">Test saved connection</button>
                 <button id="disconnect-mlflow" class="button button-quiet" type="button">Disconnect</button>
               </div>
             </form>
@@ -1797,7 +1815,7 @@
       <form id="policy-export-form" class="dialog-form">
         <div class="dialog-body">
           <div class="form-grid">
-            <div class="field"><label for="policy-export-name">Dataset name</label><input id="policy-export-name" maxlength="100" required></div>
+            <div class="field"><label for="policy-export-name">Dataset name</label><input id="policy-export-name" maxlength="100" required aria-describedby="policy-export-name-help"><small id="policy-export-name-help"></small></div>
             <div class="field"><label for="policy-export-format">Policy</label><select id="policy-export-format" required></select><small id="policy-export-format-help" hidden></small></div>
             <div class="field"><label for="preparation-validation">Validation episodes (%)</label><input id="preparation-validation" type="number" min="0" max="50" value="20" required></div>
             <div class="field"><label for="preparation-seed">Split seed</label><input id="preparation-seed" type="number" min="0" max="2147483647" value="42" required></div>

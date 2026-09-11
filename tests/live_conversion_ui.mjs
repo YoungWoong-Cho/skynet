@@ -42,6 +42,15 @@ try {
   w.renderSimulationRecordings([s]);
   w.renderSimulationRecordings([s]);
   assert.equal(changes, 1);
+  assert.match(el("simulation-recordings-body").textContent, /Checking preparation status/);
+  w.document.dispatchEvent(new w.CustomEvent("dataset-preparation-status", {detail:{state:"unavailable", error:"Catalog timed out"}}));
+  assert.match(el("simulation-recordings-body").textContent, /Preparation status unavailable/);
+  assert.doesNotMatch(el("simulation-recordings-body").textContent, /Original recordings saved|Images ready/);
+  let refreshRequests = 0;
+  w.document.addEventListener("dataset-preparation-refresh-requested", () => refreshRequests++);
+  [...el("simulation-recordings-body").querySelectorAll("button")].find(b => b.textContent === "Retry preparation status").click();
+  assert.equal(refreshRequests, 1);
+  w.document.dispatchEvent(new w.CustomEvent("dataset-preparation-status", {detail:{state:"ready"}}));
   assert.match(el("simulation-recordings-body").textContent, /Images ready/);
   assert.ok(el("simulation-recordings-body").querySelector(".state-pill.is-running"));
   assert.doesNotMatch(el("simulation-recordings-body").textContent, /Earlier state HDF5/);
@@ -66,6 +75,22 @@ try {
     el("simulation-recordings-body").textContent,
     /1 prepared format/,
   );
+  w.document.dispatchEvent(new w.CustomEvent("dataset-preparation-changed", {
+    detail: [
+      {id: "job-dp-1", session_id: "session", state: "READY", resource_id: "data", format: "dp"},
+      {id: "job-dp-2", session_id: "session", state: "READY", resource_id: "data", format: "dp"},
+      {id: "job-act", session_id: "session", state: "READY", resource_id: "data", format: "act"},
+      {id: "job-failed", session_id: "session", state: "FAILED", resource_id: "data", format: "openpi"},
+    ],
+  }));
+  assert.match(el("simulation-recordings-body").textContent, /2 prepared formats/);
+  assert.doesNotMatch(el("simulation-recordings-body").textContent, /[34] prepared formats/);
+  assert.match(el("simulation-recordings-body").textContent, /Preparation needs attention/);
+  w.document.dispatchEvent(new w.CustomEvent("dataset-preparation-status", {detail:{state:"unavailable", error:"Host unavailable"}}));
+  assert.match(el("simulation-recordings-body").textContent, /Last known: 2 prepared formats/);
+  assert.ok([...el("simulation-recordings-body").querySelectorAll("button")].some(b => b.textContent === "View dataset"));
+  w.document.dispatchEvent(new w.CustomEvent("dataset-preparation-status", {detail:{state:"ready"}}));
+  assert.doesNotMatch(el("simulation-recordings-body").textContent, /Host unavailable|Last known/);
   buttons = el("simulation-recordings-body").querySelectorAll("button");
   buttons[2].click();
   assert.equal(viewed, "data");

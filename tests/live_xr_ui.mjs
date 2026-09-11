@@ -215,6 +215,19 @@ try {
   requests.at(-1).resolve(overview);
   await flush();
   assert.equal(get("live-xr-start").textContent, "Start session");
+  assert.equal(get("live-xr-progress").hidden, true,
+    "An old failed session must not become the current startup status");
+  assert.match(get("live-xr-sessions").textContent, /Connection timed out/,
+    "The historical failure remains available in Session history");
+  get("live-xr-start-form").dispatchEvent(
+    new window.Event("submit", { cancelable: true }),
+  );
+  requests.at(-1).resolve(failed);
+  await flush();
+  requests.at(-1).resolve(overview);
+  await flush();
+  assert.equal(get("live-xr-progress").hidden, false,
+    "A newly submitted session's failure must remain visible");
   assert.equal(get("live-xr-progress-title").textContent, "Startup failed");
   assert.equal(stages()[0].dataset.state, "failed");
   assert.ok(

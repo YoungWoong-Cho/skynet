@@ -429,3 +429,40 @@ def test_unavailable_gpu_forecast_does_not_reject_a_valid_submission(tmp_path, m
         assert not marker.exists()
         if expected == 0:
             assert 'submission will validate' in result.stdout
+
+
+def test_cancelled_file_stream_interrupts_stalled_owned_ssh_process(monkeypatch):
+    import sys
+
+    original_popen = subprocess.Popen
+    children = []
+
+    def popen(*args, **kwargs):
+        child = original_popen([sys.executable, "-c", "import sys,time; sys.stdout.buffer.write(b'ab'); sys.stdout.flush(); time.sleep(30)"], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    event = threading.Event()
+    stream = ClusterClient(("host",)).stream_file_range(cluster_runtime.WORK_ROOT + "/video.mp4", "host", start=0, end=99, cancel_event=event)
+    assert next(stream) == b"ab"
+    received = []
+    worker = threading.Thread(target=lambda: received.extend(stream))
+    worker.start()
+    start = time.monotonic()
+    event.set()
+    worker.join(2)
+    assert not worker.is_alive()
+    assert time.monotonic() - start < 1
+    assert children[0].poll() is not None
+    assert received == []
+
+
+def test_file_stream_without_cancellation_preserves_original_contract(monkeypatch):
+    import sys
+
+    original_popen = subprocess.Popen
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: original_popen(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'abcd')"], **kw))
+    assert b"".join(ClusterClient(("host",)).stream_file_range(
+        cluster_runtime.WORK_ROOT + "/video.mp4", "host", start=0, end=3)) == b"abcd"

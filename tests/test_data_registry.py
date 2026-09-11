@@ -7,7 +7,7 @@ from pathlib import Path
 
 from skynet_app.database import Database, canonical_json, content_sha256, new_id, utc_now
 from skynet_app.adapters import builtin_adapter_manifests
-from skynet_app.pipeline_api import PipelineService
+from skynet_app.pipeline_api import DataBundleAssignmentRequest, PipelineService
 
 
 COMMIT = "e17cf98fe4bc234c564b37abc9e155f25e76d566"
@@ -97,6 +97,35 @@ class DataRegistryTestCase(unittest.TestCase):
                 converter_repository="https://github.com/example/dataset-converters",
                 converter_commit="c" * 40,
             )
+
+    def test_unsafe_bundle_mounts_are_rejected_by_request_and_storage(self) -> None:
+        unsafe_paths = [
+            "/absolute", "../escape", "data/../escape", "./data", "data/./file",
+            "data//file", "data/", "C:/data", "data\\file", "data\nfile", "data\x00file",
+        ]
+        for mount_path in unsafe_paths:
+            with self.subTest(mount_path=mount_path):
+                assignment = {"role": "simulation_assets", "version_id": self.assets_version["id"], "mount_path": mount_path}
+                with self.assertRaisesRegex(ValueError, "Mount path must be a relative directory"):
+                    DataBundleAssignmentRequest.model_validate(assignment)
+                with self.assertRaisesRegex(ValueError, "Mount path must be a relative directory"):
+                    self.database.create_data_bundle(name="unsafe", version="v1", assignments=[assignment])
+        self.assertEqual(self.database.list_data_bundles(), [])
+
+    def test_relative_bundle_mounts_are_normalized_in_persisted_manifest(self) -> None:
+        for index, (mount_path, expected) in enumerate([(None, None), ("", None), ("   ", None), (" data/nested-dir_v1 ", "data/nested-dir_v1")]):
+            with self.subTest(mount_path=mount_path):
+                assignment = {"role": "simulation_assets", "version_id": self.assets_version["id"], "mount_path": mount_path}
+                self.assertEqual(DataBundleAssignmentRequest.model_validate(assignment).mount_path, expected)
+                bundle = self.database.create_data_bundle(name="relative", version=str(index), assignments=[assignment])
+                self.assertEqual(bundle["assignments"][0]["mount_path"], expected)
+                self.assertEqual(bundle["manifest"]["assignments"][0]["mount_path"], expected)
+
+    def test_legacy_bundle_snapshot_cannot_bypass_mount_validation(self) -> None:
+        manifest = next(item for item in builtin_adapter_manifests() if item.slug == "groot")
+        document = {"data": {"bundle": {"assignments": [{"role": "training_data", "position": 0, "mount_path": "../../escape", "version": {"path": "/data/training", "format": "groot-lerobot-v2.0"}}]}}}
+        with self.assertRaisesRegex(ValueError, "Mount path must be a relative directory"):
+            PipelineService._apply_manifest_data_bindings(document, manifest)
 
     def test_bundle_manifest_is_content_addressed_and_snapshotted_into_spec(self) -> None:
         demonstrations = self._version("training-demos", "hf-revision-1", "4")

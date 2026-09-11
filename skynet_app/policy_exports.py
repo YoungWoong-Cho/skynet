@@ -8,17 +8,15 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import inspect
 import json
-import os
 from pathlib import Path, PurePosixPath
 import re
 import shlex
 import shutil
-import subprocess
-import sys
+import signal
 import threading
 from uuid import uuid4
 
-from ops.datasets.artifacts import digest, verify, pack
+from ops.datasets.artifacts import digest
 from .database import canonical_json, utc_now
 from . import dataset_cleanup
 from .dataset_formats import RECIPES, XPL_COMMIT as COMMIT, XPL_REPOSITORY, catalog
@@ -27,6 +25,7 @@ from .live_xr_review import ArrayUnpickler
 from .cluster_runtime import ClusterClient, ClusterError, WORK_ROOT
 from .cluster_config import CLUSTER
 from .capture_processing.service import upload_capture
+from .policy_exports_cluster import ClusterPolicyPreparation
 
 FORMATS = list(RECIPES.values())
 
@@ -35,7 +34,42 @@ def fingerprint(value):
     return hashlib.sha256(canonical_json(value).encode()).hexdigest()
 
 
-class PolicyExportService:
+def conversion_failure(returncode, output):
+    """Describe worker termination without presenting progress as its cause."""
+    progress = None
+    diagnostics = []
+    for line in output.splitlines():
+        try:
+            item = json.loads(line)
+        except (ValueError, TypeError):
+            item = None
+        if isinstance(item, dict) and "episodes_done" in item:
+            progress = f"{item['episodes_done']}/{item.get('episodes_total', '?')} episodes"
+        elif line.strip() and not any(
+            word in line for word in ("resource_tracker", "leaked semaphore", "warnings.warn(")
+        ):
+            diagnostics.append(line.strip())
+    if returncode < 0:
+        try:
+            reason = f"signal {signal.Signals(-returncode).name}"
+        except ValueError:
+            reason = f"signal {-returncode}"
+    else:
+        reason = f"exit code {returncode}"
+    message = f"Dataset conversion stopped ({reason})"
+    if progress:
+        message += f" after {progress}"
+    if diagnostics:
+        message += ": " + "\n".join(diagnostics[-8:])[-1200:]
+    else:
+        message += (
+            ". The worker exited without an exception report; "
+            "check the preparation and app logs for an interruption."
+        )
+    return message
+
+
+class PolicyExportService(ClusterPolicyPreparation):
     def __init__(self, reviews, root=None, cluster=None):
         self.reviews, self.live = reviews, reviews.live
         self.database = self.live.database
@@ -45,8 +79,11 @@ class PolicyExportService:
         self.executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="dataset-preparation"
         )
-        self.processes, self.active = {}, set()
+        self.active = set()
         self.stopping = False
+        self.monitor_stop = threading.Event()
+        self.monitor_thread = None
+        self.monitor_interval = 2.0
         with self.database.transaction() as c:
             c.execute(
                 "CREATE TABLE IF NOT EXISTS policy_exports (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL)"
@@ -83,20 +120,28 @@ class PolicyExportService:
         return job
 
     def start(self):
+        with self.lock:
+            if self.stopping:
+                return
+            if self.monitor_thread is None:
+                self.monitor_thread = threading.Thread(target=self._monitor, name="dataset-preparation-monitor", daemon=True)
+                self.monitor_thread.start()
         for job in self.list():
             if job["state"] not in {"READY", "FAILED", "DELETE_FAILED"}:
-                self.update(
-                    job["id"],
-                    state="FAILED",
-                    error="Preparation interrupted by an app restart. Retry to continue from verified files.",
-                )
+                self.dispatch(job["id"])
+
+    def _monitor(self):
+        while not self.monitor_stop.wait(self.monitor_interval):
+            for job in self.list():
+                if job["state"] not in {"READY", "FAILED", "DELETE_FAILED"}:
+                    self.dispatch(job["id"])
 
     def stop(self):
         with self.lock:
             self.stopping = True
-            for process in self.processes.values():
-                if process.poll() is None:
-                    process.terminate()
+            self.monitor_stop.set()
+        if self.monitor_thread is not None:
+            self.monitor_thread.join(timeout=5)
         self.executor.shutdown(wait=True, cancel_futures=True)
 
     def sources(self, session, indices=None, *, require_images=True):
@@ -127,7 +172,10 @@ class PolicyExportService:
                 raise ValueError(
                     "This session has no completed training images. Wait for image preparation, or collect a new session with training images enabled."
                 )
-            self.reviews.source(session["id"], index)
+            recording_path = PurePosixPath(name)
+            if (recording_path.is_absolute() or ".." in recording_path.parts
+                    or not recording_path.is_relative_to("recordings") or recording_path.suffix != ".pkl"):
+                raise ValueError("Invalid saved recording path")
             path = PurePosixPath(image["path"])
             if (
                 path.is_absolute()
@@ -249,7 +297,8 @@ class PolicyExportService:
 
     @staticmethod
     def recording_locations(session):
-        root = session.get("root")
+        archived = (session.get("archive") or {}).get("state") in {"VERIFIED", "CLEANUP_PENDING", "READY"}
+        root = session.get("archive", {}).get("root") if archived else session.get("root")
         if not root:
             return []
         directories = set()
@@ -257,8 +306,8 @@ class PolicyExportService:
             path = PurePosixPath(relative)
             if path.is_absolute() or ".." in path.parts:
                 continue
-            directories.add(str(PurePosixPath(root) / "output" / path.parent))
-        return [dict(kind="remote", host=session.get("gateway") or session.get("profile", {}).get("gateway") or "Collection host", path=path) for path in sorted(directories)]
+            directories.add(str(PurePosixPath(root) / path.parent) if archived else str(PurePosixPath(root) / "output" / path.parent))
+        return [dict(kind="remote", host="sky2" if archived else session.get("gateway") or session.get("profile", {}).get("gateway") or "Collection host", path=path) for path in sorted(directories)]
 
     def options(self):
         sessions = []
@@ -293,6 +342,8 @@ class PolicyExportService:
         policies = catalog(self.database)
         jobs = self.list()
         for job in jobs:
+            if job["state"] not in {"READY", "FAILED", "DELETE_FAILED"}:
+                self.dispatch(job["id"])
             policy = next((p for p in policies if p["id"] == job["format"]), {})
             job["training_setup"] = policy.get("training_setup")
             job["training_ready"] = bool(
@@ -324,7 +375,6 @@ class PolicyExportService:
             exports=jobs,
             targets=[
                 dict(id="cluster", name="Training cluster"),
-                dict(id="local", name="This computer"),
             ],
         )
 
@@ -336,15 +386,15 @@ class PolicyExportService:
         resource_id=None,
         *,
         selections=None,
-        target="local",
+        target="cluster",
         validation_percent=20,
         seed=42,
         gateway="auto",
     ):
         if format not in RECIPES:
             raise ValueError("No converter is registered for this policy")
-        if target not in {"local", "cluster"}:
-            raise ValueError("Choose this computer or the training cluster")
+        if target != "cluster":
+            raise ValueError("Collection datasets are prepared and retained on sky2")
         self.cluster.candidates(gateway)
         name = name.strip()
         if not name or len(name) > 100 or any(ord(c) < 32 for c in name):
@@ -407,6 +457,7 @@ class PolicyExportService:
                     "skynet_dp_training.py": "dp_training.py",
                     "skynet_act_training.py": "act_training.py",
                     "xpolicy_runtime.py": "xpolicy_runtime.py",
+                    "training_parallel.py": "training_parallel.py",
                 }.items()
             },
         }
@@ -418,6 +469,7 @@ class PolicyExportService:
             for asset_name in ("egoverse_export.py", "egoverse_zarr_writer.py", "egoverse-provenance.json", "egoverse-LICENSE"):
                 frozen_files[asset_name] = (source_root / asset_name).read_text()
             frozen_files["egoverse_runtime.py"] = (self.live.root / "skynet_app/adapters/egoverse_runtime.py").read_text()
+            frozen_files["egoverse_models.py"] = (self.live.root / "skynet_app/adapters/egoverse_models.py").read_text()
             frozen_files["egoverse_data.py"] = (self.live.root / "skynet_app/adapters/egoverse_data.py").read_text()
             frozen_files["conversion-dependencies.json"] = canonical_json(RECIPES[format]["conversion_dependencies"])
         converter_sha = fingerprint([frozen_files, provenance, runtime_lock])
@@ -451,12 +503,10 @@ class PolicyExportService:
                 resource = self.dataset(
                     self.live.get(selections[0]["session_id"]), name
                 )
-            metadata = {
-                **resource.get("metadata", {}),
-                "display_name": name,
-                "managed_dataset": True,
-            }
-            self.database.update_data_resource(resource["id"], metadata=metadata)
+            # Preparation adds immutable versions to an existing identity. Its
+            # name is chosen only when dataset() first creates the resource;
+            # retries and failed conversions must never rename earlier versions.
+            name = resource.get("metadata", {}).get("display_name") or resource["name"]
             source_version = self.register_source(resource, sources, split)
             for job in self.list():
                 if (
@@ -470,6 +520,7 @@ class PolicyExportService:
                         return self.retry(job["id"], target="cluster")
                     if (
                         job["state"] == "READY"
+                        and not job.get("remote_archive")
                         and not (self.root / job["id"] / "dataset.zip").is_file()
                     ):
                         return self.retry(job["id"], target=target)
@@ -491,7 +542,8 @@ class PolicyExportService:
                 format=format,
                 contract=RECIPES[format]["contract"],
                 target=target,
-                gateway=gateway,
+                gateway="sky2",
+                execution="cluster",
                 sources=sources,
                 split=split,
                 runtime_lock_sha256=runtime_lock,
@@ -499,7 +551,7 @@ class PolicyExportService:
                 converter_sha256=converter_sha,
                 state="QUEUED",
                 stage="QUEUED",
-                detail="Waiting to prepare data",
+                detail="Waiting in Skynet’s preparation queue; CPU job has not been submitted to sky2",
                 created_at=utc_now(),
                 updated_at=utc_now(),
             )
@@ -525,12 +577,23 @@ class PolicyExportService:
                 raise ValueError(
                     "This is an older export. Prepare a new version from its original recordings"
                 )
-            if target not in {None, "local", "cluster"}:
-                raise ValueError("Unknown destination")
+            if target not in {None, "cluster"}:
+                raise ValueError("Collection datasets are prepared and retained on sky2")
+            if job.get("cluster_script") and job["state"] not in {"FAILED", "READY"}:
+                self.dispatch(identifier)
+                return job
+            if job["state"] == "READY" and job.get("remote_archive"):
+                return job
             job = self.update(
                 identifier,
                 state="QUEUED",
-                target=target or job.get("target", "local"),
+                stage="QUEUED",
+                target="cluster",
+                execution="cluster",
+                cluster_script=None,
+                cluster_job_id=None,
+                cluster_root=None,
+                training_ready=False,
                 error=None,
                 detail="Retrying from verified files",
             )
@@ -542,215 +605,18 @@ class PolicyExportService:
             if identifier in self.active or self.stopping:
                 return
             self.active.add(identifier)
-        self.executor.submit(self.prepare, identifier)
+            self.executor.submit(self.prepare, identifier)
 
-    def download(self, session, relative, target, expected, limit, expected_size=None):
-        if target.is_file() and digest(target) == expected:
-            return
-        if self.stopping:
-            raise ValueError("Preparation interrupted by app shutdown")
-        remote = session["root"] + "/output/" + relative
-        transport = self.live.transport(session)
-        host, size = transport.file_size(remote, session["gateway"])
-        if not 0 < size <= limit or (
-            expected_size is not None and size != expected_size
-        ):
-            raise ValueError("Source recording size is invalid or changed")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temp = target.with_suffix(".part")
-        received = 0
-        try:
-            with temp.open("wb") as stream:
-                for block in transport.stream_file_range(
-                    remote, host, start=0, end=size - 1
-                ):
-                    if self.stopping:
-                        raise ValueError("Preparation interrupted by app shutdown")
-                    received += len(block)
-                    if received > size:
-                        raise ValueError("Source recording grew during download")
-                    stream.write(block)
-            if received != size or digest(temp) != expected:
-                raise ValueError("Source recording checksum verification failed")
-            temp.replace(target)
-        finally:
-            temp.unlink(missing_ok=True)
 
     def prepare(self, identifier):
-        directory = self.root / identifier
         try:
-            job = self.get(identifier)
-            manifest_path = directory / "output/manifest.json"
-            manifest = None
-            if manifest_path.exists() and job.get("manifest_sha256"):
-                try:
-                    manifest = verify(directory / "output", job["manifest_sha256"])
-                except (ValueError, OSError):
-                    pass
-            if manifest is None:
-                size = sum(s["image_size_bytes"] for s in job["sources"])
-                if shutil.disk_usage(directory).free < size * 8 + 1_000_000_000:
-                    raise ValueError(
-                        "Not enough local disk space for this image preparation"
-                    )
-                self.update(
-                    identifier,
-                    state="RUNNING",
-                    stage="FETCHING",
-                    detail="Fetching and verifying original recordings",
-                )
-                sources = []
-                for item in job["sources"]:
-                    session = self.live.get(item.get("session_id", job["session_id"]))
-                    recording = self.root / "sources" / (item["sha256"] + ".pkl")
-                    images = self.root / "sources" / (item["image_sha256"] + ".hdf5") if item.get("image_sha256") else None
-                    self.download(
-                        session, item["path"], recording, item["sha256"], 100_000_000
-                    )
-                    if images is not None:
-                        self.download(
-                            session,
-                            item["image_path"],
-                            images,
-                            item["image_sha256"],
-                            4_000_000_000,
-                            item["image_size_bytes"],
-                        )
-                    sources.append(
-                        dict(item, recording=str(recording), images=str(images) if images else None)
-                    )
-                # This directory belongs only to this job. Failed partial output is never registered.
-                if (directory / "output").exists():
-                    shutil.rmtree(directory / "output")
-                (directory / "dataset.zip.part").unlink(missing_ok=True)
-                request = {
-                    key: job[key]
-                    for key in (
-                        "format",
-                        "split",
-                        "contract",
-                        "source_revision",
-                        "converter_sha256",
-                    )
-                }
-                request.update(output=str(directory / "output"), sources=sources)
-                (directory / "request.json").write_text(canonical_json(request))
-                self.update(
-                    identifier,
-                    stage="CONVERTING",
-                    detail="Converting the selected observations and actions",
-                )
-                with (directory / "export.log").open("w") as log:
-                    interpreter = [sys.executable]
-                    dependencies = directory / "worker/conversion-dependencies.json"
-                    if dependencies.is_file():
-                        uv = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
-                        if not Path(uv).is_file():
-                            raise ValueError("Install uv to prepare this dataset format")
-                        interpreter = [uv, "run", "--no-project", "--python", sys.executable]
-                        for package in json.loads(dependencies.read_text()):
-                            interpreter.extend(["--with", package])
-                        interpreter.append("python")
-                    process = subprocess.Popen(
-                        [
-                            *interpreter,
-                            str(directory / "worker/policy_export.py"),
-                            str(directory / "request.json"),
-                        ],
-                        stdout=log,
-                        stderr=subprocess.STDOUT,
-                        env=dict(
-                            os.environ,
-                            PYTHONUNBUFFERED="1",
-                            PYTHONDONTWRITEBYTECODE="1",
-                        ),
-                    )
-                    with self.lock:
-                        self.processes[identifier] = process
-                    try:
-                        result = process.wait(timeout=3600)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait()
-                        raise ValueError("Dataset preparation exceeded one hour")
-                if result:
-                    raise ValueError(
-                        "Dataset conversion failed: "
-                        + (directory / "export.log").read_text()[-1800:]
-                    )
-                self.update(
-                    identifier,
-                    stage="VALIDATING",
-                    detail="Verifying the prepared dataset",
-                )
-                manifest_sha = digest(manifest_path)
-                manifest = verify(directory / "output", manifest_sha)
-                self.update(identifier, manifest_sha256=manifest_sha)
-            else:
-                manifest_sha = job["manifest_sha256"]
-            version = self.register(job, manifest, manifest_sha)
-            if not (directory / "dataset.zip").is_file():
-                pack(directory / "output")
-            archive_sha = digest(directory / "dataset.zip")
-            local = self.database.record_data_location(
-                version["id"],
-                kind="local",
-                host="local",
-                path=str(directory / "output"),
-                manifest_sha256=manifest_sha,
-            )
-            self.update(
-                identifier,
-                version_id=version["id"],
-                archive_sha256=archive_sha,
-                size_bytes=version["size_bytes"],
-                episodes=len(manifest["episodes"]),
-                steps=manifest["steps"],
-            )
-            if job.get("target") == "cluster":
-                self.update(
-                    identifier,
-                    stage="TRANSFERRING",
-                    detail="Copying the verified dataset to the training cluster",
-                )
-                location = self.transfer(self.get(identifier))
-                bundle = self.bundle(self.get(identifier), location)
-                self.update(identifier, bundle_id=bundle["id"] if bundle else None)
-            else:
-                location = local
-            can_train = (
-                RECIPES[job["format"]]["trainable"] and location["kind"] == "cluster"
-            )
-            detail = (
-                "Ready to use in a training experiment"
-                if can_train
-                else (
-                    "Prepared on this computer"
-                    if location["kind"] == "local"
-                    else "Files prepared on the cluster; a training adapter is still required"
-                )
-            )
-            self.update(
-                identifier,
-                state="READY",
-                stage="READY",
-                detail=detail,
-                training_ready=can_train,
-                error=None,
-            )
-        except Exception as exc:
-            self.update(
-                identifier,
-                state="FAILED",
-                error=str(exc),
-                detail="Preparation failed; original recordings are preserved",
-            )
+            self._prepare_cluster(identifier)
         finally:
             with self.lock:
-                self.processes.pop(identifier, None)
                 self.active.discard(identifier)
 
-    def register(self, job, manifest, manifest_sha):
+
+    def register(self, job, manifest, manifest_sha, *, remote_path=None):
         resource = self.database.get_data_resource(job["resource_id"])
         version = next(
             (v for v in resource["versions"] if v["revision"] == manifest_sha), None
@@ -760,14 +626,14 @@ class PolicyExportService:
                 resource["id"],
                 revision=manifest_sha,
                 format=manifest["format"],
-                path=str(self.root / job["id"] / "output"),
+                path=remote_path or str(self.root / job["id"] / "output"),
                 manifest_sha256=manifest_sha,
-                status="LOCAL",
+                status="ON_CLUSTER" if remote_path else "LOCAL",
                 size_bytes=sum(f["size_bytes"] for f in manifest["files"].values()),
                 source_uri="collection:" + job["source_revision"],
                 metadata={
                     **manifest,
-                    "storage_location": "local",
+                    "storage_location": "cluster" if remote_path else "local",
                     "export_id": job["id"],
                     "source_version_id": job["source_version_id"],
                     "representation": job["format"],
@@ -862,17 +728,19 @@ class PolicyExportService:
             for name in [
                 "egoverse_runtime.py" if kind == "egoverse" else f"skynet_{kind}_training.py",
                 "artifacts.py",
-                *(["egoverse_data.py"] if kind == "egoverse" else []),
+                *(["egoverse_data.py", "egoverse_models.py"] if kind == "egoverse" else []),
                 *(["xpolicy_runtime.py"] if kind == "act" else []),
+                *(["training_parallel.py"] if kind in {"act", "dp"} else []),
             ]:
                 frozen = directory / "worker" / name
                 # Older export-only ACT copies predate the training integration.
                 if frozen.is_file():
                     content = frozen.read_text()
                 else:
-                    filename = (
-                        "act_training.py" if name == "skynet_act_training.py" else name
-                    )
+                    filename = {
+                        "skynet_act_training.py": "act_training.py",
+                        "skynet_dp_training.py": "dp_training.py",
+                    }.get(name, name)
                     content = (
                         self.live.root / "skynet_app/adapters" / filename
                     ).read_text()
@@ -972,6 +840,7 @@ class PolicyExportService:
 
     def _delete_dataset_copies(self, jobs, versions, locations):
         prepared = [v for v in versions if v["format"] != "skynet.episodes/v1"]
+        prepared_ids = {v["id"] for v in prepared}
         job_ids = {j["id"] for j in jobs}
         for version in prepared:
             if json.loads(version["metadata_json"]).get("export_id") not in job_ids:
@@ -989,6 +858,10 @@ class PolicyExportService:
             )
         }
         for location in locations:
+            # Source manifests can live beside archived recordings on sky2.
+            # They are shared provenance, not generated training copies.
+            if location["version_id"] not in prepared_ids:
+                continue
             if location["kind"] == "cluster":
                 expected = (
                     f"{WORK_ROOT}/datasets/prepared/{location['manifest_sha256']}"
@@ -1117,7 +990,5 @@ class PolicyExportService:
             / ("output/manifest.json" if name == "manifest.json" else name)
         )
         if not path.is_file():
-            raise KeyError(
-                "Local copy is unavailable; use the verified cluster copy or prepare a local copy again"
-            )
+            raise KeyError("This file is unavailable; use its verified sky2 copy or retry preparation")
         return path

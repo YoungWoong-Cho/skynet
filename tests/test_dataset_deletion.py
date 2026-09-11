@@ -4,6 +4,7 @@ import shlex
 import shutil
 import sqlite3
 import subprocess
+from pathlib import Path
 
 import pytest
 from test_dataset_preparation import prepared
@@ -140,6 +141,61 @@ def test_manual_bundle_blocks_deletion(setup):
     with pytest.raises(ValueError, match="bundle"):
         service.delete_dataset(job["resource_id"])
     assert service.artifact(job["id"], "dataset.zip").exists()
+
+
+@pytest.mark.parametrize("single_format", [False, True])
+def test_legacy_preparation_deletes_without_flag_and_preserves_archived_sources(
+    setup, tmp_path, monkeypatch, single_format
+):
+    service, _, source, job = prepared(setup)
+    db = service.database
+    resource = db.get_data_resource(job["resource_id"])
+    metadata = dict(resource["metadata"])
+    metadata.pop("managed_dataset")
+    db.update_data_resource(resource["id"], metadata=metadata)
+    destination, capsule, _ = cluster_copy(service, job, tmp_path, monkeypatch)
+    original = {str(p): p.read_bytes() for p in source.rglob("*") if p.is_file()}
+    source_version = db.get_data_resource_version(job["source_version_id"])
+    archived_source = tmp_path / "archived-recordings" / "source-manifest.json"
+    archived_source.parent.mkdir()
+    archived_source.write_bytes(Path(source_version["path"]).read_bytes())
+    db.record_data_location(
+        source_version["id"], kind="cluster", host="sky2",
+        path=str(archived_source),
+        manifest_sha256=source_version["manifest_sha256"],
+    )
+
+    assert service.delete_dataset(
+        resource["id"], job["id"] if single_format else None
+    )["deleted"]
+    assert not destination.exists() and not capsule.exists()
+    assert archived_source.is_file()
+    assert {str(p): p.read_bytes() for p in source.rglob("*") if p.is_file()} == original
+    assert db.get_data_resource_version(job["version_id"]) is None
+    assert bool(db.get_data_resource(resource["id"])) is single_format
+
+
+def test_unmanaged_collection_without_preparation_cannot_delete(setup):
+    service, _, _ = setup
+    resource = service.database.create_data_resource(
+        provider="collection", namespace="datasets", name="Raw recordings",
+        kind="demonstrations", metadata={"qa_test": True},
+    )
+    with pytest.raises(ValueError, match="Only prepared collection datasets"):
+        service.delete_dataset(resource["id"])
+    assert service.database.get_data_resource(resource["id"])
+
+
+def test_legacy_preparation_requires_matching_version_backlink(setup):
+    service, _, _, job = prepared(setup)
+    resource = service.database.get_data_resource(job["resource_id"])
+    metadata = dict(resource["metadata"])
+    metadata.pop("managed_dataset")
+    service.database.update_data_resource(resource["id"], metadata=metadata)
+    service.update(job["id"], version_id="unrelated-version")
+    with pytest.raises(ValueError, match="Only prepared collection datasets"):
+        service.delete_dataset(resource["id"])
+    assert service.artifact(job["id"], "dataset.zip").is_file()
 
 
 def test_cleanup_rejects_redirected_paths_and_keeps_outside_files(tmp_path):

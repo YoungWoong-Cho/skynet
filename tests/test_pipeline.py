@@ -102,13 +102,13 @@ def test_retired_dexverse_preserves_pinned_experiments_and_collection(tmp_path):
     assert collection.store.adapter_by_key("dexverse-cloudxr") == collection_before
 
 
-def seed_repository_choices(service, slug):
+def seed_repository_choices(service, slug, *, manifest=None):
     """Provide the exact cached metadata that real users obtain via Inspect.
 
     Pipeline behavior tests use a fake cluster; they must not depend on network
     discovery, nor bypass production validation when building their fixtures.
     """
-    manifest = next(m for m in builtin_adapter_manifests() if m.slug == slug)
+    manifest = manifest or next(m for m in builtin_adapter_manifests() if m.slug == slug)
     source = {"revision": COMMIT, "project_subdirectory": manifest.defaults.effective_project_subdirectory}
     options = {}
     for field in manifest.train.input_fields:
@@ -131,7 +131,14 @@ def seed_repository_choices(service, slug):
 
 def make_pipeline_service(database, cluster, **kwargs):
     service = PipelineService(database, cluster, **kwargs)
-    seed_repository_choices(service, "egoverse")
+    # Pipeline lifecycle tests pin their own declared trainer contract. Their
+    # setup must not depend on whether a historical builtin is still selectable.
+    manifest = next(m for m in builtin_adapter_manifests() if m.slug == "egoverse").model_copy(deep=True)
+    manifest.slug = "pipeline_fixture"
+    manifest.capabilities.name = manifest.slug
+    manifest.display_name = "Pipeline fixture"
+    service.database.upsert_seed_adapter(seed_key=manifest.slug, name=manifest.display_name, manifest=manifest.model_dump(mode="json"))
+    seed_repository_choices(service, manifest.slug, manifest=manifest)
     seed_repository_choices(service, "openpi")
     return service
 
@@ -293,7 +300,7 @@ def canonical_spec():
         "source": {
             "repository": "https://github.com/GaTech-RL2/EgoVerse",
             "revision": COMMIT,
-            "adapter": "egoverse",
+            "adapter": "pipeline_fixture",
         },
         "runtime": {"backend": "existing", "bootstrap_uv": False},
         "train": {
@@ -1228,7 +1235,7 @@ def test_failed_evaluation_preserves_successful_training_run_and_checkpoint(monk
             is_resumable=False,
             is_selected_for_inference=True,
         )
-        suite = database.list_evaluation_suites()[0]
+        suite = next(suite for suite in database.list_evaluation_suites() if suite["name"] == "libero_10")
         with database.connection() as connection:
             connection.execute(
                 "UPDATE workflow_stages SET stage_type = 'EVALUATE', status = 'SUBMITTED' WHERE id = ?",
@@ -1329,7 +1336,7 @@ def test_frontend_payload_resolves_to_canonical(monkeypatch):
         service = make_pipeline_service(Database(Path(directory) / "skynet.db"), FakeCluster())
         spec = service.normalize_spec({
             "name": "frontend",
-            "adapter": "egoverse",
+            "adapter": "pipeline_fixture",
             "source": {"repository": "https://github.com/GaTech-RL2/EgoVerse", "revision": COMMIT},
             "runtime": {"type": "existing"},
             "hyperparameters": {
@@ -1360,7 +1367,7 @@ def test_frontend_checkpoint_cleanup_defaults_to_enabled(tmp_path, value, expect
     service = make_pipeline_service(Database(tmp_path / "skynet.db"), FakeCluster())
     payload = {
         "name": "retention-default",
-        "adapter": "egoverse",
+        "adapter": "pipeline_fixture",
         "source": {"repository": "https://github.com/GaTech-RL2/EgoVerse", "revision": COMMIT},
         "runtime": {"type": "existing"},
         "resources": {"queue_policy": "normal", "gpu_mode": "manual", "gpus_per_node": 1,
@@ -2236,10 +2243,6 @@ class AttemptLogCluster(FakeCluster):
 
 
 def _create_submitted_run(service: PipelineService, name: str) -> dict:
-    # Historical receipt fixtures intentionally use the retired generic EgoVerse
-    # adapter; make it available only in this test's isolated database.
-    legacy = next(row for row in service.database.list_adapter_registry(include_archived=True) if row["seed_key"] == "egoverse")
-    service.database.restore_adapter(legacy["id"])
     spec = canonical_spec()
     spec["identity"]["experiment"] = name
     experiment = service.create_experiment(spec)
@@ -2276,7 +2279,7 @@ def _create_active_evaluation(service: PipelineService, name: str) -> tuple[dict
         size_bytes=1,
         is_selected_for_inference=True,
     )
-    suite = database.list_evaluation_suites()[0]
+    suite = next(suite for suite in database.list_evaluation_suites() if suite["name"] == "libero_10")
     evaluation = service.create_evaluation(
         EvaluationRequest(
             run_id=run["id"],
@@ -2950,7 +2953,7 @@ def test_evaluation_ingests_canonical_episode_ledger(monkeypatch):
         run_id = experiment["runs"][0]["id"]
         cluster.state = "COMPLETED"
         service.reconcile()
-        suite = database.list_evaluation_suites()[0]
+        suite = next(suite for suite in database.list_evaluation_suites() if suite["name"] == "libero_10")
         task_id = suite["config_json"]["tasks"][0]
         database.create_checkpoint(
             run_id,

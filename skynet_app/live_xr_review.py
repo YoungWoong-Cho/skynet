@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import pickle
+import shlex
 from pathlib import Path, PurePosixPath
 import threading
 
@@ -12,6 +13,7 @@ import numpy as np
 
 from .database import canonical_json, utc_now
 from .live_xr_catalog import selection
+from .remote_artifacts import RemoteArtifact
 
 MAX_BYTES = 100 * 1024 * 1024
 MAX_PREVIEW_FRAMES = 2000
@@ -53,9 +55,14 @@ def numeric_tree(value, depth=0):
 
 def inspect(path, profile):
     """Read a bounded, application-produced capture; retain every raw byte separately."""
-    if not 0 < path.stat().st_size <= MAX_BYTES:
+    if isinstance(path, bytes):
+        raw = path
+    else:
+        if not 0 < path.stat().st_size <= MAX_BYTES:
+            raise ValueError("Review supports native files up to 100 MB")
+        raw = path.read_bytes()
+    if not 0 < len(raw) <= MAX_BYTES:
         raise ValueError("Review supports native files up to 100 MB")
-    raw = path.read_bytes()
     payload = ArrayUnpickler(io.BytesIO(raw)).load()
     if (
         not isinstance(payload, dict)
@@ -176,6 +183,9 @@ class LiveReviewService:
             or path.suffix != ".pkl"
         ):
             raise ValueError("Invalid saved recording path")
+        archive = getattr(self.live, "archive", None)
+        if archive is not None:
+            return job, archive.resolve(job, str(path))[2]
         return job, job["root"] + "/output/" + str(path)
 
     def directory(self, identifier, index):
@@ -191,12 +201,15 @@ class LiveReviewService:
             if path.exists()
             else {"state": "NOT_DOWNLOADED"}
         )
+        if result["state"] == "READY" and getattr(self.live, "archive", None) is not None:
+            if result.get("storage_path") != self.remote_location(identifier, index, "review.json").path:
+                return {"state": "NOT_DOWNLOADED"}
         if result["state"] == "DOWNLOADING" and (identifier, index) not in self.active:
             return {
                 "state": "FAILED",
                 "error": "Download was interrupted. Retry to resume review.",
             }
-        if result["state"] == "READY" and not all(
+        if result["state"] == "READY" and result.get("storage") != "remote" and not all(
             (directory / name).is_file()
             for name in ("review.json", "summary.json", "recording.pkl")
         ):
@@ -214,6 +227,8 @@ class LiveReviewService:
 
     def create(self, identifier, index=0):
         with self.lock:
+            if (self.live.get(identifier).get("archive") or {}).get("state") == "COPYING":
+                raise ValueError("Recordings are moving to sky2. Retry review after transfer completes.")
             current = self.status(identifier, index)
             key = (identifier, index)
             if current["state"] == "READY" or key in self.active:
@@ -253,10 +268,60 @@ class LiveReviewService:
         self.publish(directory, state="READY", summary=summary)
         return summary
 
+    def remote_location(self, identifier, index, name, *, job=None):
+        if job is None:
+            job, _ = self.source(identifier, index)
+        archive = self.live.archive
+        if name == "recording.pkl":
+            transport, gateway, path = archive.resolve(job, job["recordings"][index])
+            return RemoteArtifact(transport, gateway, path, MAX_BYTES)
+        if name not in {"review.json", "summary.json"}:
+            raise KeyError("Review file not found")
+        if (job.get("archive") or {}).get("state") in {"VERIFIED", "CLEANUP_PENDING", "READY"}:
+            root = archive.derived_root(job)
+            transport, gateway = archive.cluster, job["archive"]["gateway"]
+        else:
+            transport, gateway = self.live.transport(job), job["gateway"]
+            root = job["root"] + "/output"
+        return RemoteArtifact(transport, gateway, f"{root}/reviews/{index}/{name}", 50 * 1024 * 1024)
+
+    def prepare_remote(self, identifier, index):
+        """Validate bounded bytes in memory and save review data beside remote storage."""
+        job, _ = self.source(identifier, index)
+        raw = self.remote_location(identifier, index, "recording.pkl").read_bytes()
+        result = inspect(raw, job["profile"])
+        expected = job.get("recording_checksums", {}).get(job["recordings"][index])
+        if not expected and len(job["recordings"]) == 1:
+            expected = (job.get("recording_summary") or {}).get("sha256")
+        if expected and result["sha256"] != expected:
+            raise ValueError("The recording checksum differs from its saved validation report")
+        text = canonical_json(result)
+        if len(text.encode()) > 50 * 1024 * 1024:
+            raise ValueError("Recording preview exceeds the 50 MB review limit")
+        summary = {k: v for k, v in result.items() if k != "episodes"}
+        summary["episodes"] = [{k: v for k, v in ep.items() if k != "frames"} for ep in result["episodes"]]
+        for _ in range(2):
+            location_job = self.live.get(identifier)
+            targets = {name: self.remote_location(identifier, index, name, job=location_job)
+                       for name in ("review.json", "summary.json")}
+            for name, content in (("review.json", text), ("summary.json", canonical_json(summary))):
+                target = targets[name]
+                program = "import json,sys; from pathlib import Path; p=Path(sys.argv[1]); p.parent.mkdir(parents=True,exist_ok=True); t=p.with_suffix('.tmp'); t.write_text(sys.stdin.read()); t.replace(p)"
+                target.transport.ssh(target.gateway, "python3 -c " + shlex.quote(program) + " " + shlex.quote(target.path), stdin=content, timeout=40)
+            current = self.remote_location(identifier, index, "review.json")
+            if (current.gateway, current.path) == (targets["review.json"].gateway, targets["review.json"].path):
+                self.publish(self.directory(identifier, index), state="READY", storage="remote",
+                             storage_path=current.path, summary=summary)
+                return
+        raise ValueError("Recording storage changed during review. Retry after transfer completes.")
+
     def prepare(self, identifier, index):
         directory = self.directory(identifier, index)
         temp = directory / "download.part"
         try:
+            if getattr(self.live, "archive", None) is not None:
+                self.prepare_remote(identifier, index)
+                return
             job, remote = self.source(identifier, index)
             transport = self.live.transport(job)
             host, size = transport.file_size(remote, job["gateway"])
@@ -292,6 +357,8 @@ class LiveReviewService:
             raise ValueError(
                 "Download and validate the recording before opening its review"
             )
+        if getattr(self.live, "archive", None) is not None:
+            return self.remote_location(identifier, index, name)
         path = self.directory(identifier, index) / name
         if not path.is_file():
             raise KeyError(

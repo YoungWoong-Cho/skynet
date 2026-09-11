@@ -12,7 +12,7 @@ This page describes the existing state-only Slurm conversion. For new synchroniz
 4. Choose **Convert for training**, name the dataset, then choose **Convert dataset**. Every recording in that session is included automatically.
 5. Once converted, download the HDF5 file or open its registered dataset. No terminal command is required.
 
-Conversion runs on Slurm through the configured cluster gateway, preserving the collection's original hand, task, source revision and recorded controls. The Mac uploads checksum-verified cached recordings; uncached originals must first be copied from the collection host. No conversion runs on that host. It does not start training or evaluation. The former local hand/head tracking and offline experiment sections have been removed from Collection. Their saved files and job records are preserved; JSONL motion files are not simulated task demonstrations.
+Conversion runs on Slurm through the configured cluster gateway, preserving the collection's original hand, task, source revision and recorded controls. Conversion waits for the verified sky2 archive, then stages recordings within cluster storage. No source or prepared dataset is cached on the Mac. It does not start training or evaluation. The former local hand/head tracking and offline experiment sections have been removed from Collection. Their saved files and job records are preserved; JSONL motion files are not simulated task demonstrations.
 
 ## Output and compatibility
 
@@ -22,7 +22,7 @@ State observations are reconstructed from the saved simulator states without adv
 
 Use a trainer supporting this DexVerse state HDF5 schema. The existing GR00T and OpenPI adapters require other formats; the old offline JSONL experiment uses a different Skynet state/action schema. This feature does not add a native HDF5 training adapter. New outputs are already on cluster storage. Older workstation outputs still require transfer; both frontend compatibility checks and backend submission reject an untransferred workstation path.
 
-The original recordings remain unchanged. Successful conversion creates a dataset resource/version, a training-data bundle, and a derivation linking the output to a manifest of the original recordings. The HDF5 and manifest are retained on shared cluster storage and cached on the Mac for download. The conversion dialog and registry both display the exact path:
+The original recordings remain unchanged. Successful conversion creates a dataset resource/version, a training-data bundle, and a derivation linking the output to a manifest of the original recordings. The HDF5 and manifest stay on shared cluster storage; explicit downloads stream to the browser. The conversion dialog and registry both display the exact path:
 
 `/coc/flash7/ycho420/datasets/derivatives/dexverse-live/<session-id>/<conversion-id>/dataset.hdf5`
 
@@ -37,9 +37,9 @@ The launcher reuses `ClusterClient.submit_script`, its durable submission receip
 ## Recovery and limits
 
 - The app saves the request and converter source before starting the worker. Repeated identical requests recover the same conversion. Failed conversions can be retried. New conversion requests always include every recording; older browser requests containing recording selections are rejected with a reload message. Earlier partial test datasets remain available in the registry and are labelled partially converted in Collection, with a full-session conversion action.
-- The Slurm job continues after the browser closes or the web app restarts. The local monitor resumes status checks and downloads. Lost submission acknowledgements recover the same submission token rather than starting another job.
+- The Slurm job continues after the browser closes or the web app restarts. The app monitor resumes status and remote verification checks. Lost submission acknowledgements recover the same submission token rather than starting another job.
 - Slurm manages GPU allocation independently of live collection. Each recording is limited to 100 MB and each output artifact to 1 GB; larger inputs fail explicitly. Unsupported GPU capability fails before simulator startup.
-- Progress, queue reasons, job ID, connection failures, worker errors and logs are accessible from the conversion dialog. Publication requires both Slurm completion and verified output. Shared-storage visibility gets a bounded 120-second grace period; missing results never count as success. Downloads are size/checksum verified before registry publication.
+- Progress, queue reasons, job ID, connection failures, worker errors and logs are accessible from the conversion dialog. Publication requires both Slurm completion and verified output. Shared-storage visibility gets a bounded 120-second grace period; missing results never count as success. Remote files are size/checksum verified before registry publication.
 
 ## Verification
 
@@ -52,4 +52,4 @@ Verified output:
 
 SHA-256: `31a49ba77d871dedd41f3478b6c912a354e9fad2b54faa8f0ce6c408804a372e` (173,777 bytes).
 
-The full 51-recording conversion is not complete: only recording 1 is cached on this Mac, and access to the source collection workstation remains deferred. No training or evaluation was submitted.
+That historical check covered only recording 1, not the full 51-recording conversion, and submitted no training or evaluation. It is not a statement about current cache locations; current storage follows [collection storage](collection-storage.md).

@@ -104,7 +104,7 @@
   function renderProgress(running) {
     const panel = el("live-xr-progress");
     const session =
-      running || sessions.find((s) => s.id === focusedSession) || sessions[0];
+      running || sessions.find((s) => s.id === focusedSession);
     const pending = requestPending && !running;
     const failedRequest = !running && requestFailure;
     const completed = session && ["CAPTURED", "STOPPED"].includes(session.state)

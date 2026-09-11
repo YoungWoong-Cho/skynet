@@ -29,7 +29,7 @@ def test_every_native_model_forwards_values_and_supports_four_gpus():
         native.update(
             dataset_path="/prepared", dataset_manifest_sha256="a" * 64, epochs=3
         )
-        if "pi05" in manifest.slug:
+        if manifest.slug == "egoverse-pi":
             native["weights"] = "/weights"
         spec = make_spec(
             source={
@@ -116,10 +116,10 @@ def test_native_writer_matches_pinned_provenance():
 def test_incompatible_native_policies_do_not_accept_recorded_joint_contract():
     accepted = []
     for manifest in manifests():
-        binding = manifest.train.input_fields[0].data_binding
+        binding = next(field.data_binding for field in manifest.train.input_fields if field.data_binding)
         if CONTRACT in binding.contracts:
             accepted.append(manifest.slug)
-    assert accepted == ["egoverse-act", "egoverse-hpt-joints", "egoverse-dp-joints"]
+    assert accepted == ["egoverse-act", "egoverse-hpt"]
 
 
 def test_preparation_preserves_dataset_name_when_freezing_native_assets(setup):

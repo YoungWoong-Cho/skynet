@@ -206,3 +206,69 @@ def test_model_api_links_to_its_exact_simulation_variant(
         hands_api.library, "model", lambda *args: {"files": {}, "revision": "test"}
     )
     assert hands_api.model(key, side)["simulation_robot"] == expected
+
+
+def test_pose_names_are_unique_and_maintenance_preserves_values(library):
+    library.install("test", "right")
+    pose = library.save_pose("test", "right", " Grip ", {"bend": 0.75}, "a" * 40)
+    with pytest.raises(ValueError, match="already exists"):
+        library.save_pose("test", "right", "grip", {"bend": 0.25}, "a" * 40)
+    renamed = library.rename_pose("test", "right", pose["id"], "New grip")
+    assert renamed["id"] == pose["id"]
+    assert renamed["joints"] == pose["joints"]
+    assert renamed["revision"] == pose["revision"]
+    assert renamed["created_at"] == pose["created_at"]
+    with pytest.raises(ValueError, match="name"):
+        library.rename_pose("test", "right", pose["id"], "  ")
+    other = library.save_pose("test", "right", "Other", {"bend": 0.25}, "a" * 40)
+    with pytest.raises(ValueError, match="already exists"):
+        library.rename_pose("test", "right", pose["id"], "Other")
+    for invalid in ("../outside", "../" + pose["id"], "unknown"):
+        with pytest.raises(ValueError, match="identifier"):
+            library.delete_pose("test", "right", invalid)
+    library.delete_pose("test", "right", pose["id"])
+    assert [p["id"] for p in library.poses("test", "right")] == [other["id"]]
+    with pytest.raises(ValueError, match="not found"):
+        library.delete_pose("test", "right", pose["id"])
+
+
+def test_concurrent_pose_saves_cannot_create_duplicate_names(library):
+    from concurrent.futures import ThreadPoolExecutor
+
+    library.install("test", "right")
+
+    def save(_):
+        try:
+            return library.save_pose("test", "right", "Grip", {"bend": 0.75}, "a" * 40)
+        except ValueError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        result = list(executor.map(save, range(2)))
+    assert sum(pose is not None for pose in result) == 1
+    assert len(library.poses("test", "right")) == 1
+
+
+def test_pose_maintenance_api(library, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from skynet_app import hands_api
+
+    library.install("test", "right")
+    monkeypatch.setattr(hands_api, "library", library)
+    app = FastAPI()
+    app.include_router(hands_api.router)
+    client = TestClient(app)
+    payload = {"name": "Grip", "joints": {"bend": 0.75}, "revision": "a" * 40}
+    response = client.post("/api/hands/test/right/poses", json=payload)
+    assert response.status_code == 201
+    pose = response.json()
+    route = f"/api/hands/test/right/poses/{pose['id']}"
+    assert client.post("/api/hands/test/right/poses", json=payload).status_code == 400
+    renamed = client.patch(route, json={"name": "Renamed"})
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "Renamed"
+    assert renamed.json()["joints"] == pose["joints"]
+    assert client.patch(route, json={"name": "   "}).status_code == 400
+    assert client.delete(route).json() == {"deleted": pose["id"]}
+    assert client.get("/api/hands/test/right/poses").json() == {"poses": []}

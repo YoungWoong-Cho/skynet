@@ -554,6 +554,15 @@ class SweepSpec(CanonicalModel):
     max_parallel: int = Field(default=2, ge=1, le=256)
     confirmation_threshold: int = Field(default=20, ge=1)
 
+    @model_serializer(mode="wrap")
+    def serialize_seed_intent(self, handler):
+        payload = handler(self)
+        # Preserve omission across saved-spec round trips: an automatic baseline
+        # seed must not become an explicit unsupported adapter override.
+        if "seeds" not in self.model_fields_set:
+            payload.pop("seeds", None)
+        return payload
+
     @field_validator("axes")
     @classmethod
     def validate_axes(cls, value: dict[str, list[Any]]) -> dict[str, list[Any]]:
@@ -633,11 +642,11 @@ class TrackingSpec(CanonicalModel):
 
 
 class EvaluationSpec(CanonicalModel):
-    adapter: Literal["libero", "mujoco", "robosuite", "isaac_sim", "isaac_lab", "isaac_gym"]
+    adapter: str = Field(min_length=1)
     suite: str
     suite_version: str
     tasks: list[str] = Field(default_factory=list)
-    profile: Literal["smoke", "standard", "report"] = "standard"
+    profile: str = Field(default="standard", min_length=1)
     episodes_per_task: int | None = Field(default=None, ge=1, le=10000)
     seeds: list[int] | None = None
     horizon: int | None = Field(default=None, ge=1)
@@ -655,7 +664,7 @@ class EvaluationSpec(CanonicalModel):
     def apply_profile_defaults(self) -> "EvaluationSpec":
         profile_episodes = {"smoke": 2, "standard": 20, "report": 50}
         if self.episodes_per_task is None:
-            self.episodes_per_task = profile_episodes[self.profile]
+            self.episodes_per_task = profile_episodes.get(self.profile, profile_episodes["standard"])
         if self.seeds is None:
             self.seeds = [41, 42, 43] if self.profile == "report" else [42]
         if len(set(self.seeds)) != len(self.seeds):
@@ -776,7 +785,7 @@ class ExperimentSpec(CanonicalModel):
     def validate_reproducibility(self) -> "ExperimentSpec":
         if self.reproducibility.mode == "exact-input" and not FULL_COMMIT_RE.fullmatch(self.source.revision):
             raise ValueError("exact-input reproducibility requires a full 40-character Git commit")
-        if self.train.checkpoint.save_before_timeout_seconds >= parse_slurm_duration(self.resources.time_limit):
+        if self.train.checkpoint.auto_resume and self.train.checkpoint.save_before_timeout_seconds >= parse_slurm_duration(self.resources.time_limit):
             raise ValueError("checkpoint warning must occur before the job time limit")
         return self
 
@@ -834,7 +843,9 @@ def expand_sweep(spec: ExperimentSpec) -> list[ResolvedVariant]:
     variants: list[ResolvedVariant] = []
     index = 0
     for assignment in _sweep_assignments(spec.sweep):
-        seeds = [assignment.get("train.seed")] if "train.seed" in assignment else spec.sweep.seeds
+        explicit_seed = "train.seed" in assignment or "seeds" in spec.sweep.model_fields_set
+        seeds = ([assignment["train.seed"]] if "train.seed" in assignment
+                 else spec.sweep.seeds if explicit_seed else [spec.train.seed])
         for seed in seeds:
             parameters = copy.deepcopy(assignment)
             parameters["train.seed"] = seed
@@ -845,7 +856,7 @@ def expand_sweep(spec: ExperimentSpec) -> list[ResolvedVariant]:
                 payload.setdefault("intent", {}).setdefault("explicit_parameters", [])
             )
             explicit_parameters.update(
-                path for path in parameters if path.startswith("train.")
+                path for path in parameters if path.startswith("train.") and (path != "train.seed" or explicit_seed)
             )
             payload["intent"]["explicit_parameters"] = sorted(explicit_parameters)
             payload["sweep"] = SweepSpec().model_dump(mode="json")

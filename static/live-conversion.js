@@ -3,6 +3,9 @@
   const el = (id) => document.getElementById(id);
   let sessions = [],
     preparations = [],
+    preparationState = "loading",
+    preparationKnown = false,
+    preparationError = "",
     signature = "",
     sourceSignature = "";
   const label = (s) => s.profile.task_name || s.profile.task;
@@ -29,7 +32,7 @@
         .toLowerCase()
         .includes(query),
     );
-    const next = JSON.stringify([rows, preparations, query]);
+    const next = JSON.stringify([rows, preparations, preparationState, preparationError, query]);
     if (next === signature) return;
     signature = next;
     const count = saved.reduce(
@@ -61,6 +64,14 @@
         `${new Date(session.created_at).toLocaleString()} · ${session.id.slice(0, 8)}`,
         "secondary",
       );
+      const archive = session.archive;
+      const storage = archive?.state === "READY" ? "Stored on sky2"
+        : ["VERIFIED", "CLEANUP_PENDING"].includes(archive?.state) ? "On sky2 · cleanup pending"
+        : archive?.state === "COPYING" ? "Moving to sky2…"
+        : archive?.state === "FAILED" ? "Transfer needs attention"
+        : "On collection workstation";
+      text(name, "span", storage, "secondary");
+      if (archive?.error) text(name, "span", archive.error, "secondary");
       text(
         row,
         "td",
@@ -74,14 +85,22 @@
         ),
       );
       const ready = jobs.filter((j) => j.state === "READY");
+      const formats = new Set(ready.map(j => j.format)).size;
       const active = jobs.find((j) => !["READY", "FAILED", "DELETE_FAILED"].includes(j.state));
       const cell = text(row, "td", "", "wrap-cell");
       const images = Object.keys(session.recording_images || {}).length;
-      const datasetLabel = active ? active.detail
-        : ready.length ? `${ready.length} prepared format${ready.length === 1 ? "" : "s"}`
+      const knownLabel = active ? active.detail
+        : ready.length ? `${formats} prepared format${formats === 1 ? "" : "s"}`
         : images === session.recordings.length ? "Images ready" : "Original recordings saved";
+      const datasetLabel = preparationState === "unavailable" ? "Preparation status unavailable"
+        : preparationState === "loading" && !preparationKnown ? "Checking preparation status…" : knownLabel;
       cell.innerHTML = statusPill(datasetLabel);
-      if (active) cell.firstElementChild.className = `state-pill ${stateClass(active.stage || "PENDING")}`;
+      if (preparationState === "unavailable") {
+        cell.firstElementChild.className = "state-pill is-failed";
+        text(cell, "span", preparationError || "Prepared formats could not be checked.", "secondary");
+        if (jobs.length) text(cell, "span", "Last known: " + knownLabel, "secondary");
+      }
+      if (active && preparationState === "ready") cell.firstElementChild.className = `state-pill ${stateClass(active.stage || "PENDING")}`;
       if (jobs.some((j) => ["FAILED", "DELETE_FAILED"].includes(j.state)))
         cell.insertAdjacentHTML("beforeend", statusPill("Preparation needs attention"));
       const actions = text(row, "td", "", "row-actions");
@@ -94,6 +113,10 @@
       if (jobs[0]?.resource_id)
         button(actions, "View dataset", () =>
           window.openPreparedDataset(jobs[0].resource_id),
+        );
+      if (preparationState === "unavailable")
+        button(actions, "Retry preparation status", () =>
+          document.dispatchEvent(new CustomEvent("dataset-preparation-refresh-requested")),
         );
     }
   }
@@ -120,6 +143,12 @@
     el("simulation-recordings-error").textContent =
       "Could not refresh recordings: " + message;
   };
+  document.addEventListener("dataset-preparation-status", (event) => {
+    preparationState = event.detail.state;
+    if (preparationState === "ready") preparationKnown = true;
+    preparationError = event.detail.error || "";
+    render();
+  });
   document.addEventListener("dataset-preparation-changed", (event) => {
     preparations = event.detail;
     render();

@@ -55,7 +55,18 @@ def adapter_io_contract(slug):
             observation_selector="native.config.observation_mode")
     if slug == "xpolicylab-act":
         return recorded_joint_io(action_steps=50, image_size=(480, 640), action_paths=("spec.native.config.action_steps",))
-    if slug in {"egoverse-act", "egoverse-hpt-joints", "egoverse-dp-joints"}:
+    if slug in {"egoverse-hpt", "egoverse-pi"}:
+        from .adapters.egoverse_models import ALGORITHMS
+
+        contract = ModelIOContract(note="Input and output follow the selected native model preset.")
+        for model in ALGORITHMS[slug.removeprefix("egoverse-")][1]:
+            preset = adapter_io_contract("egoverse-" + model.replace("_", "-").replace(".", ""))
+            for direction in ("inputs", "outputs"):
+                for stream in getattr(preset, direction):
+                    stream.when["native.config.model_preset"] = [model]
+                    getattr(contract, direction).append(stream)
+        return contract
+    if slug in {"egoverse-act", "egoverse-hpt-joints"}:
         is_act = slug == "egoverse-act"
         return recorded_joint_io(
             history_paths=() if is_act else ("spec.native.config.model_overrides.robomimic_model.trunk.observation_horizon",),
@@ -128,7 +139,10 @@ def resolve_model_io(manifest, spec=None, *, legacy=False):
     if not contract and legacy:
         # Older receipts predate I/O declarations. Only infer our recorded-joint
         # integrations; use the receipt's own settings and dataset, not the registry.
-        if manifest.get("slug") in {"xpolicylab-dp", "xpolicylab-act", "egoverse-act", "egoverse-hpt-joints", "egoverse-dp-joints"}:
+        if manifest.get("slug") == "egoverse-dp-joints":
+            # This retired adapter is still describable in immutable history.
+            contract = adapter_io_contract("egoverse-hpt-joints")
+        elif manifest.get("slug") in {"xpolicylab-dp", "xpolicylab-act", "egoverse-act", "egoverse-hpt-joints"}:
             contract = adapter_io_contract(manifest["slug"])
     if isinstance(contract, ModelIOContract):
         contract = contract.model_dump(mode="json")
