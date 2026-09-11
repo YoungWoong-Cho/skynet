@@ -395,3 +395,23 @@ def test_original_recording_locations_are_actual_directories(setup):
     assert service.recording_locations({}) == []
     session["recordings"] = ["../../outside.pkl"]
     assert service.recording_locations(session) == []
+
+
+def test_shared_preparation_redacts_other_workspace_experiment_details(setup, monkeypatch):
+    from skynet_app.workspaces import WorkspaceDirectory
+    service, session, _ = setup
+    created = service.create(session['id'], 'act', 'Shared preparation')
+    job = service.get(created['id'])
+    job['state'] = 'READY'
+    monkeypatch.setattr(service, 'list', lambda: [dict(job)])
+    monkeypatch.setattr(service.database, 'get_data_resource_version', lambda _: {'manifest_sha256': 'a'*64, 'locations': []})
+    monkeypatch.setattr(service.database, 'data_version_usage', lambda _: [
+        {'experiment_id': 'private-experiment', 'name': 'Private name', 'run_id': 'private-run', 'revision_number': 1}
+    ])
+    workspace, _ = WorkspaceDirectory(service.database).open('teammate@example.com')
+    scoped = Database(service.database.path, workspace_id=workspace['id'])
+    result = service.options(workspace_database=scoped)
+    assert result['exports'][0]['usage'] == [{'other_workspace': True}]
+    assert 'Private name' not in json.dumps(result)
+    # Internal deletion checks retain the actual dependency information.
+    assert service.database.data_version_usage('a'*64)[0]['experiment_id'] == 'private-experiment'

@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
-from fastapi import APIRouter, Body, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
@@ -59,6 +59,8 @@ from .credential_store import (
     KeyringCredentialStore,
 )
 from .database import Database, canonical_json, content_sha256, utc_now
+from .workspace_schema import visible_sql
+from .workspaces import WorkspaceServices, require_workspace_records
 from .experiments import (
     CanonicalResult,
     EvaluationSpec,
@@ -1437,6 +1439,8 @@ class PipelineService:
         self._seed_registries()
 
     def _seed_registries(self) -> None:
+        if self.database.workspace_id is not None:
+            return
         for manifest in builtin_adapter_manifests():
             self.database.upsert_seed_adapter(
                 seed_key=manifest.slug,
@@ -5096,15 +5100,17 @@ class PipelineService:
             (parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), parsed.query, "")
         )
 
-    @staticmethod
-    def _environment_credentials(provider: str) -> dict[str, str]:
+    def _tracking_environment(self):
+        return os.environ if self.database.workspace_id in (None, "legacy") else {}
+
+    def _environment_credentials(self, provider: str) -> dict[str, str]:
         if provider == "wandb":
-            values = {"api_key": os.environ.get("WANDB_API_KEY")}
+            values = {"api_key": self._tracking_environment().get("WANDB_API_KEY")}
         else:
             values = {
-                "token": os.environ.get("MLFLOW_TRACKING_TOKEN"),
-                "username": os.environ.get("MLFLOW_TRACKING_USERNAME"),
-                "password": os.environ.get("MLFLOW_TRACKING_PASSWORD"),
+                "token": self._tracking_environment().get("MLFLOW_TRACKING_TOKEN"),
+                "username": self._tracking_environment().get("MLFLOW_TRACKING_USERNAME"),
+                "password": self._tracking_environment().get("MLFLOW_TRACKING_PASSWORD"),
             }
         return {key: value for key, value in values.items() if value}
 
@@ -5118,13 +5124,12 @@ class PipelineService:
             return "basic"
         return "none"
 
-    @classmethod
-    def _environment_credentials_for_endpoint(cls, provider: str, endpoint: str | None) -> dict[str, str]:
-        settings = WandBSettings.from_env() if provider == "wandb" else TrackingSettings.from_env()
+    def _environment_credentials_for_endpoint(self, provider: str, endpoint: str | None) -> dict[str, str]:
+        settings = WandBSettings.from_env(self._tracking_environment()) if provider == "wandb" else TrackingSettings.from_env(self._tracking_environment())
         expected = settings.base_url if provider == "wandb" else settings.tracking_uri
         if not expected or not endpoint or endpoint.rstrip("/") != expected.rstrip("/"):
             return {}
-        return cls._credentials_for_mode(provider, cls._environment_credentials(provider))
+        return self._credentials_for_mode(provider, self._environment_credentials(provider))
 
     @classmethod
     def _credentials_for_mode(cls, provider: str, credentials: Mapping[str, str]) -> dict[str, str]:
@@ -5297,7 +5302,7 @@ class PipelineService:
     def _mlflow_settings(self, provider: Any | None = None) -> TrackingSettings:
         with self._tracking_connection_lock:
             self._ensure_tracking_credentials_restored()
-            settings = TrackingSettings.from_env()
+            settings = TrackingSettings.from_env(self._tracking_environment())
             connection = self.database.get_tracking_connection("mlflow") or {}
             requested_uri = self._tracking_provider_value(provider, "tracking_uri") if provider else None
             trusted_uri = connection.get("endpoint") or settings.tracking_uri
@@ -5323,7 +5328,7 @@ class PipelineService:
     def _wandb_settings(self, provider: Any | None = None) -> WandBSettings:
         with self._tracking_connection_lock:
             self._ensure_tracking_credentials_restored()
-            settings = WandBSettings.from_env()
+            settings = WandBSettings.from_env(self._tracking_environment())
             connection = self.database.get_tracking_connection("wandb") or {}
             requested_url = (
                 self._tracking_provider_value(provider, "base_url") if provider else None
@@ -5418,7 +5423,7 @@ class PipelineService:
             if not key:
                 raise ValueError("W&B API key is required")
             settings = replace(
-                WandBSettings.from_env(),
+                WandBSettings.from_env(self._tracking_environment()),
                 base_url=base_url,
                 api_key=key,
                 entity=request.entity or None,
@@ -5426,7 +5431,7 @@ class PipelineService:
             )
             try:
                 bridge = WandBBridge(
-                    LOCAL_CAPSULE_ROOT / ".tracking-connections" / "wandb", settings
+                    LOCAL_CAPSULE_ROOT / ".tracking-connections" / (self.database.workspace_id or "legacy") / "wandb", settings
                 )
                 identity = bridge.validate_connection()
                 entity = request.entity or str(identity["entity"])
@@ -5485,7 +5490,7 @@ class PipelineService:
             username = credentials.get("username")
             password = credentials.get("password")
             settings = replace(
-                TrackingSettings.from_env(),
+                TrackingSettings.from_env(self._tracking_environment()),
                 tracking_uri=tracking_uri,
                 token=token,
                 username=username,
@@ -5494,7 +5499,7 @@ class PipelineService:
             )
             try:
                 MLflowBridge(
-                    LOCAL_CAPSULE_ROOT / ".tracking-connections" / "mlflow", settings
+                    LOCAL_CAPSULE_ROOT / ".tracking-connections" / (self.database.workspace_id or "legacy") / "mlflow", settings
                 ).validate_connection()
             except Exception as error:
                 safe_error = str(sanitize(str(error), secrets=(token, password)))
@@ -5517,13 +5522,13 @@ class PipelineService:
         if provider == "wandb":
             settings, tested_revision = self._tracking_connection_snapshot("wandb")
             bridge: Any = WandBBridge(
-                LOCAL_CAPSULE_ROOT / ".tracking-connections" / "wandb", settings
+                LOCAL_CAPSULE_ROOT / ".tracking-connections" / (self.database.workspace_id or "legacy") / "wandb", settings
             )
             secrets = (settings.api_key,)
         elif provider == "mlflow":
             settings, tested_revision = self._tracking_connection_snapshot("mlflow")
             bridge = MLflowBridge(
-                LOCAL_CAPSULE_ROOT / ".tracking-connections" / "mlflow", settings
+                LOCAL_CAPSULE_ROOT / ".tracking-connections" / (self.database.workspace_id or "legacy") / "mlflow", settings
             )
             secrets = (settings.token, settings.password)
         else:
@@ -6698,10 +6703,10 @@ class PipelineService:
     def _repair_missing_attempt_log_paths(self) -> int:
         with self.database.connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT id, gateway, slurm_job_id, sbatch_path, stdout_path, stderr_path
                 FROM job_attempts
-                WHERE slurm_job_id IS NOT NULL
+                WHERE {visible_sql("job_attempts")} AND slurm_job_id IS NOT NULL
                   AND sbatch_path IS NOT NULL
                   AND (stdout_path IS NULL OR stderr_path IS NULL)
                 """
@@ -6922,7 +6927,7 @@ class PipelineService:
                 unknown_rows = [
                     dict(row)
                     for row in connection.execute(
-                    """
+                    f"""
                     SELECT a.id, a.gateway, a.stdout_path, a.stderr_path,
                            s.id AS stage_id, s.run_id, s.stage_type,
                            s.status AS stage_status,
@@ -6935,7 +6940,7 @@ class PipelineService:
                     JOIN variants v ON v.id = r.variant_id
                     JOIN experiment_revisions er ON er.id = v.experiment_revision_id
                     LEFT JOIN evaluations e ON e.stage_id = s.id
-                    WHERE a.status IN ('SUBMITTING', 'CANCELLING')
+                    WHERE {visible_sql('job_attempts', 'a')} AND a.status IN ('SUBMITTING', 'CANCELLING')
                       AND a.slurm_job_id IS NULL
                       AND a.slurm_reason LIKE 'Submission outcome unknown%'
                     """
@@ -6956,14 +6961,15 @@ class PipelineService:
                 recovered_submissions += 1
             self._repair_missing_attempt_log_paths()
             try:
-                self.reconcile_data_imports()
+                if self.database.workspace_id in (None, "legacy"):
+                    self.reconcile_data_imports()
             except Exception:
                 pass
             with self.database.connection() as connection:
                 rows = [
                     dict(row)
                     for row in connection.execute(
-                    """
+                    f"""
                     SELECT a.*, s.run_id, s.stage_type, s.auto_resume, s.max_attempts,
                            s.resolved_config_json, s.status AS stage_status,
                            er.experiment_id,
@@ -6977,7 +6983,7 @@ class PipelineService:
                     JOIN runs r ON r.id = s.run_id
                     JOIN variants v ON v.id = r.variant_id
                     JOIN experiment_revisions er ON er.id = v.experiment_revision_id
-                    WHERE a.slurm_job_id IS NOT NULL
+                    WHERE {visible_sql("job_attempts", "a")} AND a.slurm_job_id IS NOT NULL
                       AND (
                           a.status IN ('SUBMITTED','PENDING','RUNNING','REQUEUED','CANCELLING')
                           OR (
@@ -9477,8 +9483,8 @@ class PipelineService:
         return evaluation
 
 
-service = PipelineService()
-router = APIRouter(prefix="/api")
+service = WorkspaceServices(PipelineService())
+router = APIRouter(prefix="/api", dependencies=[Depends(require_workspace_records)])
 
 
 def _http_error(error: Exception) -> HTTPException:

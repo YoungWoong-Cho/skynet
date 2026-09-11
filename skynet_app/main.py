@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .capture_processing.api import router as capture_processing_router
 from .cluster_config import CLUSTER
+from .workspaces import WorkspaceMiddleware, session_router
 from .collection_api import router as collection_router
 from .local_capture_api import router as local_capture_router
 from .hands_api import router as hands_router
@@ -484,6 +485,8 @@ def index() -> HTMLResponse:
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
+app.add_middleware(WorkspaceMiddleware, services=pipeline_service)
+app.include_router(session_router(pipeline_service.directory))
 app.include_router(pipeline_router)
 app.include_router(collection_router)
 app.include_router(local_capture_router)

@@ -309,7 +309,7 @@ class PolicyExportService(ClusterPolicyPreparation):
             directories.add(str(PurePosixPath(root) / path.parent) if archived else str(PurePosixPath(root) / "output" / path.parent))
         return [dict(kind="remote", host="sky2" if archived else session.get("gateway") or session.get("profile", {}).get("gateway") or "Collection host", path=path) for path in sorted(directories)]
 
-    def options(self):
+    def options(self, *, workspace_database=None):
         sessions = []
         for session in self.live.list():
             resource = None
@@ -339,7 +339,7 @@ class PolicyExportService(ClusterPolicyPreparation):
                         locations=self.recording_locations(session),
                     )
                 )
-        policies = catalog(self.database)
+        policies = catalog(workspace_database or self.database)
         jobs = self.list()
         for job in jobs:
             if job["state"] not in {"READY", "FAILED", "DELETE_FAILED"}:
@@ -356,6 +356,11 @@ class PolicyExportService(ClusterPolicyPreparation):
                 if version
                 else []
             )
+            if workspace_database is not None:
+                own_usage = [item for item in job["usage"] if workspace_database.owns("experiments", item["experiment_id"])]
+                if len(own_usage) != len(job["usage"]):
+                    own_usage.append({"other_workspace": True})
+                job["usage"] = own_usage
             if job.get("stage") == "CONVERTING":
                 log = self.root / job["id"] / "export.log"
                 if log.exists():

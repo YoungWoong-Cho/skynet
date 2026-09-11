@@ -1,12 +1,12 @@
 # Skynet Training and Evaluation Console
 
-Skynet is a local, single-user web application for inspecting the live Slurm cluster and managing reproducible training and evaluation workflows. It provides GPU/account usage, node and queue views, a versioned Adapter Registry, exact-commit repository inspection, canonical experiment specifications, deterministic `sbatch` generation, submission and retry history, evaluation progress, logs, artifacts, and optional W&B and MLflow synchronization.
+Skynet is a web application for a trusted team for inspecting the live Slurm cluster and managing reproducible training and evaluation workflows. It provides GPU/account usage, node and queue views, a versioned Adapter Registry, exact-commit repository inspection, canonical experiment specifications, deterministic `sbatch` generation, submission and retry history, evaluation progress, logs, artifacts, and optional W&B and MLflow synchronization.
 
 The application talks to the cluster through the `sky1` and `sky2` SSH login aliases. It does not install training repositories or simulator runtimes for you.
 
 ## Safety boundary
 
-Run the service only on a trusted workstation and bind it to loopback. The application can submit and cancel Slurm jobs and execute adapter-defined workloads as your cluster user. Adapter manifests use structured argv rather than shell command strings, but a manifest can still select any executable available to that user. Registry authors are therefore trusted operators. The application does not currently provide authentication, user isolation, authorization, or an execution sandbox.
+Run the service only on a trusted workstation and bind it to loopback. The application can submit and cancel Slurm jobs and execute adapter-defined workloads as your cluster user. Adapter manifests use structured argv rather than shell command strings, but a manifest can still select any executable available to that user. Registry authors are therefore trusted operators. Email workspaces separate saved experiment configurations, custom training adapters, repository selections, tracking credentials, training runs and evaluations. Emails are deliberately unverified: anyone who enters an email can open its workspace. This is workspace organization, not identity authentication or a cluster execution sandbox. All workloads still use the configured cluster SSH account.
 
 ```bash
 uv run uvicorn skynet_app.main:app --host 127.0.0.1 --port 8080
@@ -52,7 +52,7 @@ export SKYNET_DATABASE_PATH="$PWD/data/skynet.db"
 uv run uvicorn skynet_app.main:app --reload --reload-dir skynet_app --reload-dir ops --host 127.0.0.1 --port 8080
 ```
 
-Open `http://127.0.0.1:8080`. The generated API documentation is available at `http://127.0.0.1:8080/api/docs`.
+Open `http://127.0.0.1:8080` and enter your email. No password or email verification is required. See [email workspaces](docs/email-workspaces.md) for migration and shared-data behavior. The generated API documentation is available at `http://127.0.0.1:8080/api/docs`.
 
 Run the test suite:
 

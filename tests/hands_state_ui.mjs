@@ -35,7 +35,8 @@ w.fetch = async (url, options={}) => {
 w.TestHandsViewer=class {clear(){}render(){}fit(){}async load(){modelLoads++;return true;}setJoints(values){snapshot={...values};}};
 w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
 w.HTMLDialogElement.prototype.close=function(value=''){if(this.open){this.returnValue=value;this.open=false;this.dispatchEvent(new w.Event('close'));}};
-const script=w.document.querySelector('script[src*="hands-ui"]');
+const script=w.document.createElement("script");
+script.src=w.document.querySelector('script[data-workspace-src*="hands-ui"]').dataset.workspaceSrc;
 Object.defineProperty(w.document,'currentScript',{value:script});
 w.eval(await readFile(new URL('../static/dialogs.js',import.meta.url),'utf8'));
 w.eval((await readFile(new URL('../static/hands-ui.js',import.meta.url),'utf8')).replace('await import("/static/hands-viewer.js" + version)','({ HandsViewer: window.TestHandsViewer })'));

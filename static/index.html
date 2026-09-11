@@ -6,16 +6,32 @@
     <meta name="description" content="Skynet Slurm experiment and evaluation console.">
     <title>Skynet / Experiment Console</title>
     <link rel="stylesheet" href="/static/styles.css?v=experiment-tabs-20260909-data-refinement">
-    <script src="/static/dialogs.js?v=20260909-data" defer></script>
-    <script src="/static/workspace-navigation.js?v=20260909-experiment-tabs" defer></script>
-    <script src="/static/app.js?v=20260909-experiment-tabs" defer></script>
-    <script src="/static/hands-ui.js?v=20260907-imported-hands-2" defer></script>
-    <script src="/static/live-review.js?v=20260909-review-only" defer></script>
-    <script src="/static/live-conversion.js?v=20260909-data-refinement" defer></script>
-    <script src="/static/policy-exports.js?v=20260909-policy-formats" defer></script>
-    <script src="/static/live-xr.js?v=20260909-data-refinement" defer></script>
+    <script type="application/skynet-script" data-workspace-src="/static/dialogs.js?v=20260909-data" defer></script>
+    <script type="application/skynet-script" data-workspace-src="/static/workspace-navigation.js?v=20260909-experiment-tabs" defer></script>
+    <script type="application/skynet-script" data-workspace-src="/static/app.js?v=20260909-experiment-tabs" defer></script>
+    <script type="application/skynet-script" data-workspace-src="/static/hands-ui.js?v=20260907-imported-hands-2" defer></script>
+    <script type="application/skynet-script" data-workspace-src="/static/live-review.js?v=20260909-review-only" defer></script>
+    <script type="application/skynet-script" data-workspace-src="/static/live-conversion.js?v=20260909-data-refinement" defer></script>
+    <script type="application/skynet-script" data-workspace-src="/static/policy-exports.js?v=20260909-policy-formats" defer></script>
+    <script type="application/skynet-script" data-workspace-src="/static/live-xr.js?v=20260909-data-refinement" defer></script>
+    <script src="/static/email-workspace.js" defer></script>
   </head>
   <body>
+    <section id="email-workspace-gate" aria-labelledby="email-workspace-title">
+      <div class="email-workspace-card">
+        <span class="brand-mark">S/</span>
+        <h1 id="email-workspace-title">Your Skynet workspace</h1>
+        <p>Enter your email to open your configurations, training runs and evaluations.</p>
+        <form id="email-workspace-form">
+          <div class="field"><label for="workspace-email">Email</label>
+            <input id="workspace-email" type="email" autocomplete="email" autocapitalize="none" spellcheck="false" maxlength="254" required placeholder="you@example.com"></div>
+          <button class="button button-accent" type="submit" disabled>Open workspace</button>
+          <p id="workspace-message" role="status" aria-live="polite"></p>
+        </form>
+        <p class="secondary">For your trusted team. Anyone entering this email can open its workspace.</p>
+      </div>
+    </section>
+    <div id="email-workspace-content" hidden>
     <header class="topbar">
       <a class="brand" href="#cluster" data-tab-target="cluster" aria-label="Skynet console home">
         <span class="brand-mark">S/</span>
@@ -43,6 +59,11 @@
       </div>
     </header>
 
+    <div class="workspace-account-bar">
+      <span>Workspace: <strong id="workspace-current-email"></strong></span>
+      <button id="workspace-sign-out" class="button button-outline" type="button">Switch email / sign out</button>
+      <span id="workspace-sign-out-error" role="status"></span>
+    </div>
     <main>
       <section id="cluster" class="tab-panel" data-tab-panel="cluster" role="tabpanel">
         <div class="section-shell workspace-page">
@@ -1807,7 +1828,7 @@
 
     <footer>
       <span>SKYNET / SLURM EXPERIMENT CONSOLE</span>
-      <span>LOCAL OPERATOR TOOL / NO AUTH LAYER</span>
+      <span>TRUSTED TEAM / EMAIL WORKSPACES</span>
     </footer>
   <datalist id="data-format-suggestions"></datalist><datalist id="data-role-suggestions"><option value="training_data"></option><option value="evaluation_data"></option><option value="simulation_assets"></option></datalist>
     <dialog id="policy-export-dialog" class="app-dialog" aria-labelledby="policy-export-title">
@@ -1903,5 +1924,6 @@
       </div>
     </section>
   </dialog>
+    </div>
 </body>
 </html>

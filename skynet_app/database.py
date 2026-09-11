@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 from .data_paths import validate_mount_path
+from .workspace_schema import PRIVATE_TABLES, LEGACY_WORKSPACE, migrate_workspaces, visible_sql
 from .training_metrics import is_scalar
 
 
@@ -642,15 +643,24 @@ def content_sha256(value: Any) -> str:
 class Database:
     """Thread-safe SQLite persistence with one connection per operation."""
 
-    def __init__(self, path: str | os.PathLike[str] | None = None) -> None:
+    def __init__(self, path: str | os.PathLike[str] | None = None, *, workspace_id: str | None = None) -> None:
+        self.workspace_id = workspace_id
         configured = path if path is not None else os.environ.get("SKYNET_DATABASE_PATH")
         self.path = Path(configured or DEFAULT_DATABASE_PATH).expanduser().resolve()
         self._write_lock = threading.RLock()
-        self.initialize()
+        if workspace_id is None:
+            self.initialize()
+        else:
+            # Schema upgrades run once through the unscoped coordinator, never
+            # during a login while another workspace is using the database.
+            with self.connection() as connection:
+                if not connection.execute("SELECT 1 FROM workspaces WHERE id=?", (workspace_id,)).fetchone():
+                    raise ValueError("Unknown workspace")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30.0, isolation_level=None)
         connection.row_factory = sqlite3.Row
+        connection.create_function("current_workspace_id", 0, lambda: self.workspace_id)
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 30000")
         return connection
@@ -668,6 +678,7 @@ class Database:
                 self._migrate_adapter_registry(connection)
                 self._migrate_job_attempt_snapshots(connection)
                 self._ensure_execution_immutability_triggers(connection)
+                migrate_workspaces(connection)
             finally:
                 connection.close()
 
@@ -1112,6 +1123,11 @@ class Database:
 
     @staticmethod
     def _insert(connection: sqlite3.Connection, table: str, values: Mapping[str, Any]) -> None:
+        if table in PRIVATE_TABLES:
+            values = dict(values)
+            values["owner_id"] = connection.execute("SELECT current_workspace_id()").fetchone()[0] or LEGACY_WORKSPACE
+            if table == "adapters" and values.get("seed_key"):
+                values["owner_id"] = None
         columns = ", ".join(values)
         placeholders = ", ".join("?" for _ in values)
         connection.execute(
@@ -1123,7 +1139,7 @@ class Database:
     def _row_by_id(
         cls, connection: sqlite3.Connection, table: str, entity_id: str
     ) -> dict[str, Any] | None:
-        return cls._decode(connection.execute(f"SELECT * FROM {table} WHERE id = ?", (entity_id,)).fetchone())
+        return cls._decode(connection.execute(f"SELECT * FROM {table} WHERE id = ? AND {visible_sql(table)}", (entity_id,)).fetchone())
 
     @staticmethod
     def _encode_updates(
@@ -1150,6 +1166,8 @@ class Database:
             if current is None:
                 raise KeyError(f"{table} entity not found: {entity_id}")
             return current
+        if cls._row_by_id(connection, table, entity_id) is None:
+            raise KeyError(f"{table} entity not found: {entity_id}")
         assignments = ", ".join(f"{key} = ?" for key in fields)
         cursor = connection.execute(
             f"UPDATE {table} SET {assignments} WHERE id = ?",
@@ -1161,6 +1179,28 @@ class Database:
         assert updated is not None
         return updated
 
+    def owns(self, table: str, identifier: str, *, writable: bool = False) -> bool:
+        if table not in PRIVATE_TABLES:
+            raise ValueError("Unknown personal record type")
+        with self.connection() as connection:
+            key = "(id = ? OR adapter_key = ?)" if table == "adapters" else "id = ?"
+            params = (identifier, identifier) if table == "adapters" else (identifier,)
+            row = connection.execute(f"SELECT owner_id FROM {table} WHERE {key} AND {visible_sql(table)} LIMIT 1", params).fetchone()
+        return row is not None and (not writable or self.workspace_id is None or row["owner_id"] == self.workspace_id)
+
+    def _visible_ids(self, table: str, identifiers: list[str]) -> list[str]:
+        if self.workspace_id is None or not identifiers:
+            return identifiers
+        allowed = set()
+        with self.connection() as connection:
+            for start in range(0, len(identifiers), 400):
+                batch = identifiers[start:start + 400]
+                placeholders = ",".join("?" for _ in batch)
+                allowed.update(row[0] for row in connection.execute(
+                    f"SELECT id FROM {table} WHERE id IN ({placeholders}) AND {visible_sql(table)}", batch
+                ))
+        return [identifier for identifier in identifiers if identifier in allowed]
+
     def create_project(self, name: str, description: str = "") -> dict[str, Any]:
         values = {"id": new_id(), "name": name, "description": description, "created_at": utc_now(), "archived_at": None}
         with self.transaction() as connection:
@@ -1168,7 +1208,7 @@ class Database:
         return dict(values)
 
     def list_projects(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
-        where = "" if include_archived else "WHERE archived_at IS NULL"
+        where = f"WHERE {visible_sql('projects')}" + ("" if include_archived else " AND archived_at IS NULL")
         with self.connection() as connection:
             return self._decode_many(connection.execute(f"SELECT * FROM projects {where} ORDER BY name").fetchall())
 
@@ -1221,18 +1261,18 @@ class Database:
         with self.transaction() as connection:
             connection.execute(
                 """
-                INSERT INTO tracking_connections(provider, endpoint, workspace, config_json, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(provider) DO UPDATE SET
+                INSERT INTO tracking_connections(owner_id, provider, endpoint, workspace, config_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner_id, provider) DO UPDATE SET
                     endpoint = excluded.endpoint,
                     workspace = excluded.workspace,
                     config_json = excluded.config_json,
                     updated_at = excluded.updated_at
                 """,
-                (provider, endpoint, workspace, canonical_json(config or {}), now),
+                (self.workspace_id or LEGACY_WORKSPACE, provider, endpoint, workspace, canonical_json(config or {}), now),
             )
             result = self._decode(connection.execute(
-                "SELECT * FROM tracking_connections WHERE provider = ?", (provider,)
+                "SELECT * FROM tracking_connections WHERE owner_id = ? AND provider = ?", (self.workspace_id or LEGACY_WORKSPACE, provider)
             ).fetchone())
         assert result is not None
         return result
@@ -1240,12 +1280,12 @@ class Database:
     def get_tracking_connection(self, provider: str) -> dict[str, Any] | None:
         with self.connection() as connection:
             return self._decode(connection.execute(
-                "SELECT * FROM tracking_connections WHERE provider = ?", (provider,)
+                "SELECT * FROM tracking_connections WHERE owner_id = ? AND provider = ?", (self.workspace_id or LEGACY_WORKSPACE, provider)
             ).fetchone())
 
     def delete_tracking_connection(self, provider: str) -> None:
         with self.transaction() as connection:
-            connection.execute("DELETE FROM tracking_connections WHERE provider = ?", (provider,))
+            connection.execute("DELETE FROM tracking_connections WHERE owner_id = ? AND provider = ?", (self.workspace_id or LEGACY_WORKSPACE, provider))
 
     def upsert_tracking_binding(
         self,
@@ -1263,6 +1303,9 @@ class Database:
             raise ValueError(f"unsupported tracking provider: {provider}")
         if scope_type not in {"experiment", "run"}:
             raise ValueError(f"unsupported tracking scope: {scope_type}")
+        table = "experiments" if scope_type == "experiment" else "runs"
+        if self.workspace_id is not None and not self.owns(table, scope_id):
+            raise KeyError("Record not found in this workspace")
         now = utc_now()
         binding_id = new_id()
         with self.transaction() as connection:
@@ -1298,8 +1341,8 @@ class Database:
     ) -> list[dict[str, Any]]:
         with self.connection() as connection:
             return self._decode_many(connection.execute(
-                """SELECT * FROM tracking_bindings
-                   WHERE scope_type = ? AND scope_id = ? ORDER BY provider""",
+                f"""SELECT * FROM tracking_bindings
+                   WHERE scope_type = ? AND scope_id = ? AND {visible_sql('tracking_bindings')} ORDER BY provider""",
                 (scope_type, scope_id),
             ).fetchall())
 
@@ -1310,7 +1353,7 @@ class Database:
         scope_type: str | None = None,
         statuses: Sequence[str] = (),
     ) -> list[dict[str, Any]]:
-        clauses = ["provider = ?"]
+        clauses = ["provider = ?", visible_sql("tracking_bindings")]
         parameters: list[Any] = [provider]
         if scope_type:
             clauses.append("scope_type = ?")
@@ -1337,6 +1380,8 @@ class Database:
         created_by: str | None = None,
         mlflow_experiment_id: str | None = None,
     ) -> dict[str, Any]:
+        if self.workspace_id is not None and project_id is not None and not self.owns("projects", project_id):
+            raise KeyError("Record not found in this workspace")
         now = utc_now()
         experiment_id = new_id()
         revision_id = new_id()
@@ -1365,6 +1410,8 @@ class Database:
         spec_schema_version: str = "skynet.rl2/v1",
         created_by: str | None = None,
     ) -> dict[str, Any]:
+        if self.workspace_id is not None and experiment_id is not None and not self.owns("experiments", experiment_id):
+            raise KeyError("Record not found in this workspace")
         spec_json = canonical_json(requested_spec)
         with self.transaction() as connection:
             exists = connection.execute("SELECT 1 FROM experiments WHERE id = ?", (experiment_id,)).fetchone()
@@ -1394,6 +1441,10 @@ class Database:
         delete_experiment_if_empty: bool = False,
     ) -> bool:
         """Rollback a draft graph only while it has no execution history."""
+        if self.workspace_id is not None and experiment_id is not None and not self.owns("experiments", experiment_id):
+            raise KeyError("Record not found in this workspace")
+        if self.workspace_id is not None and revision_id is not None and not self.owns("experiment_revisions", revision_id):
+            raise KeyError("Record not found in this workspace")
 
         with self.transaction() as connection:
             revision = connection.execute(
@@ -1459,6 +1510,10 @@ class Database:
         self, experiment_id: str, revision_id: str
     ) -> dict[str, Any] | None:
         """Atomically lock a draft revision before its first submission."""
+        if self.workspace_id is not None and experiment_id is not None and not self.owns("experiments", experiment_id):
+            raise KeyError("Record not found in this workspace")
+        if self.workspace_id is not None and revision_id is not None and not self.owns("experiment_revisions", revision_id):
+            raise KeyError("Record not found in this workspace")
 
         now = utc_now()
         with self.transaction() as connection:
@@ -1475,9 +1530,11 @@ class Database:
             return self._row_by_id(connection, "experiment_revisions", revision_id)
 
     def get_experiment(self, experiment_id: str) -> dict[str, Any] | None:
+        if self.workspace_id is not None and experiment_id is not None and not self.owns("experiments", experiment_id):
+            return None
         with self.connection() as connection:
             experiment = self._decode(connection.execute(
-                "SELECT e.*, p.name AS project_name FROM experiments e LEFT JOIN projects p ON p.id = e.project_id WHERE e.id = ?",
+                f"SELECT e.*, p.name AS project_name FROM experiments e LEFT JOIN projects p ON p.id = e.project_id WHERE e.id = ? AND {visible_sql('experiments', 'e')}",
                 (experiment_id,),
             ).fetchone())
             if experiment is None:
@@ -1493,7 +1550,9 @@ class Database:
     def list_experiments(
         self, *, project_id: str | None = None, status: str | None = None, limit: int = 100, offset: int = 0
     ) -> list[dict[str, Any]]:
-        clauses: list[str] = []
+        if self.workspace_id is not None and project_id is not None and not self.owns("projects", project_id):
+            return []
+        clauses: list[str] = [visible_sql("experiments", "e")]
         parameters: list[Any] = []
         if project_id is not None:
             clauses.append("e.project_id = ?")
@@ -1525,6 +1584,8 @@ class Database:
             return results
 
     def update_experiment(self, experiment_id: str, **fields: Any) -> dict[str, Any]:
+        if self.workspace_id is not None and experiment_id is not None and not self.owns("experiments", experiment_id):
+            raise KeyError("Record not found in this workspace")
         encoded = self._encode_updates(fields, allowed=frozenset({"name", "description", "status", "mlflow_experiment_id", "project_id"}))
         encoded["updated_at"] = utc_now()
         with self.transaction() as connection:
@@ -1539,6 +1600,8 @@ class Database:
         resolved_spec: Mapping[str, Any],
         variant_index: int | None = None,
     ) -> dict[str, Any]:
+        if self.workspace_id is not None and experiment_revision_id is not None and not self.owns("experiment_revisions", experiment_revision_id):
+            raise KeyError("Record not found in this workspace")
         resolved_json = canonical_json(resolved_spec)
         with self.transaction() as connection:
             if variant_index is None:
@@ -1558,6 +1621,8 @@ class Database:
         return result
 
     def list_variants(self, experiment_revision_id: str) -> list[dict[str, Any]]:
+        if self.workspace_id is not None and experiment_revision_id is not None and not self.owns("experiment_revisions", experiment_revision_id):
+            return []
         with self.connection() as connection:
             return self._decode_many(connection.execute(
                 "SELECT * FROM variants WHERE experiment_revision_id = ? ORDER BY variant_index", (experiment_revision_id,)
@@ -1578,6 +1643,10 @@ class Database:
         run_number: int | None = None,
         restarted_from_run_id: str | None = None,
     ) -> dict[str, Any]:
+        if self.workspace_id is not None and variant_id is not None and not self.owns("variants", variant_id):
+            raise KeyError("Record not found in this workspace")
+        if self.workspace_id is not None and restarted_from_run_id is not None and not self.owns("runs", restarted_from_run_id):
+            raise KeyError("Record not found in this workspace")
         now = utc_now()
         with self.transaction() as connection:
             if restarted_from_run_id is not None:
@@ -1629,6 +1698,8 @@ class Database:
         The entire draft graph is committed once across independent service
         instances. Existing execution records always win over rematerialization.
         """
+        if self.workspace_id is not None and revision_id is not None and not self.owns("experiment_revisions", revision_id):
+            raise KeyError("Record not found in this workspace")
         with self.transaction() as connection:
             revision = connection.execute(
                 "SELECT id FROM experiment_revisions WHERE id = ?", (revision_id,)
@@ -1718,7 +1789,13 @@ class Database:
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        clauses: list[str] = []
+        if self.workspace_id is not None and experiment_id is not None and not self.owns("experiments", experiment_id):
+            return []
+        if self.workspace_id is not None and experiment_revision_id is not None and not self.owns("experiment_revisions", experiment_revision_id):
+            return []
+        if self.workspace_id is not None and variant_id is not None and not self.owns("variants", variant_id):
+            return []
+        clauses: list[str] = [visible_sql("runs", "r")]
         parameters: list[Any] = []
         if experiment_id is not None:
             clauses.append("er.experiment_id = ?")
@@ -1751,8 +1828,10 @@ class Database:
             return results
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
+        if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
+            return None
         with self.connection() as connection:
-            run = self._decode(connection.execute("""
+            run = self._decode(connection.execute(f"""
                 SELECT r.*, v.name AS variant_name, v.parameters_json, v.resolved_spec_json,
                        er.experiment_id, er.id AS experiment_revision_id,
                        er.revision_number AS experiment_revision_number,
@@ -1761,7 +1840,7 @@ class Database:
                 JOIN variants v ON v.id = r.variant_id
                 JOIN experiment_revisions er ON er.id = v.experiment_revision_id
                 JOIN experiments e ON e.id = er.experiment_id
-                WHERE r.id = ?
+                WHERE r.id = ? AND {visible_sql('runs', 'r')}
             """, (run_id,)).fetchone())
             if run is None:
                 return None
@@ -1795,6 +1874,7 @@ class Database:
     ) -> dict[str, dict[str, Any]]:
         """Return persisted, provider-neutral training progress evidence in batches."""
         identifiers = list(dict.fromkeys(str(run_id) for run_id in run_ids if run_id))
+        identifiers = self._visible_ids("runs", identifiers)
         evidence = {
             run_id: {
                 "resolved_spec_json": None,
@@ -1854,6 +1934,8 @@ class Database:
         return evidence
 
     def update_run(self, run_id: str, **fields: Any) -> dict[str, Any]:
+        if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
+            raise KeyError("Record not found in this workspace")
         encoded = self._encode_updates(fields, allowed=frozenset({
             "status", "run_directory", "mlflow_run_id",
             "started_at", "completed_at",
@@ -1873,6 +1955,8 @@ class Database:
         max_attempts: int = 1,
         status: str = "PENDING",
     ) -> dict[str, Any]:
+        if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
+            raise KeyError("Record not found in this workspace")
         now = utc_now()
         values = {
             "id": new_id(), "run_id": run_id, "stage_type": stage_type, "name": name,
@@ -1889,12 +1973,16 @@ class Database:
     create_workflow_stage = create_stage
 
     def list_stages(self, run_id: str) -> list[dict[str, Any]]:
+        if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
+            return []
         with self.connection() as connection:
             return self._decode_many(connection.execute(
                 "SELECT * FROM workflow_stages WHERE run_id = ? ORDER BY created_at", (run_id,)
             ).fetchall())
 
     def update_stage(self, stage_id: str, **fields: Any) -> dict[str, Any]:
+        if self.workspace_id is not None and stage_id is not None and not self.owns("workflow_stages", stage_id):
+            raise KeyError("Record not found in this workspace")
         encoded = self._encode_updates(
             fields,
             allowed=frozenset({"status", "resolved_config_json", "auto_resume", "max_attempts", "started_at", "completed_at"}),
@@ -1906,6 +1994,8 @@ class Database:
 
     def claim_stage_for_submission(self, stage_id: str) -> dict[str, Any] | None:
         """Atomically claim one pending stage so concurrent dispatchers cannot submit it twice."""
+        if self.workspace_id is not None and stage_id is not None and not self.owns("workflow_stages", stage_id):
+            raise KeyError("Record not found in this workspace")
 
         now = utc_now()
         with self.transaction() as connection:
@@ -1924,6 +2014,10 @@ class Database:
     def add_stage_dependency(
         self, stage_id: str, depends_on_stage_id: str, dependency_type: str = "AFTER_OK"
     ) -> dict[str, Any]:
+        if self.workspace_id is not None and stage_id is not None and not self.owns("workflow_stages", stage_id):
+            raise KeyError("Record not found in this workspace")
+        if self.workspace_id is not None and depends_on_stage_id is not None and not self.owns("workflow_stages", depends_on_stage_id):
+            raise KeyError("Record not found in this workspace")
         values = {
             "stage_id": stage_id, "depends_on_stage_id": depends_on_stage_id,
             "dependency_type": dependency_type, "created_at": utc_now(),
@@ -1940,6 +2034,8 @@ class Database:
         status: str = "CREATED",
         **fields: Any,
     ) -> dict[str, Any]:
+        if self.workspace_id is not None and stage_id is not None and not self.owns("workflow_stages", stage_id):
+            raise KeyError("Record not found in this workspace")
         allowed = frozenset({
             "slurm_job_id", "slurm_array_job_id", "slurm_array_task_id", "gateway", "account",
             "partition_name", "node_list", "gpu_type", "gpu_count", "cpu_count", "memory_mb",
@@ -1972,6 +2068,10 @@ class Database:
     def list_job_attempts(
         self, *, stage_id: str | None = None, run_id: str | None = None
     ) -> list[dict[str, Any]]:
+        if self.workspace_id is not None and stage_id is not None and not self.owns("workflow_stages", stage_id):
+            return []
+        if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
+            return []
         if stage_id is None and run_id is None:
             raise ValueError("stage_id or run_id is required")
         if stage_id is not None:
@@ -1987,6 +2087,8 @@ class Database:
             return self._decode_many(connection.execute(query, parameters).fetchall())
 
     def update_job_attempt(self, attempt_id: str, **fields: Any) -> dict[str, Any]:
+        if self.workspace_id is not None and attempt_id is not None and not self.owns("job_attempts", attempt_id):
+            raise KeyError("Record not found in this workspace")
         encoded = self._encode_updates(fields, allowed=frozenset({
             "slurm_job_id", "slurm_array_job_id", "slurm_array_task_id", "gateway", "account",
             "partition_name", "node_list", "gpu_type", "gpu_count", "cpu_count", "memory_mb",
@@ -2006,6 +2108,8 @@ class Database:
         **fields: Any,
     ) -> dict[str, Any] | None:
         """Atomically claim a pending stage and create its next attempt."""
+        if self.workspace_id is not None and stage_id is not None and not self.owns("workflow_stages", stage_id):
+            raise KeyError("Record not found in this workspace")
 
         values_extra = self._encode_updates(
             fields,
@@ -2098,6 +2202,8 @@ class Database:
         details: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Atomically persist one idempotent cancellation intent for a workflow stage."""
+        if self.workspace_id is not None and stage_id is not None and not self.owns("workflow_stages", stage_id):
+            raise KeyError("Record not found in this workspace")
 
         cancellable_states = {
             "CREATED", "PENDING", "RETRY_PENDING", "SUBMITTING", "SUBMITTED",
@@ -2257,6 +2363,14 @@ class Database:
         expected_stage_statuses: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """Commit one attempt/stage/run/evaluation transition and its event together."""
+        if self.workspace_id is not None and stage_id is not None and not self.owns("workflow_stages", stage_id):
+            raise KeyError("Record not found in this workspace")
+        if self.workspace_id is not None and attempt_id is not None and not self.owns("job_attempts", attempt_id):
+            raise KeyError("Record not found in this workspace")
+        if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
+            raise KeyError("Record not found in this workspace")
+        if self.workspace_id is not None and evaluation_id is not None and not self.owns("evaluations", evaluation_id):
+            raise KeyError("Record not found in this workspace")
 
         now = utc_now()
         encoded_stage = self._encode_updates(
@@ -2346,6 +2460,8 @@ class Database:
         self, experiment_id: str | None = None
     ) -> dict[str, Any]:
         """Restore false submission state for revisions with no attempt history."""
+        if self.workspace_id is not None and experiment_id is not None and not self.owns("experiments", experiment_id):
+            raise KeyError("Record not found in this workspace")
 
         now = utc_now()
         repaired = 0
@@ -2353,7 +2469,7 @@ class Database:
         experiment_ids: set[str] = set()
         with self.transaction() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT er.id AS revision_id, er.experiment_id,
                        er.submitted_at, e.status AS experiment_status,
                        (
@@ -2365,7 +2481,7 @@ class Database:
                        ) AS latest_revision_id
                 FROM experiment_revisions er
                 JOIN experiments e ON e.id = er.experiment_id
-                WHERE (? IS NULL OR er.experiment_id = ?)
+                WHERE {visible_sql("experiment_revisions", "er")} AND (? IS NULL OR er.experiment_id = ?)
                   AND NOT EXISTS (
                       SELECT 1
                       FROM variants v
@@ -2509,7 +2625,7 @@ class Database:
                 JOIN variants v ON v.id = r.variant_id
                 JOIN experiment_revisions er ON er.id = v.experiment_revision_id
                 LEFT JOIN evaluations e ON e.stage_id = s.id
-                WHERE s.status IN ({placeholders_stage})
+                WHERE {visible_sql("workflow_stages", "s")} AND s.status IN ({placeholders_stage})
                   AND a.status IN ({placeholders_attempt})
                   AND NOT EXISTS (
                       SELECT 1 FROM job_attempts active
@@ -2614,6 +2730,10 @@ class Database:
         Replaying the same receipt preserves its ID and evaluation references.
         A different receipt at an existing path is still an integrity error.
         """
+        if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
+            raise KeyError("Record not found in this workspace")
+        if self.workspace_id is not None and produced_by_attempt_id is not None and not self.owns("job_attempts", produced_by_attempt_id):
+            raise KeyError("Record not found in this workspace")
         values = {
             "id": new_id(), "run_id": run_id, "produced_by_attempt_id": produced_by_attempt_id,
             "training_step": training_step, "checkpoint_type": checkpoint_type, "path": path,
@@ -2660,6 +2780,8 @@ class Database:
     def list_checkpoints(
         self, run_id: str, *, available_only: bool = False, resumable_only: bool = False
     ) -> list[dict[str, Any]]:
+        if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
+            return []
         clauses = ["run_id = ?"]
         parameters: list[Any] = [run_id]
         if available_only:
@@ -2674,6 +2796,8 @@ class Database:
             ).fetchall())
 
     def update_checkpoint(self, checkpoint_id: str, **fields: Any) -> dict[str, Any]:
+        if self.workspace_id is not None and checkpoint_id is not None and not self.owns("checkpoints", checkpoint_id):
+            raise KeyError("Record not found in this workspace")
         encoded = self._encode_updates(
             fields,
             allowed=frozenset({
@@ -2686,6 +2810,8 @@ class Database:
             return self._update(connection, "checkpoints", checkpoint_id, encoded)
 
     def checkpoint_prune_candidates(self, run_id: str, *, keep_last: int = 3) -> list[dict[str, Any]]:
+        if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
+            raise KeyError("Record not found in this workspace")
         if keep_last < 0:
             raise ValueError("keep_last must be non-negative")
         with self.connection() as connection:
@@ -2790,6 +2916,12 @@ class Database:
         status: str = "PENDING",
         result_path: str | None = None,
     ) -> dict[str, Any]:
+        if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
+            raise KeyError("Record not found in this workspace")
+        if self.workspace_id is not None and stage_id is not None and not self.owns("workflow_stages", stage_id):
+            raise KeyError("Record not found in this workspace")
+        if self.workspace_id is not None and checkpoint_id is not None and not self.owns("checkpoints", checkpoint_id):
+            raise KeyError("Record not found in this workspace")
         now = utc_now()
         values = {
             "id": new_id(), "run_id": run_id, "stage_id": stage_id, "checkpoint_id": checkpoint_id,
@@ -2811,7 +2943,9 @@ class Database:
     def list_evaluations(
         self, *, run_id: str | None = None, status: str | None = None
     ) -> list[dict[str, Any]]:
-        clauses: list[str] = []
+        if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
+            return []
+        clauses: list[str] = [visible_sql("evaluations", "")]
         parameters: list[Any] = []
         if run_id is not None:
             clauses.append("run_id = ?")
@@ -2854,6 +2988,8 @@ class Database:
         )
 
     def get_evaluation(self, evaluation_id: str) -> dict[str, Any] | None:
+        if self.workspace_id is not None and evaluation_id is not None and not self.owns("evaluations", evaluation_id):
+            return None
         with self.connection() as connection:
             evaluation = self._row_by_id(connection, "evaluations", evaluation_id)
             if evaluation is None:
@@ -2879,6 +3015,7 @@ class Database:
         identifiers = list(dict.fromkeys(
             str(evaluation_id) for evaluation_id in evaluation_ids if evaluation_id
         ))
+        identifiers = self._visible_ids("evaluations", identifiers)
         evidence: dict[str, dict[str, list[dict[str, Any]]]] = {
             evaluation_id: {"attempts": [], "episodes": []}
             for evaluation_id in identifiers
@@ -2908,6 +3045,8 @@ class Database:
         return evidence
 
     def update_evaluation(self, evaluation_id: str, **fields: Any) -> dict[str, Any]:
+        if self.workspace_id is not None and evaluation_id is not None and not self.owns("evaluations", evaluation_id):
+            raise KeyError("Record not found in this workspace")
         encoded = self._encode_updates(fields, allowed=frozenset({
             "status", "progress_completed", "progress_total", "result_path", "started_at", "completed_at",
             "task_selection_json", "seeds_json", "episodes_per_task",
@@ -2955,6 +3094,8 @@ class Database:
         completed_at: str | None = None,
         expected_parent_states: Sequence[str] | None = None,
     ) -> dict[str, Any] | None:
+        if self.workspace_id is not None and evaluation_id is not None and not self.owns("evaluations", evaluation_id):
+            raise KeyError("Record not found in this workspace")
         now = utc_now()
         with self.transaction() as connection:
             if expected_parent_states is not None:
@@ -3007,6 +3148,10 @@ class Database:
         sample_count: int | None = None,
         recorded_at: str | None = None,
     ) -> dict[str, Any]:
+        if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
+            raise KeyError("Record not found in this workspace")
+        if self.workspace_id is not None and evaluation_id is not None and not self.owns("evaluations", evaluation_id):
+            raise KeyError("Record not found in this workspace")
         values = {
             "id": new_id(), "run_id": run_id, "evaluation_id": evaluation_id, "name": name,
             "scope": scope, "step": step, "value": value, "unit": unit,
@@ -3029,6 +3174,10 @@ class Database:
         recorded_at: str | None = None,
         unit: str = "step",
     ) -> dict[str, Any]:
+        if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
+            raise KeyError("Record not found in this workspace")
+        if self.workspace_id is not None and attempt_id is not None and not self.owns("job_attempts", attempt_id):
+            raise KeyError("Record not found in this workspace")
         if restart_count < 0 or completed < 0 or (total is not None and total < 1):
             raise ValueError("invalid training progress sample")
         now = utc_now()
@@ -3083,7 +3232,7 @@ class Database:
             return False
         with self.transaction() as connection:
             row = connection.execute(
-                "SELECT evidence_json FROM training_progress_samples WHERE id = ?",
+                f"SELECT evidence_json FROM training_progress_samples WHERE id = ? AND {visible_sql('training_progress_samples')}",
                 (sample_id,),
             ).fetchone()
             if row is None:
@@ -3107,6 +3256,10 @@ class Database:
     def list_training_progress_samples(
         self, run_id: str, *, attempt_id: str | None = None
     ) -> list[dict[str, Any]]:
+        if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
+            return []
+        if self.workspace_id is not None and attempt_id is not None and not self.owns("job_attempts", attempt_id):
+            return []
         clauses = ["run_id = ?"]
         parameters: list[Any] = [run_id]
         if attempt_id is not None:
@@ -3122,6 +3275,10 @@ class Database:
     def list_metrics(
         self, run_id: str, *, evaluation_id: str | None = None, name: str | None = None
     ) -> list[dict[str, Any]]:
+        if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
+            return []
+        if self.workspace_id is not None and evaluation_id is not None and not self.owns("evaluations", evaluation_id):
+            return []
         clauses = ["run_id = ?"]
         parameters: list[Any] = [run_id]
         if evaluation_id is not None:
@@ -3149,6 +3306,12 @@ class Database:
         mlflow_artifact_uri: str | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
+            raise KeyError("Record not found in this workspace")
+        if self.workspace_id is not None and stage_id is not None and not self.owns("workflow_stages", stage_id):
+            raise KeyError("Record not found in this workspace")
+        if self.workspace_id is not None and evaluation_id is not None and not self.owns("evaluations", evaluation_id):
+            raise KeyError("Record not found in this workspace")
         values = {
             "id": new_id(), "run_id": run_id, "stage_id": stage_id,
             "evaluation_id": evaluation_id, "artifact_type": artifact_type, "path": path,
@@ -3163,6 +3326,8 @@ class Database:
         return result
 
     def list_artifacts(self, run_id: str, *, artifact_type: str | None = None) -> list[dict[str, Any]]:
+        if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
+            return []
         query = "SELECT * FROM artifacts WHERE run_id = ?"
         parameters: list[Any] = [run_id]
         if artifact_type is not None:
@@ -3182,6 +3347,10 @@ class Database:
         sha256: str,
         attempt_id: str | None = None,
     ) -> dict[str, Any]:
+        if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
+            raise KeyError("Record not found in this workspace")
+        if self.workspace_id is not None and attempt_id is not None and not self.owns("job_attempts", attempt_id):
+            raise KeyError("Record not found in this workspace")
         values = {
             "id": new_id(), "run_id": run_id, "attempt_id": attempt_id,
             "manifest_type": manifest_type, "schema_version": schema_version,
@@ -3239,6 +3408,8 @@ class Database:
         self, attempt_id: str, details: Mapping[str, Any]
     ) -> dict[str, Any]:
         """Insert the v1 enrichment receipt once; retries return the original receipt."""
+        if self.workspace_id is not None and attempt_id is not None and not self.owns("job_attempts", attempt_id):
+            raise KeyError("Record not found in this workspace")
 
         event_type = "COMMON_HYPERPARAMETERS_ENRICHED_V1"
         encoded_details = canonical_json(dict(details))
@@ -3275,7 +3446,7 @@ class Database:
     def list_events(
         self, *, entity_type: str | None = None, entity_id: str | None = None, limit: int = 200
     ) -> list[dict[str, Any]]:
-        clauses: list[str] = []
+        clauses: list[str] = [visible_sql("events", "")]
         parameters: list[Any] = []
         if entity_type is not None:
             clauses.append("entity_type = ?")
@@ -3295,7 +3466,7 @@ class Database:
     ) -> dict[str, Any]:
         now = utc_now()
         with self.transaction() as connection:
-            existing = connection.execute("SELECT id FROM runtime_profiles WHERE name = ?", (name,)).fetchone()
+            existing = connection.execute(f"SELECT id FROM runtime_profiles WHERE name = ? AND {visible_sql('runtime_profiles')}", (name,)).fetchone()
             if existing:
                 profile_id = existing[0]
                 self._update(connection, "runtime_profiles", profile_id, {
@@ -3375,6 +3546,7 @@ class Database:
             "archived_at": latest.get("archived_at"),
             "enabled": bool(latest.get("enabled")),
             "seed_key": latest.get("seed_key"),
+            "shared": latest.get("owner_id") is None,
             "created_at": min(str(row["created_at"]) for row in versions),
             "updated_at": latest["updated_at"],
             "latest_version_number": int(latest["version_number"]),
@@ -3391,9 +3563,9 @@ class Database:
         connection: sqlite3.Connection, adapter_id: str
     ) -> list[sqlite3.Row]:
         return connection.execute(
-            """
+            f"""
             SELECT * FROM adapters
-            WHERE adapter_key = COALESCE(
+            WHERE {visible_sql("adapters")} AND adapter_key = COALESCE(
                 (SELECT adapter_key FROM adapters WHERE adapter_key = ? LIMIT 1),
                 (SELECT adapter_key FROM adapters WHERE id = ? LIMIT 1)
             )
@@ -3460,10 +3632,10 @@ class Database:
     def list_adapter_registry(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
         with self.connection() as connection:
             keys = connection.execute(
-                """
+                f"""
                 SELECT adapter_key, lower(name) AS sort_name
                 FROM adapters
-                WHERE (? = 1 OR archived_at IS NULL)
+                WHERE {visible_sql("adapters")} AND (? = 1 OR archived_at IS NULL)
                 GROUP BY adapter_key
                 ORDER BY sort_name, adapter_key
                 """,
@@ -3483,6 +3655,8 @@ class Database:
         version_number: int | None = None,
         include_versions: bool = True,
     ) -> dict[str, Any] | None:
+        if self.workspace_id is not None and adapter_id is not None and not self.owns("adapters", adapter_id):
+            return None
         with self.connection() as connection:
             return self._adapter_bundle(
                 self._adapter_rows(connection, adapter_id),
@@ -3537,6 +3711,8 @@ class Database:
         change_note: str | None = None,
         expected_latest_version: int | None = None,
     ) -> dict[str, Any]:
+        if self.workspace_id is not None and adapter_id is not None and not self.owns("adapters", adapter_id, writable=True):
+            raise KeyError("Record not found in this workspace")
         if not isinstance(manifest, Mapping):
             raise ValueError("Adapter manifest must be an object")
         with self.transaction() as connection:
@@ -3586,6 +3762,8 @@ class Database:
         created_by: str | None = None,
         change_note: str | None = None,
     ) -> dict[str, Any]:
+        if self.workspace_id is not None and adapter_id is not None and not self.owns("adapters", adapter_id):
+            raise KeyError("Record not found in this workspace")
         normalized_name = name.strip()
         if not normalized_name:
             raise ValueError("Adapter name must not be empty")
@@ -3617,6 +3795,8 @@ class Database:
         return result
 
     def archive_adapter(self, adapter_id: str) -> dict[str, Any]:
+        if self.workspace_id is not None and adapter_id is not None and not self.owns("adapters", adapter_id, writable=True):
+            raise KeyError("Record not found in this workspace")
         with self.transaction() as connection:
             rows = self._adapter_rows(connection, adapter_id)
             current = self._adapter_bundle(rows)
@@ -3634,6 +3814,8 @@ class Database:
         return result
 
     def restore_adapter(self, adapter_id: str) -> dict[str, Any]:
+        if self.workspace_id is not None and adapter_id is not None and not self.owns("adapters", adapter_id, writable=True):
+            raise KeyError("Record not found in this workspace")
         with self.transaction() as connection:
             rows = self._adapter_rows(connection, adapter_id)
             current = self._adapter_bundle(rows)
@@ -3776,6 +3958,8 @@ class Database:
         resolved_runtime: Mapping[str, Any] | None = None,
         created_by: str | None = None,
     ) -> dict[str, Any]:
+        if self.workspace_id is not None and adapter_id is not None and not self.owns("adapters", adapter_id):
+            raise KeyError("Record not found in this workspace")
         normalized_status = status.strip().upper()
         if normalized_status not in {"PASSED", "FAILED", "WARNING"}:
             raise ValueError("Validation status must be PASSED, FAILED, or WARNING")
@@ -3819,6 +4003,8 @@ class Database:
         version_number: int | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
+        if self.workspace_id is not None and adapter_id is not None and not self.owns("adapters", adapter_id):
+            return []
         if limit < 1:
             raise ValueError("limit must be positive")
         with self.connection() as connection:
@@ -3837,7 +4023,7 @@ class Database:
                 SELECT v.*, a.version_number
                 FROM adapter_validations v
                 JOIN adapters a ON a.id = v.adapter_version_id
-                WHERE v.adapter_key = ?{version_clause}
+                WHERE v.adapter_key = ?{version_clause} AND {visible_sql('adapter_validations', 'v')}
                 ORDER BY v.created_at DESC
                 LIMIT ?
                 """,
@@ -4838,7 +5024,7 @@ class Database:
 
     def list_adapters(self, *, enabled_only: bool = True) -> list[dict[str, Any]]:
         """Compatibility flat version listing; prefer list_adapter_registry for UI/API use."""
-        where = "WHERE enabled = 1" if enabled_only else ""
+        where = f"WHERE {visible_sql('adapters')}" + (" AND enabled = 1" if enabled_only else "")
         with self.connection() as connection:
             return self._decode_many(connection.execute(
                 f"SELECT * FROM adapters {where} ORDER BY name, version_number"

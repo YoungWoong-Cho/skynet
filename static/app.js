@@ -1,4 +1,5 @@
-const SSH_GATEWAY_PREFERENCE_KEY = "skynet:ssh-gateway";
+const workspaceStorageKey = key => window.SkynetWorkspace?.storageKey(key) || key;
+const SSH_GATEWAY_PREFERENCE_KEY = workspaceStorageKey("skynet:ssh-gateway");
 
 const elements = {
   gateway: document.querySelector("#gateway"),
@@ -3137,9 +3138,9 @@ function renderAdapters() {
         <td>${escapeHtml(formatDate(adapter.updated_at || adapter.latest_version?.created_at || adapter.created_at))}</td>
         <td class="row-actions adapter-row-actions">
           <button type="button" data-adapter-action="view" data-id="${escapeHtml(id)}">View</button>
-          ${archived ? "" : `<button type="button" data-adapter-action="edit" data-id="${escapeHtml(id)}">Edit</button>`}
+          ${archived || adapter.shared ? "" : `<button type="button" data-adapter-action="edit" data-id="${escapeHtml(id)}">Edit</button>`}
           ${archived ? "" : `<button type="button" data-adapter-action="clone" data-id="${escapeHtml(id)}">Clone</button>`}
-          <button type="button" data-adapter-action="${archived ? "restore" : "archive"}" data-id="${escapeHtml(id)}">${archived ? "Restore" : "Archive"}</button>
+          ${adapter.shared ? `<span class="secondary">Shared · clone to customize</span>` : `<button type="button" data-adapter-action="${archived ? "restore" : "archive"}" data-id="${escapeHtml(id)}">${archived ? "Restore" : "Archive"}</button>`}
         </td>
       </tr>`;
   }).join("");
@@ -3275,7 +3276,7 @@ function setAdapterEditorMode(mode) {
   elements.adapterManifest.readOnly = !editing;
   elements.adapterDescription.disabled = !editing;
   elements.adapterChangeNote.disabled = !editing;
-  elements.editAdapter.hidden = editing || adapterArchived(adapterEditorState.adapter);
+  elements.editAdapter.hidden = editing || adapterArchived(adapterEditorState.adapter) || Boolean(adapterEditorState.adapter?.shared);
   elements.saveAdapter.hidden = !editing;
   elements.validateAdapter.disabled = false;
   elements.saveAdapter.textContent = creating ? "Create adapter" : "Create version";
@@ -3858,7 +3859,7 @@ async function openAdapter(id, editable = false, launcher = null) {
     elements.adapterValidationRevision.value = jobRepoMatches ? elements.experimentRevision.value : "";
     elements.adapterEditorTitle.textContent = adapter.name || adapter.label || id;
     renderAdapterVersions(versions);
-    setAdapterEditorMode(editable && !adapterArchived(adapter) ? "edit" : "view");
+    setAdapterEditorMode(editable && !adapterArchived(adapter) && !adapter.shared ? "edit" : "view");
     revealPanel(elements.adapterEditor, { focusTarget: elements.adapterEditorTitle, launcher: revealLauncher });
   } catch (error) {
     if (!disclosureTokenIsCurrent(elements.adapterEditor, requestToken)) return;
@@ -10714,7 +10715,7 @@ function newTutorialSession(page, retainedRecords = []) {
 
 function loadTutorialSession(page) {
   try {
-    const saved = JSON.parse(window.localStorage.getItem(tutorialProgressKey(page)) || "null");
+    const saved = JSON.parse(window.localStorage.getItem(workspaceStorageKey(tutorialProgressKey(page))) || "null");
     if (!saved || saved.page !== page || !saved.token) return null;
     if (saved.definitionVersion === 2) {
       saved.definitionVersion = 3;
@@ -10734,7 +10735,7 @@ function loadTutorialSession(page) {
 function persistTutorialSession() {
   if (!tutorialState.session) return;
   tutorialState.session.updatedAt = new Date().toISOString();
-  try { window.localStorage.setItem(tutorialProgressKey(tutorialState.session.page), JSON.stringify(tutorialState.session)); } catch { /* Progress persistence is optional. */ }
+  try { window.localStorage.setItem(workspaceStorageKey(tutorialProgressKey(tutorialState.session.page)), JSON.stringify(tutorialState.session)); } catch { /* Progress persistence is optional. */ }
 }
 
 function tutorialStep() {
@@ -11483,7 +11484,7 @@ function tutorialStorageKey(page) {
 
 function tutorialIsComplete(page) {
   try {
-    return window.localStorage.getItem(tutorialStorageKey(page)) === "1";
+    return window.localStorage.getItem(workspaceStorageKey(tutorialStorageKey(page))) === "1";
   } catch {
     return false;
   }
@@ -12009,7 +12010,7 @@ function endTutorial(completed = false) {
   tutorialUi.useValue.hidden = true;
   if (completed) {
     try {
-      window.localStorage.setItem(tutorialStorageKey(page), "1");
+      window.localStorage.setItem(workspaceStorageKey(tutorialStorageKey(page)), "1");
     } catch {
       // Completion persistence is optional.
     }

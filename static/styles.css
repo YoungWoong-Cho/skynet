@@ -1818,3 +1818,15 @@ table:has(> tbody#data-bundles-body) :is(th, td):nth-child(5) { width: 10%; }
   .row-disclosure .text-button { display: inline-flex; align-items: center; justify-content: center; }
   .row-disclosure-detached .row-disclosure-heading { flex-direction: column; align-items: stretch; }
 }
+
+/* Email workspaces reuse the existing type, field and button components. */
+#email-workspace-gate { min-height: 100dvh; display: grid; place-items: center; padding: 24px; }
+#email-workspace-gate[hidden], #email-workspace-content[hidden] { display: none; }
+.email-workspace-card { width: min(100%, 440px); padding: 28px; background: var(--surface); border: 1px solid var(--line, #d3dad5); }
+.email-workspace-card h1 { margin: 20px 0 12px; }
+.email-workspace-card form { margin: 24px 0; display: grid; gap: 14px; }
+.email-workspace-card input { width: 100%; }
+#workspace-message { min-height: 1.5em; margin: 0; }
+.workspace-account-bar { display: flex; justify-content: flex-end; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 24px; border-bottom: 1px solid var(--line, #d3dad5); font-size: 13px; }
+#workspace-current-email { overflow-wrap: anywhere; }
+@media (max-width: 600px) { .workspace-account-bar { justify-content: space-between; padding: 10px 16px; } .email-workspace-card { padding: 20px; } }

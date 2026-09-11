@@ -41,14 +41,22 @@ class SourceMetadataStore:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS source_repository_selections (
-                    repository_url TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL DEFAULT 'legacy',
+                    repository_url TEXT NOT NULL,
                     branch_name TEXT NOT NULL,
                     commits_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(owner_id, repository_url)
                 )
                 """
             )
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(source_repository_selections)")}
+            if "owner_id" not in columns:
+                connection.execute("ALTER TABLE source_repository_selections RENAME TO source_selections_legacy")
+                connection.execute("CREATE TABLE source_repository_selections(owner_id TEXT NOT NULL, repository_url TEXT NOT NULL, branch_name TEXT NOT NULL, commits_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(owner_id, repository_url))")
+                connection.execute("INSERT INTO source_repository_selections SELECT 'legacy', * FROM source_selections_legacy")
+                connection.execute("DROP TABLE source_selections_legacy")
 
     @staticmethod
     def _key(kind: str, repository_url: str, parameters: Mapping[str, Any]) -> str:
@@ -164,9 +172,9 @@ class SourceMetadataStore:
                 """
                 SELECT branch_name, commits_json, updated_at
                 FROM source_repository_selections
-                WHERE repository_url = ?
+                WHERE owner_id = ? AND repository_url = ?
                 """,
-                (repository_url,),
+                (self.database.workspace_id or "legacy", repository_url),
             ).fetchone()
         if row is None:
             return {"branch": "", "commits": {}, "updated_at": None}
@@ -188,9 +196,9 @@ class SourceMetadataStore:
                 """
                 SELECT commits_json, created_at
                 FROM source_repository_selections
-                WHERE repository_url = ?
+                WHERE owner_id = ? AND repository_url = ?
                 """,
-                (repository_url,),
+                (self.database.workspace_id or "legacy", repository_url),
             ).fetchone()
             commits = (
                 self._decode_object(row["commits_json"], "source commit selection")
@@ -202,14 +210,15 @@ class SourceMetadataStore:
             connection.execute(
                 """
                 INSERT INTO source_repository_selections (
-                    repository_url, branch_name, commits_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(repository_url) DO UPDATE SET
+                    owner_id, repository_url, branch_name, commits_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner_id, repository_url) DO UPDATE SET
                     branch_name = excluded.branch_name,
                     commits_json = excluded.commits_json,
                     updated_at = excluded.updated_at
                 """,
                 (
+                    self.database.workspace_id or "legacy",
                     repository_url,
                     branch,
                     canonical_json(commits),

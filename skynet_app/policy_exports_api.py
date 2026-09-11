@@ -27,6 +27,10 @@ class RetryRequest(BaseModel):
 
 @router.get("")
 def overview():
+    from .workspaces import CURRENT_WORKSPACE
+    if CURRENT_WORKSPACE.get() is not None:
+        from .pipeline_api import service as pipeline_service
+        return checked(lambda: service.options(workspace_database=pipeline_service.database))
     return checked(service.options)
 
 
