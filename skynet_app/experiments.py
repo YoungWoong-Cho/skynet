@@ -909,7 +909,14 @@ class EvaluationDatasetTaskBinding(CanonicalModel):
     metadata_path: str = Field(min_length=1, pattern=r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
 
+class EvaluationRuntimeSuite(CanonicalModel):
+    suite: str = Field(min_length=1)
+    version: str = Field(min_length=1)
+
+
 class EvaluationSuite(CanonicalModel):
+    runtime_readiness_suite: EvaluationRuntimeSuite | None = None
+    initial_state: Literal["single_training_episode"] | None = None
     dataset_task_binding: EvaluationDatasetTaskBinding | None = None
     dataset_episode_binding: EvaluationDatasetTaskBinding | None = None
     default_tasks: list[str] | None = None
@@ -940,6 +947,10 @@ class EvaluationSuite(CanonicalModel):
     @model_serializer(mode="wrap")
     def serialize_without_absent_binding(self, handler):
         result = handler(self)
+        if self.initial_state is None:
+            result.pop("initial_state", None)
+        if self.runtime_readiness_suite is None:
+            result.pop("runtime_readiness_suite", None)
         # Existing immutable catalogs must retain their original content hashes.
         if self.default_tasks is None:
             result.pop("default_tasks", None)

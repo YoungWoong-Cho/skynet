@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from skynet_app.evaluation_contracts import bind_suite_to_dataset
+from skynet_app.recorded_evaluation import recorded_episode_sources
 from skynet_app.gpu_tracking import sync_gpu_statistics
 from skynet_app.model_io import resolve_model_io, preview_spec
 
@@ -8982,7 +8983,7 @@ class PipelineService:
     ) -> tuple[ExperimentSpec, AdapterPlan, dict[str, Any], dict[str, Any], dict[str, Any], str]:
         episode_limit = suite.get("config_json", {}).get("maximum_episodes_per_task")
         if episode_limit is not None and episodes_per_task > episode_limit:
-            raise ValueError(f"The dataset has {episode_limit} held-out episodes; choose at most {episode_limit}")
+            raise ValueError(f"The dataset has {episode_limit} available episodes; choose at most {episode_limit}")
         training_spec = ExperimentSpec.model_validate(run["resolved_spec_json"])
         training_adapter = self._adapter_identity(training_spec)
         training_document = training_spec.model_dump(mode="json", by_alias=True)
@@ -9085,6 +9086,10 @@ class PipelineService:
                 },
             },
         }
+        if suite_config.get("initial_state") == "single_training_episode":
+            context["recorded_episode_sources"] = recorded_episode_sources(
+                self.database, self.cluster, training_document
+            )
         plan = resolve_adapter_evaluation_plan(
             evaluator_spec,
             environment=environment,
@@ -10306,18 +10311,24 @@ def evaluation_suites(
         )
 
     suites = []
+    unavailable_suites = []
     for row in service.database.list_evaluation_suites():
         if not runnable_for_current_evaluator(row):
             continue
         if run_id is not None:
             try:
                 row = bind_suite_to_dataset(row, spec_document or {})
-            except ValueError:
+                if row["config_json"].get("initial_state") == "single_training_episode":
+                    recorded_episode_sources(service.database, service.cluster, spec_document or {})
+            except ValueError as error:
+                unavailable_suites.append({"id": row["id"], "reason": sanitize(str(error))})
                 continue
         config = row["config_json"]
         suites.append({
             **row,
             "slug": row["id"],
+            "is_default": run_id is not None and config.get("initial_state") == "single_training_episode",
+            "maximum_episodes_per_task": config.get("maximum_episodes_per_task"),
             "label": row["description"] or row["name"],
             "evaluator": row["evaluator_adapter"],
             "version": row["suite_version"],
@@ -10342,7 +10353,7 @@ def evaluation_suites(
                 else {}
             ),
         })
-    return {"suites": suites, "evaluation_suites": suites}
+    return {"suites": suites, "evaluation_suites": suites, "unavailable_suites": unavailable_suites}
 
 
 @router.post("/experiments/preview")

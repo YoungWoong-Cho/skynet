@@ -26,6 +26,7 @@ def identity(context):
             "episodes_per_task",
             "policy",
             "episode_assignments",
+            "recorded_episode_sources",
         ]
     }
     return hashlib.sha256(
@@ -139,6 +140,13 @@ def main():
         ).read_text()
     )
     capture = manifest["capture"]
+    sources = context.get("recorded_episode_sources") or []
+    initial_state = None
+    if context["suite"]["config"].get("initial_state") == "single_training_episode":
+        if len(sources) != 1 or context["episodes_per_task"] != 1 or context["tasks"] != [capture["task"]]:
+            raise ValueError("Recorded initial-state evaluation must use its single training episode and task")
+        from recorded_scene import load_initial_state
+        initial_state = load_initial_state(sources[0], capture)
     task = context["tasks"][0]
     order = manifest["policy_to_source_indices"]
     import pinocchio  # Load before Isaac's plugins, as in collection.
@@ -247,6 +255,7 @@ def main():
                 for index in range(context["episodes_per_task"]):
                     if [seed, index] not in context.get(
                         "episode_assignments",
+            "recorded_episode_sources",
                         [
                             [s, i]
                             for s in context["seeds"]
@@ -277,6 +286,9 @@ def main():
                         ),
                     )
                     env.reset(seed=effective_seed)
+                    if initial_state is not None:
+                        from recorded_scene import restore_state
+                        restore_state(env, initial_state)
                     if isinstance(success_fn, ManagerTermBase):
                         success_fn.reset()
                     request({"command": "reset", "seed": effective_seed})

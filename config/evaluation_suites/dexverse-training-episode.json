@@ -1,0 +1,55 @@
+{
+  "schema_version": 2,
+  "evaluator": "isaac_lab",
+  "suite": "dexverse_training_episode",
+  "version": "v1",
+  "label": "Recorded training episode \u00b7 simulator",
+  "task_source": "training_dataset",
+  "task_catalog_complete": true,
+  "task_selection_mode": "all_only",
+  "task_selection_reason": "Run the policy from the training episode\u2019s saved initial scene. This checks overfitting, not held-out performance.",
+  "dataset_task_binding": {
+    "role": "training_data",
+    "metadata_path": "capture.task"
+  },
+  "task_catalog_provenance": {
+    "repository": "https://github.com/ycyao216/DexVerse",
+    "revision": "30cc673e27684b9f10186fa6bea731aed246bc9f",
+    "source_path": "source/dexverse/dexverse/tasks"
+  },
+  "task_catalog_sha256": "1efdb7cb80f30cee4cc65e711f557e6aedc6df7f4d1df3f76f7d6f3f6cf74adf",
+  "tasks": [
+    "Dexverse-PickUpStick-v0",
+    "Dexverse-PickCube-v0",
+    "Dexverse-StackCube-v0",
+    "Dexverse-RelocateSphere-v0"
+  ],
+  "task_options": [
+    {
+      "id": "Dexverse-PickUpStick-v0",
+      "label": "Pick up stick"
+    },
+    {
+      "id": "Dexverse-PickCube-v0",
+      "label": "Pick up cube"
+    },
+    {
+      "id": "Dexverse-StackCube-v0",
+      "label": "Stack cubes"
+    },
+    {
+      "id": "Dexverse-RelocateSphere-v0",
+      "label": "Move sphere to target"
+    }
+  ],
+  "current": true,
+  "initial_state": "single_training_episode",
+  "dataset_episode_binding": {
+    "role": "training_data",
+    "metadata_path": "split.train"
+  },
+  "runtime_readiness_suite": {
+    "suite": "dexverse_recorded",
+    "version": "tasks-v2"
+  }
+}

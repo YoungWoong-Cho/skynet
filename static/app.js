@@ -910,6 +910,7 @@ let activeCollectionSession = null;
 let evaluationSuites = [];
 let evaluationSuitesScope = "global";
 const evaluationSuitesCache = new Map();
+const evaluationSuiteReasons = new Map();
 const evaluationSuitesPromises = new Map();
 const evaluationSuiteRequestGenerations = new Map();
 let evaluationSuiteReloadTimer = null;
@@ -4025,7 +4026,7 @@ function populateEvaluationSuites(preferredSuiteId = "", { runId = "" } = {}) {
   setSelectOptions(elements.evaluationSuite, evaluationSuites);
   elements.evaluationSuite.insertAdjacentHTML("afterbegin", '<option value="">Choose a suite...</option>');
   const desiredExists = evaluationSuites.some((suite) => evaluationSuiteId(suite) === desiredSuiteId);
-  const firstCompatibleSuiteId = "";
+  const firstCompatibleSuiteId = runId ? evaluationSuiteId(evaluationSuites.find((suite) => suite.is_default) || {}) : "";
   const selectedSuiteId = desiredExists ? desiredSuiteId : firstCompatibleSuiteId;
   elements.evaluationSuite.value = selectedSuiteId;
   elements.evaluationSuite.setCustomValidity("");
@@ -4057,7 +4058,9 @@ async function loadEvaluationSuites(force = false, explicitRunId = undefined) {
     evaluationSuites = suites;
     evaluationSuitesScope = scope;
     populateEvaluationSuites(desiredSuiteId, { runId });
-    if (error) elements.evaluationSuiteStatus.textContent = `Suite API: ${error.message}`;
+    const reason = evaluationSuiteReasons.get(scope);
+    if (error) elements.evaluationSuiteStatus.textContent = `Could not load evaluation suites: ${error.message}`;
+    else if (!suites.length && reason) elements.evaluationSuiteStatus.textContent = reason;
   };
 
   if (!force && evaluationSuitesCache.has(scope)) {
@@ -4079,6 +4082,7 @@ async function loadEvaluationSuites(force = false, explicitRunId = undefined) {
         const suites = listFrom(payload, ["evaluation_suites", "suites"]);
         if (evaluationSuiteRequestGenerations.get(scope) === generation) {
           evaluationSuitesCache.set(scope, suites);
+          evaluationSuiteReasons.set(scope, (payload.unavailable_suites || []).map((item) => item.reason).filter(Boolean).join(" "));
         }
         return { suites, error: null, generation };
       } catch (error) {
@@ -7460,6 +7464,7 @@ function evaluationSuiteIsRunnable(suite) {
 }
 
 function evaluationSuitePreference(run, suite) {
+  if (suite?.is_default === true) return 4;
   const config = evaluationSuiteConfig(suite);
   const runMetadata = JSON.stringify(run || {});
   const suiteIdentity = [
@@ -7921,7 +7926,7 @@ async function startEvaluationForRun(id) {
   scheduleEvaluationTargetValidation({ immediate: true });
 
   const warnings = [];
-  if (!suite) warnings.push("No runnable evaluation suite is available; choose a suite after the registry is restored.");
+  if (!suite) warnings.push(elements.evaluationSuiteStatus.textContent || "No compatible evaluation suite is available for this run.");
   if (warnings.length) showNotice(elements.evaluationsError, warnings.join(" "));
   else clearNotice(elements.evaluationsError);
   window.requestAnimationFrame(() => {

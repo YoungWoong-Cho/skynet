@@ -25,6 +25,23 @@ def is_archived(job):
     return (job.get("archive") or {}).get("state") in AVAILABLE_STATES
 
 
+def archive_descriptor(job, cluster, *, require_available=True):
+    archive = job.get("archive") or {}
+    if require_available and not is_archived(job):
+        raise ValueError("Session has no verified archive")
+    manifest, checksum = archive.get("manifest"), archive.get("manifest_sha256", "")
+    if (not isinstance(manifest, dict) or manifest.get("session_id") != job["id"]
+            or manifest.get("schema") != "skynet.live-archive/v1"
+            or not re.fullmatch(r"[a-f0-9]{64}", checksum)
+            or hashlib.sha256(canonical_json(manifest).encode()).hexdigest() != checksum):
+        raise ValueError("The saved archive manifest is invalid")
+    expected = f"{CLUSTER.paths.datasets}/raw/dexverse-live/{job['id']}/{checksum}/output"
+    if archive.get("gateway") != "sky2" or archive.get("root") != expected:
+        raise ValueError("The saved archive storage location is invalid")
+    cluster.candidates("sky2")
+    cluster._remote_path(expected)
+    return archive
+
 class LiveArchiveService:
     def __init__(self, live, cluster=None, *, enabled=False, cleanup_enabled=False):
         self.live, self.cluster = live, cluster or live.cluster or ClusterClient()
@@ -44,21 +61,7 @@ class LiveArchiveService:
         return str(candidate)
 
     def _descriptor(self, job, *, require_available=True):
-        archive = job.get("archive") or {}
-        if require_available and not is_archived(job):
-            raise ValueError("Session has no verified archive")
-        manifest, checksum = archive.get("manifest"), archive.get("manifest_sha256", "")
-        if (not isinstance(manifest, dict) or manifest.get("session_id") != job["id"]
-                or manifest.get("schema") != "skynet.live-archive/v1"
-                or not re.fullmatch(r"[a-f0-9]{64}", checksum)
-                or hashlib.sha256(canonical_json(manifest).encode()).hexdigest() != checksum):
-            raise ValueError("The saved archive manifest is invalid")
-        expected = f"{CLUSTER.paths.datasets}/raw/dexverse-live/{job['id']}/{checksum}/output"
-        if archive.get("gateway") != "sky2" or archive.get("root") != expected:
-            raise ValueError("The saved archive storage location is invalid")
-        self.cluster.candidates("sky2")
-        self.cluster._remote_path(expected)
-        return archive
+        return archive_descriptor(job, self.cluster, require_available=require_available)
 
     def resolve(self, job, relative_path):
         relative_path = self._relative(relative_path)

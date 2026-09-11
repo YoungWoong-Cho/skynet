@@ -49,31 +49,7 @@ def evaluation(policy):
     from . import EvaluationAdapterMetadata, CommandTemplate
 
     files = support_files(policy)
-    files.update(
-        {
-            "adapter-support/evaluation_workers.py": (
-                SUPPORT / "evaluation_workers.py"
-            ).read_text(),
-            "adapter-support/dexverse_readiness.py": (
-                SUPPORT / "dexverse_readiness.py"
-            ).read_text(),
-            "adapter-support/xpolicy_evaluation.py": (
-                SUPPORT / "xpolicy_evaluation.py"
-            ).read_text(),
-            "adapter-support/dexverse_evaluation.py": (
-                SUPPORT / "dexverse_evaluation.py"
-            ).read_text(),
-            "adapter-support/evaluation_video.py": (
-                SUPPORT / "evaluation_video.py"
-            ).read_text(),
-            "adapter-support/images.py": (
-                SUPPORT.parents[1] / "ops/xr/images.py"
-            ).read_text(),
-            "adapter-support/wrist.py": (
-                SUPPORT.parents[1] / "ops/xr/wrist.py"
-            ).read_text(),
-        }
-    )
+    files.update(simulation_support_files())
     argv = [
         "python",
         "{{tokens.run_dir}}/adapter-support/evaluation_workers.py",
@@ -85,7 +61,7 @@ def evaluation(policy):
     return EvaluationAdapterMetadata(
         maximum_parallelism=8,
         environment="isaac_lab",
-        suites=["dexverse_recorded"],
+        suites=["dexverse_recorded", "dexverse_training_episode"],
         runtime_profile_id="isaacsim-5.1.0_isaaclab-2.3.2_py311",
         command=CommandTemplate(
             argv=argv,
@@ -101,3 +77,23 @@ def evaluation(policy):
             ],
         ),
     )
+
+
+def simulation_support_files():
+    import inspect
+    from skynet_app.live_xr_review import ArrayUnpickler
+
+    files = {
+        "adapter-support/" + name: (SUPPORT / name).read_text()
+        for name in (
+            "evaluation_workers.py", "dexverse_readiness.py", "xpolicy_evaluation.py",
+            "dexverse_evaluation.py", "evaluation_video.py", "policy_simulator.py",
+            "recorded_scene.py", "xpolicy_runtime.py",
+        )
+    }
+    files.update({
+        "adapter-support/" + name: (SUPPORT.parents[1] / "ops/xr" / name).read_text()
+        for name in ("images.py", "wrist.py", "render_images.py")
+    })
+    files["adapter-support/arrays.py"] = "import pickle\nimport numpy as np\n" + inspect.getsource(ArrayUnpickler)
+    return files

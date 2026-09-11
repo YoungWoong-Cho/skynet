@@ -33,6 +33,23 @@ def _content_sha256(value: Any) -> str:
 
 
 def suite_contract(config: Mapping[str, Any]) -> dict[str, Any]:
+    if reference := config.get("runtime_readiness_suite"):
+        from .experiments import get_evaluation_catalog
+
+        shared = next((item for item in get_evaluation_catalog()
+                       if item.suite == reference["suite"]
+                       and item.version == reference["version"]), None)
+        if shared is None:
+            raise ValueError("The shared simulator readiness suite is not registered")
+        base = shared.model_dump(mode="json")
+        # A different reset strategy can reuse evidence for the same simulator,
+        # source revision and task registration. Cross-simulator aliases cannot.
+        if (base.get("runtime_readiness_suite")
+                or any(base.get(key) != config.get(key) for key in (
+                    "evaluator", "task_catalog_provenance", "dataset_task_binding"))
+                or not set(config.get("tasks") or []).issubset(base["tasks"])):
+            raise ValueError("Shared readiness requires the same simulator source and tasks")
+        return suite_contract(base)
     if binding := config.get("dataset_task_binding"):
         # Runtime readiness verifies the pinned simulator and registration module.
         # Each dataset's concrete task/robot contract is checked by its rollout.

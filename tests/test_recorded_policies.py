@@ -50,7 +50,7 @@ def test_registered_split_and_joint_mapping_are_enforced(portable):
     assert portable.data.validate_manifest(good) == good
     for split in [
         {"train": [0], "validation": [0]},
-        {"train": [0, 1], "validation": []},
+        {"train": [], "validation": [0, 1]},
     ]:
         bad = copy.deepcopy(good)
         bad["split"] = split
@@ -148,7 +148,7 @@ def test_evaluation_task_is_frozen_from_training_bundle_not_catalog_mutated():
 
 def test_existing_catalogs_do_not_gain_an_empty_binding():
     for suite in get_evaluation_catalog():
-        if suite.suite != "dexverse_recorded":
+        if suite.dataset_task_binding is None:
             assert "dataset_task_binding" not in suite.model_dump(mode="json")
 
 
@@ -188,7 +188,7 @@ def test_both_policies_have_training_and_same_real_rollout_contract():
     for slug in ["xpolicylab-dp", "xpolicylab-act"]:
         model = policies[slug]
         assert model.train.progress.unit == "epoch"
-        assert model.evaluations[0].suites == ["dexverse_recorded"]
+        assert model.evaluations[0].suites == ["dexverse_recorded", "dexverse_training_episode"]
         files = model.evaluations[0].command.capsule_files
         assert "adapter-support/dexverse_evaluation.py" in files
         assert "adapter-support/images.py" in files

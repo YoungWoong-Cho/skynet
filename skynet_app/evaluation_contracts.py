@@ -19,6 +19,12 @@ def bound_metadata(spec, binding):
 def bind_suite_to_dataset(suite, spec):
     result = copy.deepcopy(suite)
     config = result["config_json"]
+    if config.get("initial_state") == "single_training_episode":
+        binding = {"role": "training_data", "metadata_path": "episodes"}
+        episodes = bound_metadata(spec, binding)
+        split = bound_metadata(spec, {**binding, "metadata_path": "split"}) or {}
+        if not isinstance(episodes, list) or len(episodes) != 1 or split.get("train") != [0]:
+            raise ValueError("Recorded initial-state evaluation requires a single training episode")
     episode_binding = config.get("dataset_episode_binding")
     if episode_binding:
         if episode_binding.get("metadata_path") == "split.validation" and bound_metadata(
@@ -27,7 +33,7 @@ def bind_suite_to_dataset(suite, spec):
             raise ValueError("This overfit dataset reuses its training episode; there are no held-out episodes to evaluate")
         episodes = bound_metadata(spec, episode_binding)
         if not isinstance(episodes, list) or not episodes:
-            raise ValueError("The dataset has no held-out episodes")
+            raise ValueError("The dataset has no held-out episodes" if episode_binding["metadata_path"] == "split.validation" else "The dataset has no training episodes")
         config["maximum_episodes_per_task"] = len(episodes)
     binding = config.get("dataset_task_binding")
     if not binding:

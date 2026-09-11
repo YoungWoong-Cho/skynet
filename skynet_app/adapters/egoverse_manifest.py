@@ -238,7 +238,7 @@ def manifests():
                 ),
                 capsule_files=support_files(),
             ),
-            evaluations=[
+            evaluations=([recorded_evaluation(model)] if recorded else []) + [
                 EvaluationAdapterMetadata(
                     environment="egoverse",
                     suites=["egoverse_held_out"],
@@ -265,3 +265,33 @@ def manifests():
                 )
             ],
         )
+
+
+def recorded_evaluation(model):
+    from . import EvaluationAdapterMetadata, CommandTemplate
+    from .xpolicy_manifest import simulation_support_files
+
+    return EvaluationAdapterMetadata(
+        environment="isaac_lab",
+        suites=["dexverse_training_episode"],
+        enabled_when={"native.config.model_preset": ["act" if model == "act" else "hpt_joints"]},
+        maximum_parallelism=1,
+        runtime_profile_id="isaacsim-5.1.0_isaaclab-2.3.2_py311",
+        command=CommandTemplate(
+            argv=["python", "{{tokens.run_dir}}/adapter-support/egoverse_simulation.py",
+                  "--context", "{{tokens.run_dir}}/adapter-support/evaluation-context.json",
+                  "--source-dir", "{{tokens.source_dir}}"],
+            capsule_files=support_files() | simulation_support_files() | {
+                "adapter-support/egoverse_simulation.py": (
+                    Path(__file__).with_name("egoverse_simulation.py").read_text()
+                ),
+            },
+            environment={"SKYNET_EVAL_RESUME_GRANULARITY": "episode"},
+            required_values=[
+                "evaluation.checkpoint.sha256", "evaluation.evaluator_runtime.python_executable",
+                "evaluation.evaluator_runtime.source_dir", "evaluation.recorded_episode_sources",
+                "evaluation.policy.native_config.dataset_path",
+                "evaluation.policy.native_config.dataset_manifest_sha256",
+            ],
+        ),
+    )
