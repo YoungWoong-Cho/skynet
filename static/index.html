@@ -9,7 +9,7 @@
     <script type="application/skynet-script" data-workspace-src="/static/dialogs.js?v=20260909-data" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/workspace-navigation.js?v=20260909-experiment-tabs" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/slack-settings.js?v=1" defer></script>
-<script type="application/skynet-script" data-workspace-src="/static/app.js?v=20260909-experiment-tabs" defer></script>
+    <script type="application/skynet-script" data-workspace-src="/static/app.js?v=20260909-experiment-tabs" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/hands-ui.js?v=20260907-imported-hands-2" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/live-review.js?v=20260909-review-only" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/live-conversion.js?v=20260909-data-refinement" defer></script>
@@ -1686,17 +1686,19 @@
                 <input id="slack-app-url" name="app_url" type="url" placeholder="http://your-skynet-server:8080">
                 <small>Use an address reachable from Slack. Leave blank to omit the link.</small>
               </div>
-              <label class="checkbox-field span-2"><input name="enabled" type="checkbox"><span>Enable Slack notifications</span></label>
-              <fieldset class="field span-2"><legend>Notify me when a job…</legend>
-                <label><input name="events" type="checkbox" value="submitted" checked> Is submitted</label>
-                <label><input name="events" type="checkbox" value="running" checked> Starts running</label>
-                <label><input name="events" type="checkbox" value="cancelled" checked> Is cancelled</label>
-                <label><input name="events" type="checkbox" value="failed" checked> Fails</label>
-                <label><input name="events" type="checkbox" value="completed" checked> Completes</label>
-              </fieldset>
+              <label class="check-field span-4"><input name="enabled" type="checkbox"><span>Enable Slack notifications</span></label>
             </div>
-            <p id="slack-notification-detail" role="status">Notifications begin with future job state changes after enabling. Closing your browser does not stop delivery.</p>
-            <div class="form-actions">
+            <fieldset class="form-section"><legend>Notify me when a job…</legend>
+              <div class="form-grid">
+                <label class="check-field"><input name="events" type="checkbox" value="submitted" checked><span>Is submitted</span></label>
+                <label class="check-field"><input name="events" type="checkbox" value="running" checked><span>Starts running</span></label>
+                <label class="check-field"><input name="events" type="checkbox" value="cancelled" checked><span>Is cancelled</span></label>
+                <label class="check-field"><input name="events" type="checkbox" value="failed" checked><span>Fails</span></label>
+                <label class="check-field"><input name="events" type="checkbox" value="completed" checked><span>Completes</span></label>
+              </div>
+            </fieldset>
+            <p id="slack-notification-detail" class="tracking-connection-detail" role="status">Notifications begin with future job state changes after enabling. Closing your browser does not stop delivery.</p>
+            <div class="form-actions tracking-connection-actions">
               <button class="button button-accent" type="submit">Save settings</button>
               <button id="slack-send-test" class="button button-outline" type="button" disabled>Send test message</button>
               <button id="slack-retry-failed" class="button button-outline" type="button" disabled>Retry failed notifications</button>
