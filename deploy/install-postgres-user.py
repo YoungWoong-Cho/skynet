@@ -16,6 +16,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--bin", type=Path, required=True)
+    parser.add_argument(
+        "--loopback",
+        action="store_true",
+        help="Allow SCRAM-authenticated SSH forwarding to 127.0.0.1",
+    )
     args = parser.parse_args()
     root = args.root.resolve()
     binary = args.bin.resolve()
@@ -57,7 +62,9 @@ def main():
     config.write_text(
         "\n".join(
             [
-                "listen_addresses = ''",
+                "listen_addresses = '127.0.0.1'"
+                if args.loopback
+                else "listen_addresses = ''",
                 "port = 55432",
                 "unix_socket_directories = '" + str(socket) + "'",
                 "unix_socket_permissions = 0700",

@@ -289,3 +289,26 @@ def test_endpoint_rejects_invalid_configuration_before_ssh(tmp_path, monkeypatch
     )
     with pytest.raises(ValueError):
         load_endpoint(config)
+
+
+def test_ssh_tcp_endpoint_requires_loopback_and_resolves_private_password(tmp_path):
+    from skynet_app.database_endpoint import SSHEndpoint, load_endpoint
+
+    config = {
+        "backend": "postgresql",
+        "transport": "ssh-tcp",
+        "ssh_host": "sky2",
+        "remote_address": "10.0.0.2",
+        "remote_port": 55432,
+        "password_file": "database-password",
+        "user": "test",
+    }
+    with pytest.raises(ValueError, match="loopback"):
+        SSHEndpoint(config)
+    config["remote_address"] = "127.0.0.1"
+    path = tmp_path / "database.json"
+    path.write_text(json.dumps(config))
+    endpoint = load_endpoint(path)
+    assert endpoint.forward_target == "127.0.0.1:55432"
+    assert endpoint.config["password_file"] == str(tmp_path / "database-password")
+    endpoint.close()

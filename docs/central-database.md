@@ -10,18 +10,22 @@ create `config/database.json` (ignored by Git):
 ```json
 {
   "backend": "postgresql",
-  "transport": "ssh-unix",
+  "transport": "ssh-tcp",
   "ssh_host": "sky2",
-  "remote_socket": "/run/user/3712043/skynet-postgres/.s.PGSQL.55432",
+  "remote_address": "127.0.0.1",
+  "remote_port": 55432,
+  "password_file": "database-password",
   "database": "skynet",
   "user": "ycho420",
   "object_store_root": "/coc/flash7/ycho420/services/skynet/objects"
 }
 ```
 
-The host needs working SSH access to the selected cluster user. No database TCP
-port is exposed. Each app creates a private Unix-socket SSH tunnel and closes it
-on exit. A direct PostgreSQL connection can instead be provided using
+The host needs working SSH access to the selected cluster user. The database listens only on the cluster host’s loopback interface. No database
+port is exposed to the network. Put the DB connection password in
+`config/database-password` with permission `0600`; this file is ignored by Git. Each app creates a private Unix-socket SSH tunnel and closes it
+on exit. The original `ssh-unix` transport remains available for SSH servers that
+support forwarding to the private PostgreSQL Unix socket. A direct PostgreSQL connection can instead be provided using
 `SKYNET_DATABASE_URL`; supporting file storage still requires the SSH endpoint
 configuration. Remove `SKYNET_DATABASE_PATH` from existing launch scripts before
 using the central configuration. An explicit SQLite path selects SQLite.
@@ -46,9 +50,10 @@ credentials to deliver notifications and tracking events.
 
 Install PostgreSQL binaries in a private user directory. With user lingering
 already enabled, run `deploy/install-postgres-user.py --root <private-db-root>
---bin <postgres-bin-directory>` on the cluster host, alongside
-`deploy/backup-postgres.py`. It creates `skynet-postgres.service`, private Unix
-socket authentication using the OS user, and a backup timer every six hours.
+--bin <postgres-bin-directory> --loopback` on the cluster host, alongside
+`deploy/backup-postgres.py`. It creates `skynet-postgres.service`, a private Unix socket for administration and a backup timer every six hours.
+The optional loopback listener requires a separately provisioned PostgreSQL SCRAM
+password. Without `--loopback`, only Unix socket access is enabled.
 It does not install system packages or alter firewall rules.
 
 The current deployment uses a hard-mounted NFS filesystem. It depends on that

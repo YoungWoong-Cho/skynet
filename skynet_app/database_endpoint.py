@@ -21,13 +21,30 @@ class SSHEndpoint:
     def __init__(self, config):
         self.config = dict(config)
         host = str(config["ssh_host"])
-        remote = str(config["remote_socket"])
+        self.transport = config.get("transport", "ssh-unix")
+        remote = str(config.get("remote_socket", ""))
         if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.@-]*", host):
             raise ValueError("Invalid database SSH host")
-        if not remote.startswith("/") or any(
-            c in remote for c in ("\n", "\r", ":", "\x00")
-        ):
-            raise ValueError("Invalid database socket path")
+        if self.transport == "ssh-unix":
+            if not remote.startswith("/") or any(
+                c in remote for c in ("\n", "\r", ":", "\x00")
+            ):
+                raise ValueError("Invalid database socket path")
+            self.forward_target = remote
+        elif self.transport == "ssh-tcp":
+            if (
+                config.get("remote_address") != "127.0.0.1"
+                or type(config.get("remote_port")) is not int
+                or not 1 <= config["remote_port"] <= 65535
+            ):
+                raise ValueError(
+                    "Central DB TCP forwarding must target a loopback port"
+                )
+            self.forward_target = "127.0.0.1:" + str(config["remote_port"])
+            if not config.get("password_file"):
+                raise ValueError("Central DB password file is not configured")
+        else:
+            raise ValueError("Unknown database SSH transport")
         self._lock = threading.Lock()
         self._process = None
         self._directory = None
@@ -61,7 +78,7 @@ class SSHEndpoint:
                     "-o",
                     "ServerAliveCountMax=2",
                     "-L",
-                    str(local) + ":" + self.config["remote_socket"],
+                    str(local) + ":" + self.forward_target,
                     self.config["ssh_host"],
                     "cat >/dev/null",
                 ]
@@ -82,7 +99,14 @@ class SSHEndpoint:
                             + self.config["ssh_host"]
                         )
                     time.sleep(0.05)
+            credentials = {}
+            if self.transport == "ssh-tcp":
+                password_file = Path(self.config["password_file"])
+                if password_file.stat().st_mode & 0o077:
+                    raise ValueError("Central DB password file must be private (0600)")
+                credentials["password"] = password_file.read_text().strip()
             return make_conninfo(
+                **credentials,
                 host=str(self._directory),
                 port=55432,
                 dbname=self.config.get("database", "skynet"),
@@ -120,8 +144,15 @@ _ENDPOINT_LOCK = threading.Lock()
 
 def load_endpoint(path: Path):
     config = json.loads(path.read_text())
-    if config.get("backend") != "postgresql" or config.get("transport") != "ssh-unix":
+    if config.get("backend") != "postgresql" or config.get("transport") not in {
+        "ssh-unix",
+        "ssh-tcp",
+    }:
         raise ValueError("Unknown central database configuration")
+    if config.get("password_file"):
+        password_file = Path(config["password_file"])
+        if not password_file.is_absolute():
+            config["password_file"] = str(path.parent / password_file)
     key = (
         os.getpid(),
         hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest(),
