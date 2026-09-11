@@ -40,6 +40,7 @@ TOKENS = {
     "{{SKYNET_SOURCE_DIR}}": lambda: os.environ["SKYNET_SOURCE_DIR"],
 }
 child = None
+termination_signal = None
 
 
 def replace_tokens(value, resume_checkpoint):
@@ -205,8 +206,10 @@ def run_preparation_steps(execution, run_dir, capsule_dir):
         atomic_json(state_path, {"schema_version": 1, "steps": records})
         print(f"Preparation step {step_id}: running")
         child = subprocess.Popen(argv, cwd=working_directory, start_new_session=True)
-        return_code = child.wait()
+        return_code = wait_for_child()
         child = None
+        if termination_signal is not None:
+            raise SystemExit(interrupted_exit_code())
         if return_code != 0:
             record.update({"status": "failed", "return_code": return_code})
             atomic_json(state_path, {"schema_version": 1, "steps": records})
@@ -743,14 +746,48 @@ def snapshot_checkpoints(run_dir, project_dir, execution, *, final=False):
 
 
 def forward(signum, _frame):
+    global termination_signal
+    if termination_signal is not None:
+        return
+    termination_signal = signum
     marker = Path(os.environ["SKYNET_RUN_DIR"]) / "state" / "checkpoint-requested"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(str(signum))
+    if signum == signal.SIGUSR1:
+        capsule = Path(os.environ.get("SKYNET_CAPSULE_DIR", os.environ["SKYNET_RUN_DIR"]))
+        atomic_json(capsule / "state" / "interruption.json", {
+            "schema_version": 1,
+            "job_id": os.environ.get("SLURM_JOB_ID"),
+            "run_id": os.environ.get("SKYNET_RUN_ID"),
+            "reason": "time_limit_warning",
+            "exit_code": 124,
+        })
+        print("[skynet] Time-limit warning: stopping training and preserving its latest checkpoint.", flush=True)
     if child is not None and child.poll() is None:
         try:
-            os.killpg(child.pid, signum)
+            # USR1 is a scheduler warning, not a portable trainer checkpoint API.
+            os.killpg(child.pid, signal.SIGTERM if signum == signal.SIGUSR1 else signum)
         except ProcessLookupError:
             pass
+
+
+def interrupted_exit_code():
+    return 124 if termination_signal == signal.SIGUSR1 else 128 + termination_signal
+
+
+def check_timeout_warning():
+    capsule = Path(os.environ.get("SKYNET_CAPSULE_DIR", os.environ["SKYNET_RUN_DIR"]))
+    if termination_signal is None and (capsule / "state" / "time-limit-warning").is_file():
+        forward(signal.SIGUSR1, None)
+
+
+def wait_for_child():
+    while True:
+        check_timeout_warning()
+        try:
+            return child.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def main():
@@ -777,6 +814,9 @@ def main():
         snapshot_checkpoints(run_dir, project_dir, execution)
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGUSR1):
         signal.signal(signum, forward)
+    check_timeout_warning()
+    if termination_signal is not None:
+        return interrupted_exit_code()
     run_preparation_steps(execution, run_dir, capsule_dir)
     resume_checkpoint = (
         latest_checkpoint(run_dir, execution.get("initial_checkpoint"))
@@ -808,12 +848,17 @@ def main():
         except Exception as error:
             print(f"GPU statistics unavailable: {type(error).__name__}", file=sys.stderr)
     try:
-        return_code = child.wait()
+        return_code = wait_for_child()
     finally:
         if sampler is not None:
             sampler.stop()
     if stage == "train":
-        snapshot_checkpoints(run_dir, project_dir, execution, final=return_code == 0)
+        snapshot_checkpoints(
+            run_dir, project_dir, execution,
+            final=return_code == 0 and termination_signal is None,
+        )
+    if termination_signal is not None:
+        return interrupted_exit_code()
     return return_code
 
 
@@ -828,6 +873,28 @@ if __name__ == "__main__":
 
 class SlurmCompileError(ValueError):
     pass
+
+
+BATCH_WARNING_HANDLER = '''mkdir -p "$SKYNET_CAPSULE_DIR/state"
+rm -f "$SKYNET_CAPSULE_DIR/state/time-limit-warning" "$SKYNET_CAPSULE_DIR/state/interruption.json"
+trap 'skynet_wait_interrupted=1; printf "%s\\n" USR1 > "$SKYNET_CAPSULE_DIR/state/time-limit-warning"' USR1'''
+
+
+def _supervise_runtime(runtime_lines: list[str]) -> list[str]:
+    """Wait for finalization even when the batch shell receives a warning."""
+    return [
+        "skynet_run_runtime() {",
+        *runtime_lines,
+        "}",
+        "skynet_run_runtime &",
+        "skynet_runtime_pid=$!",
+        "while true; do",
+        "  skynet_wait_interrupted=0",
+        '  if wait "$skynet_runtime_pid"; then skynet_runtime_rc=0; else skynet_runtime_rc=$?; fi',
+        '  if [[ "$skynet_wait_interrupted" == 0 ]]; then break; fi',
+        "done",
+        'exit "$skynet_runtime_rc"',
+    ]
 
 
 class CompiledSlurmJob(CanonicalModel):
@@ -1580,6 +1647,7 @@ def compile_sbatch(
         'mkdir -p "$SKYNET_CAPSULE_DIR"',
         "",
         status_trap,
+        BATCH_WARNING_HANDLER,
         "",
         *materializers,
         *attempt_archivers,
@@ -1595,7 +1663,7 @@ def compile_sbatch(
         'ln -sfn "' + work_root + '/logs/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.err" "$SKYNET_CAPSULE_DIR/stderr.log"',
         *secret_lines,
         'cd "$SKYNET_PROJECT_DIR"',
-        *runtime_lines,
+        *_supervise_runtime(runtime_lines),
         "",
     ]
     script = "\n".join(script_parts)

@@ -6887,6 +6887,27 @@ class PipelineService:
                 record_event=True,
             )
 
+    def _stopped_for_time_limit(self, attempt: Mapping[str, Any]) -> bool:
+        """Distinguish our graceful warning exit from an arbitrary trainer failure."""
+        path = (
+            f"{self._run_directory(attempt['run_id'])}/attempts/"
+            f"{attempt['slurm_job_id']}/state/interruption.json"
+        )
+        try:
+            _, content = self.cluster.read_log(path, attempt.get("gateway") or "auto", lines=30)
+            receipt = json.loads(content)
+        except (ClusterError, ValueError):
+            return False
+        return isinstance(receipt, dict) and all(
+            receipt.get(key) == value for key, value in {
+                "schema_version": 1,
+                "job_id": str(attempt["slurm_job_id"]),
+                "run_id": attempt["run_id"],
+                "reason": "time_limit_warning",
+                "exit_code": 124,
+            }.items()
+        )
+
     def reconcile(self) -> dict[str, Any]:
         if not self._reconcile_lock.acquire(blocking=False):
             return {
@@ -7028,6 +7049,13 @@ class PipelineService:
                     "exit_code": record.get("ExitCode"),
                     "node_list": record.get("NodeList"),
                 }
+                if (
+                    state == "FAILED"
+                    and record.get("ExitCode") == "124:0"
+                    and self._stopped_for_time_limit(row)
+                ):
+                    state = "TIMEOUT"
+                    common["slurm_reason"] = "Stopped at the Slurm time-limit warning; checkpoint preserved if available"
                 cancellation_requested = (
                     str(row.get("stage_status") or "").upper() == "CANCELLING"
                     or str(row.get("status") or "").upper() == "CANCELLING"
