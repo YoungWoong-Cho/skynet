@@ -66,6 +66,10 @@ npm run test:shared
 
 The tests use temporary databases and mocked transports where appropriate. Cluster integration tests require active SSH access and submit real Slurm jobs, so review their markers and payloads before running them.
 
+## Slack notifications
+
+Open **Settings → Slack notifications** to connect a personal Slack webhook and receive submission, start, cancellation, failure and completion updates for your training and evaluation jobs. Settings and delivery queues are isolated by email workspace. See [Slack setup and delivery behavior](docs/slack-notifications.md).
+
 ## UI workflow
 
 1. Open the cluster dashboard and select one or more partitions to filter the job queue.

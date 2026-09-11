@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from .capture_processing.api import router as capture_processing_router
 from .cluster_config import CLUSTER
 from .workspaces import WorkspaceMiddleware, session_router
+from .slack_api import slack_router
 from .collection_api import router as collection_router
 from .local_capture_api import router as local_capture_router
 from .hands_api import router as hands_router
@@ -488,6 +489,7 @@ def index() -> HTMLResponse:
 app.add_middleware(WorkspaceMiddleware, services=pipeline_service)
 app.include_router(session_router(pipeline_service.directory))
 app.include_router(pipeline_router)
+app.include_router(slack_router(pipeline_service))
 app.include_router(collection_router)
 app.include_router(local_capture_router)
 app.include_router(hands_router)

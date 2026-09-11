@@ -8,7 +8,8 @@
     <link rel="stylesheet" href="/static/styles.css?v=experiment-tabs-20260909-data-refinement">
     <script type="application/skynet-script" data-workspace-src="/static/dialogs.js?v=20260909-data" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/workspace-navigation.js?v=20260909-experiment-tabs" defer></script>
-    <script type="application/skynet-script" data-workspace-src="/static/app.js?v=20260909-experiment-tabs" defer></script>
+    <script type="application/skynet-script" data-workspace-src="/static/slack-settings.js?v=1" defer></script>
+<script type="application/skynet-script" data-workspace-src="/static/app.js?v=20260909-experiment-tabs" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/hands-ui.js?v=20260907-imported-hands-2" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/live-review.js?v=20260909-review-only" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/live-conversion.js?v=20260909-data-refinement" defer></script>
@@ -1667,6 +1668,41 @@
           </div>
 
           <div id="settings-error" class="inline-alert" role="alert" hidden></div>
+
+          <form id="slack-notifications-form" class="panel tracking-connection-card" autocomplete="off">
+            <div class="panel-heading">
+              <div><h2>Slack notifications</h2><p>Get updates for your workspace’s training and evaluation jobs, including each retry attempt.</p></div>
+              <span id="slack-notification-status" class="state-pill is-other">Not loaded</span>
+            </div>
+            <div class="form-grid">
+              <div class="field span-2">
+                <label for="slack-webhook">Incoming webhook URL</label>
+                <input id="slack-webhook" name="webhook_url" type="password" autocomplete="new-password" spellcheck="false" placeholder="Paste a Slack webhook; leave blank to keep the saved one">
+                <small>Stored securely on the Skynet server for your workspace. The webhook’s Slack channel receives the messages.</small>
+                <a href="https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/" target="_blank" rel="noopener noreferrer">Create a Slack incoming webhook</a>
+              </div>
+              <div class="field span-2">
+                <label for="slack-app-url">Skynet address for notification links (optional)</label>
+                <input id="slack-app-url" name="app_url" type="url" placeholder="http://your-skynet-server:8080">
+                <small>Use an address reachable from Slack. Leave blank to omit the link.</small>
+              </div>
+              <label class="checkbox-field span-2"><input name="enabled" type="checkbox"><span>Enable Slack notifications</span></label>
+              <fieldset class="field span-2"><legend>Notify me when a job…</legend>
+                <label><input name="events" type="checkbox" value="submitted" checked> Is submitted</label>
+                <label><input name="events" type="checkbox" value="running" checked> Starts running</label>
+                <label><input name="events" type="checkbox" value="cancelled" checked> Is cancelled</label>
+                <label><input name="events" type="checkbox" value="failed" checked> Fails</label>
+                <label><input name="events" type="checkbox" value="completed" checked> Completes</label>
+              </fieldset>
+            </div>
+            <p id="slack-notification-detail" role="status">Notifications begin with future job state changes after enabling. Closing your browser does not stop delivery.</p>
+            <div class="form-actions">
+              <button class="button button-accent" type="submit">Save settings</button>
+              <button id="slack-send-test" class="button button-outline" type="button" disabled>Send test message</button>
+              <button id="slack-retry-failed" class="button button-outline" type="button" disabled>Retry failed notifications</button>
+              <button id="slack-disconnect" class="button button-quiet" type="button" disabled>Disconnect &amp; forget webhook</button>
+            </div>
+          </form>
 
           <div class="tracking-settings-grid">
             <form id="wandb-connection-form" class="panel tracking-connection-card" data-tracking-provider="wandb" autocomplete="off">

@@ -97,6 +97,7 @@ class WorkspaceServices:
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._notification_thread: threading.Thread | None = None
 
     def for_workspace(self, identifier: str):
         with self._lock:
@@ -127,6 +128,30 @@ class WorkspaceServices:
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="skynet-workspaces", daemon=True)
         self._thread.start()
+        self._notification_thread = threading.Thread(target=self._notification_loop, name="skynet-notifications", daemon=True)
+        self._notification_thread.start()
+
+    def _notification_loop(self):
+        # Independent of cluster polling: Slack latency never delays job management.
+        while not self._stop.wait(2):
+            try:
+                with self.system.database.connection() as connection:
+                    owners = [
+                        row[0] for row in connection.execute(
+                            "SELECT owner_id FROM slack_notifications WHERE enabled=1 ORDER BY owner_id"
+                        )
+                    ]
+            except Exception as error:
+                logging.getLogger(__name__).error("Slack queue read failed (%s)", type(error).__name__)
+                continue
+            for owner in owners:
+                if self._stop.is_set():
+                    break
+                try:
+                    self.for_workspace(owner).notifications.deliver_one()
+                except Exception as error:
+                    # Do not log webhook URLs that may appear in transport errors.
+                    logging.getLogger(__name__).error("Slack dispatcher failed (%s)", type(error).__name__)
 
     def _loop(self):
         while not self._stop.wait(15):
@@ -148,6 +173,8 @@ class WorkspaceServices:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=5)
+        if self._notification_thread:
+            self._notification_thread.join(timeout=6)
         with self._lock:
             services = list(self._services.values())
         for service in services:

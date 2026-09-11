@@ -12473,6 +12473,7 @@ async function loadSettings(force = false) {
     const [settingsResult, connectionsResult] = await Promise.allSettled([
       api("/api/settings"),
       loadTrackingConnections(force),
+      ...(typeof loadSlackSettings === "function" ? [loadSlackSettings()] : []),
     ]);
     if (settingsResult.status === "fulfilled") {
       renderSettings(settingsResult.value);

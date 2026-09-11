@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 from .data_paths import validate_mount_path
+from .notification_schema import migrate_notifications
 from .workspace_schema import PRIVATE_TABLES, LEGACY_WORKSPACE, migrate_workspaces, visible_sql
 from .training_metrics import is_scalar
 
@@ -679,6 +680,7 @@ class Database:
                 self._migrate_job_attempt_snapshots(connection)
                 self._ensure_execution_immutability_triggers(connection)
                 migrate_workspaces(connection)
+                migrate_notifications(connection)
             finally:
                 connection.close()
 

@@ -6,7 +6,7 @@ There are no passwords, email messages, verification codes or SSO. This is for a
 
 ## Personal and shared records
 
-Personal records include projects, experiment specifications and revisions, custom training adapters and their validations, saved repository branches/commits, tracking connections and credentials, training runs and attempts, checkpoints, evaluation jobs, episodes, results, logs and tracking links. Browser gateway preferences and tutorial progress also follow the workspace. Logging out does not cancel jobs or discard saved tracking credentials.
+Personal records include projects, experiment specifications and revisions, custom training adapters and their validations, saved repository branches/commits, tracking connections and credentials, Slack notification settings and delivery history, training runs and attempts, checkpoints, evaluation jobs, episodes, results, logs and tracking links. Browser gateway preferences and tutorial progress also follow the workspace. Logging out does not cancel jobs or discard saved tracking credentials.
 
 Cluster availability, recording sessions, datasets and preparation jobs, hands/poses, collection adapter definitions, built-in training adapters, installed runtimes and evaluation suite definitions are shared. Clone a built-in training adapter to customize it in your workspace. Shared datasets remain protected from deletion while any experiment uses them; other workspaces' experiment names and links are hidden.
 

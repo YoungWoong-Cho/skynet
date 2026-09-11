@@ -60,6 +60,7 @@ from .credential_store import (
 )
 from .database import Database, canonical_json, content_sha256, utc_now
 from .workspace_schema import visible_sql
+from .slack_notifications import SlackNotifications
 from .workspaces import WorkspaceServices, require_workspace_records
 from .experiments import (
     CanonicalResult,
@@ -1417,6 +1418,7 @@ class PipelineService:
         self.cluster = cluster or ClusterClient()
         self.credential_store = credential_store or KeyringCredentialStore()
         self.credentials = session_credentials or SESSION_CREDENTIALS
+        self.notifications = SlackNotifications(self.database, self.credential_store)
         self._credential_restore_lock = threading.Lock()
         self._tracking_connection_lock = threading.RLock()
         self._tracking_connection_revisions = {"mlflow": 0, "wandb": 0}
