@@ -87,7 +87,7 @@ class WorkspaceServices:
     def __init__(self, system_service: Any):
         self.system = system_service
         self.directory = WorkspaceDirectory(system_service.database)
-        owner_file = system_service.database.path.with_name("workspace-owner.json")
+        owner_file = system_service.database.data_root / "workspace-owner.json"
         owner_email = os.environ.get("SKYNET_LEGACY_OWNER_EMAIL")
         if not owner_email and owner_file.exists():
             owner_email = json.loads(owner_file.read_text())["email"]
@@ -109,7 +109,7 @@ class WorkspaceServices:
                                     KeyringCredentialStore(service_name=f"io.skynet-control.tracking.{identifier}"))
                 credentials = self.system.credentials if identifier == LEGACY_WORKSPACE else SessionCredentialStore()
                 self._services[identifier] = type(self.system)(
-                    Database(self.system.database.path, workspace_id=identifier),
+                    self.system.database.for_workspace(identifier),
                     cluster=self.system.cluster,
                     credential_store=credential_store, session_credentials=credentials,
                 )
@@ -277,7 +277,7 @@ def session_router(directory: WorkspaceDirectory) -> APIRouter:
         workspace = directory.resolve(request.cookies.get(COOKIE))
         if workspace:
             from .workspace_storage import WorkspaceStorage
-            storage = WorkspaceStorage(Database(directory.database.path, workspace_id=workspace["id"]))
+            storage = WorkspaceStorage(directory.database.for_workspace(workspace["id"]))
             workspace["storage_configured"] = storage.work_root is not None
         return {"workspace": workspace}
 

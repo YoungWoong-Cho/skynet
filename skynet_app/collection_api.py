@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from .db_backend import INTEGRITY_ERRORS, DATABASE_ERRORS
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -28,7 +29,7 @@ service = CollectionService()
 def _http_error(error: Exception) -> HTTPException:
     if isinstance(error, KeyError):
         return HTTPException(status_code=404, detail=str(error).strip("'"))
-    if isinstance(error, sqlite3.IntegrityError):
+    if isinstance(error, INTEGRITY_ERRORS):
         return HTTPException(status_code=409, detail=str(error))
     if isinstance(error, (ValueError, CollectionValidationError)):
         return HTTPException(status_code=422, detail=str(error))

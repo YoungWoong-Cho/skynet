@@ -525,6 +525,8 @@ class CompiledCollectionJob(BaseModel):
 class CollectionStore:
     def __init__(self, database: Database) -> None:
         self.database = database
+        if database.is_postgres:
+            return  # Versioned PostgreSQL migrations own the schema.
         with self.database.transaction() as connection:
             connection.executescript(COLLECTION_SCHEMA)
             columns = {
@@ -1113,7 +1115,7 @@ class CollectionStore:
                 last = connection.execute(
                     "SELECT details_json FROM collection_session_events "
                     "WHERE session_id = ? AND event_type = 'SCHEDULER_OBSERVED' "
-                    "ORDER BY created_at DESC, rowid DESC LIMIT 1", (session_id,),
+                    "ORDER BY created_at DESC, id DESC LIMIT 1", (session_id,),
                 ).fetchone()
                 observation = {**details, "scheduler_status": new_status}
                 if last is None or last["details_json"] != canonical_json(observation):

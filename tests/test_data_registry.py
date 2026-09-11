@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import sqlite3
+from skynet_app.db_backend import INTEGRITY_ERRORS
 import tempfile
 import unittest
 from pathlib import Path
@@ -63,7 +63,7 @@ class DataRegistryTestCase(unittest.TestCase):
         self.assertEqual(loaded["version_count"], 1)
         self.assertEqual(loaded["latest_version"]["revision"], "a" * 40)
         self.assertEqual(loaded["metadata"]["license"], "upstream")
-        with self.assertRaises(sqlite3.IntegrityError):
+        with self.assertRaises(INTEGRITY_ERRORS):
             with self.database.transaction() as connection:
                 connection.execute(
                     "UPDATE data_resource_versions SET status = 'BROKEN' WHERE id = ?",

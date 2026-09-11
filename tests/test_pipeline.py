@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import sqlite3
+from skynet_app.db_backend import DATABASE_ERRORS, INTEGRITY_ERRORS
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -676,7 +677,7 @@ def test_failed_wandb_binding_reopens_exact_same_run(monkeypatch):
         reopened = []
 
         class ExactBindingWandB:
-            def __init__(self, _capsule, _settings):
+            def __init__(self, _capsule, _settings, **_kwargs):
                 pass
 
             def ensure_experiment(self, entity, project):
@@ -750,7 +751,7 @@ def test_wandb_retry_recovers_missing_binding(monkeypatch, missing):
         local = {"remote_id": run_id, "url": remote_url} if missing == "registry" else None
 
         class ExactBindingWandB:
-            def __init__(self, _capsule, _settings):
+            def __init__(self, _capsule, _settings, **_kwargs):
                 pass
 
             def ensure_experiment(self, entity, project):
@@ -1128,13 +1129,17 @@ def test_reconcile_repeated_checkpoint_finalization_succeeds(tmp_path, monkeypat
         job_statuses = cluster.job_statuses
 
         def simultaneous_completion(*args, **kwargs):
-            barrier.wait(timeout=10)
+            if not database.is_postgres:
+                barrier.wait(timeout=10)
             return job_statuses(*args, **kwargs)
 
         monkeypatch.setattr(cluster, "job_statuses", simultaneous_completion)
         with ThreadPoolExecutor(max_workers=2) as pool:
             reports = list(pool.map(lambda worker: worker.reconcile(), [service, other]))
-        assert all(report["updated"] == 1 for report in reports)
+        if database.is_postgres:
+            assert sum(report.get("updated", 0) for report in reports) == 1
+        else:
+            assert all(report["updated"] == 1 for report in reports)
     else:
         # A process can exit after registration but before updating run state.
         checkpoint = service._capture_checkpoint(run_id, attempt_id, required=True)
@@ -2832,7 +2837,7 @@ def test_historical_attempt_enrichment_uses_exact_cache_and_write_once_receipt(m
             if event["event_type"] == "COMMON_HYPERPARAMETERS_ENRICHED_V1"
         ]
         assert len(receipts) == 1
-        with pytest.raises(sqlite3.DatabaseError, match="receipts are immutable"):
+        with pytest.raises(DATABASE_ERRORS, match="receipts are immutable"):
             with database.transaction() as connection:
                 connection.execute(
                     "UPDATE events SET details_json = '{}' WHERE id = ?",

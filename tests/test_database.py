@@ -7,6 +7,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from skynet_app.db_backend import INTEGRITY_ERRORS
 from skynet_app.database import Database
 
 
@@ -163,7 +164,7 @@ class DatabaseTestCase(unittest.TestCase):
         second = self.database.create_checkpoint(
             self.run["id"], **{**receipt, "path": "/checkpoints/best.ckpt"}
         )
-        with self.assertRaisesRegex(sqlite3.IntegrityError, "different receipt"):
+        with self.assertRaisesRegex(INTEGRITY_ERRORS, "different receipt"):
             self.database.create_checkpoint(
                 self.run["id"], **{**receipt, "sha256": "b" * 64}
             )

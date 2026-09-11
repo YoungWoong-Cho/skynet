@@ -7,7 +7,7 @@ After=gnome-keyring-daemon.service
 Type=simple
 WorkingDirectory=%h/skynet
 ExecStart=%h/skynet/.venv/bin/python -m uvicorn skynet_app.main:app --host 0.0.0.0 --port 8080 --workers 1
-Environment=SKYNET_DATABASE_PATH=%h/skynet/data/skynet.db
+
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus

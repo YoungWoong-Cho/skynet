@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+from .db_backend import INTEGRITY_ERRORS, DATABASE_ERRORS
 import threading
 import time
 import uuid
@@ -217,7 +218,7 @@ class SlackNotifications:
                             f"UPDATE notification_outbox SET status='skipped',lease_token=NULL WHERE owner_id=? AND status IN ('pending','sending') AND category NOT IN ({placeholders})",
                             (self.owner, *events),
                         )
-            except sqlite3.Error:
+            except DATABASE_ERRORS:
                 if webhook:
                     if old:
                         self.credentials.save("slack", old.endpoint, old.credentials)

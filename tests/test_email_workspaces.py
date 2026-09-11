@@ -8,6 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from skynet_app.db_backend import INTEGRITY_ERRORS
 from skynet_app.database import Database
 from skynet_app.pipeline_api import PipelineService, router
 from skynet_app.source_metadata_cache import SourceMetadataStore
@@ -101,12 +102,15 @@ def test_personal_graphs_and_writes_are_isolated(services):
         bob.update_run(a['run']['id'], status='CANCELLED')
     with pytest.raises(KeyError):
         bob.upsert_tracking_binding('wandb', 'run', a['run']['id'], remote_id='bad', remote_url=None, status='connected')
-    with bob.transaction() as connection, pytest.raises(sqlite3.IntegrityError):
+    with bob.transaction() as connection, pytest.raises(INTEGRITY_ERRORS):
         connection.execute("UPDATE runs SET status='CANCELLED' WHERE id=?", (a['run']['id'],))
     assert alice.get_run(a['run']['id'])['status'] != 'CANCELLED'
     assert len(alice.get_evaluation(a['evaluation']['id'])['episodes']) == 1
     with services.system.database.connection() as connection:
-        assert connection.execute('PRAGMA foreign_key_check').fetchall() == []
+        if getattr(connection, "dialect", "sqlite") == "postgresql":
+            assert connection.execute("SELECT conname FROM pg_constraint WHERE contype='f' AND NOT convalidated").fetchall() == []
+        else:
+            assert connection.execute('PRAGMA foreign_key_check').fetchall() == []
 
 
 def test_saved_settings_and_shared_adapters(services, monkeypatch):

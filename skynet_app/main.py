@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .capture_processing.api import router as capture_processing_router
 from .cluster_config import CLUSTER
+from .background_owner import BackgroundOwner
 from .cluster_runtime import ClusterError
 from .workspaces import WorkspaceMiddleware, session_router
 from .slack_api import slack_router
@@ -50,20 +51,30 @@ printf '\n__SKYNET_USER_USAGE__\n'
 LC_ALL=C {GPU_USAGE_USER_COMMAND} 2>/dev/null || true
 '''
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
+def _start_background_services():
     pipeline_service.start()
     live_conversions.start()
     policy_exports.start()
     storage = json.loads((APP_ROOT / "config/live_storage.json").read_text())
     live_archive.start(enabled=storage["enabled"], cleanup_enabled=storage["cleanup_source"])
+
+
+def _stop_background_services():
+    live_archive.stop()
+    policy_exports.stop()
+    live_conversions.stop()
+    pipeline_service.stop()
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    owner = BackgroundOwner(pipeline_service.system.database, _start_background_services, _stop_background_services)
+    application.state.background_owner = owner
+    owner.start()
     try:
         yield
     finally:
-        live_archive.stop()
-        policy_exports.stop()
-        live_conversions.stop()
-        pipeline_service.stop()
+        owner.stop()
 
 
 app = FastAPI(

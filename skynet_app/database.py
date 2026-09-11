@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
+from .database_endpoint import load_endpoint
+from .db_backend import PostgresBackend, Record, DistributedRLock, lock_key
 from .data_paths import validate_mount_path
 from .notification_schema import migrate_notifications
 from .workspace_schema import PRIVATE_TABLES, LEGACY_WORKSPACE, migrate_workspaces, visible_sql
@@ -642,23 +644,44 @@ def content_sha256(value: Any) -> str:
 
 
 class Database:
-    """Thread-safe SQLite persistence with one connection per operation."""
+    """Workspace-scoped persistence using SQLite or the central PostgreSQL backend."""
 
-    def __init__(self, path: str | os.PathLike[str] | None = None, *, workspace_id: str | None = None) -> None:
+    def __init__(self, path: str | os.PathLike[str] | None = None, *, workspace_id: str | None = None,
+                 url: str | None = None, data_root: str | os.PathLike[str] | None = None) -> None:
         self.workspace_id = workspace_id
+        self.data_root = Path(data_root or os.environ.get("SKYNET_DATA_ROOT") or APP_ROOT / "data").expanduser().resolve()
+        self.url = url or (os.environ.get("SKYNET_DATABASE_URL") if path is None else None)
+        endpoint_file = self.data_root / "database.json"
+        if not endpoint_file.exists():
+            endpoint_file = APP_ROOT / "config/database.json"
+        self.endpoint_config = json.loads(endpoint_file.read_text()) if endpoint_file.exists() else {}
+        if not self.url and path is None and not os.environ.get("SKYNET_DATABASE_PATH") and endpoint_file.exists():
+            self.url = load_endpoint(endpoint_file)
+        self.is_postgres = bool(self.url)
+        if isinstance(self.url, str) and not self.url.startswith(("postgresql://", "postgres://", "dbname=", "host=", "user=")):
+            raise ValueError("SKYNET_DATABASE_URL must describe a PostgreSQL connection")
+        self.backend = PostgresBackend(self.url, workspace_id) if self.is_postgres else None
         configured = path if path is not None else os.environ.get("SKYNET_DATABASE_PATH")
-        self.path = Path(configured or DEFAULT_DATABASE_PATH).expanduser().resolve()
+        self.path = None if self.is_postgres else Path(configured or DEFAULT_DATABASE_PATH).expanduser().resolve()
+        if data_root is None and path is not None:
+            self.data_root = Path(path).expanduser().resolve().parent
         self._write_lock = threading.RLock()
         if workspace_id is None:
             self.initialize()
         else:
-            # Schema upgrades run once through the unscoped coordinator, never
-            # during a login while another workspace is using the database.
             with self.connection() as connection:
                 if not connection.execute("SELECT 1 FROM workspaces WHERE id=?", (workspace_id,)).fetchone():
                     raise ValueError("Unknown workspace")
 
+    def for_workspace(self, workspace_id: str):
+        return Database(self.path, url=self.url, workspace_id=workspace_id, data_root=self.data_root)
+
+    def operation_lock(self, name: str):
+        return DistributedRLock(self.backend, name) if self.is_postgres else threading.RLock()
+
     def _connect(self) -> sqlite3.Connection:
+        if self.is_postgres:
+            return self.backend.connect()
         connection = sqlite3.connect(self.path, timeout=30.0, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.create_function("current_workspace_id", 0, lambda: self.workspace_id)
@@ -667,6 +690,9 @@ class Database:
         return connection
 
     def initialize(self) -> None:
+        if self.is_postgres:
+            self.backend.initialize()
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._write_lock:
             connection = self._connect()
@@ -1095,7 +1121,11 @@ class Database:
         with self._write_lock:
             connection = self._connect()
             try:
-                connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+                connection.execute("BEGIN" if self.is_postgres or not immediate else "BEGIN IMMEDIATE")
+                if self.is_postgres and immediate:
+                    # Preserve the repository's read-modify-write serialization
+                    # across app hosts, not only threads in one Python process.
+                    connection.execute("SELECT pg_advisory_xact_lock(?)", (lock_key("repository-write"),))
                 yield connection
                 connection.commit()
             except Exception:
@@ -2483,7 +2513,7 @@ class Database:
                        ) AS latest_revision_id
                 FROM experiment_revisions er
                 JOIN experiments e ON e.id = er.experiment_id
-                WHERE {visible_sql("experiment_revisions", "er")} AND (? IS NULL OR er.experiment_id = ?)
+                WHERE {visible_sql("experiment_revisions", "er")} AND (CAST(? AS TEXT) IS NULL OR er.experiment_id = ?)
                   AND NOT EXISTS (
                       SELECT 1
                       FROM variants v
@@ -2817,11 +2847,11 @@ class Database:
         if keep_last < 0:
             raise ValueError("keep_last must be non-negative")
         with self.connection() as connection:
-            return self._decode_many(connection.execute("""
+            return self._decode_many(connection.execute(f"""
                 SELECT * FROM checkpoints
                 WHERE run_id = ? AND is_resumable = 1 AND is_selected_for_inference = 0 AND pruned_at IS NULL
                 ORDER BY COALESCE(training_step, -1) DESC, created_at DESC
-                LIMIT -1 OFFSET ?
+                {"OFFSET ?" if self.is_postgres else "LIMIT -1 OFFSET ?"}
             """, (run_id, keep_last)).fetchall())
 
     def register_evaluation_suite(
@@ -3496,7 +3526,7 @@ class Database:
 
     @classmethod
     def _adapter_version_payload(cls, row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
-        decoded = cls._decode(row) if isinstance(row, sqlite3.Row) else dict(row)
+        decoded = cls._decode(row) if isinstance(row, (sqlite3.Row, Record)) else dict(row)
         assert decoded is not None
         return {
             "id": decoded["id"],
@@ -3635,7 +3665,7 @@ class Database:
         with self.connection() as connection:
             keys = connection.execute(
                 f"""
-                SELECT adapter_key, lower(name) AS sort_name
+                SELECT adapter_key, min(lower(name)) AS sort_name
                 FROM adapters
                 WHERE {visible_sql("adapters")} AND (? = 1 OR archived_at IS NULL)
                 GROUP BY adapter_key
@@ -4035,7 +4065,7 @@ class Database:
 
     @classmethod
     def _public_data_resource(cls, row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
-        result = cls._decode(row) if isinstance(row, sqlite3.Row) else dict(row)
+        result = cls._decode(row) if isinstance(row, (sqlite3.Row, Record)) else dict(row)
         assert result is not None
         result["metadata"] = result.pop("metadata_json", {})
         return result
@@ -4048,7 +4078,7 @@ class Database:
         *,
         include_resource: bool = False,
     ) -> dict[str, Any]:
-        result = cls._decode(row) if isinstance(row, sqlite3.Row) else dict(row)
+        result = cls._decode(row) if isinstance(row, (sqlite3.Row, Record)) else dict(row)
         assert result is not None
         result["metadata"] = result.pop("metadata_json", {})
         result["locations"] = [dict(item) for item in connection.execute("SELECT * FROM data_locations WHERE version_id=? ORDER BY kind, host", (result["id"],)).fetchall()]
@@ -4459,15 +4489,18 @@ class Database:
                         "data_bundle_assignments",
                     )
                 ]
-                triggers = [
-                    c.execute(
-                        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
-                        (name,),
-                    ).fetchone()[0]
-                    for name in trigger_names
-                ]
-                for name in trigger_names:
-                    c.execute(f"DROP TRIGGER {name}")
+                triggers = []
+                if self.is_postgres:
+                    # Transaction-local capability; other connections retain the
+                    # immutable-record guards throughout this cleanup.
+                    c.execute("SET LOCAL skynet.allow_dataset_delete = 'on'")
+                else:
+                    triggers = [
+                        c.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (name,)).fetchone()[0]
+                        for name in trigger_names
+                    ]
+                    for name in trigger_names:
+                        c.execute(f"DROP TRIGGER {name}")
                 for bundle in bundles:
                     c.execute(
                         "DELETE FROM data_bundle_assignments WHERE bundle_id=?",
@@ -4510,7 +4543,7 @@ class Database:
                 FROM experiment_revisions er JOIN experiments e ON e.id=er.experiment_id
                 LEFT JOIN variants v ON v.experiment_revision_id=er.id
                 LEFT JOIN runs r ON r.variant_id=v.id
-                JOIN json_each(er.requested_spec_json, '$.data.bundle.assignments') assignment
+                CROSS JOIN json_each(er.requested_spec_json, '$.data.bundle.assignments') assignment
                 WHERE json_extract(assignment.value, '$.version.manifest_sha256')=?
                 ORDER BY e.name, er.revision_number
             """, (manifest_sha256,)).fetchall()]

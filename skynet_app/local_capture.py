@@ -143,7 +143,7 @@ class LocalCaptureService:
     def __init__(self, database: Database, root: Path | None = None, *, storage=None):
         self.database = database
         # Only used to identify legacy files during explicit verified migration.
-        self.root = root or database.path.parent / "local-captures"
+        self.root = root or database.data_root / "local-captures"
         self.storage = storage or CaptureStorage()
         self._lock = threading.RLock()
         with database.transaction() as connection:

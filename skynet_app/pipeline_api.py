@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 import sqlite3
+from .db_backend import INTEGRITY_ERRORS, DATABASE_ERRORS
 import subprocess
 import threading
 from dataclasses import replace
@@ -1431,7 +1432,7 @@ class PipelineService:
         self.credentials = session_credentials or SESSION_CREDENTIALS
         self.notifications = SlackNotifications(self.database, self.credential_store)
         self._credential_restore_lock = threading.Lock()
-        self._tracking_connection_lock = threading.RLock()
+        self._tracking_connection_lock = self.database.operation_lock("tracking:" + (self.database.workspace_id or "system"))
         self._tracking_connection_revisions = {"mlflow": 0, "wandb": 0}
         self._credentials_restored = False
         self._evaluator_runtime_readiness_lock = threading.Lock()
@@ -1440,7 +1441,7 @@ class PipelineService:
         ] = {}
         self.source_discovery = SourceDiscovery(self.cluster)
         self.source_metadata = SourceMetadataStore(self.database)
-        self._reconcile_lock = threading.RLock()
+        self._reconcile_lock = self.database.operation_lock("pipeline")
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._progress_refresh_lock = threading.Lock()
@@ -1450,6 +1451,20 @@ class PipelineService:
         self._progress_refresh_versions: dict[tuple[str, str], tuple[Any, ...]] = {}
         self._progress_refresh_workers = 0
         self._seed_registries()
+
+    def _tracking_journal(self, capsule):
+        if not self.database.is_postgres:
+            return {}
+        from .tracking_journal import TrackingJournal
+        path = Path(capsule)
+        scope = path.name if re.fullmatch(r"[a-f0-9-]{36}", path.name) else str(path.resolve().relative_to(LOCAL_CAPSULE_ROOT.resolve()))
+        return {"journal": TrackingJournal(self.database, scope)}
+
+    def _wandb_bridge(self, capsule, settings=None):
+        return WandBBridge(capsule, settings, **self._tracking_journal(capsule))
+
+    def _mlflow_bridge(self, capsule, settings=None):
+        return MLflowBridge(capsule, settings, **self._tracking_journal(capsule))
 
     @property
     def work_root(self) -> str:
@@ -3505,7 +3520,7 @@ class PipelineService:
             return existing
         try:
             return database.create_project(name)
-        except sqlite3.IntegrityError:
+        except INTEGRITY_ERRORS:
             return next(item for item in database.list_projects() if item["name"] == name)
 
     def _materialize_experiment_revision(
@@ -3698,7 +3713,7 @@ class PipelineService:
                     status="DRAFT",
                     spec_schema_version=spec.api_version,
                 )
-            except sqlite3.IntegrityError as error:
+            except INTEGRITY_ERRORS as error:
                 existing = next(
                     (
                         item
@@ -4268,8 +4283,13 @@ class PipelineService:
             if existing.get("sha256") != digest:
                 raise ValueError("The saved submission checksum differs from this attempt")
             return existing
+        location = "submission_host"
+        if self.database.is_postgres:
+            from .metadata_objects import MetadataObjects
+            path = MetadataObjects(self.database).put(content, name=f"{attempt_id}.sbatch")
+            location = "cluster_objects"
         return self.database.create_artifact(run_id, artifact_type="SUBMISSION_SCRIPT", path=str(path),
-            sha256=digest, size_bytes=len(content), retention_policy="preserve", metadata={"attempt_id": attempt_id, "location": "submission_host"})
+            sha256=digest, size_bytes=len(content), retention_policy="preserve", metadata={"attempt_id": attempt_id, "location": location})
 
     def recover_run_submission(self, run_id: str, gateway: str) -> dict[str, Any]:
         with self._reconcile_lock:
@@ -4292,11 +4312,15 @@ class PipelineService:
                                      if item.get("metadata_json", {}).get("attempt_id") == attempt["id"]), None)
                     if not artifact:
                         raise ValueError("No accepted job was found and this older attempt has no saved submission script. Its original script must be restored before upload recovery.")
-                    path = Path(artifact["path"])
-                    expected = (LOCAL_CAPSULE_ROOT / run_id / "submissions" / f"{attempt['id']}.sbatch").resolve()
-                    if path.resolve() != expected:
-                        raise ValueError("Saved submission path does not match this attempt")
-                    content = path.read_bytes()
+                    if artifact.get("metadata_json", {}).get("location") == "cluster_objects":
+                        from .metadata_objects import MetadataObjects
+                        content = MetadataObjects(self.database).read(artifact["path"], artifact["sha256"])
+                    else:
+                        path = Path(artifact["path"])
+                        expected = (LOCAL_CAPSULE_ROOT / run_id / "submissions" / f"{attempt['id']}.sbatch").resolve()
+                        if path.resolve() != expected:
+                            raise ValueError("Saved submission path does not match this attempt")
+                        content = path.read_bytes()
                     if hashlib.sha256(content).hexdigest() != artifact["sha256"]:
                         raise ValueError("Saved submission script changed; restore the original before recovery")
                     submission = self.cluster.submit_script(content.decode("utf-8"), run_id, selected_gateway,
@@ -5088,7 +5112,7 @@ class PipelineService:
                 path=f"{attempt_directory}/resolved-spec.json",
                 sha256=compiled.spec_sha256,
             )
-        except sqlite3.IntegrityError:
+        except INTEGRITY_ERRORS:
             pass
         if not is_evaluation_stage:
             self._start_tracking(
@@ -5485,7 +5509,7 @@ class PipelineService:
                 verify_tls=request.verify_tls,
             )
             try:
-                bridge = WandBBridge(
+                bridge = self._wandb_bridge(
                     LOCAL_CAPSULE_ROOT / ".tracking-connections" / (self.database.workspace_id or "legacy") / "wandb", settings
                 )
                 identity = bridge.validate_connection()
@@ -5553,7 +5577,7 @@ class PipelineService:
                 verify_tls=request.verify_tls,
             )
             try:
-                MLflowBridge(
+                self._mlflow_bridge(
                     LOCAL_CAPSULE_ROOT / ".tracking-connections" / (self.database.workspace_id or "legacy") / "mlflow", settings
                 ).validate_connection()
             except Exception as error:
@@ -5928,17 +5952,17 @@ class PipelineService:
         for existing in bindings:
             run_id = str(existing["scope_id"])
             capsule = LOCAL_CAPSULE_ROOT / run_id
-            if not capsule.exists():
+            if not capsule.exists() and not self.database.is_postgres:
                 continue
             try:
                 if provider == "wandb":
                     settings = self._wandb_settings()
                     current_endpoint = settings.base_url
-                    bridge: Any = WandBBridge(capsule, settings)
+                    bridge: Any = self._wandb_bridge(capsule, settings)
                 else:
                     settings = self._mlflow_settings()
                     current_endpoint = settings.tracking_uri
-                    bridge = MLflowBridge(capsule, settings)
+                    bridge = self._mlflow_bridge(capsule, settings)
                 metadata = existing.get("metadata_json") or {}
                 pinned_endpoint = metadata.get("endpoint")
                 if not pinned_endpoint or str(pinned_endpoint).rstrip("/") != str(
@@ -6239,7 +6263,7 @@ class PipelineService:
                 run_name = self._tracking_run_name(provider, spec, run)
                 if name == "mlflow":
                     settings = self._mlflow_settings(provider)
-                    bridge = MLflowBridge(LOCAL_CAPSULE_ROOT / local_run_id, settings)
+                    bridge = self._mlflow_bridge(LOCAL_CAPSULE_ROOT / local_run_id, settings)
                     experiment_name = (
                         self._tracking_provider_value(provider, "experiment")
                         or spec.tracking.mlflow_experiment
@@ -6338,7 +6362,7 @@ class PipelineService:
                                 "W&B is enabled but no session/environment API key and entity are configured"
                             )
                         entity = str(
-                            WandBBridge(
+                            self._wandb_bridge(
                                 LOCAL_CAPSULE_ROOT / local_run_id, settings
                             ).validate_connection()["entity"]
                         )
@@ -6347,7 +6371,7 @@ class PipelineService:
                         self._tracking_provider_value(provider, "project")
                         or spec.identity.experiment
                     )
-                    bridge = WandBBridge(LOCAL_CAPSULE_ROOT / local_run_id, settings)
+                    bridge = self._wandb_bridge(LOCAL_CAPSULE_ROOT / local_run_id, settings)
                     project_result = bridge.ensure_experiment(entity, project)
                     existing = next((
                         item for item in self.database.list_tracking_bindings("run", local_run_id)
@@ -7517,7 +7541,7 @@ class PipelineService:
                 is_selected_for_inference=True,
                 metadata=payload,
             )
-        except sqlite3.IntegrityError as error:
+        except INTEGRITY_ERRORS as error:
             if required:
                 raise RuntimeError(f"required inference checkpoint could not be registered: {error}") from error
             return None
@@ -7801,7 +7825,7 @@ class PipelineService:
         # Reconciliation and manual sync may overlap. Serialize the read/delta/
         # append sequence per run, including calls made by another service instance.
         with self._training_tracking_locks_guard:
-            lock = self._training_tracking_locks.setdefault(run_id, threading.RLock())
+            lock = self._training_tracking_locks.setdefault((self.database.url is not None, run_id), self.database.operation_lock("training-metrics:" + run_id))
         with lock:
             return self._publish_training_progress_tracking_locked(
                 run_id, providers=providers, include_native=include_native
@@ -7842,11 +7866,11 @@ class PipelineService:
             name = str(self._tracking_provider_value(provider, "provider"))
             try:
                 if name == "mlflow":
-                    bridge: Any = MLflowBridge(
+                    bridge: Any = self._mlflow_bridge(
                         LOCAL_CAPSULE_ROOT / run_id, self._mlflow_settings(provider)
                     )
                 elif name == "wandb":
-                    bridge = WandBBridge(
+                    bridge = self._wandb_bridge(
                         LOCAL_CAPSULE_ROOT / run_id, replace(self._wandb_settings(provider), auto_flush=False)
                     )
                 else:
@@ -8143,7 +8167,7 @@ class PipelineService:
                         "aggregate": [metric.model_dump(mode="json") for metric in result.aggregate],
                     },
                 )
-            except sqlite3.IntegrityError:
+            except INTEGRITY_ERRORS:
                 pass
             linked_outputs = [
                 (result.raw_metrics_path, "EVALUATION_RAW_METRICS", "canonical raw metrics")
@@ -8169,7 +8193,7 @@ class PipelineService:
                             "uploaded": False,
                         },
                     )
-                except sqlite3.IntegrityError:
+                except INTEGRITY_ERRORS:
                     pass
             self._sync_tracking_outputs(str(attempt["run_id"]))
             return None, len(result.episodes)
@@ -8386,11 +8410,11 @@ class PipelineService:
                 continue
             try:
                 if name == "mlflow":
-                    bridge: Any = MLflowBridge(
+                    bridge: Any = self._mlflow_bridge(
                         LOCAL_CAPSULE_ROOT / run_id, self._mlflow_settings(provider)
                     )
                 elif name == "wandb":
-                    bridge = WandBBridge(
+                    bridge = self._wandb_bridge(
                         LOCAL_CAPSULE_ROOT / run_id, self._wandb_settings(provider)
                     )
                 else:
@@ -9555,7 +9579,7 @@ router = APIRouter(prefix="/api", dependencies=[Depends(require_workspace_record
 def _http_error(error: Exception) -> HTTPException:
     if isinstance(error, KeyError):
         return HTTPException(status_code=404, detail=str(error).strip("'"))
-    if isinstance(error, sqlite3.IntegrityError):
+    if isinstance(error, INTEGRITY_ERRORS):
         message = str(error)
         identities = {
             "data_resources.provider": "A resource with this provider, namespace, and name already exists. Open that resource or choose another name.",
@@ -11751,7 +11775,7 @@ def settings() -> dict[str, Any]:
     return {
         "paths": {
             "work_root": service.storage.work_root,
-            "database": str(service.database.path),
+            "database": "central-postgresql" if service.database.is_postgres else str(service.database.path),
             "local_capsules": str(LOCAL_CAPSULE_ROOT),
             "evaluation_root": service.storage.public_paths()["evaluation"],
         },

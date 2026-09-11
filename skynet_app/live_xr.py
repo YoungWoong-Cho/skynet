@@ -43,7 +43,7 @@ class LiveXRService:
             cluster or ClusterClient(),
             Path(root),
         )
-        self.lock = threading.RLock()
+        self.lock = self.database.operation_lock("live-collection")
         self.active, self.refreshing = set(), set()
         self.refreshed = {}
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="live-xr")
@@ -59,7 +59,7 @@ class LiveXRService:
         with self.database.transaction() as c:
             if accept:
                 c.execute(
-                    "INSERT OR IGNORE INTO live_xr_consent VALUES (?,?)",
+                    "INSERT INTO live_xr_consent VALUES (?,?) ON CONFLICT(url) DO NOTHING",
                     (EULA, utc_now()),
                 )
             row = c.execute(

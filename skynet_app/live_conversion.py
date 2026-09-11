@@ -120,7 +120,7 @@ class LiveConversionService:
         self.database = self.live.database
         self.cluster = cluster or ClusterClient()
         self.root = Path(root or self.live.root / "data/live-conversions")
-        self.lock, self.active = threading.RLock(), set()
+        self.lock, self.active = self.database.operation_lock("live-conversion"), set()
         self.stopping, self.monitor = threading.Event(), None
         self.executor = ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="conversion"

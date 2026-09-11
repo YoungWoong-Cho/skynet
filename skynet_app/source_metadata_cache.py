@@ -18,6 +18,8 @@ class SourceMetadataStore:
 
     def __init__(self, database: Database) -> None:
         self.database = database
+        if database.is_postgres:
+            return  # Versioned PostgreSQL migrations own the schema.
         with self.database.transaction() as connection:
             connection.execute(
                 """
@@ -136,14 +138,14 @@ class SourceMetadataStore:
                 ),
             )
             connection.execute(
-                """
+                f"""
                 DELETE FROM source_metadata_cache
                 WHERE cache_key IN (
                     SELECT cache_key
                     FROM source_metadata_cache
                     WHERE cache_kind = ?
                     ORDER BY updated_at DESC, cache_key DESC
-                    LIMIT -1 OFFSET ?
+                    {"OFFSET ?" if self.database.is_postgres else "LIMIT -1 OFFSET ?"}
                 )
                 """,
                 (kind, MAX_CACHE_ENTRIES_PER_KIND),

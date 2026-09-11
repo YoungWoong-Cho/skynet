@@ -104,7 +104,7 @@ def _sync(service, run, capsule_root, force):
     )
     if provider is None:
         return 0
-    bridge = WandBBridge(
+    bridge = getattr(service, "_wandb_bridge", WandBBridge)(
         Path(capsule_root) / run_id,
         replace(service._wandb_settings(provider), auto_flush=False),
     )
@@ -114,7 +114,9 @@ def _sync(service, run, capsule_root, force):
         return 0
     _LAST_POLLS[run_id] = time.monotonic()
     state_path = Path(capsule_root) / run_id / "gpu-statistics.json"
-    state = json.loads(state_path.read_text()) if state_path.exists() else {}
+    journal = getattr(bridge, "_journal", None)
+    state_file = journal.file("gpu-statistics.json") if journal else state_path
+    state = json.loads(state_file.read_text()) if state_file.exists() else {}
     train_stages = {
         s["id"] for s in run.get("stages", []) if s.get("stage_type") == "TRAIN"
     }
@@ -184,7 +186,10 @@ def _sync(service, run, capsule_root, force):
         }
     state["updated_at"] = datetime.now().astimezone().isoformat()
     state.pop("error", None)
-    bridge._atomic_write(state_path, json.dumps(state).encode())
+    if journal:
+        state_file.write_bytes(json.dumps(state).encode())
+    else:
+        bridge._atomic_write(state_path, json.dumps(state).encode())
     state_path.with_name("gpu-statistics-error.txt").unlink(missing_ok=True)
     report = bridge.drain_spool()
     if report.errors:
@@ -197,6 +202,10 @@ def sync_gpu_statistics(service, run, capsule_root, *, force=False):
         return 0
     try:
         try:
+            database = getattr(service, "database", None)
+            if database is not None and database.is_postgres:
+                with database.operation_lock("gpu-tracking:" + str(run.get("id"))):
+                    return _sync(service, run, capsule_root, force)
             return _sync(service, run, capsule_root, force)
         except Exception as error:
             # Telemetry must never change the training outcome. Keep an actionable

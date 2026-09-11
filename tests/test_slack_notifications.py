@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from skynet_app.credential_store import CredentialStoreUnavailable, StoredCredential
+from skynet_app.db_backend import INTEGRITY_ERRORS
 from skynet_app.database import Database
 from skynet_app.slack_api import slack_router
 from skynet_app.slack_notifications import (
@@ -136,7 +137,12 @@ def test_actual_transitions_all_events_idempotency_and_secret_storage(setup):
     assert all(row["status"] == "delivered" for row in queued(db))
     assert "secret_test_only" not in json.dumps(slack.settings())
     with db.connection() as c:
-        assert "secret_test_only" not in "\n".join(c.iterdump())
+        if getattr(c, "dialect", "sqlite") == "postgresql":
+            tables = [row[0] for row in c.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")]
+            stored = "\n".join(str(dict(row)) for table in tables for row in c.execute('SELECT * FROM "'+table+'"'))
+        else:
+            stored = "\n".join(c.iterdump())
+        assert "secret_test_only" not in stored
     payload = sender.call_args_list[0].args[1]
     assert (
         payload["mrkdwn"] is False
@@ -243,12 +249,12 @@ def test_evaluations_and_workspace_ownership(setup):
     payload = sender.call_args.args[1]
     assert payload["text"].startswith("Evaluation submitted")
     assert payload["blocks"][-1]["elements"][0]["url"].endswith("#evaluations")
-    with other.transaction() as c, pytest.raises(sqlite3.IntegrityError):
+    with other.transaction() as c, pytest.raises(INTEGRITY_ERRORS):
         c.execute(
             "UPDATE slack_notifications SET enabled=0 WHERE owner_id=?",
             (db.workspace_id,),
         )
-    with other.transaction() as c, pytest.raises(sqlite3.IntegrityError):
+    with other.transaction() as c, pytest.raises(INTEGRITY_ERRORS):
         c.execute(
             "DELETE FROM notification_outbox WHERE owner_id=?", (db.workspace_id,)
         )
@@ -462,15 +468,19 @@ def test_failed_save_keeps_the_original_destination_and_pending_delivery(setup):
     transition(db, stage, attempt, "SUBMITTED", slurm_job_id="123")
     assert slack.settings()["pending_count"] == 1
     with db.transaction() as connection:
-        connection.execute(
-            "CREATE TRIGGER reject_settings BEFORE UPDATE ON slack_notifications BEGIN SELECT RAISE(ABORT,'write rejected'); END"
-        )
-    with pytest.raises(sqlite3.IntegrityError):
+        if getattr(connection, "dialect", "sqlite") == "postgresql":
+            connection.executescript("""CREATE FUNCTION reject_settings_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN RAISE EXCEPTION 'write rejected' USING ERRCODE='23514'; END; $$;
+                CREATE TRIGGER reject_settings BEFORE UPDATE ON slack_notifications
+                FOR EACH ROW EXECUTE FUNCTION reject_settings_fn();""")
+        else:
+            connection.execute("CREATE TRIGGER reject_settings BEFORE UPDATE ON slack_notifications BEGIN SELECT RAISE(ABORT,'write rejected'); END")
+    with pytest.raises(INTEGRITY_ERRORS):
         slack.configure(webhook_url=WEBHOOK.replace("BTEST", "BNEW"))
     assert slack.credentials.load("slack").credentials["webhook_url"] == WEBHOOK
     assert queued(db)[0]["status"] == "pending"
     with db.transaction() as connection:
-        connection.execute("DROP TRIGGER reject_settings")
+        connection.execute("DROP TRIGGER reject_settings ON slack_notifications" if db.is_postgres else "DROP TRIGGER reject_settings")
     sender.side_effect = None
     slack.deliver_one()
     assert sender.call_args.args[0] == WEBHOOK

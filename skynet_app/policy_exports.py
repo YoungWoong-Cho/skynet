@@ -75,7 +75,7 @@ class PolicyExportService(ClusterPolicyPreparation):
         self.database = self.live.database
         self.root = Path(root or self.live.root / "data/policy-exports")
         self.cluster = cluster or ClusterClient()
-        self.lock = threading.RLock()
+        self.lock = self.database.operation_lock("dataset-preparation")
         self.executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="dataset-preparation"
         )
@@ -254,7 +254,10 @@ class PolicyExportService(ClusterPolicyPreparation):
         path = self.root / "manifests" / (revision + ".json")
         path.parent.mkdir(parents=True, exist_ok=True)
         content = canonical_json({"sources": sources, "split": split})
-        if not path.exists():
+        if self.database.is_postgres:
+            from .metadata_objects import MetadataObjects
+            path = MetadataObjects(self.database).put(content.encode())
+        elif not path.exists():
             path.write_text(content)
         return self.database.create_data_resource_version(
             resource["id"],

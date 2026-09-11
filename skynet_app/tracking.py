@@ -237,11 +237,13 @@ class MLflowBridge:
         self,
         run_capsule: str | os.PathLike[str],
         settings: TrackingSettings | None = None,
+        *, journal=None,
     ) -> None:
+        self._journal = journal
         self.run_capsule = Path(run_capsule).expanduser().resolve()
         self.settings = settings or TrackingSettings.from_env()
-        self.spool_path = self.run_capsule / SPOOL_FILENAME
-        self.state_path = self.run_capsule / STATE_FILENAME
+        self.spool_path = journal.file(SPOOL_FILENAME) if journal else self.run_capsule / SPOOL_FILENAME
+        self.state_path = journal.file(STATE_FILENAME) if journal else self.run_capsule / STATE_FILENAME
         self.lock_path = self.run_capsule / LOCK_FILENAME
         self._thread_lock = threading.RLock()
         self._last_error: str | None = None
@@ -264,6 +266,10 @@ class MLflowBridge:
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
+        if self._journal:
+            with self._journal.lock:
+                yield
+            return
         with self._thread_lock:
             descriptor = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
             try:
@@ -287,6 +293,9 @@ class MLflowBridge:
         }
 
     def _atomic_write(self, path: Path, payload: bytes) -> None:
+        if self._journal and path in (self.state_path, self.spool_path):
+            path.write_bytes(payload)
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
         temporary_path = Path(temporary_name)
@@ -1133,11 +1142,13 @@ class WandBBridge:
         self,
         run_capsule: str | os.PathLike[str],
         settings: WandBSettings | None = None,
+        *, journal=None,
     ) -> None:
+        self._journal = journal
         self.run_capsule = Path(run_capsule).expanduser().resolve()
         self.settings = settings or WandBSettings.from_env()
-        self.spool_path = self.run_capsule / WANDB_SPOOL_FILENAME
-        self.state_path = self.run_capsule / WANDB_STATE_FILENAME
+        self.spool_path = journal.file(WANDB_SPOOL_FILENAME) if journal else self.run_capsule / WANDB_SPOOL_FILENAME
+        self.state_path = journal.file(WANDB_STATE_FILENAME) if journal else self.run_capsule / WANDB_STATE_FILENAME
         self.lock_path = self.run_capsule / WANDB_LOCK_FILENAME
         self._thread_lock = threading.RLock()
         self._last_error: str | None = None
@@ -1160,6 +1171,10 @@ class WandBBridge:
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
+        if self._journal:
+            with self._journal.lock:
+                yield
+            return
         with self._thread_lock:
             descriptor = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
             try:
@@ -1172,6 +1187,9 @@ class WandBBridge:
                 os.close(descriptor)
 
     def _atomic_write(self, path: Path, payload: bytes) -> None:
+        if self._journal and path in (self.state_path, self.spool_path):
+            path.write_bytes(payload)
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
         temporary_path = Path(temporary_name)

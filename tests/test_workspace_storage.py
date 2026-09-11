@@ -1,7 +1,7 @@
 """Exercise personal path routing through real SQLite, compilation and SSH commands."""
 
 import json
-import sqlite3
+from skynet_app.db_backend import INTEGRITY_ERRORS
 import subprocess
 from unittest.mock import Mock
 from concurrent.futures import ThreadPoolExecutor
@@ -86,7 +86,7 @@ def test_path_is_personal_persistent_and_does_not_rewrite_runs(services):
     restarted = WorkspaceStorage(Database(alice.database.path, workspace_id=alice.database.workspace_id))
     assert restarted.work_root == alice.work_root
     assert restarted.root_for_run(run_id) == original_root
-    with bob.database.transaction() as connection, pytest.raises(sqlite3.IntegrityError):
+    with bob.database.transaction() as connection, pytest.raises(INTEGRITY_ERRORS):
         connection.execute("UPDATE workspace_storage SET work_root='/bad/path' WHERE owner_id=?", (alice.database.workspace_id,))
     with pytest.raises(ValueError, match="another tab"):
         configure(alice, "/new/path", old)

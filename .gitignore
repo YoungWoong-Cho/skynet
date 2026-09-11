@@ -20,3 +20,6 @@ DerivedData/
 *.xcuserstate
 
 node_modules/
+
+# Per-install central DB endpoint (contains deployment host paths).
+/config/database.json
