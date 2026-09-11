@@ -79,11 +79,14 @@
           session.recording_summary?.episodes || session.recordings.length,
         ),
       );
-      const jobs = preparations.filter((j) =>
-        (j.selections || [{ session_id: j.session_id }]).some(
-          (s) => s.session_id === session.id,
-        ),
-      );
+      const jobs = preparations.filter((j) => {
+        if (Object.hasOwn(j, "recording_session_id")) return j.recording_session_id === session.id;
+        // Compatibility with an older API: only whole-session preparations can
+        // supply this entry's dataset. Source membership alone is ambiguous.
+        const selections = j.selections || [{ session_id: j.session_id }];
+        return selections.length === 1 && selections[0].session_id === session.id
+          && selections[0].indices == null && j.split?.mode !== "single_episode_overfit";
+      });
       const ready = jobs.filter((j) => j.state === "READY");
       const formats = new Set(ready.map(j => j.format)).size;
       const active = jobs.find((j) => !["READY", "FAILED", "DELETE_FAILED"].includes(j.state));

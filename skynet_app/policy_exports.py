@@ -217,7 +217,9 @@ class PolicyExportService(ClusterPolicyPreparation):
             provider="collection", namespace="datasets", include_archived=True
         )
         identity = session["id"] if overfit_episode is None else f"{session['id']}:overfit:{overfit_episode}"
-        existing = next((r for r in resources if r["name"] == identity), None)
+        existing = next((r for r in resources if r["name"] == identity or (
+            r.get("metadata", {}).get("recording_session_id") == session["id"]
+        )), None)
         if existing or not create:
             return existing
         label = name or session["profile"]["display_name"]
@@ -342,8 +344,12 @@ class PolicyExportService(ClusterPolicyPreparation):
                     )
                 )
         policies = catalog(workspace_database or self.database)
+        # A dataset belongs to a recording entry independently of which source
+        # recordings a preparation used. Subsets must not replace their source's link.
+        resource_sessions = {s["resource_id"]: s["id"] for s in sessions if s["resource_id"]}
         jobs = self.list()
         for job in jobs:
+            job["recording_session_id"] = resource_sessions.get(job.get("resource_id"))
             if job["state"] not in {"READY", "FAILED", "DELETE_FAILED"}:
                 self.dispatch(job["id"])
             policy = next((p for p in policies if p["id"] == job["format"]), {})

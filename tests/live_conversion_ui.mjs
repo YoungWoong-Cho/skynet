@@ -94,6 +94,26 @@ try {
   buttons = el("simulation-recordings-body").querySelectorAll("button");
   buttons[2].click();
   assert.equal(viewed, "data");
+  const subset = {...s, id: "subset", recordings: ["a"], recording_images: {a: {}}};
+  w.renderSimulationRecordings([s, subset]);
+  const mixed = [
+    {id: "new-subset", session_id: "session", selections: [{session_id: "session", indices: [0]}], recording_session_id: "subset", state: "READY", resource_id: "subset-data", format: "egoverse"},
+    {id: "original", session_id: "session", recording_session_id: "session", state: "READY", resource_id: "data", format: "act"},
+  ];
+  for (const detail of [mixed, [...mixed].reverse()]) {
+    w.document.dispatchEvent(new w.CustomEvent("dataset-preparation-changed", {detail}));
+    const rows = [...el("simulation-recordings-body").rows];
+    rows[0].querySelectorAll("button")[2].click();
+    assert.equal(viewed, "data", "original link must not depend on preparation order");
+    rows[1].querySelectorAll("button")[2].click();
+    assert.equal(viewed, "subset-data", "derived entry opens its own prepared dataset");
+    assert.match(rows[0].textContent, /2 episodes/);
+    assert.match(rows[1].textContent, /1 episode/);
+  }
+  w.document.dispatchEvent(new w.CustomEvent("dataset-preparation-changed", {detail: [
+    {...mixed[0], recording_session_id: null}, mixed[1],
+  ]}));
+  assert.equal(el("simulation-recordings-body").rows[1].querySelectorAll("button").length, 2, "unassigned subset cannot hijack another entry");
   assert.equal(el("conversion-dialog"), null);
   assert.doesNotMatch(
     el("simulation-recordings-body").textContent,

@@ -66,3 +66,24 @@ def test_held_out_suite_rejects_overfit_before_submission():
     spec = {'data': {'bundle': {'assignments': [{'role': 'training_data', 'version': {'metadata': {'split': {'mode': 'single_episode_overfit', 'train': [0], 'validation': [0]}}}}]}}}
     with pytest.raises(ValueError, match='no held-out episodes'):
         bind_suite_to_dataset(suite, spec)
+
+
+def test_recording_links_follow_resource_ownership_not_source_membership(setup, monkeypatch):
+    import copy
+    service, original, _ = setup
+    full = service.create(original['id'], 'egoverse', 'All recordings')
+    subset = service.create(original['id'], 'egoverse', 'Episode 1', overfit_episode=0)
+    before = {j['id']: j['recording_session_id'] for j in service.options()['exports']}
+    assert before[full['id']] == original['id']
+    assert before[subset['id']] is None
+    derived = copy.deepcopy(original)
+    derived.update(id='derived', recordings=original['recordings'][:1])
+    resource = service.database.get_data_resource(subset['resource_id'])
+    service.database.update_data_resource(resource['id'], metadata={**resource['metadata'], 'recording_session_id': derived['id']})
+    monkeypatch.setattr(service.live, 'list', lambda: [derived, original])
+    monkeypatch.setattr(service.live, 'get', lambda identifier: derived if identifier == derived['id'] else original)
+    options = service.options()
+    links = {j['id']: j['recording_session_id'] for j in options['exports']}
+    assert links == {full['id']: original['id'], subset['id']: derived['id']}
+    assert service.dataset(derived, create=False)['id'] == subset['resource_id']
+    assert service.get(subset['id'])['sources'][0]['session_id'] == original['id'], 'immutable source lineage is unchanged'
