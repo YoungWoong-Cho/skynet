@@ -451,8 +451,8 @@ def cluster(gateway: str = Query(default="auto")) -> dict[str, object]:
 def initialize_workspace(gateway: str = Query(default="auto")) -> dict[str, object]:
     try:
         work_root = pipeline_service.work_root
-        active_gateway = pipeline_service.cluster.initialize_workspace(gateway, work_root=work_root)
-        return {"ok": True, "gateway": active_gateway, "work_root": work_root}
+        result = pipeline_service.storage.configure(work_root, work_root, pipeline_service.cluster, gateway)
+        return {"ok": True, **result}
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except (ClusterError, subprocess.TimeoutExpired) as error:

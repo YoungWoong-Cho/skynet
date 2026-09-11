@@ -16,7 +16,7 @@ W&B and MLflow settings, in-memory credentials and OS credential-store namespace
 
 ## Personal cluster base path
 
-In **Settings → Cluster storage**, enter an absolute path, select **Save path**, then **Initialize directories**. The server’s configured SSH account must be able to write there; selecting a path does not change the Linux or Slurm account.
+On first use, **Settings → Cluster storage** requires an explicit base path; no personal path is prefilled or inherited from the server. Enter an absolute path to a new or empty directory and select **Validate and initialize**. Skynet checks syntax, write access, directory emptiness and workspace ownership before creating directories and saving the path. Failed initialization leaves the previous setting unchanged. A completed initialization can be retried safely for the same workspace. The path does not change the Linux or Slurm account.
 
 New training runs record the selected base path when their draft run is created. Job scripts, repository checkouts, logs, caches and checkpoints use that root. Existing runs, retries, submission recovery and evaluations associated with those runs retain their recorded root, even after the preference changes. No files are moved or removed. Shared recording, preparation and import jobs, registered datasets and installed runtime profiles retain their existing shared locations.
 

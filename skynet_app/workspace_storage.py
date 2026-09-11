@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import re
+import threading
 from pathlib import PurePosixPath
+from typing import Any
 
 from .cluster_config import CLUSTER, ClusterPaths
 from .database import Database
 from .workspace_schema import visible_sql
+
+
+STORAGE_REQUIRED = "Set up Cluster storage in Settings before using this workspace."
+_SETUP_LOCK = threading.RLock()
+PERSONAL_PATHS = (
+    "work_root", "workspace", "repositories", "artifacts", "logs", "jobs",
+    "evaluation", "uv_cache", "huggingface_cache", "torch_cache",
+)
 
 
 def validate_work_root(value: str) -> str:
@@ -20,7 +30,7 @@ def validate_work_root(value: str) -> str:
             "Use an absolute cluster directory, such as /coc/flash7/yourname. "
             "Use letters, numbers, slashes, dots, underscores or hyphens; no spaces or '..'."
         )
-    return str(PurePosixPath(value))
+    return str(PurePosixPath("/" + value.lstrip("/")))
 
 
 def paths_for_root(work_root: str) -> ClusterPaths:
@@ -28,10 +38,7 @@ def paths_for_root(work_root: str) -> ClusterPaths:
     root = validate_work_root(work_root)
     original = CLUSTER.paths
     paths = original.model_dump()
-    for key in (
-        "work_root", "workspace", "repositories", "artifacts", "logs", "jobs",
-        "evaluation", "uv_cache", "huggingface_cache", "torch_cache",
-    ):
+    for key in PERSONAL_PATHS:
         path = PurePosixPath(paths[key])
         try:
             suffix = path.relative_to(original.work_root)
@@ -46,7 +53,7 @@ class WorkspaceStorage:
         self.database = database
 
     @property
-    def work_root(self) -> str:
+    def work_root(self) -> str | None:
         if self.database.workspace_id is None:
             return CLUSTER.paths.work_root
         with self.database.connection() as connection:
@@ -54,38 +61,71 @@ class WorkspaceStorage:
                 "SELECT work_root FROM workspace_storage WHERE owner_id=?",
                 (self.database.workspace_id,),
             ).fetchone()
-        return row[0] if row else CLUSTER.paths.work_root
+        return row[0] if row else None
 
     @property
     def paths(self) -> ClusterPaths:
-        return paths_for_root(self.work_root)
+        return paths_for_root(self.require_root())
 
-    def settings(self) -> dict[str, str]:
+    def require_root(self) -> str:
+        root = self.work_root
+        if root is None:
+            raise ValueError(STORAGE_REQUIRED)
+        return root
+
+    def public_paths(self) -> dict[str, Any]:
+        if self.work_root is not None:
+            return self.paths.model_dump()
+        paths = CLUSTER.paths.model_dump()
+        for key in PERSONAL_PATHS:
+            paths[key] = None
+        return paths
+
+    def settings(self) -> dict[str, Any]:
         return {
             "work_root": self.work_root,
-            "default_work_root": CLUSTER.paths.work_root,
+            "configured": self.work_root is not None,
             "shared_datasets": CLUSTER.paths.datasets,
             "shared_environments": CLUSTER.paths.environments,
         }
 
-    def save(self, work_root: str, expected_work_root: str) -> dict[str, str]:
+    def _check_update(self, connection, root: str, expected: str | None) -> None:
+        row = connection.execute(
+            "SELECT work_root FROM workspace_storage WHERE owner_id=?",
+            (self.database.workspace_id,),
+        ).fetchone()
+        current = row[0] if row else None
+        if current != expected:
+            raise ValueError("The base path changed in another tab. Refresh Settings and try again.")
+        for other in connection.execute(
+            "SELECT work_root FROM workspace_storage WHERE owner_id<>?",
+            (self.database.workspace_id,),
+        ):
+            path = other[0]
+            if root == path or root.startswith(path + "/") or path.startswith(root + "/"):
+                raise ValueError("Choose a directory separate from another workspace's base path.")
+
+    def configure(self, work_root: str, expected_work_root: str | None, cluster,
+                  gateway: str = "auto") -> dict[str, Any]:
         if self.database.workspace_id is None:
-            raise ValueError("Open an email workspace before saving a base path")
+            raise ValueError("Open an email workspace before setting up a base path")
         root = validate_work_root(work_root)
-        with self.database.transaction() as connection:
-            row = connection.execute(
-                "SELECT work_root FROM workspace_storage WHERE owner_id=?",
-                (self.database.workspace_id,),
-            ).fetchone()
-            current = row[0] if row else CLUSTER.paths.work_root
-            if current != expected_work_root:
-                raise ValueError("The base path changed in another tab. Refresh Settings and try again.")
-            connection.execute(
-                """INSERT INTO workspace_storage(owner_id,work_root) VALUES (?,?)
-                ON CONFLICT(owner_id) DO UPDATE SET work_root=excluded.work_root""",
-                (self.database.workspace_id, root),
+        # Serialize setup without keeping a SQLite transaction open during SSH.
+        # A cluster-side ownership marker also protects retries and other servers.
+        with _SETUP_LOCK:
+            with self.database.connection() as connection:
+                self._check_update(connection, root, expected_work_root)
+            active_gateway = cluster.initialize_personal_workspace(
+                root, self.database.workspace_id, gateway,
             )
-        return self.settings()
+            with self.database.transaction() as connection:
+                self._check_update(connection, root, expected_work_root)
+                connection.execute(
+                    """INSERT INTO workspace_storage(owner_id,work_root) VALUES (?,?)
+                    ON CONFLICT(owner_id) DO UPDATE SET work_root=excluded.work_root""",
+                    (self.database.workspace_id, root),
+                )
+        return {**self.settings(), "gateway": active_gateway}
 
     def run_directory(self, run_id: str) -> str:
         with self.database.connection() as connection:
@@ -104,7 +144,9 @@ class WorkspaceStorage:
         return validate_work_root(directory.removesuffix(suffix))
 
     def allowed_roots(self) -> set[str]:
-        roots = {self.work_root, CLUSTER.paths.work_root}
+        roots = {CLUSTER.paths.work_root}
+        if self.work_root is not None:
+            roots.add(self.work_root)
         with self.database.connection() as connection:
             rows = connection.execute(
                 f"SELECT id,run_directory FROM runs WHERE {visible_sql('runs')}"

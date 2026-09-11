@@ -18,7 +18,6 @@ const elements = {
   showDataResourceForm: document.querySelector("#show-data-resource-form"),
   showDataDerivationForm: document.querySelector("#show-data-derivation-form"),
   showDataBundleForm: document.querySelector("#show-data-bundle-form"),
-  initWorkspace: document.querySelector("#init-workspace"),
   toast: document.querySelector("#toast"),
   tutorialLayer: document.querySelector("#tutorial-layer"),
   tutorialSpotlight: document.querySelector("#tutorial-spotlight"),
@@ -1607,20 +1606,6 @@ async function refreshCluster({ force = false, background = false } = {}) {
   } finally {
     if (!background) elements.refreshButton.disabled = false;
     scheduleClusterAutoRefresh();
-  }
-}
-
-async function initializeWorkspace() {
-  if (typeof initializeWorkspaceStorage === "function") return initializeWorkspaceStorage();
-  elements.initWorkspace.disabled = true;
-  try {
-    const gateway = encodeURIComponent(elements.gateway.value);
-    const result = await api(`/api/workspace/init?gateway=${gateway}`, { method: "POST" });
-    showToast(`Workspace ready at ${result.work_root} through ${result.gateway}.`);
-  } catch (error) {
-    showToast(error.message, true);
-  } finally {
-    elements.initWorkspace.disabled = false;
   }
 }
 
@@ -12506,6 +12491,7 @@ function loadActiveTab(tab, force = false) {
 }
 
 function activateTab(tab, updateHash = true, requestedView = null) {
+  if (window.SkynetStorageConfigured === false) { tab = "settings"; requestedView = null; }
   const allowed = ["cluster", "experiments", "collection", "datasets", "runs", "evaluations", "adapters", "settings", "hands"];
   const isData = ["data", "collection", "datasets"].includes(tab);
   const isExperiments = ["experiments", "adapters"].includes(tab);
@@ -12592,7 +12578,6 @@ elements.gateway.addEventListener("change", () => {
 document.querySelector("#jobs-previous").addEventListener("click", () => { jobPage = Math.max(0, jobPage - 1); renderJobs(visibleQueueJobs, queueTotal); });
 document.querySelector("#jobs-next").addEventListener("click", () => { jobPage += 1; renderJobs(visibleQueueJobs, queueTotal); });
 elements.refreshButton.addEventListener("click", () => refreshCluster({ force: true }));
-elements.initWorkspace.addEventListener("click", initializeWorkspace);
 
 elements.refreshExperiments.addEventListener("click", () => loadExperiments(true));
 elements.experimentPreviewButton.addEventListener("click", previewExperiment);

@@ -1445,7 +1445,7 @@ class PipelineService:
 
     @property
     def work_root(self) -> str:
-        return self.storage.work_root
+        return self.storage.require_root()
 
     def _run_directory(self, run_id: str) -> str:
         return self.storage.run_directory(run_id)
@@ -10201,7 +10201,7 @@ def capabilities() -> dict[str, Any]:
         "experiment_schema": ExperimentSpec.model_json_schema(by_alias=True),
         "runtime_backends": ["uv", "conda", "apptainer", "existing"],
         "runtime_profiles": CLUSTER.public_runtime_profiles(),
-        "cluster": {**CLUSTER.public_dict(), "paths": service.storage.paths.model_dump()},
+        "cluster": {**CLUSTER.public_dict(), "paths": service.storage.public_paths()},
         "safety": {"multi_node": False, "arbitrary_adapter_code": False, "readme_execution": False},
     }
 
@@ -11683,14 +11683,14 @@ def settings() -> dict[str, Any]:
     }
     return {
         "paths": {
-            "work_root": service.work_root,
+            "work_root": service.storage.work_root,
             "database": str(service.database.path),
             "local_capsules": str(LOCAL_CAPSULE_ROOT),
-            "evaluation_root": service.storage.paths.evaluation,
+            "evaluation_root": service.storage.public_paths()["evaluation"],
         },
         "cluster": {
             **CLUSTER.public_dict(),
-            "paths": service.storage.paths.model_dump(),
+            "paths": service.storage.public_paths(),
             "multi_node": False,
             "multi_gpu_single_node": True,
         },
@@ -11713,7 +11713,7 @@ def settings() -> dict[str, Any]:
 class WorkspaceStorageRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     work_root: str = Field(min_length=2, max_length=512)
-    expected_work_root: str = Field(min_length=2, max_length=512)
+    expected_work_root: str | None = Field(default=None, min_length=2, max_length=512)
 
     @field_validator("work_root")
     @classmethod
@@ -11722,11 +11722,13 @@ class WorkspaceStorageRequest(BaseModel):
 
 
 @router.put("/workspace/storage")
-def update_workspace_storage(payload: WorkspaceStorageRequest) -> dict[str, Any]:
+def update_workspace_storage(payload: WorkspaceStorageRequest, gateway: str = Query(default="auto")) -> dict[str, Any]:
     try:
-        return service.storage.save(payload.work_root, payload.expected_work_root)
+        return service.storage.configure(payload.work_root, payload.expected_work_root, service.cluster, gateway)
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    except ClusterError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 __all__ = ["PipelineService", "router", "service"]

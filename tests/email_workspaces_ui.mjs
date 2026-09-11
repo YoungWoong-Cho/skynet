@@ -101,4 +101,13 @@ function setup(session=null, preferences={}) {
   assert.equal(f.w.localStorage.getItem('skynet:ssh-gateway'),null);
   assert.deepEqual(f.errors,[]); f.close();
 }
+{
+  const f=setup({id:'new',email:'new@example.com',storage_configured:false});
+  await flush();
+  assert.equal(f.w.SkynetStorageConfigured,false);
+  assert.equal(f.el('workspace-storage-form').closest('[data-tab-panel]').hidden,false);
+  f.w.activateTab('experiments');
+  assert.equal(f.el('workspace-storage-form').closest('[data-tab-panel]').hidden,false);
+  assert.deepEqual(f.errors,[]); f.close();
+}
 console.log('Email workspace UI: gate, real script initialization, validation, switching and stale tabs passed');

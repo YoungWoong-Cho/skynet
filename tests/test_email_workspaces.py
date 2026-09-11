@@ -149,6 +149,10 @@ def test_api_requires_email_and_rejects_cross_workspace_actions(services):
     assert 'HttpOnly' in login.headers['set-cookie'] and 'SameSite=lax' in login.headers['set-cookie']
     a_id = login.json()['workspace']['id']
     b.post('/api/workspace/session', json={'email': 'bob@example.com'})
+    # This test exercises ownership after both users completed storage setup.
+    with services.system.database.transaction() as connection:
+        for row in connection.execute("SELECT id FROM workspaces WHERE email IN ('alice@example.com','bob@example.com')").fetchall():
+            connection.execute("INSERT INTO workspace_storage VALUES (?,?)", (row[0], '/team/' + row[0]))
     owned = graph(services.for_workspace(a_id).database)
     listing = a.get('/api/experiments')
     assert listing.headers['cache-control'] == 'private, no-store'

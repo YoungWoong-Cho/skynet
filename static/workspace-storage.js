@@ -1,4 +1,4 @@
-/* Personal base path. Existing runs retain their recorded locations. */
+/* A personal path is registered only after cluster validation and initialization. */
 const storageForm = document.querySelector("#workspace-storage-form");
 const storagePath = document.querySelector("#workspace-base-path");
 const storageStatus = document.querySelector("#workspace-storage-status");
@@ -7,38 +7,62 @@ let storageSaved = null;
 let storageBusy = false;
 
 function storageControls() {
-  const dirty = storagePath.value.trim() !== storageSaved?.work_root;
+  const dirty = storagePath.value.trim() !== (storageSaved?.work_root || "");
   storagePath.disabled = storageBusy || !storageSaved;
   document.querySelector("#save-workspace-storage").disabled =
-    storageBusy || !storageSaved || !dirty;
-  document.querySelector("#init-workspace").disabled =
-    storageBusy || !storageSaved || dirty;
+    storageBusy || !storageSaved || !storagePath.value.trim() || !dirty;
 }
 
 function renderWorkspaceStorage(settings) {
-  if (!settings?.work_root) return;
+  if (!settings || !("work_root" in settings)) return;
   storageSaved = settings;
-  if (!storageForm.dataset.dirty) storagePath.value = settings.work_root;
-  storageStatus.textContent = storageForm.dataset.dirty
-    ? "Unsaved changes"
-    : "Saved";
+  window.SkynetStorageConfigured = settings.configured;
+  if (!storageForm.dataset.dirty) storagePath.value = settings.work_root || "";
+  storageStatus.textContent = storageForm.dataset.dirty ? "Unsaved changes"
+    : settings.configured ? "Ready" : "Setup required";
   if (!storageBusy) {
     storageDetail.classList.remove("is-error");
-    storageDetail.textContent = storageForm.dataset.dirty
-      ? `Saved path: ${settings.work_root}. Save your changes before initializing directories.`
-      : `Your base path: ${settings.work_root}. Save changes first, then initialize directories to check cluster access.`;
+    storageDetail.textContent = settings.configured
+      ? `Base path: ${settings.work_root}`
+      : "Set a base path to continue. It must be new or empty.";
   }
   storageControls();
 }
 
-async function storageAction(action) {
-  if (storageBusy || !storageSaved) return;
+storagePath.addEventListener("input", () => {
+  if (storagePath.value.trim() === (storageSaved?.work_root || ""))
+    delete storageForm.dataset.dirty;
+  else storageForm.dataset.dirty = "true";
+  storageStatus.textContent = storageForm.dataset.dirty ? "Unsaved changes"
+    : storageSaved?.configured ? "Ready" : "Setup required";
+  storageDetail.classList.remove("is-error");
+  storageDetail.textContent = "The path is saved after validation and initialization succeed.";
+  storageControls();
+});
+
+storageForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (storageBusy || !storageSaved || !storageForm.reportValidity()) return;
   storageBusy = true;
   storageForm.setAttribute("aria-busy", "true");
   storageControls();
   storageDetail.classList.remove("is-error");
+  storageStatus.textContent = "Initializing";
+  storageDetail.textContent = "Checking path, permissions and empty directory…";
   try {
-    await action();
+    const gateway = encodeURIComponent(document.querySelector("#gateway").value);
+    const saved = await api(`/api/workspace/storage?gateway=${gateway}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        work_root: storagePath.value.trim(),
+        expected_work_root: storageSaved.work_root,
+      }),
+    });
+    delete storageForm.dataset.dirty;
+    renderWorkspaceStorage(saved);
+    storageDetail.textContent = `Directories ready at ${saved.work_root} through ${saved.gateway}.`;
+    if (typeof loadedTabs !== "undefined") loadedTabs.delete("experiments");
+    if (typeof refreshResolvedSettings === "function") await refreshResolvedSettings();
   } catch (error) {
     storageDetail.textContent = error.message;
     storageDetail.classList.add("is-error");
@@ -48,56 +72,4 @@ async function storageAction(action) {
     storageForm.removeAttribute("aria-busy");
     storageControls();
   }
-}
-
-storagePath.addEventListener("input", () => {
-  if (storagePath.value.trim() === storageSaved?.work_root)
-    delete storageForm.dataset.dirty;
-  else storageForm.dataset.dirty = "true";
-  storageStatus.textContent = storageForm.dataset.dirty
-    ? "Unsaved changes"
-    : "Saved";
-  storageDetail.classList.remove("is-error");
-  storageDetail.textContent =
-    "Save path applies to new training runs. Existing files are not moved.";
-  storageControls();
 });
-
-storageForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  if (!storageSaved || !storageForm.reportValidity()) return;
-  const payload = {
-    work_root: storagePath.value.trim(),
-    expected_work_root: storageSaved.work_root,
-  };
-  void storageAction(async () => {
-    storageDetail.textContent = "Saving path…";
-    const saved = await api("/api/workspace/storage", {
-      method: "PUT",
-      body: JSON.stringify(payload),
-    });
-    delete storageForm.dataset.dirty;
-    renderWorkspaceStorage(saved);
-    storageDetail.textContent = `Saved ${saved.work_root}. Initialize directories to check cluster access.`;
-    // Other settings and new experiment previews must use the saved root too.
-    if (typeof refreshResolvedSettings === "function")
-      await refreshResolvedSettings();
-    if (typeof loadedTabs !== "undefined") loadedTabs.delete("experiments");
-  });
-});
-
-async function initializeWorkspaceStorage() {
-  if (!storageSaved || storageForm.dataset.dirty) return;
-  const root = storageSaved.work_root;
-  return storageAction(async () => {
-    storageDetail.textContent = `Checking and initializing ${root}…`;
-    const gateway = encodeURIComponent(
-      document.querySelector("#gateway").value,
-    );
-    const result = await api(`/api/workspace/init?gateway=${gateway}`, {
-      method: "POST",
-    });
-    storageStatus.textContent = "Ready";
-    storageDetail.textContent = `Directories ready at ${result.work_root} through ${result.gateway}.`;
-  });
-}

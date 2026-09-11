@@ -92,6 +92,7 @@
         }
       } catch { /* Browser preference storage is optional. */ }
     }
+    window.SkynetStorageConfigured = workspace.storage_configured;
     installWorkspaceFetch();
     for (const placeholder of document.querySelectorAll("script[data-workspace-src]")) {
       await new Promise((resolve, reject) => {
@@ -105,6 +106,10 @@
     }
     gate.hidden = true;
     content.hidden = false;
+    if (window.SkynetStorageConfigured === false) {
+      document.getElementById("workspace-storage-form").scrollIntoView({block: "center"});
+      document.getElementById("workspace-base-path").focus({preventScroll: true});
+    }
   }
 
   form.addEventListener("submit", async event => {

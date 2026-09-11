@@ -2,6 +2,8 @@
 
 import json
 import sqlite3
+import subprocess
+from unittest.mock import Mock
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -38,6 +40,7 @@ from skynet_app.workspaces import WorkspaceMiddleware, WorkspaceServices, sessio
 def services(tmp_path, monkeypatch):
     monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", tmp_path / "capsules")
     coordinator = WorkspaceServices(PipelineService(Database(tmp_path / "storage.db"), ClusterClient()))
+    monkeypatch.setattr(ClusterClient, "initialize_personal_workspace", lambda self, root, owner, gateway="auto": "sky2")
     monkeypatch.setattr("skynet_app.pipeline_api.service", coordinator)
     return coordinator
 
@@ -45,6 +48,10 @@ def services(tmp_path, monkeypatch):
 def personal(services, email):
     workspace, _ = services.directory.open(email)
     return services.for_workspace(workspace["id"])
+
+
+def configure(service, root, expected):
+    return service.storage.configure(root, expected, Mock(initialize_personal_workspace=lambda *args: "sky2"))
 
 
 def create_run(service, root, name="run"):
@@ -66,31 +73,32 @@ def test_reject_ambiguous_or_shell_paths(value):
 def test_path_is_personal_persistent_and_does_not_rewrite_runs(services):
     alice = personal(services, "alice@example.com")
     bob = personal(services, "bob@example.com")
-    old = alice.work_root
-    run_id = create_run(alice, old)
-    alice.storage.save(" /coc/flash7/alice//skynet/ ", old)
+    old = alice.storage.work_root
+    original_root = CLUSTER.paths.work_root
+    run_id = create_run(alice, original_root)
+    configure(alice, " /coc/flash7/alice//skynet/ ", old)
     assert alice.work_root == "/coc/flash7/alice/skynet"
-    assert bob.work_root == old
+    assert bob.storage.work_root is None
     assert services.system.cluster.storage is None
     assert alice.cluster is not bob.cluster
     assert alice.cluster.work_root == alice.work_root
-    assert alice._run_directory(run_id) == f"{old}/jobs/runs/{run_id}"
+    assert alice._run_directory(run_id) == f"{original_root}/jobs/runs/{run_id}"
     restarted = WorkspaceStorage(Database(alice.database.path, workspace_id=alice.database.workspace_id))
     assert restarted.work_root == alice.work_root
-    assert restarted.root_for_run(run_id) == old
+    assert restarted.root_for_run(run_id) == original_root
     with bob.database.transaction() as connection, pytest.raises(sqlite3.IntegrityError):
         connection.execute("UPDATE workspace_storage SET work_root='/bad/path' WHERE owner_id=?", (alice.database.workspace_id,))
     with pytest.raises(ValueError, match="another tab"):
-        alice.storage.save("/new/path", old)
+        configure(alice, "/new/path", old)
     assert alice.work_root == "/coc/flash7/alice/skynet"
 
 
 def test_concurrent_saves_have_one_winner(services):
     alice = personal(services, "alice@example.com")
-    old = alice.work_root
+    old = alice.storage.work_root
     def save(root):
         try:
-            alice.storage.save(root, old)
+            configure(alice, root, old)
             return True
         except ValueError:
             return False
@@ -104,7 +112,7 @@ def test_authenticated_api_validation_and_workspace_isolation(services):
     app.include_router(session_router(services.directory))
     app.include_router(router)
     with TestClient(app) as client:
-        payload = {"work_root": "/team/alice", "expected_work_root": CLUSTER.paths.work_root}
+        payload = {"work_root": "/team/alice", "expected_work_root": None}
         assert client.put("/api/workspace/storage", json=payload).status_code == 401
         client.post("/api/workspace/session", json={"email": "alice@example.com"})
         assert client.put("/api/workspace/storage", json={**payload, "work_root": "/tmp/$(id)"}).status_code == 422
@@ -116,7 +124,7 @@ def test_authenticated_api_validation_and_workspace_isolation(services):
         assert client.get("/api/capabilities").json()["cluster"]["paths"]["logs"] == "/team/alice/logs"
         assert client.put("/api/workspace/storage", json=payload).status_code == 409
         client.post("/api/workspace/session", json={"email": "bob@example.com"})
-        assert client.get("/api/settings").json()["paths"]["work_root"] == CLUSTER.paths.work_root
+        assert client.get("/api/settings").json()["paths"]["work_root"] is None
 
 
 def test_compiler_routes_every_job_path_but_preserves_runtime_and_data():
@@ -139,9 +147,9 @@ def test_compiler_routes_every_job_path_but_preserves_runtime_and_data():
 def test_transport_keeps_receipts_secrets_and_log_reads_at_original_root(services):
     alice = personal(services, "alice@example.com")
     first = "/team/alice/first"
-    alice.storage.save(first, alice.work_root)
+    configure(alice, first, alice.storage.work_root)
     run_id = create_run(alice, first)
-    alice.storage.save("/team/alice/second", first)
+    configure(alice, "/team/alice/second", first)
     original = RecordingClusterClient()
     transport = original.with_storage(alice.storage)
     assert original.storage is None
@@ -157,8 +165,7 @@ def test_transport_keeps_receipts_secrets_and_log_reads_at_original_root(service
     assert first in original.commands[-1][1]
     transport.read_log(first + "/logs/job.out", "sky2")
     assert first + "/logs/job.out" in original.commands[-1][1]
-    transport.initialize_workspace("sky2")
-    assert "/team/alice/second/workspace" in original.commands[-1][1]
+
     with pytest.raises(ValueError, match="registered workspace root"):
         transport.read_log("/team/bob/logs/job.out", "sky2")
 
@@ -188,11 +195,11 @@ def test_materialized_runs_and_checkpoints_survive_preference_change(tmp_path, m
     version = service._selected_version(service.database.get_adapter(manifest["id"]))
     seed_repository_choices(service, "pipeline_fixture", manifest=AdapterManifest.model_validate(version["manifest"]))
     root = "/team/alice/first"
-    service.storage.save(root, service.work_root)
+    configure(service, root, service.storage.work_root)
     experiment = service.create_experiment(canonical_spec())
     run_id = experiment["runs"][0]["id"]
     assert service.database.get_run(run_id)["run_directory"] == f"{root}/jobs/runs/{run_id}"
-    service.storage.save("/team/alice/second", root)
+    configure(service, "/team/alice/second", root)
     cluster = service.cluster
     submitted = service.submit_experiment(experiment["id"])
     assert submitted["submitted"][0]["job_id"] == "9001"
@@ -223,3 +230,110 @@ def test_materialized_runs_and_checkpoints_survive_preference_change(tmp_path, m
     new_spec["identity"]["experiment"] = "new-root"
     new_experiment = service.create_experiment(new_spec)
     assert new_experiment["runs"][0]["run_directory"].startswith("/team/alice/second/jobs/runs/")
+
+
+def test_first_use_has_no_fallback_and_failed_init_is_not_saved(services):
+    alice = personal(services, "alice@example.com")
+    assert alice.storage.settings()["work_root"] is None
+    assert alice.storage.settings()["configured"] is False
+    assert alice.storage.public_paths()["jobs"] is None
+    with pytest.raises(ValueError, match="Set up Cluster storage"):
+        _ = alice.work_root
+    cluster = Mock()
+    cluster.initialize_personal_workspace.side_effect = RuntimeError("Permission denied")
+    with pytest.raises(RuntimeError, match="Permission denied"):
+        alice.storage.configure("/team/alice", None, cluster)
+    assert alice.storage.work_root is None
+    configure(alice, "/team/alice", None)
+    bob = personal(services, "bob@example.com")
+    for path in ("/team/alice", "/team/alice/nested", "/team"):
+        with pytest.raises(ValueError, match="another workspace"):
+            configure(bob, path, None)
+
+
+def test_required_storage_gate_blocks_jobs_but_keeps_reads_and_settings(services):
+    app = FastAPI()
+    app.add_middleware(WorkspaceMiddleware, services=services)
+    app.include_router(session_router(services.directory))
+    app.include_router(router)
+    with TestClient(app) as client:
+        client.post("/api/workspace/session", json={"email": "new@example.com"})
+        assert client.get("/api/workspace/session").json()["workspace"]["storage_configured"] is False
+        settings = client.get("/api/settings").json()
+        assert settings["storage"]["work_root"] is None
+        assert settings["cluster"]["paths"]["jobs"] is None
+        assert client.get("/api/runs").status_code == 200
+        for path in ("/api/experiments", "/api/runs/example/resume", "/api/evaluations", "/api/policy-exports"):
+            response = client.post(path, json={})
+            assert response.status_code == 409
+            assert response.json()["code"] == "storage_required"
+        assert client.post("/api/runs/example/cancel").status_code != 409
+        response = client.put("/api/workspace/storage", json={"work_root": "/team/new"})
+        assert response.status_code == 200, response.text
+        assert client.get("/api/workspace/session").json()["workspace"]["storage_configured"] is True
+
+
+def test_remote_initialization_empty_nonempty_files_symlinks_and_retries(tmp_path):
+    from skynet_app.workspace_storage_remote import initialize, DIRECTORIES
+    root = tmp_path / "fresh"
+    result = initialize(root, "alice")
+    assert result["ready"]
+    assert all((root / d).is_dir() for d in DIRECTORIES)
+    (root / "jobs" / "keep.txt").write_text("keep")
+    assert initialize(root, "alice") == result
+    assert (root / "jobs" / "keep.txt").read_text() == "keep"
+    with pytest.raises(ValueError, match="another workspace"):
+        initialize(root, "bob")
+    nonempty = tmp_path / "occupied"
+    nonempty.mkdir()
+    (nonempty / ".hidden").write_text("keep")
+    with pytest.raises(ValueError, match="not empty"):
+        initialize(nonempty, "alice")
+    assert list(nonempty.iterdir()) == [nonempty / ".hidden"]
+    link = tmp_path / "link"
+    link.symlink_to(root, target_is_directory=True)
+    with pytest.raises(ValueError, match="symbolic"):
+        initialize(link, "alice")
+    with pytest.raises(ValueError, match="outside"):
+        initialize(root / "nested", "alice")
+    file = tmp_path / "file"
+    file.write_text("keep")
+    with pytest.raises(FileExistsError):
+        initialize(file, "alice")
+    assert file.read_text() == "keep"
+
+
+def test_real_initialization_script_transport_and_concurrent_claim(tmp_path):
+    # Execute exactly the payload sent over SSH, against isolated temporary directories.
+    class LocalCluster(ClusterClient):
+        def ssh(self, host, command, *, stdin=None, timeout=30):
+            result = subprocess.run(command, shell=True, input=stdin, text=True, capture_output=True, timeout=timeout)
+            if result.returncode:
+                from skynet_app.cluster_runtime import ClusterError
+                raise ClusterError(result.stderr)
+            return result.stdout
+    root = tmp_path / "transport"
+    client = LocalCluster()
+    assert client.initialize_personal_workspace(str(root), "alice", "sky2") == "sky2"
+    from skynet_app.cluster_runtime import ClusterError
+    with pytest.raises(ClusterError, match="another workspace"):
+        client.initialize_personal_workspace(str(root), "bob", "sky2")
+    root = tmp_path / "concurrent"
+    def claim(owner):
+        try:
+            client.initialize_personal_workspace(str(root), owner, "sky2")
+            return True
+        except ClusterError:
+            return False
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(claim, ["alice", "bob"])) == [False, True]
+
+
+def test_non_writable_path_does_not_get_registered(tmp_path, monkeypatch):
+    from skynet_app.workspace_storage_remote import initialize
+    root = tmp_path / "denied"
+    root.mkdir()
+    monkeypatch.setattr("skynet_app.workspace_storage_remote.os.access", lambda *args: False)
+    with pytest.raises(ValueError, match="writable"):
+        initialize(root, "alice")
+    assert not list(root.iterdir())

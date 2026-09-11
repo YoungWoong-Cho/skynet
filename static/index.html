@@ -1747,20 +1747,20 @@
 
             <form id="workspace-storage-form" class="panel tracking-connection-card" autocomplete="off">
               <div class="panel-heading">
-                <div><h2>Cluster storage</h2><p>Choose the base directory for your email workspace’s new training runs.</p></div>
+                <div><h2>Cluster storage</h2></div>
                 <span id="workspace-storage-status" class="state-pill is-other">Not loaded</span>
               </div>
               <div class="form-grid">
                 <div class="field span-4">
                   <label for="workspace-base-path">Base path</label>
                   <input id="workspace-base-path" name="work_root" placeholder="/coc/flash7/yourname" spellcheck="false" maxlength="512" required disabled aria-describedby="workspace-base-path-help">
-                  <small id="workspace-base-path-help">Use a cluster directory writable by the server’s SSH account. Changing this path does not change that account.</small>
+                  <small id="workspace-base-path-help">Choose a new or empty cluster directory writable by the server’s SSH account.</small>
                 </div>
               </div>
               <p id="workspace-storage-detail" class="tracking-connection-detail" role="status" aria-live="polite">Open Settings to load your saved base path.</p>
               <div class="form-actions tracking-connection-actions">
-                <button id="save-workspace-storage" class="button button-accent" type="submit" disabled>Save path</button>
-                <button id="init-workspace" class="button button-outline" type="button" disabled>Initialize directories</button>
+                <button id="save-workspace-storage" class="button button-accent" type="submit" disabled>Validate and initialize</button>
+
               </div>
             </form>
           </div>

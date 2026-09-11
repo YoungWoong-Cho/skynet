@@ -208,6 +208,14 @@ class WorkspaceMiddleware:
         expected = request.headers.get("x-skynet-workspace")
         if expected and expected != workspace["id"]:
             return await JSONResponse({"detail": "The workspace changed in another tab. Reload this page.", "code": "workspace_changed"}, status_code=409)(scope, receive, send)
+        settings_request = path.startswith(("/api/workspace/", "/api/tracking/", "/api/notifications/"))
+        if (request.method not in {"GET", "HEAD", "OPTIONS", "DELETE"}
+                and not settings_request and not path.endswith(("/cancel", "/reconcile"))
+                and self.services.for_workspace(workspace["id"]).storage.work_root is None):
+            from .workspace_storage import STORAGE_REQUIRED
+            return await JSONResponse(
+                {"detail": STORAGE_REQUIRED, "code": "storage_required"}, status_code=409,
+            )(scope, receive, send)
         scope.setdefault("state", {})["workspace"] = workspace
         token = CURRENT_WORKSPACE.set(workspace["id"])
 
@@ -266,7 +274,12 @@ def session_router(directory: WorkspaceDirectory) -> APIRouter:
     @router.get("/session")
     def session(request: Request, response: Response):
         response.headers["Cache-Control"] = "no-store"
-        return {"workspace": directory.resolve(request.cookies.get(COOKIE))}
+        workspace = directory.resolve(request.cookies.get(COOKIE))
+        if workspace:
+            from .workspace_storage import WorkspaceStorage
+            storage = WorkspaceStorage(Database(directory.database.path, workspace_id=workspace["id"]))
+            workspace["storage_configured"] = storage.work_root is not None
+        return {"workspace": workspace}
 
     @router.post("/session")
     def open_workspace(payload: EmailRequest, request: Request, response: Response):

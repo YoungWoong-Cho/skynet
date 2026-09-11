@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import json
 import os
 import re
 import select
@@ -10,7 +11,7 @@ import shlex
 import subprocess
 import time
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Iterable, Mapping, Sequence
 
 from .cluster_config import CLUSTER
@@ -158,7 +159,7 @@ class ClusterClient:
 
     @property
     def work_root(self) -> str:
-        return self.storage.work_root if self.storage else WORK_ROOT
+        return self.storage.require_root() if self.storage else WORK_ROOT
 
     def run_directory(self, run_id: str) -> str:
         run_id = self._run_id(run_id)
@@ -267,6 +268,21 @@ class ClusterClient:
             )
         )
         host, _ = self.run_with_fallback(command, gateway)
+        return host
+
+    def initialize_personal_workspace(self, root: str, owner_id: str, gateway: str = "auto") -> str:
+        from .workspace_storage import validate_work_root
+
+        root = validate_work_root(root)
+        script = Path(__file__).with_name("workspace_storage_remote.py").read_text()
+        command = f"python3 - {shlex.quote(root)} {shlex.quote(owner_id)}"
+        host, output = self.run_with_fallback(command, gateway, stdin=script, timeout=30)
+        try:
+            result = json.loads(output)
+            if result != {"work_root": root, "owner_id": owner_id, "ready": True}:
+                raise ValueError("Unexpected initialization result")
+        except (ValueError, TypeError) as error:
+            raise ClusterError("Cluster storage initialization was not confirmed. Try again.") from error
         return host
 
     @staticmethod
