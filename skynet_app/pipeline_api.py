@@ -21,7 +21,7 @@ import threading
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse, StreamingResponse
@@ -47,7 +47,6 @@ from .cluster_runtime import (
     ClusterError,
     SLURM_BIN,
     SubmissionOutcomeUnknown,
-    WORK_ROOT,
     approved_operator_environment,
 )
 from .data_imports import build_huggingface_import_job
@@ -60,6 +59,7 @@ from .credential_store import (
 )
 from .database import Database, canonical_json, content_sha256, utc_now
 from .workspace_schema import visible_sql
+from .workspace_storage import WorkspaceStorage, paths_for_root, validate_work_root
 from .slack_notifications import SlackNotifications
 from .workspaces import WorkspaceServices, require_workspace_records
 from .experiments import (
@@ -1415,7 +1415,10 @@ class PipelineService:
         session_credentials: SessionCredentialStore | None = None,
     ) -> None:
         self.database = database or Database()
+        self.storage = WorkspaceStorage(self.database)
         self.cluster = cluster or ClusterClient()
+        if isinstance(self.cluster, ClusterClient) and self.database.workspace_id is not None:
+            self.cluster = self.cluster.with_storage(self.storage)
         self.credential_store = credential_store or KeyringCredentialStore()
         self.credentials = session_credentials or SESSION_CREDENTIALS
         self.notifications = SlackNotifications(self.database, self.credential_store)
@@ -1439,6 +1442,16 @@ class PipelineService:
         self._progress_refresh_versions: dict[tuple[str, str], tuple[Any, ...]] = {}
         self._progress_refresh_workers = 0
         self._seed_registries()
+
+    @property
+    def work_root(self) -> str:
+        return self.storage.work_root
+
+    def _run_directory(self, run_id: str) -> str:
+        return self.storage.run_directory(run_id)
+
+    def _run_paths(self, run_id: str):
+        return paths_for_root(self.storage.root_for_run(run_id))
 
     def _seed_registries(self) -> None:
         if self.database.workspace_id is not None:
@@ -3490,6 +3503,7 @@ class PipelineService:
     def _materialize_experiment_revision(
         self, revision_id: str, variants: list[Any]
     ) -> None:
+        work_root = self.work_root
         for resolved in variants:
             variant = self.database.create_variant(
                 revision_id,
@@ -3505,11 +3519,11 @@ class PipelineService:
                 adapter_version=str(resolved.resolved_spec.source.adapter_version),
                 source_commit=resolved.resolved_spec.source.revision,
                 runtime_profile=resolved.resolved_spec.runtime.profile,
-                run_directory=f"{WORK_ROOT}/jobs/runs/pending",
+                run_directory=f"{work_root}/jobs/runs/pending",
                 status="DRAFT",
             )
             self.database.update_run(
-                run["id"], run_directory=f"{WORK_ROOT}/jobs/runs/{run['id']}"
+                run["id"], run_directory=f"{work_root}/jobs/runs/{run['id']}"
             )
             plan = resolve_adapter_plan(resolved.resolved_spec)
             self.database.create_stage(
@@ -3867,7 +3881,7 @@ class PipelineService:
                     f"# BLOCKED: {variant.name}\n# {validation_blocker}"
                 )
                 continue
-            compiled = compile_sbatch(resolved, plan, run_id=f"preview-{variant.index:03d}")
+            compiled = compile_sbatch(resolved, plan, run_id=f"preview-{variant.index:03d}", work_root=self.work_root)
             scripts.append(compiled.script)
         if len(variants) > spec.sweep.confirmation_threshold:
             warnings.append(
@@ -3913,7 +3927,7 @@ class PipelineService:
                 }
             )
         self.database.materialize_empty_revision_runs(
-            revision["id"], planned_runs, run_directory_root=f"{WORK_ROOT}/jobs/runs"
+            revision["id"], planned_runs, run_directory_root=f"{self.work_root}/jobs/runs"
         )
 
     def submit_experiment(self, experiment_id: str, gateway: str = "auto") -> dict[str, Any]:
@@ -4648,6 +4662,10 @@ class PipelineService:
         attempt_snapshot = self._attempt_execution_snapshot(
             spec, plan, execution_provenance, selected_repository_inputs
         )
+        attempt_snapshot["storage"] = {
+            "work_root": self.storage.root_for_run(run_id),
+            "run_directory": self._run_directory(run_id),
+        }
         if repository_argument_validation is not None:
             attempt_snapshot["repository_argument_validation"] = (
                 repository_argument_validation
@@ -4708,6 +4726,7 @@ class PipelineService:
                 spec,
                 plan,
                 run_id=run_id,
+                work_root=self.storage.root_for_run(run_id),
                 stage="eval" if stage["stage_type"] == "EVALUATE" else "train",
                 capsule_files=capsule_files,
                 stage_auto_resume=(
@@ -4757,7 +4776,7 @@ class PipelineService:
             resume_checkpoint_id=resume_checkpoint_id,
             execution_snapshot_json=attempt_snapshot,
             execution_snapshot_sha256=attempt_snapshot_sha256,
-            sbatch_path=f"{WORK_ROOT}/jobs/runs/{run_id}/job.sbatch",
+            sbatch_path=f"{self._run_directory(run_id)}/job.sbatch",
             stdout_path=compiled.stdout_path_template,
             stderr_path=compiled.stderr_path_template,
         )
@@ -4942,10 +4961,10 @@ class PipelineService:
             return {"run_id": run_id, "stage_id": stage_id, "status": "FAILED", "error": str(error)}
 
         stdout = resolve_slurm_log_path(
-            compiled.stdout_path_template, submission.job_id
+            compiled.stdout_path_template, submission.job_id, logs_root=self._run_paths(run_id).logs
         )
         stderr = resolve_slurm_log_path(
-            compiled.stderr_path_template, submission.job_id
+            compiled.stderr_path_template, submission.job_id, logs_root=self._run_paths(run_id).logs
         )
         if stdout is None or stderr is None:
             raise RuntimeError("compiled Slurm log path templates could not be resolved")
@@ -5520,51 +5539,6 @@ class PipelineService:
             "flush": self._flush_tracking_provider(provider),
         }
 
-    def test_tracking_connection(self, provider: str) -> dict[str, Any]:
-        if provider == "wandb":
-            settings, tested_revision = self._tracking_connection_snapshot("wandb")
-            bridge: Any = WandBBridge(
-                LOCAL_CAPSULE_ROOT / ".tracking-connections" / (self.database.workspace_id or "legacy") / "wandb", settings
-            )
-            secrets = (settings.api_key,)
-        elif provider == "mlflow":
-            settings, tested_revision = self._tracking_connection_snapshot("mlflow")
-            bridge = MLflowBridge(
-                LOCAL_CAPSULE_ROOT / ".tracking-connections" / (self.database.workspace_id or "legacy") / "mlflow", settings
-            )
-            secrets = (settings.token, settings.password)
-        else:
-            raise ValueError(f"unsupported tracking provider: {provider}")
-        try:
-            result = bridge.validate_connection()
-            if provider == "wandb":
-                entity = settings.entity or str(result["entity"])
-                bridge.validate_entity(entity)
-        except Exception as error:
-            safe_error = str(sanitize(str(error), secrets=secrets))
-            with self._tracking_connection_lock:
-                current = self._wandb_settings() if provider == "wandb" else self._mlflow_settings()
-                if current == settings and self._tracking_connection_revisions[provider] == tested_revision:
-                    self.credentials.mark_error(provider, safe_error)
-            raise TrackingRequestError(safe_error) from error
-        with self._tracking_connection_lock:
-            current_settings = self._wandb_settings() if provider == "wandb" else self._mlflow_settings()
-            if current_settings != settings or self._tracking_connection_revisions[provider] != tested_revision:
-                raise ValueError("The tracking connection changed while it was being tested; test the current connection again")
-            connection = self.database.get_tracking_connection(provider) or {}
-            endpoint = settings.base_url if provider == "wandb" else settings.tracking_uri
-            self.database.upsert_tracking_connection(
-                provider, endpoint=endpoint,
-                workspace=entity if provider == "wandb" else None,
-                config=connection.get("config_json") or {"verify_tls": settings.verify_tls},
-            )
-            self.credentials.mark_connected(provider, **({"entity": entity, "username": result.get("username")} if provider == "wandb" else {}))
-            self._tracking_connection_revisions[provider] += 1
-        return {
-            "connection": self.tracking_connections()["connections"][provider],
-            "flush": self._flush_tracking_provider(provider),
-        }
-
     def disconnect_tracking_connection(self, provider: str) -> dict[str, Any]:
         with self._tracking_connection_lock:
             self._ensure_tracking_credentials_restored()
@@ -5818,7 +5792,7 @@ class PipelineService:
         secret_environment_files: dict[str, str] = {}
         secret_contents: dict[str, str] = {}
         run_ids: dict[str, str] = {}
-        run_directory = f"{WORK_ROOT}/jobs/runs/{run_id}"
+        run_directory = self._run_directory(run_id)
         for name in sorted(active):
             provider = providers[name]
             if name != "wandb":
@@ -6706,7 +6680,8 @@ class PipelineService:
         with self.database.connection() as connection:
             rows = connection.execute(
                 f"""
-                SELECT id, gateway, slurm_job_id, sbatch_path, stdout_path, stderr_path
+                SELECT id, gateway, slurm_job_id, sbatch_path, stdout_path, stderr_path,
+                       (SELECT run_id FROM workflow_stages WHERE id=job_attempts.stage_id) AS run_id
                 FROM job_attempts
                 WHERE {visible_sql("job_attempts")} AND slurm_job_id IS NOT NULL
                   AND sbatch_path IS NOT NULL
@@ -6730,7 +6705,7 @@ class PipelineService:
             except ClusterError:
                 continue
             stdout_path, stderr_path = resolve_slurm_log_paths_from_sbatch(
-                script, job_id
+                script, job_id, logs_root=self._run_paths(str(row["run_id"])).logs
             )
             updates: dict[str, str] = {}
             if row["stdout_path"] is None and stdout_path is not None:
@@ -6821,10 +6796,10 @@ class PipelineService:
     def _record_recovered_submission(self, unknown: Mapping[str, Any], recovered: Any) -> None:
         submitted_at = utc_now()
         stdout_path = resolve_slurm_log_path(
-            unknown["stdout_path"], recovered.job_id
+            unknown["stdout_path"], recovered.job_id, logs_root=self._run_paths(str(unknown["run_id"])).logs
         )
         stderr_path = resolve_slurm_log_path(
-            unknown["stderr_path"], recovered.job_id
+            unknown["stderr_path"], recovered.job_id, logs_root=self._run_paths(str(unknown["run_id"])).logs
         )
         is_evaluation = unknown["stage_type"] == "EVALUATE"
         transition = self.database.transition_workflow_state(
@@ -7371,7 +7346,7 @@ class PipelineService:
         required: bool = False,
         gateway: str = "auto",
     ) -> dict[str, Any] | None:
-        path = f"{WORK_ROOT}/jobs/runs/{run_id}/checkpoints/selected-for-inference.json"
+        path = f"{self._run_directory(run_id)}/checkpoints/selected-for-inference.json"
         try:
             _, content = self.cluster.read_log(path, gateway, lines=100)
         except ClusterError as error:
@@ -7393,7 +7368,7 @@ class PipelineService:
             if required:
                 raise RuntimeError("required inference checkpoint descriptor has no path")
             return None
-        run_root = Path(f"{WORK_ROOT}/jobs/runs/{run_id}")
+        run_root = Path(self._run_directory(run_id))
         checkpoint_target = Path(checkpoint_path)
         try:
             checkpoint_relative = checkpoint_target.relative_to(run_root)
@@ -8477,13 +8452,13 @@ class PipelineService:
                 adapter_version=str(source["adapter_version"]),
                 source_commit=source.get("source_commit"),
                 runtime_profile=source.get("runtime_profile"),
-                run_directory=f"{WORK_ROOT}/jobs/runs/pending",
+                run_directory=f"{self.work_root}/jobs/runs/pending",
                 status="PENDING",
                 restarted_from_run_id=run_id,
             )
             self.database.update_run(
                 rerun["id"],
-                run_directory=f"{WORK_ROOT}/jobs/runs/{rerun['id']}",
+                run_directory=f"{self.work_root}/jobs/runs/{rerun['id']}",
             )
             rerun_stage = self.database.create_stage(
                 rerun["id"],
@@ -9010,7 +8985,7 @@ class PipelineService:
         evaluator_spec = ExperimentSpec.model_validate(evaluator_document)
         evaluator_adapter = self._adapter_identity(evaluator_spec)
 
-        evaluation_root = f"{WORK_ROOT}/eval/runs/{execution_key}"
+        evaluation_root = f"{self._run_paths(str(run['id'])).evaluation}/runs/{execution_key}"
         source_document = training_document["source"]
         suite_config = copy.deepcopy(suite["config_json"])
         context = {
@@ -10198,7 +10173,7 @@ def capabilities() -> dict[str, Any]:
         "experiment_schema": ExperimentSpec.model_json_schema(by_alias=True),
         "runtime_backends": ["uv", "conda", "apptainer", "existing"],
         "runtime_profiles": CLUSTER.public_runtime_profiles(),
-        "cluster": CLUSTER.public_dict(),
+        "cluster": {**CLUSTER.public_dict(), "paths": service.storage.paths.model_dump()},
         "safety": {"multi_node": False, "arbitrary_adapter_code": False, "readme_execution": False},
     }
 
@@ -11655,16 +11630,6 @@ def configure_tracking_connection(
         raise HTTPException(status_code=422, detail=str(error)) from error
 
 
-@router.post("/tracking/connections/{provider}/test")
-def test_tracking_connection(provider: str) -> dict[str, Any]:
-    try:
-        return service.test_tracking_connection(provider)
-    except TrackingRequestError as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
-
-
 @router.post("/tracking/connections/{provider}/disconnect")
 def disconnect_tracking_connection(provider: str) -> dict[str, Any]:
     try:
@@ -11690,16 +11655,18 @@ def settings() -> dict[str, Any]:
     }
     return {
         "paths": {
-            "work_root": WORK_ROOT,
+            "work_root": service.work_root,
             "database": str(service.database.path),
             "local_capsules": str(LOCAL_CAPSULE_ROOT),
-            "evaluation_root": CLUSTER.paths.evaluation,
+            "evaluation_root": service.storage.paths.evaluation,
         },
         "cluster": {
             **CLUSTER.public_dict(),
+            "paths": service.storage.paths.model_dump(),
             "multi_node": False,
             "multi_gpu_single_node": True,
         },
+        "storage": service.storage.settings(),
         "runtime_profiles": CLUSTER.public_runtime_profiles(),
         "checkpoint": {
             "save_every_steps": CLUSTER.defaults.checkpoint_save_steps,
@@ -11713,6 +11680,25 @@ def settings() -> dict[str, Any]:
             "secrets_persisted": False,
         },
     }
+
+
+class WorkspaceStorageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    work_root: str = Field(min_length=2, max_length=512)
+    expected_work_root: str = Field(min_length=2, max_length=512)
+
+    @field_validator("work_root")
+    @classmethod
+    def valid_root(cls, value: str) -> str:
+        return validate_work_root(value)
+
+
+@router.put("/workspace/storage")
+def update_workspace_storage(payload: WorkspaceStorageRequest) -> dict[str, Any]:
+    try:
+        return service.storage.save(payload.work_root, payload.expected_work_root)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 __all__ = ["PipelineService", "router", "service"]

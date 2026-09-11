@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .capture_processing.api import router as capture_processing_router
 from .cluster_config import CLUSTER
+from .cluster_runtime import ClusterError
 from .workspaces import WorkspaceMiddleware, session_router
 from .slack_api import slack_router
 from .collection_api import router as collection_router
@@ -48,26 +49,6 @@ LC_ALL=C {GPU_USAGE_LONG_COMMAND} 2>/dev/null || true
 printf '\n__SKYNET_USER_USAGE__\n'
 LC_ALL=C {GPU_USAGE_USER_COMMAND} 2>/dev/null || true
 '''
-
-INIT_COMMAND = "mkdir -p " + " ".join(
-    [
-        f"{WORK_ROOT}/workspace",
-        f"{WORK_ROOT}/repos",
-        f"{WORK_ROOT}/datasets",
-        f"{WORK_ROOT}/artifacts",
-        f"{WORK_ROOT}/logs",
-        f"{WORK_ROOT}/jobs",
-        f"{WORK_ROOT}/eval/catalogs",
-        f"{WORK_ROOT}/eval/datasets",
-        f"{WORK_ROOT}/eval/assets",
-        f"{WORK_ROOT}/eval/runs",
-        f"{WORK_ROOT}/mlflow/db",
-        f"{WORK_ROOT}/mlflow/artifacts",
-        f"{WORK_ROOT}/.cache/uv",
-        f"{WORK_ROOT}/.cache/huggingface",
-        f"{WORK_ROOT}/.cache/torch",
-    ]
-)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -469,9 +450,12 @@ def cluster(gateway: str = Query(default="auto")) -> dict[str, object]:
 @app.post("/api/workspace/init")
 def initialize_workspace(gateway: str = Query(default="auto")) -> dict[str, object]:
     try:
-        active_gateway, _ = _run_with_fallback(INIT_COMMAND, gateway)
-        return {"ok": True, "gateway": active_gateway, "work_root": WORK_ROOT}
-    except (ClusterUnavailable, subprocess.TimeoutExpired) as error:
+        work_root = pipeline_service.work_root
+        active_gateway = pipeline_service.cluster.initialize_workspace(gateway, work_root=work_root)
+        return {"ok": True, "gateway": active_gateway, "work_root": work_root}
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except (ClusterError, subprocess.TimeoutExpired) as error:
         raise _as_http_error(error) from error
 
 

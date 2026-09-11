@@ -239,40 +239,26 @@ class SlackNotifications:
                 )
         return self.settings()
 
-    def retry_failed(self) -> dict[str, Any]:
-        with self._lock, self.database.transaction() as connection:
-            config = self._config(connection)
-            if not config or not config["enabled"]:
-                raise ValueError(
-                    "Enable Slack notifications before retrying failed messages."
-                )
-            connection.execute(
-                "UPDATE notification_outbox SET status='pending',attempts=0,due_at=0,lease_token=NULL,last_error=NULL WHERE owner_id=? AND status='failed'",
-                (self.owner,),
-            )
-            connection.execute(
-                "UPDATE slack_notifications SET last_error=NULL WHERE owner_id=?",
-                (self.owner,),
-            )
-        return self.settings()
-
-    def test(self) -> dict[str, Any]:
+    def connect(self, *, webhook_url: str) -> dict[str, Any]:
         _ = self.owner
+        webhook = validate_webhook(webhook_url)
         with self._lock:
-            record = self.credentials.load("slack")
-            if not record:
-                raise ValueError("Save a Slack webhook first.")
-            self.sender(
-                record.credentials["webhook_url"],
-                {
-                    "text": "Skynet test: job notifications are connected for your personal workspace.",
-                    "mrkdwn": False,
-                },
+            previous = self.credentials.load("slack")
+            current = self.settings()
+            if (current["enabled"] and previous
+                    and previous.credentials.get("webhook_url") == webhook
+                    and not current["last_error"]):
+                return current
+            # Slack incoming webhooks have no read-only validation endpoint.
+            # Connect sends this confirmation before saving or enabling delivery.
+            self.sender(webhook, {
+                "text": "Skynet connected. You’ll receive job submission, running, cancellation, failure and completion notifications here.",
+                "mrkdwn": False,
+            })
+            return self.configure(
+                webhook_url=webhook, enabled=True, events=EVENTS,
+                app_url=os.environ.get("SKYNET_PUBLIC_URL", ""),
             )
-        return {
-            "ok": True,
-            "message": "Test message sent to your saved Slack destination.",
-        }
 
     def _payload(self, connection, item, config):
         row = connection.execute(

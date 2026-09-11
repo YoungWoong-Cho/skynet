@@ -184,7 +184,7 @@ api.conversions = FixtureConversion(
 )
 # Resolve the real, read-only configuration without a simulated SSH connection.
 api.conversions.cluster.candidates = ClusterClient().candidates
-api.conversions.cluster._remote_path = ClusterClient._remote_path
+api.conversions.cluster._remote_path = ClusterClient()._remote_path
 app = FastAPI()
 app.include_router(api.router)
 app.include_router(data_router)

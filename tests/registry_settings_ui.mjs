@@ -11,7 +11,7 @@ w.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
 w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
 w.HTMLDialogElement.prototype.close=function(value=''){if(this.open){this.returnValue=value;this.open=false;this.dispatchEvent(new w.Event('close'));}};
 try {
-  for (const name of ['dialogs.js','workspace-navigation.js','app.js']) w.eval((await readFile(new URL('../static/'+name,import.meta.url),'utf8')) + (name === 'app.js' ? `window.registryFixture=(versions,resources=[])=>{dataVersionRows=versions;dataResourceRows=resources;renderDataVersions();renderDataResources();};
+  for (const name of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js']) w.eval((await readFile(new URL('../static/'+name,import.meta.url),'utf8')) + (name === 'app.js' ? `window.registryFixture=(versions,resources=[])=>{dataVersionRows=versions;dataResourceRows=resources;renderDataVersions();renderDataResources();};
     window.trackingFixture=provider=>trackingConnections.get(provider);
     window.missingTutorialFixture=()=>{tutorialState.active=true;tutorialState.page='datasets';tutorialState.session=newTutorialSession('datasets');tutorialState.sessionGeneration=tutorialState.session.sessionGeneration;showTutorialUnavailableStep(tutorialTours.datasets.steps[7],7);};
     window.tutorialBackFixture=()=>{
@@ -85,39 +85,41 @@ try {
   w.registryFixture([], [{id:'archived',archived_at:'today',name:'Example'}]);
   assert.ok(el('data-resources-body').querySelector('[data-resource-action="restore"]'));
   assert.equal(el('data-resources-body').querySelector('[data-resource-action="version"]'),null);
-  // Current connection and edited draft are distinct, including TLS persistence.
-  const connection={provider:'mlflow',configured:true,connected:true,status:'connected',tracking_uri:'https://fixture.test',username:'alice',verify_tls:false};
+  // Each integration has one visible action; validation happens in Connect.
+  const connection={provider:'mlflow',configured:true,connected:true,status:'connected',tracking_uri:'https://fixture.test',username:'alice',verify_tls:true};
   w.renderTrackingConnection('mlflow',connection);
-  assert.equal(el('mlflow-verify-tls').checked,false);
   assert.equal(el('mlflow-connection-username').value,'alice');
-  el('mlflow-verify-tls').checked=true;el('mlflow-verify-tls').dispatchEvent(new w.Event('input',{bubbles:true}));
-  w.renderTrackingConnection('mlflow',connection);assert.equal(el('mlflow-verify-tls').checked,true,'refresh preserves unsaved edits');
-  assert.match(el('mlflow-connection-form').querySelector('.tracking-draft-notice').textContent,/Unsaved changes/);
-  assert.equal(el('test-mlflow-connection').textContent,'Test saved connection');
+  assert.equal(el('mlflow-connection-username').disabled,true);
+  assert.equal(el('disconnect-mlflow').hidden,false);
+  assert.equal(el('mlflow-connection-form').querySelector('button[type="submit"]').hidden,true);
+  assert.equal(el('test-mlflow-connection'),null);
+  assert.equal(el('mlflow-connection-form').querySelector('.tracking-draft-notice'),null);
   w.renderTrackingConnectionsUnavailable('Timed out');assert.equal(w.trackingFixture('mlflow').status,'unavailable');
   let fail=true;
   w.api=async(path)=>{
-    if(path.endsWith('/test')||path.endsWith('/connect')){if(fail)throw Error('Unauthorized');return {connection};}
+    if(path.endsWith('/connect')){if(fail)throw Error('Unauthorized');return {connection};}
     if(path==='/api/tracking/connections')return {connections:{mlflow:{...connection,connected:false,status:'error',last_error:'Unauthorized'}}};
     if(path==='/api/settings')return {tracking:{connections:{mlflow:{...connection,connected:!fail,status:fail?'error':'connected'}}}};
     throw Error(path);
   };
-  await w.submitTrackingConnection('mlflow','test');
-  assert.equal(el('mlflow-connection-status').textContent,'error');
+  await w.submitTrackingConnection('mlflow','connect');
+  assert.equal(el('mlflow-connection-status').textContent,'Not connected');
   assert.match(el('settings-body').textContent,/error/);
-  w.showNotice(el('settings-error'),'Old settings fetch error',{scope:'settings:resolved'});fail=false;await w.submitTrackingConnection('mlflow','test');
+  assert.equal(el('mlflow-connection-form').querySelector('button[type="submit"]').hidden,false);
+  w.showNotice(el('settings-error'),'Old settings fetch error',{scope:'settings:resolved'});fail=false;await w.submitTrackingConnection('mlflow','connect');
   assert.equal(el('settings-error').hidden,true,el('settings-error').textContent);
-  assert.equal(el('mlflow-connection-status').textContent,'connected');
-  assert.equal(el('toast').querySelectorAll('.is-error[data-notification-scope="tracking:mlflow"]').length,0,'Successful Test clears its obsolete global alert');
+  assert.equal(el('mlflow-connection-status').textContent,'Connected');
+  assert.equal(el('toast').querySelectorAll('.is-error[data-notification-scope="tracking:mlflow"]').length,0,'Successful Connect clears its obsolete alert');
   // Recovering one provider never dismisses another provider or an unrelated issue.
   w.showToast('W&B connection needs attention',true,{scope:'tracking:wandb'});
   w.showNotice(el('settings-error'),'Unrelated configuration issue',{scope:'settings:unrelated'});
+  w.renderTrackingConnection('mlflow',{...connection,connected:false});
   fail=true;await w.submitTrackingConnection('mlflow','connect');
   await w.submitTrackingConnection('mlflow','connect');
   assert.equal(el('toast').querySelectorAll('.is-error[data-notification-scope="tracking:mlflow"]').length,1,'Repeated failure replaces its own alert');
   assert.match(el('toast').textContent,/MLflow connect failed: Unauthorized/);
   fail=false;await w.submitTrackingConnection('mlflow','connect');
-  assert.equal(el('mlflow-connection-status').textContent,'connected');
+  assert.equal(el('mlflow-connection-status').textContent,'Connected');
   assert.doesNotMatch(el('toast').textContent,/MLflow connect failed/);
   assert.match(el('toast').textContent,/W&B connection needs attention/);
   assert.match(el('settings-error').textContent,/Unrelated configuration issue/);
@@ -242,5 +244,5 @@ try {
   assert.equal(w.beginTutorialRecovery(w.tutorialResultState().record),true);
   assert.equal(w.tutorialResultState().gateComplete,false,'Recovery always requires a fresh exact Read even when an older Read completed');
   w.resetTutorialAttempt();w.Date.now=originalNow;w.document.body.classList.remove('has-active-tutorial');
-  console.log('Registry/Settings regressions: mounts, prepared copies, optional fields, restore, connection drafts/status/TLS, and tutorial recovery passed.');
+  console.log('Registry/Settings regressions: mounts, prepared copies, optional fields, restore, Connect/Disconnect validation and status, and tutorial recovery passed.');
 } catch(error) {console.error(error);process.exitCode=1;} finally {for(const observer of observers)observer.disconnect();await flush();w.close();}

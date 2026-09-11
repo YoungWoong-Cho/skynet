@@ -5,6 +5,7 @@ import threading
 import pytest
 
 from skynet_app.database import Database
+from skynet_app.workspace_storage import WorkspaceStorage
 from test_pipeline import FakeCluster, canonical_spec, make_pipeline_service
 import skynet_app.pipeline_api as pipeline
 
@@ -55,6 +56,7 @@ def test_two_service_instances_restore_one_atomic_graph(cleaned):
     database, cluster, service, experiment, variants, _ = cleaned
     second = pipeline.PipelineService.__new__(pipeline.PipelineService)
     second.database = Database(database.path)
+    second.storage = WorkspaceStorage(second.database)
     barrier = threading.Barrier(2)
     def restore(instance):
         barrier.wait(timeout=5)

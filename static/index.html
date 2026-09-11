@@ -8,7 +8,9 @@
     <link rel="stylesheet" href="/static/styles.css?v=experiment-tabs-20260909-data-refinement">
     <script type="application/skynet-script" data-workspace-src="/static/dialogs.js?v=20260909-data" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/workspace-navigation.js?v=20260909-experiment-tabs" defer></script>
+    <script type="application/skynet-script" data-workspace-src="/static/connection-settings.js?v=1" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/slack-settings.js?v=1" defer></script>
+    <script type="application/skynet-script" data-workspace-src="/static/workspace-storage.js?v=1" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/app.js?v=20260909-experiment-tabs" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/hands-ui.js?v=20260907-imported-hands-2" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/live-review.js?v=20260909-review-only" defer></script>
@@ -1669,120 +1671,97 @@
 
           <div id="settings-error" class="inline-alert" role="alert" hidden></div>
 
-          <form id="slack-notifications-form" class="panel tracking-connection-card" autocomplete="off">
-            <div class="panel-heading">
-              <div><h2>Slack notifications</h2><p>Get updates for your workspace’s training and evaluation jobs, including each retry attempt.</p></div>
-              <span id="slack-notification-status" class="state-pill is-other">Not loaded</span>
-            </div>
-            <div class="form-grid">
-              <div class="field span-2">
-                <label for="slack-webhook">Incoming webhook URL</label>
-                <input id="slack-webhook" name="webhook_url" type="password" autocomplete="new-password" spellcheck="false" placeholder="Paste a Slack webhook; leave blank to keep the saved one">
-                <small>Stored securely on the Skynet server for your workspace. The webhook’s Slack channel receives the messages.</small>
-                <a href="https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/" target="_blank" rel="noopener noreferrer">Create a Slack incoming webhook</a>
-              </div>
-              <div class="field span-2">
-                <label for="slack-app-url">Skynet address for notification links (optional)</label>
-                <input id="slack-app-url" name="app_url" type="url" placeholder="http://your-skynet-server:8080">
-                <small>Use an address reachable from Slack. Leave blank to omit the link.</small>
-              </div>
-              <label class="check-field span-4"><input name="enabled" type="checkbox"><span>Enable Slack notifications</span></label>
-            </div>
-            <fieldset class="form-section"><legend>Notify me when a job…</legend>
-              <div class="form-grid">
-                <label class="check-field"><input name="events" type="checkbox" value="submitted" checked><span>Is submitted</span></label>
-                <label class="check-field"><input name="events" type="checkbox" value="running" checked><span>Starts running</span></label>
-                <label class="check-field"><input name="events" type="checkbox" value="cancelled" checked><span>Is cancelled</span></label>
-                <label class="check-field"><input name="events" type="checkbox" value="failed" checked><span>Fails</span></label>
-                <label class="check-field"><input name="events" type="checkbox" value="completed" checked><span>Completes</span></label>
-              </div>
-            </fieldset>
-            <p id="slack-notification-detail" class="tracking-connection-detail" role="status">Notifications begin with future job state changes after enabling. Closing your browser does not stop delivery.</p>
-            <div class="form-actions tracking-connection-actions">
-              <button class="button button-accent" type="submit">Save settings</button>
-              <button id="slack-send-test" class="button button-outline" type="button" disabled>Send test message</button>
-              <button id="slack-retry-failed" class="button button-outline" type="button" disabled>Retry failed notifications</button>
-              <button id="slack-disconnect" class="button button-quiet" type="button" disabled>Disconnect &amp; forget webhook</button>
-            </div>
-          </form>
-
           <div class="tracking-settings-grid">
             <form id="wandb-connection-form" class="panel tracking-connection-card" data-tracking-provider="wandb" autocomplete="off">
               <div class="panel-heading">
-                <div>
-                  <h2>Weights &amp; Biases</h2>
-                  <p>Connect an existing W&amp;B account. The verified default entity becomes the automatic workspace.</p>
-                </div>
+                <h2>Weights &amp; Biases</h2>
                 <span id="wandb-connection-status" class="state-pill is-other">Not loaded</span>
               </div>
               <div class="form-grid">
-                <div class="field span-2">
+                <div class="field span-4">
                   <label for="wandb-api-key">API key</label>
-                  <input id="wandb-api-key" type="password" autocomplete="new-password" spellcheck="false" placeholder="Paste an API key to connect">
-                  <small>Sent only to the Skynet server connection API. It is never saved or prefilled by this browser.</small>
+                  <input id="wandb-api-key" type="password" autocomplete="new-password" spellcheck="false" placeholder="Enter API key">
                 </div>
-                <div class="field">
-                  <label for="wandb-base-url">Base URL</label>
-                  <input id="wandb-base-url" type="url" placeholder="Optional; W&B default when blank">
+                <div class="field span-4">
+                  <label for="wandb-entity">Entity (optional)</label>
+                  <input id="wandb-entity" placeholder="Default workspace">
                 </div>
-                <div class="field">
-                  <label for="wandb-entity">Preferred entity</label>
-                  <input id="wandb-entity" placeholder="Optional; verified from the API key">
-                </div>
-                <label class="check-field credential-persistence span-4">
-                  <input id="wandb-remember" type="checkbox" checked>
-                  <span><strong>Remember in the Skynet server credential store</strong><small>Turn off to keep the API key in backend session memory only.</small></span>
-                </label>
               </div>
-              <p id="wandb-connection-detail" class="tracking-connection-detail" role="status" aria-live="polite">Connection status has not been loaded.</p>
-              <p id="wandb-credential-source" class="tracking-credential-source" data-source="none">Credential source: none</p>
+              <p id="wandb-connection-detail" class="tracking-connection-detail" role="status" aria-live="polite" hidden></p>
               <div class="form-actions tracking-connection-actions">
-                <button class="button button-accent" type="submit">Connect</button>
-                <button id="test-wandb-connection" class="button button-outline" type="button">Test saved connection</button>
-                <button id="disconnect-wandb" class="button button-quiet" type="button">Disconnect</button>
+                <button class="button button-accent" type="submit" disabled>Connect</button>
+                <button id="disconnect-wandb" data-connection-disconnect class="button button-quiet" type="button" hidden>Disconnect</button>
               </div>
             </form>
 
             <form id="mlflow-connection-form" class="panel tracking-connection-card" data-tracking-provider="mlflow" autocomplete="off">
               <div class="panel-heading">
-                <div>
-                  <h2>MLflow</h2>
-                  <p>Connect a reachable MLflow tracking server. Authentication is optional and is never stored in an experiment.</p>
-                </div>
+                <h2>MLflow</h2>
                 <span id="mlflow-connection-status" class="state-pill is-other">Not loaded</span>
               </div>
               <div class="form-grid">
-                <div class="field span-2">
+                <div class="field span-4">
                   <label for="mlflow-connection-uri">Tracking URI</label>
                   <input id="mlflow-connection-uri" type="url" placeholder="https://mlflow.example" required>
                 </div>
                 <div class="field span-2">
-                  <label for="mlflow-connection-username">Username</label>
-                  <input id="mlflow-connection-username" autocomplete="off" placeholder="Optional">
+                  <label for="mlflow-connection-username">Username (optional)</label>
+                  <input id="mlflow-connection-username" autocomplete="off">
                 </div>
                 <div class="field span-2">
-                  <label for="mlflow-connection-password">Password</label>
-                  <input id="mlflow-connection-password" type="password" autocomplete="new-password" spellcheck="false" placeholder="Optional; never prefilled">
+                  <label for="mlflow-connection-password">Password (optional)</label>
+                  <input id="mlflow-connection-password" type="password" autocomplete="new-password" spellcheck="false">
                 </div>
-                <div class="field span-2">
-                  <label for="mlflow-connection-token">Bearer token</label>
-                  <input id="mlflow-connection-token" type="password" autocomplete="new-password" spellcheck="false" placeholder="Optional; never prefilled">
+                <div class="field span-4">
+                  <label for="mlflow-connection-token">Access token (optional)</label>
+                  <input id="mlflow-connection-token" type="password" autocomplete="new-password" spellcheck="false">
                 </div>
-                <label class="check-field span-4">
-                  <input id="mlflow-verify-tls" type="checkbox" checked>
-                  <span>Verify TLS certificates</span>
-                </label>
-                <label class="check-field credential-persistence span-4">
-                  <input id="mlflow-remember" type="checkbox" checked>
-                  <span><strong>Remember in the Skynet server credential store</strong><small>Turn off to keep authentication in backend session memory only.</small></span>
-                </label>
               </div>
-              <p id="mlflow-connection-detail" class="tracking-connection-detail" role="status" aria-live="polite">Connection status has not been loaded.</p>
-              <p id="mlflow-credential-source" class="tracking-credential-source" data-source="none">Credential source: none</p>
+              <p id="mlflow-connection-detail" class="tracking-connection-detail" role="status" aria-live="polite" hidden></p>
               <div class="form-actions tracking-connection-actions">
-                <button class="button button-accent" type="submit">Connect</button>
-                <button id="test-mlflow-connection" class="button button-outline" type="button">Test saved connection</button>
-                <button id="disconnect-mlflow" class="button button-quiet" type="button">Disconnect</button>
+                <button class="button button-accent" type="submit" disabled>Connect</button>
+                <button id="disconnect-mlflow" data-connection-disconnect class="button button-quiet" type="button" hidden>Disconnect</button>
+              </div>
+            </form>
+
+            <form id="slack-notifications-form" class="panel tracking-connection-card" autocomplete="off">
+              <div class="panel-heading">
+                <h2>Slack</h2>
+                <span id="slack-notification-status" class="state-pill is-other">Not loaded</span>
+              </div>
+              <div class="form-grid">
+                <div class="field span-4">
+                  <label for="slack-webhook">Incoming webhook URL</label>
+                  <input id="slack-webhook" name="webhook_url" type="password" autocomplete="new-password" spellcheck="false" placeholder="https://hooks.slack.com/services/…" required>
+                </div>
+              </div>
+              <p id="slack-notification-detail" class="tracking-connection-detail" role="status" aria-live="polite" hidden></p>
+              <div class="form-actions tracking-connection-actions">
+                <button class="button button-accent" type="submit" disabled>Connect</button>
+                <button id="slack-disconnect" data-connection-disconnect class="button button-quiet" type="button" hidden>Disconnect</button>
+              </div>
+            </form>
+
+            <form id="workspace-storage-form" class="panel tracking-connection-card" autocomplete="off">
+              <div class="panel-heading">
+                <div><h2>Cluster storage</h2><p>Choose the base directory for your email workspace’s new training runs.</p></div>
+                <span id="workspace-storage-status" class="state-pill is-other">Not loaded</span>
+              </div>
+              <div class="form-grid">
+                <div class="field span-4">
+                  <label for="workspace-base-path">Base path</label>
+                  <input id="workspace-base-path" name="work_root" placeholder="/coc/flash7/yourname" spellcheck="false" maxlength="512" required disabled aria-describedby="workspace-base-path-help">
+                  <small id="workspace-base-path-help">Use a cluster directory writable by the server’s SSH account. Changing this path does not change that account.</small>
+                </div>
+                <div class="field span-4">
+                  <span class="field-label">Existing data</span>
+                  <small>Existing runs, their retries and evaluations keep their original paths. Shared recordings, datasets and installed runtimes stay at their registered locations.</small>
+                </div>
+              </div>
+              <p id="workspace-storage-detail" class="tracking-connection-detail" role="status" aria-live="polite">Open Settings to load your saved base path.</p>
+              <div class="form-actions tracking-connection-actions">
+                <button id="save-workspace-storage" class="button button-accent" type="submit" disabled>Save path</button>
+                <button id="init-workspace" class="button button-outline" type="button" disabled>Initialize directories</button>
               </div>
             </form>
           </div>
@@ -1807,19 +1786,6 @@
 
           </div>
 
-          <section class="panel workspace-card">
-            <div>
-
-              <h2>/coc/flash7/ycho420</h2>
-              <p>Creates workspace, repos, datasets, artifacts, logs, jobs, and shared uv, Hugging Face, and Torch caches.</p>
-            </div>
-            <button id="init-workspace" class="button button-dark" type="button">Initialize directories</button>
-          </section>
-
-          <section class="panel contract-note">
-
-            <p>The browser never stores or prefills secrets. Remembering a credential saves it in your workspace's secure store on the Skynet server; otherwise it stays in server session memory. Disconnect removes that workspace's session and saved credentials. Environment credentials remain managed outside Skynet.</p>
-          </section>
         </div>
       </section>
     </main>

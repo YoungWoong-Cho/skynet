@@ -83,6 +83,23 @@ def migrate_workspaces(connection: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS workspace_session_expiry ON workspace_sessions(expires_at);
         CREATE TABLE IF NOT EXISTS workspace_migrations (version INTEGER PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS workspace_storage (
+            owner_id TEXT PRIMARY KEY NOT NULL REFERENCES workspaces(id),
+            work_root TEXT NOT NULL
+        );
+        CREATE TRIGGER IF NOT EXISTS workspace_storage_insert
+        BEFORE INSERT ON workspace_storage
+        WHEN current_workspace_id() IS NOT NULL AND NEW.owner_id IS NOT current_workspace_id()
+        BEGIN SELECT RAISE(ABORT, 'Record is outside this workspace'); END;
+        CREATE TRIGGER IF NOT EXISTS workspace_storage_update
+        BEFORE UPDATE ON workspace_storage
+        WHEN NEW.owner_id IS NOT OLD.owner_id OR
+            (current_workspace_id() IS NOT NULL AND OLD.owner_id IS NOT current_workspace_id())
+        BEGIN SELECT RAISE(ABORT, 'Record is outside this workspace'); END;
+        CREATE TRIGGER IF NOT EXISTS workspace_storage_delete
+        BEFORE DELETE ON workspace_storage
+        WHEN current_workspace_id() IS NOT NULL AND OLD.owner_id IS NOT current_workspace_id()
+        BEGIN SELECT RAISE(ABORT, 'Record is outside this workspace'); END;
     """)
     if connection.execute("SELECT 1 FROM workspace_migrations WHERE version=1").fetchone():
         _scope_adapter_names(connection)

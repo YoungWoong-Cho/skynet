@@ -22,6 +22,7 @@ from .cluster_runtime import (
     ClusterError,
     SubmissionOutcomeUnknown,
     WORK_ROOT,
+    validate_remote_path,
 )
 from .capture_processing.slurm import compile_isaac_job
 from .remote_artifacts import RemoteArtifact
@@ -417,7 +418,7 @@ class LiveConversionService:
             if session.get("recording_checksums", {}).get(relative) != source["sha256"]:
                 raise ValueError("Recording checksum differs from the frozen conversion")
             _, _, resolved = archive.resolve(session, relative)
-            sources.append(dict(source, source=ClusterClient._remote_path(resolved)))
+            sources.append(dict(source, source=validate_remote_path(resolved)))
         return sources
 
     @staticmethod
@@ -486,7 +487,7 @@ print(json.dumps({'runtime':(runtime/'bin/python').is_file(), 'revision':(repo/'
                 )
                 receipt = self.remote_check(
                     transport, job["gateway"], STAGE_ARCHIVED_RECORDINGS,
-                    {"root": ClusterClient._remote_path(job["root"] + "/recordings"),
+                    {"root": validate_remote_path(job["root"] + "/recordings"),
                      "sources": [source]},
                 )
                 if receipt.get("staged") != 1:
@@ -679,7 +680,7 @@ else: print('{}')
         receipt = self.remote_check(
             transport, job["gateway"], VERIFY_CONVERTED_DATASET,
             dict(
-                root=ClusterClient._remote_path(job.get("dataset_root", job["root"])),
+                root=validate_remote_path(job.get("dataset_root", job["root"])),
                 metadata=m, manifest=result["manifest"],
                 source_manifest=dict(
                     size_bytes=len(sources), sha256=hashlib.sha256(sources).hexdigest(),
@@ -839,7 +840,7 @@ else: print('{}')
             raise ValueError("Dataset conversion is not complete")
         return RemoteArtifact(
             self.cluster, job["gateway"],
-            ClusterClient._remote_path(job.get("dataset_root", job["root"]) + "/" + name),
+            validate_remote_path(job.get("dataset_root", job["root"]) + "/" + name),
             max_bytes=2_000_000 if name == "manifest.json" else None,
         )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import os
 import re
@@ -10,9 +11,13 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Iterable, Mapping, Sequence
 
 from .cluster_config import CLUSTER
+
+
+if TYPE_CHECKING:
+    from .workspace_storage import WorkspaceStorage
 
 
 HOME_ROOT = CLUSTER.paths.home_root
@@ -26,6 +31,19 @@ class ClusterError(RuntimeError):
 
 class SubmissionOutcomeUnknown(ClusterError):
     """Slurm may have accepted a job whose SSH acknowledgement was lost."""
+
+
+def validate_remote_path(path: str, roots: Iterable[str] = (WORK_ROOT,)) -> str:
+    """Validate a cluster path against the caller's registered storage roots."""
+    candidate = PurePosixPath(path)
+    if not candidate.is_absolute() or not any(
+        candidate == PurePosixPath(root) or PurePosixPath(root) in candidate.parents
+        for root in roots
+    ):
+        raise ValueError("Remote path must be below a registered workspace root")
+    if ".." in candidate.parts:
+        raise ValueError("Remote path cannot contain '..'")
+    return str(candidate)
 
 
 def approved_operator_environment(
@@ -131,6 +149,21 @@ class ClusterClient:
         if not configured:
             raise ValueError("At least one SSH gateway is required")
         self.hosts = tuple(dict.fromkeys(configured))
+        self.storage: WorkspaceStorage | None = None
+
+    def with_storage(self, storage: WorkspaceStorage) -> ClusterClient:
+        client = copy.copy(self)
+        client.storage = storage
+        return client
+
+    @property
+    def work_root(self) -> str:
+        return self.storage.work_root if self.storage else WORK_ROOT
+
+    def run_directory(self, run_id: str) -> str:
+        run_id = self._run_id(run_id)
+        return self.storage.run_directory(run_id) if self.storage else f"{WORK_ROOT}/jobs/runs/{run_id}"
+
 
     def candidates(self, gateway: str) -> tuple[str, ...]:
         if gateway == "auto":
@@ -216,15 +249,22 @@ class ClusterClient:
         host, _ = self.run_with_fallback(command, gateway, timeout=15)
         return host
 
-    def initialize_workspace(self, gateway: str = "auto") -> str:
+    def initialize_workspace(self, gateway: str = "auto", *, work_root: str | None = None) -> str:
+        from .workspace_storage import validate_work_root
+
+        root = validate_work_root(work_root or self.work_root)
         directories = (
             "workspace repos repos/shared envs datasets artifacts logs jobs eval/catalogs eval/datasets "
             "eval/assets eval/runs mlflow/db mlflow/artifacts .cache/uv "
             ".cache/huggingface .cache/torch"
         )
+        paths = [root, *(f"{root}/{item}" for item in directories.split())]
         command = (
             "set -eu; umask 077; "
-            + " ".join(f"mkdir -p {shlex.quote(f'{WORK_ROOT}/{item}')} ;" for item in directories.split())
+            + " ".join(
+                f"mkdir -p {shlex.quote(path)}; test -w {shlex.quote(path)}; test -x {shlex.quote(path)};"
+                for path in paths
+            )
         )
         host, _ = self.run_with_fallback(command, gateway)
         return host
@@ -242,15 +282,9 @@ class ClusterClient:
             raise ValueError("Capsule paths must be relative and cannot contain '..'")
         return str(path)
 
-    @staticmethod
-    def _remote_path(path: str) -> str:
-        candidate = PurePosixPath(path)
-        root = PurePosixPath(WORK_ROOT)
-        if not candidate.is_absolute() or candidate != root and root not in candidate.parents:
-            raise ValueError(f"Remote path must be below {WORK_ROOT}")
-        if ".." in candidate.parts:
-            raise ValueError("Remote path cannot contain '..'")
-        return str(candidate)
+    def _remote_path(self, path: str) -> str:
+        roots = self.storage.allowed_roots() if self.storage else {WORK_ROOT}
+        return validate_remote_path(path, roots)
 
     def write_capsule_file(
         self,
@@ -261,7 +295,7 @@ class ClusterClient:
     ) -> tuple[str, str]:
         run_id = self._run_id(run_id)
         relative_path = self._relative_path(relative_path)
-        destination = f"{WORK_ROOT}/jobs/runs/{run_id}/{relative_path}"
+        destination = f"{self.run_directory(run_id)}/{relative_path}"
         destination_q = shlex.quote(destination)
         parent_q = shlex.quote(str(PurePosixPath(destination).parent))
         command = (
@@ -281,7 +315,7 @@ class ClusterClient:
     ) -> tuple[str, str]:
         run_id = self._run_id(run_id)
         relative_path = self._relative_path(relative_path)
-        destination = f"{WORK_ROOT}/jobs/runs/{run_id}/{relative_path}"
+        destination = f"{self.run_directory(run_id)}/{relative_path}"
         host, _ = self.run_with_fallback(
             f"set -eu; rm -f -- {shlex.quote(destination)}",
             gateway,
@@ -333,7 +367,7 @@ class ClusterClient:
 
         run_id = self._run_id(run_id)
         token = self._submission_token(submission_key)
-        run_directory = f"{WORK_ROOT}/jobs/runs/{run_id}"
+        run_directory = self.run_directory(run_id)
         script_path = f"{run_directory}/job.sbatch"
         receipt_path = f"{run_directory}/submissions/{token}.jobid"
         host, receipt = self.run_with_fallback(
@@ -420,7 +454,7 @@ since=$(date -d '7 days ago' +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
         submission_key = submission_key or run_id
         token = self._submission_token(submission_key)
         host = self.resolve_gateway() if gateway == "auto" else self.candidates(gateway)[0]
-        run_directory = f"{WORK_ROOT}/jobs/runs/{run_id}"
+        run_directory = self.run_directory(run_id)
         script_path = f"{run_directory}/job.sbatch"
         receipt_directory = f"{run_directory}/submissions"
         receipt_path = f"{receipt_directory}/{token}.jobid"
@@ -473,7 +507,7 @@ cp -f {shlex.quote(submitted_script_path)} "$attempt_dir/job.sbatch" || true
         command = f'''set -eu
 export PATH={SLURM_BIN}:$PATH
 umask 077
-mkdir -p {shlex.quote(run_directory)} {shlex.quote(receipt_directory)} {shlex.quote(f"{WORK_ROOT}/logs")}
+mkdir -p {shlex.quote(run_directory)} {shlex.quote(receipt_directory)} {shlex.quote(str(PurePosixPath(run_directory).parents[2] / "logs"))} {shlex.quote(str(PurePosixPath(run_directory).parents[2] / "workspace"))}
 if test -s {shlex.quote(receipt_path)}; then
   cat {shlex.quote(receipt_path)}
   exit 0

@@ -16,7 +16,7 @@ w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
 w.HTMLDialogElement.prototype.close=function(value=''){if(this.open){this.returnValue=value;this.open=false;this.dispatchEvent(new w.Event('close'));}};
 const key=(target,key)=>target.dispatchEvent(new w.KeyboardEvent('keydown',{key,bubbles:true,cancelable:true}));
 try {
-  for(const file of ['dialogs.js','workspace-navigation.js','app.js']) w.eval(await readFile(new URL('../static/'+file,import.meta.url),'utf8'));
+  for(const file of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js']) w.eval(await readFile(new URL('../static/'+file,import.meta.url),'utf8'));
   const tabs=[...w.document.querySelectorAll('.tab-nav [role="tab"]')];
   assert.equal(tabs.filter(t=>t.tabIndex===0).length,1);
   tabs[0].focus();key(tabs[0],'ArrowRight');

@@ -261,25 +261,17 @@ const elements = {
   settingsBody: document.querySelector("#settings-body"),
   wandbConnectionForm: document.querySelector("#wandb-connection-form"),
   wandbApiKey: document.querySelector("#wandb-api-key"),
-  wandbBaseUrl: document.querySelector("#wandb-base-url"),
   wandbEntity: document.querySelector("#wandb-entity"),
-  wandbRemember: document.querySelector("#wandb-remember"),
   wandbConnectionStatus: document.querySelector("#wandb-connection-status"),
   wandbConnectionDetail: document.querySelector("#wandb-connection-detail"),
-  wandbCredentialSource: document.querySelector("#wandb-credential-source"),
-  testWandbConnection: document.querySelector("#test-wandb-connection"),
   disconnectWandb: document.querySelector("#disconnect-wandb"),
   mlflowConnectionForm: document.querySelector("#mlflow-connection-form"),
   mlflowConnectionUri: document.querySelector("#mlflow-connection-uri"),
   mlflowConnectionUsername: document.querySelector("#mlflow-connection-username"),
   mlflowConnectionPassword: document.querySelector("#mlflow-connection-password"),
   mlflowConnectionToken: document.querySelector("#mlflow-connection-token"),
-  mlflowVerifyTls: document.querySelector("#mlflow-verify-tls"),
-  mlflowRemember: document.querySelector("#mlflow-remember"),
   mlflowConnectionStatus: document.querySelector("#mlflow-connection-status"),
   mlflowConnectionDetail: document.querySelector("#mlflow-connection-detail"),
-  mlflowCredentialSource: document.querySelector("#mlflow-credential-source"),
-  testMlflowConnection: document.querySelector("#test-mlflow-connection"),
   disconnectMlflow: document.querySelector("#disconnect-mlflow"),
   adaptersError: document.querySelector("#adapters-error"),
   refreshAdapters: document.querySelector("#refresh-adapters"),
@@ -1618,6 +1610,7 @@ async function refreshCluster({ force = false, background = false } = {}) {
 }
 
 async function initializeWorkspace() {
+  if (typeof initializeWorkspaceStorage === "function") return initializeWorkspaceStorage();
   elements.initWorkspace.disabled = true;
   try {
     const gateway = encodeURIComponent(elements.gateway.value);
@@ -12190,9 +12183,6 @@ function trackingConnectionElements(provider) {
         form: elements.wandbConnectionForm,
         status: elements.wandbConnectionStatus,
         detail: elements.wandbConnectionDetail,
-        source: elements.wandbCredentialSource,
-        remember: elements.wandbRemember,
-        test: elements.testWandbConnection,
         disconnect: elements.disconnectWandb,
         secrets: [elements.wandbApiKey],
       }
@@ -12200,36 +12190,9 @@ function trackingConnectionElements(provider) {
         form: elements.mlflowConnectionForm,
         status: elements.mlflowConnectionStatus,
         detail: elements.mlflowConnectionDetail,
-        source: elements.mlflowCredentialSource,
-        remember: elements.mlflowRemember,
-        test: elements.testMlflowConnection,
         disconnect: elements.disconnectMlflow,
         secrets: [elements.mlflowConnectionPassword, elements.mlflowConnectionToken],
       };
-}
-
-function renderTrackingDraftNotice(provider) {
-  const ui = trackingConnectionElements(provider);
-  let notice = ui.form.querySelector(".tracking-draft-notice");
-  if (!notice) {
-    notice = document.createElement("p");
-    notice.className = "tracking-draft-notice registry-section-help";
-    notice.setAttribute("role", "status");
-    ui.form.append(notice);
-  }
-  const dirty = Boolean(ui.form.querySelector('[data-dirty="true"]')) || ui.secrets.some(input => input.value);
-  notice.textContent = dirty
-    ? "Unsaved changes. Connect validates and saves these fields. Test saved connection uses the last saved settings."
-    : "Test saved connection checks the last saved settings. Connect validates and saves changes.";
-}
-
-function trackingCredentialSourceText(source) {
-  const normalized = String(source || "none").toLowerCase();
-  if (normalized === "credential_store") return "credential_store (saved on the Skynet server)";
-  if (normalized === "keychain") return "keychain (saved on the Skynet server)";
-  if (normalized === "session") return "session (backend memory only)";
-  if (normalized === "environment") return "environment (managed outside Skynet)";
-  return normalized;
 }
 
 function renderTrackingConnection(provider, connection) {
@@ -12238,25 +12201,15 @@ function renderTrackingConnection(provider, connection) {
     ? { provider, ...connection }
     : { provider, configured: false, connected: false, status: "not_configured" };
   trackingConnections.set(provider, normalized);
-  const status = normalized.status || (normalized.connected ? "connected" : normalized.configured ? "configured" : "not configured");
-  ui.status.className = `state-pill ${stateClass(status)}`;
-  ui.status.textContent = String(status).replaceAll("_", " ");
-  const credentialSource = String(normalized.credential_source || "none").toLowerCase();
-  const source = `credential: ${trackingCredentialSourceText(credentialSource)}`;
-  const endpoint = provider === "wandb" ? normalized.base_url : normalized.tracking_uri || normalized.base_url;
-  const identity = provider === "wandb" && normalized.entity ? `entity: ${normalized.entity}` : "";
-  ui.detail.textContent = normalized.last_error || normalized.message || [endpoint, identity, source].filter(Boolean).join(" / ");
-  ui.detail.classList.toggle("is-error", status === "error");
-  ui.source.dataset.source = credentialSource;
-  ui.source.textContent = `Credential source: ${trackingCredentialSourceText(credentialSource)}`;
-  ui.test.disabled = ui.form.dataset.busy === "true" || !normalized.configured;
-  ui.disconnect.disabled = ui.form.dataset.busy === "true" || (!normalized.configured && !normalized.connected);
-  ui.disconnect.textContent = ["credential_store", "keychain"].includes(credentialSource) ? "Disconnect & forget" : "Disconnect";
-  ui.disconnect.title = credentialSource === "environment"
-    ? "Disconnect this connection; remove environment credentials outside Skynet."
-    : "Disconnect and remove any credential saved by Skynet.";
+  const connected = Boolean(normalized.connected);
+  ui.status.className = `state-pill ${connected ? "is-running" : normalized.last_error ? "is-failed" : "is-other"}`;
+  ui.status.textContent = connected ? "Connected" : "Not connected";
+  ui.detail.textContent = normalized.last_error || "";
+  ui.detail.hidden = !normalized.last_error;
+  ui.detail.classList.toggle("is-error", Boolean(normalized.last_error));
+  renderConnectionControls(ui.form, { connected, busy: ui.form.dataset.busy === "true" });
+  ui.disconnect.textContent = "Disconnect";
   if (provider === "wandb") {
-    if (!elements.wandbBaseUrl.dataset.dirty) elements.wandbBaseUrl.value = normalized.base_url || "";
     if (!elements.wandbEntity.dataset.dirty) elements.wandbEntity.value = normalized.entity || "";
     elements.wandbExperimentConnection.textContent = normalized.connected
       ? `Connected workspace: ${normalized.entity || "missing verified entity"}`
@@ -12265,13 +12218,11 @@ function renderTrackingConnection(provider, connection) {
     const uri = normalized.tracking_uri || normalized.base_url || "";
     if (!elements.mlflowConnectionUri.dataset.dirty) elements.mlflowConnectionUri.value = uri;
     if (!elements.mlflowConnectionUsername.dataset.dirty) elements.mlflowConnectionUsername.value = normalized.username || "";
-    if (!elements.mlflowVerifyTls.dataset.dirty) elements.mlflowVerifyTls.checked = normalized.verify_tls !== false;
     elements.mlflowUri.value = uri;
     elements.mlflowExperimentConnection.textContent = normalized.connected
       ? `Connected: ${uri || "endpoint verified"}`
       : "Not connected; configure in Settings";
   }
-  renderTrackingDraftNotice(provider);
   renderTrackingNamePreview();
   updateExperimentSubmitState();
 }
@@ -12289,7 +12240,9 @@ function renderTrackingConnectionsUnavailable(message) {
     ui.status.className = "state-pill is-failed";
     ui.status.textContent = "Unavailable";
     ui.detail.textContent = message;
+    ui.detail.hidden = false;
     ui.detail.classList.add("is-error");
+    renderConnectionControls(ui.form, { connected: false, loaded: false });
     const experimentStatus = provider === "wandb" ? elements.wandbExperimentConnection : elements.mlflowExperimentConnection;
     experimentStatus.textContent = "Connection API unavailable";
   });
@@ -12314,32 +12267,25 @@ function trackingConnectionPayload(provider) {
   if (provider === "wandb") {
     const payload = {};
     if (elements.wandbApiKey.value) payload.api_key = elements.wandbApiKey.value;
-    if (elements.wandbBaseUrl.value.trim()) payload.base_url = elements.wandbBaseUrl.value.trim();
+    if (trackingConnections.get(provider)?.base_url) payload.base_url = trackingConnections.get(provider).base_url;
     if (elements.wandbEntity.value.trim()) payload.entity = elements.wandbEntity.value.trim();
-    payload.remember = elements.wandbRemember.checked;
+    payload.remember = true;
     return payload;
   }
   const payload = {
     tracking_uri: elements.mlflowConnectionUri.value.trim(),
-    verify_tls: elements.mlflowVerifyTls.checked,
+    verify_tls: true,
   };
   if (elements.mlflowConnectionUsername.value.trim()) payload.username = elements.mlflowConnectionUsername.value.trim();
   if (elements.mlflowConnectionPassword.value) payload.password = elements.mlflowConnectionPassword.value;
   if (elements.mlflowConnectionToken.value) payload.token = elements.mlflowConnectionToken.value;
-  payload.remember = elements.mlflowRemember.checked;
+  payload.remember = true;
   return payload;
 }
 
 function setTrackingConnectionBusy(provider, busy) {
   const ui = trackingConnectionElements(provider);
-  ui.form.dataset.busy = String(busy);
-  ui.form.setAttribute("aria-busy", String(busy));
-  [...ui.form.querySelectorAll("button, input")].forEach(control => { control.disabled = busy; });
-  if (!busy) {
-    const connection = trackingConnections.get(provider) || {};
-    ui.test.disabled = !connection.configured;
-    ui.disconnect.disabled = !connection.configured && !connection.connected;
-  }
+  renderConnectionControls(ui.form, { connected: Boolean(trackingConnections.get(provider)?.connected), busy });
 }
 
 function clearTrackingSecrets(provider) {
@@ -12349,9 +12295,8 @@ function clearTrackingSecrets(provider) {
 async function submitTrackingConnection(provider, action) {
   const ui = trackingConnectionElements(provider);
   const notificationScope = `tracking:${provider}`;
-  if (ui.form.dataset.busy === "true") return;
+  if (ui.form.dataset.busy === "true" || (action === "connect" && trackingConnections.get(provider)?.connected)) return;
   const payload = action === "connect" ? trackingConnectionPayload(provider) : null;
-  const credentialSourceBeforeAction = String(trackingConnections.get(provider)?.credential_source || "none").toLowerCase();
   if (action === "connect") {
     if (provider === "wandb" && !payload.api_key && !trackingConnections.get(provider)?.configured) {
       showToast("Enter a W&B API key to connect.", true, { scope: notificationScope });
@@ -12366,7 +12311,8 @@ async function submitTrackingConnection(provider, action) {
   }
   setTrackingConnectionBusy(provider, true);
   ui.detail.classList.remove("is-error");
-  ui.detail.textContent = action === "disconnect" ? "Disconnecting and removing saved credentials..." : `${action === "test" ? "Testing" : "Connecting"}...`;
+  ui.detail.hidden = false;
+  ui.detail.textContent = action === "disconnect" ? "Disconnecting…" : "Connecting…";
   try {
     const path = action === "connect"
       ? `/api/tracking/connections/${provider}/connect`
@@ -12376,23 +12322,18 @@ async function submitTrackingConnection(provider, action) {
       ...(action === "connect" ? { body: JSON.stringify(payload) } : {}),
     });
     if (!result?.connection) throw new Error('Tracking response did not contain "connection".');
-    if (action !== "test") ui.form.querySelectorAll("[data-dirty]").forEach(input => delete input.dataset.dirty);
+    ui.form.querySelectorAll("[data-dirty]").forEach(input => delete input.dataset.dirty);
     renderTrackingConnection(provider, result.connection);
     trackingConnectionsLoaded = true;
-    if (action !== "test") clearTrackingSecrets(provider);
-    renderTrackingDraftNotice(provider);
+    clearTrackingSecrets(provider);
     await refreshResolvedSettings();
-    const disconnectResult = credentialSourceBeforeAction === "environment"
-      ? "disconnect completed; environment credential remains externally managed"
-      : ["credential_store", "keychain"].includes(credentialSourceBeforeAction)
-        ? "disconnected; saved credential removed"
-        : "session disconnected";
-    showToast(`${trackingProviderLabel(provider)} ${action === "disconnect" ? disconnectResult : action === "test" ? "connection verified" : "connected"}.`, false, { scope: notificationScope });
+    showToast(`${trackingProviderLabel(provider)} ${action === "disconnect" ? "disconnected" : "connected"}.`, false, { scope: notificationScope });
   } catch (error) {
     // Failed validation changes the canonical status; every view must see it.
     await loadTrackingConnections(true).catch(() => {});
     await refreshResolvedSettings();
     ui.detail.textContent = error.message;
+    ui.detail.hidden = false;
     ui.detail.classList.add("is-error");
     showToast(`${trackingProviderLabel(provider)} ${action} failed: ${error.message}`, true, { scope: notificationScope });
   } finally {
@@ -12446,6 +12387,7 @@ function renderSettings(payload) {
     ? (payload.settings && typeof payload.settings === "object" ? payload.settings : payload)
     : null;
   if (!settings) throw new Error("Settings API response must be an object.");
+  if (typeof renderWorkspaceStorage === "function") renderWorkspaceStorage(settings.storage);
   const rows = flattenSettings(settings);
   elements.settingsBody.innerHTML = rows.length
     ? rows.map(([key, value]) => `
@@ -12986,16 +12928,13 @@ elements.mlflowConnectionForm.addEventListener("submit", (event) => {
   event.preventDefault();
   submitTrackingConnection("mlflow", "connect");
 });
-elements.testWandbConnection.addEventListener("click", () => submitTrackingConnection("wandb", "test"));
-elements.testMlflowConnection.addEventListener("click", () => submitTrackingConnection("mlflow", "test"));
 elements.disconnectWandb.addEventListener("click", () => submitTrackingConnection("wandb", "disconnect"));
 elements.disconnectMlflow.addEventListener("click", () => submitTrackingConnection("mlflow", "disconnect"));
 ["wandb", "mlflow"].forEach(provider => {
   trackingConnectionElements(provider).form.addEventListener("input", event => {
     if (!event.target.matches("input")) return;
     event.target.dataset.dirty = "true";
-    renderTrackingDraftNotice(provider);
-  });
+    });
 });
 
 elements.refreshAdapters.addEventListener("click", () => loadAdapters(true));

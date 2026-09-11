@@ -14,7 +14,7 @@ w.CSS={escape:value=>value};
 const el=id=>w.document.getElementById(id);
 const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediate(resolve));};
 try {
-  for(const file of ['dialogs.js','workspace-navigation.js','app.js']) {
+  for(const file of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js']) {
     w.eval(await readFile(new URL('../static/'+file,import.meta.url),'utf8')+(file==='app.js'
       ? 'window.progressPage=page=>{activeTab=page;loadedTabs.clear();};' : ''));
   }

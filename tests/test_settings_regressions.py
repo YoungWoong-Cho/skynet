@@ -117,7 +117,7 @@ def test_anonymous_connection_does_not_inherit_even_same_endpoint_environment_au
     monkeypatch.setenv('MLFLOW_TRACKING_URI', 'https://public.test')
     monkeypatch.setenv('MLFLOW_TRACKING_TOKEN', 'environment-fixture-secret')
     assert service._mlflow_settings().token is None
-    service.test_tracking_connection('mlflow')
+    connect(service, tracking_uri=service._mlflow_settings().tracking_uri)
     assert validated[-1][1].token is None
 
 
@@ -153,19 +153,19 @@ def test_new_secret_cannot_pair_with_previous_host_after_failed_database_commit(
     assert service.tracking_connections()['connections']['mlflow']['connected'] is False
 
 
-def test_environment_secret_is_redacted_from_saved_connection_test_errors(service, monkeypatch):
+def test_environment_secret_is_redacted_from_connect_errors(service, monkeypatch):
     monkeypatch.setenv('MLFLOW_TRACKING_URI', 'https://environment.test')
     monkeypatch.setenv('MLFLOW_TRACKING_TOKEN', 'environment-fixture-secret')
     def fail(_):
         raise RuntimeError('rejected environment-fixture-secret')
     monkeypatch.setattr(MLflowBridge, 'validate_connection', fail)
     with pytest.raises(Exception) as raised:
-        service.test_tracking_connection('mlflow')
+        connect(service, tracking_uri=service._mlflow_settings().tracking_uri)
     assert 'environment-fixture-secret' not in str(raised.value)
     assert 'environment-fixture-secret' not in str(service.tracking_connections())
 
 
-def test_late_test_response_cannot_overwrite_a_changed_connection(service, validated, monkeypatch):
+def test_late_connect_response_cannot_overwrite_a_changed_connection(service, validated, monkeypatch):
     connect(service, tracking_uri='https://first.test', token='first-token')
     def validate(_):
         service._commit_tracking_connection('mlflow', 'https://second.test', {'token': 'second-token'},
@@ -175,7 +175,7 @@ def test_late_test_response_cannot_overwrite_a_changed_connection(service, valid
         return {'reachable': True}
     monkeypatch.setattr(MLflowBridge, 'validate_connection', validate)
     with pytest.raises(ValueError, match='changed while'):
-        service.test_tracking_connection('mlflow')
+        connect(service, tracking_uri=service._mlflow_settings().tracking_uri)
     assert service._mlflow_settings().tracking_uri == 'https://second.test'
     assert service._mlflow_settings().token == 'second-token'
     assert service.tracking_connections()['connections']['mlflow']['connected'] is True
@@ -191,7 +191,7 @@ def test_late_validation_failure_does_not_mark_a_new_connection_failed(service, 
         raise RuntimeError('late first-token validation failure')
     monkeypatch.setattr(MLflowBridge, 'validate_connection', validate)
     with pytest.raises(Exception):
-        service.test_tracking_connection('mlflow')
+        connect(service, tracking_uri=service._mlflow_settings().tracking_uri)
     assert service.tracking_connections()['connections']['mlflow']['connected'] is True
     assert service._mlflow_settings().token == 'second-token'
 

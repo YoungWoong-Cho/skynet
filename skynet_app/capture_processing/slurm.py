@@ -6,7 +6,7 @@ Submission, recovery and scheduler reads remain in ClusterClient.
 import re
 import shlex
 
-from skynet_app.cluster_runtime import ClusterClient
+from skynet_app.cluster_runtime import validate_remote_path
 from skynet_app.cluster_config import CLUSTER
 
 
@@ -17,7 +17,7 @@ def compile_isaac_job(profile, root, name, argv, checks=(), after=()):
     if not re.fullmatch(r"[a-zA-Z0-9_-]+", name):
         raise ValueError("Invalid job name")
     for path in (root, profile["runtime"], profile["repository"]):
-        ClusterClient._remote_path(path)
+        validate_remote_path(path)
         if any(c.isspace() for c in path):
             raise ValueError("Isaac job paths cannot contain whitespace")
     runtime, repo = profile["runtime"], profile["repository"]

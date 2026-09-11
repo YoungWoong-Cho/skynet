@@ -12,7 +12,7 @@ w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
 w.HTMLDialogElement.prototype.close=function(value=''){if(this.open){this.returnValue=value;this.open=false;this.dispatchEvent(new w.Event('close'));}};
 const flush = async()=>{for(let i=0;i<3;i++)await new Promise(r=>setImmediate(r));};
 try {
-  for(const file of ['dialogs.js','workspace-navigation.js','app.js']) w.eval((await readFile(new URL('../static/'+file,import.meta.url),'utf8')) + (file==='app.js' ? '\nwindow.setRegistryTestData=(resources,imports=[])=>{dataResourceRows=resources;dataImportRows=imports;renderDataResources();renderDataImports();};' : ''));
+  for(const file of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js']) w.eval((await readFile(new URL('../static/'+file,import.meta.url),'utf8')) + (file==='app.js' ? '\nwindow.setRegistryTestData=(resources,imports=[])=>{dataResourceRows=resources;dataImportRows=imports;renderDataResources();renderDataImports();};' : ''));
   w.setRegistryTestData([{id:'resource',provider:'local',namespace:'test',name:'Example',kind:'demonstrations'}]);
   for(const [launch,panel] of [['show-data-resource-form','data-resource-form'],['show-data-derivation-form','data-derivation-form'],['show-data-bundle-form','data-bundle-form']]) {
     el(launch).click();

@@ -362,23 +362,24 @@ def test_api_scopes_settings_and_never_returns_webhook(setup, monkeypatch):
     assert alice.get("/api/notifications/slack").status_code == 401
     alice.post("/api/workspace/session", json={"email": "alice@example.com"})
     bob.post("/api/workspace/session", json={"email": "bob@example.com"})
-    saved = alice.put(
-        "/api/notifications/slack", json={"webhook_url": WEBHOOK, "enabled": True}
+    saved = alice.post(
+        "/api/notifications/slack/connect", json={"webhook_url": WEBHOOK}
     )
     assert saved.status_code == 200 and saved.json()["configured"]
     assert "secret_test_only" not in saved.text
     assert not bob.get("/api/notifications/slack").json()["configured"]
-    assert not sender.called
-    assert (
-        alice.post("/api/notifications/slack/test").status_code == 200
-        and sender.call_count == 1
-    )
-    invalid = alice.put(
-        "/api/notifications/slack",
+    assert sender.call_count == 1
+    again = alice.post("/api/notifications/slack/connect", json={"webhook_url": WEBHOOK})
+    assert again.status_code == 200 and sender.call_count == 1
+    invalid = alice.post(
+        "/api/notifications/slack/connect",
         json={"webhook_url": "http://evil.test/secret_test_only"},
     )
     assert invalid.status_code == 422 and "secret_test_only" not in invalid.text
-    assert bob.post("/api/notifications/slack/test").status_code == 422
+    assert alice.post("/api/notifications/slack/test").status_code == 404
+    assert alice.post("/api/notifications/slack/retry").status_code == 404
+    assert alice.put("/api/notifications/slack", json={}).status_code == 405
+    assert bob.post("/api/notifications/slack/connect", json={}).status_code == 422
     assert bob.delete("/api/notifications/slack").status_code == 200
     assert alice.get("/api/notifications/slack").json()["enabled"]
     assert alice.delete("/api/notifications/slack").status_code == 200
@@ -417,16 +418,12 @@ def test_unscoped_coordinator_cannot_configure_or_send(setup):
         service.deliver_one()
 
 
-def test_manual_retry_and_failed_save_keep_the_original_destination(setup):
+def test_failed_save_keeps_the_original_destination_and_pending_delivery(setup):
     _, _, create = setup
     db, slack, sender = create()
     slack.configure(webhook_url=WEBHOOK)
     _, stage, attempt = graph(db)
     transition(db, stage, attempt, "SUBMITTED", slurm_job_id="123")
-    sender.side_effect = DeliveryError("Webhook revoked")
-    slack.deliver_one()
-    assert slack.settings()["failed_count"] == 1
-    slack.retry_failed()
     assert slack.settings()["pending_count"] == 1
     with db.transaction() as connection:
         connection.execute(
@@ -442,3 +439,21 @@ def test_manual_retry_and_failed_save_keep_the_original_destination(setup):
     slack.deliver_one()
     assert sender.call_args.args[0] == WEBHOOK
     assert slack.settings()["failed_count"] == 0
+
+
+def test_connect_validates_before_saving_or_enabling(setup):
+    _, _, create = setup
+    db, slack, sender = create()
+    sender.side_effect = DeliveryError("Webhook revoked")
+    with pytest.raises(DeliveryError, match="Webhook revoked"):
+        slack.connect(webhook_url=WEBHOOK)
+    assert not slack.settings()["configured"]
+    assert not slack.settings()["enabled"]
+    sender.side_effect = None
+    connected = slack.connect(webhook_url=WEBHOOK)
+    assert connected["enabled"] and len(connected["events"]) == 5
+    assert sender.call_count == 2
+    slack.connect(webhook_url=WEBHOOK)
+    assert sender.call_count == 2
+    slack.disconnect()
+    assert not slack.settings()["configured"]

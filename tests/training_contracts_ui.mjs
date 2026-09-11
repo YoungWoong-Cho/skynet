@@ -20,7 +20,7 @@ const manifest={schema_version:'skynet.adapter/v1',slug:'policy-test',display_na
  {path:'native.config.steps',label:'Steps',kind:'integer',minimum:1,maximum:100,default:20}
  ]}};
 try {
- for(const name of ['dialogs.js','workspace-navigation.js','app.js']) {
+ for(const name of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js']) {
   let source=await readFile(new URL('../static/'+name,import.meta.url),'utf8');
   if(name==='app.js')source+=`\nwindow.configureContractTest=(manifest)=>{
     adapterRows=[{id:'adapter-test',name:'Test policy',latest_version:{id:'version-test',version_number:1,manifest}}];

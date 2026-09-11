@@ -14,7 +14,8 @@ from pydantic import Field
 from skynet_app.adapters import AdapterPlan, resolve_gpu_count, resolve_gpu_type
 from skynet_app.cluster_config import CLUSTER
 from skynet_app.cluster_runtime import HOME_ROOT, SLURM_BIN
-from skynet_app.experiments import CanonicalModel, ExperimentSpec, WORK_ROOT, canonical_sha256
+from skynet_app.experiments import CanonicalModel, ExperimentSpec, canonical_sha256
+from skynet_app.workspace_storage import paths_for_root
 
 
 RUNNER_SOURCE = r'''#!/usr/bin/env python3
@@ -864,6 +865,7 @@ def resolve_slurm_log_path(
     job_id: str,
     *,
     job_name: str | None = None,
+    logs_root: str | None = None,
 ) -> str | None:
     """Resolve the bounded Slurm substitutions used by Skynet log paths."""
 
@@ -901,7 +903,7 @@ def resolve_slurm_log_path(
     if not re.fullmatch(r"/[A-Za-z0-9._/%+:-]+", value):
         return None
     path = PurePosixPath(value)
-    log_root = PurePosixPath(CLUSTER.paths.logs)
+    log_root = PurePosixPath(logs_root or CLUSTER.paths.logs)
     if not path.is_absolute() or ".." in path.parts:
         return None
     try:
@@ -914,6 +916,8 @@ def resolve_slurm_log_path(
 def resolve_slurm_log_paths_from_sbatch(
     script: str,
     job_id: str,
+    *,
+    logs_root: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Resolve canonical log directives from a pinned, archived sbatch script."""
 
@@ -947,8 +951,8 @@ def resolve_slurm_log_paths_from_sbatch(
 
     job_name = values.get("job-name")
     return (
-        resolve_slurm_log_path(values.get("output"), job_id, job_name=job_name),
-        resolve_slurm_log_path(values.get("error"), job_id, job_name=job_name),
+        resolve_slurm_log_path(values.get("output"), job_id, job_name=job_name, logs_root=logs_root),
+        resolve_slurm_log_path(values.get("error"), job_id, job_name=job_name, logs_root=logs_root),
     )
 
 
@@ -1179,7 +1183,10 @@ def compile_sbatch(
     secret_environment_files: Mapping[str, str] | None = None,
     native_tracking_run_ids: Mapping[str, str] | None = None,
     native_tracking_resume: bool = False,
+    work_root: str | None = None,
 ) -> CompiledSlurmJob:
+    paths = paths_for_root(work_root) if work_root is not None else CLUSTER.paths
+    work_root = paths.work_root
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", run_id):
         raise SlurmCompileError("run_id must be a safe stable identifier")
     if not plan.runnable:
@@ -1209,7 +1216,7 @@ def compile_sbatch(
     evaluation_progress_path = (
         configured_progress_path
         if stage == "eval" and isinstance(configured_progress_path, str) and configured_progress_path
-        else f"{WORK_ROOT}/eval/runs/{run_id}/progress.jsonl"
+        else f"{work_root}/eval/runs/{run_id}/progress.jsonl"
     )
 
     gpu_count = resolve_gpu_count(spec, plan)
@@ -1225,8 +1232,8 @@ def compile_sbatch(
             ],
         }
     )
-    run_directory = f"{WORK_ROOT}/jobs/runs/{run_id}"
-    source_directory = f"{WORK_ROOT}/repos/{_repo_slug(spec.source.repository)}/{spec.source.revision}"
+    run_directory = f"{work_root}/jobs/runs/{run_id}"
+    source_directory = f"{work_root}/repos/{_repo_slug(spec.source.repository)}/{spec.source.revision}"
     project_directory = str(PurePosixPath(source_directory) / spec.source.project_subdirectory)
     injected_environment = dict(runtime_environment or {})
     secret_files = dict(secret_environment_files or {})
@@ -1269,8 +1276,8 @@ def compile_sbatch(
     ]
 
     job_name = _safe_identifier(f"{spec.identity.experiment}-{stage}", maximum=64)
-    stdout_path_template = f"{CLUSTER.paths.logs}/{job_name}-%j.out"
-    stderr_path_template = f"{CLUSTER.paths.logs}/{job_name}-%j.err"
+    stdout_path_template = f"{paths.logs}/{job_name}-%j.out"
+    stderr_path_template = f"{paths.logs}/{job_name}-%j.err"
     if gpu_type not in CLUSTER.gpu_aliases:
         raise SlurmCompileError(f"GPU type is not configured: {gpu_type}")
     gpu_alias = CLUSTER.gpu_aliases[gpu_type]
@@ -1285,9 +1292,9 @@ def compile_sbatch(
         f"#SBATCH --cpus-per-task={spec.resources.cpus_per_task}",
         f"#SBATCH --mem={spec.resources.memory_gb}G",
         f"#SBATCH --time={spec.resources.time_limit}",
-        f"#SBATCH --chdir={CLUSTER.paths.workspace}",
-        f"#SBATCH --output={CLUSTER.paths.logs}/%x-%j.out",
-        f"#SBATCH --error={CLUSTER.paths.logs}/%x-%j.err",
+        f"#SBATCH --chdir={paths.workspace}",
+        f"#SBATCH --output={paths.logs}/%x-%j.out",
+        f"#SBATCH --error={paths.logs}/%x-%j.err",
         "#SBATCH --export=NIL",
     ]
     directives.extend(compile_slurm_placement_directives(spec.resources))
@@ -1303,11 +1310,11 @@ def compile_sbatch(
 
     exports = {
         "HOME": HOME_ROOT,
-        "WORK_ROOT": WORK_ROOT,
-        "XDG_CACHE_HOME": f"{WORK_ROOT}/.cache",
-        "UV_CACHE_DIR": CLUSTER.paths.uv_cache,
-        "HF_HOME": CLUSTER.paths.huggingface_cache,
-        "TORCH_HOME": CLUSTER.paths.torch_cache,
+        "WORK_ROOT": work_root,
+        "XDG_CACHE_HOME": f"{work_root}/.cache",
+        "UV_CACHE_DIR": paths.uv_cache,
+        "HF_HOME": paths.huggingface_cache,
+        "TORCH_HOME": paths.torch_cache,
         "SKYNET_RUN_ID": run_id,
         "SKYNET_RUN_DIR": run_directory,
         "SKYNET_SOURCE_DIR": source_directory,
@@ -1315,7 +1322,7 @@ def compile_sbatch(
         "SKYNET_CHECKPOINT_DIR": f"{run_directory}/checkpoints",
         "SKYNET_CHECKPOINT_SAVE_STEPS": str(spec.train.checkpoint.save_every_steps),
         "SKYNET_CHECKPOINT_KEEP_LAST": str(spec.train.checkpoint.keep_last),
-        "SKYNET_EVAL_ROOT": f"{WORK_ROOT}/eval",
+        "SKYNET_EVAL_ROOT": f"{work_root}/eval",
         "SKYNET_EVAL_PROGRESS_PATH": evaluation_progress_path,
         "SKYNET_EVALUATION_RESUME": (
             "1" if stage == "eval" and effective_auto_resume else "0"
@@ -1584,8 +1591,8 @@ def compile_sbatch(
         "",
         provenance,
         "",
-        'ln -sfn "' + WORK_ROOT + '/logs/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.out" "$SKYNET_CAPSULE_DIR/stdout.log"',
-        'ln -sfn "' + WORK_ROOT + '/logs/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.err" "$SKYNET_CAPSULE_DIR/stderr.log"',
+        'ln -sfn "' + work_root + '/logs/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.out" "$SKYNET_CAPSULE_DIR/stdout.log"',
+        'ln -sfn "' + work_root + '/logs/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.err" "$SKYNET_CAPSULE_DIR/stderr.log"',
         *secret_lines,
         'cd "$SKYNET_PROJECT_DIR"',
         *runtime_lines,
