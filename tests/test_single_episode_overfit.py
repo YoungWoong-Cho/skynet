@@ -87,3 +87,11 @@ def test_recording_links_follow_resource_ownership_not_source_membership(setup, 
     assert links == {full['id']: original['id'], subset['id']: derived['id']}
     assert service.dataset(derived, create=False)['id'] == subset['resource_id']
     assert service.get(subset['id'])['sources'][0]['session_id'] == original['id'], 'immutable source lineage is unchanged'
+
+
+def test_overfit_of_a_one_episode_recording_keeps_its_dataset_link(setup):
+    service, session, _ = setup
+    session['recordings'] = session['recordings'][:1]
+    job = service.create(session['id'], 'egoverse', 'One episode', overfit_episode=0)
+    assert service.dataset(session, create=False)['id'] == job['resource_id']
+    assert service.options()['exports'][0]['recording_session_id'] == session['id']

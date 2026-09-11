@@ -234,6 +234,8 @@ class PolicyExportService(ClusterPolicyPreparation):
                 "session_id": session["id"],
                 "managed_dataset": True,
                 **({"overfit_episode": overfit_episode} if overfit_episode is not None else {}),
+                **({"recording_session_id": session["id"]}
+                   if overfit_episode is not None and len(session.get("recordings", [])) == 1 else {}),
             },
         )
 
