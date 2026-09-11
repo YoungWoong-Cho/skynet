@@ -13,8 +13,10 @@ import sys
 
 try:
     from .egoverse_models import model_algorithm, NATIVE_TARGETS
+    from .egoverse_splits import OVERFIT_MODE, validate_split
 except ImportError:  # Frozen run capsule modules live beside the entrypoint.
     from egoverse_models import model_algorithm, NATIVE_TARGETS
+    from egoverse_splits import OVERFIT_MODE, validate_split
 
 REVISION = "e17cf98fe4bc234c564b37abc9e155f25e76d566"
 JOINT_CONTRACT = "skynet.egoverse-rgb-joints/v1"
@@ -81,7 +83,7 @@ def make_act(norm_stats, **kwargs):
     return ACT(data_schematic=ACTDataInterface(norm_stats), **kwargs)
 
 
-def joint_data(root, batch, workers, horizon=100, reject_outliers=True):
+def joint_data(root, batch, workers, horizon=100, reject_outliers=True, *, overfit=False):
     datasets = {}
     for split in ("train", "validation"):
         datasets[split] = {
@@ -89,7 +91,7 @@ def joint_data(root, batch, workers, horizon=100, reject_outliers=True):
                 "_target_": "egoverse_data.JointDataset._from_resolver",
                 "resolver": {
                     "_target_": "egomimic.rldb.zarr.zarr_dataset_multi.LocalEpisodeResolver",
-                    "folder_path": str(Path(root) / "dataset" / split),
+                    "folder_path": str(Path(root) / "dataset" / ("train" if overfit else split)),
                     "key_map": {
                         "_target_": "egoverse_runtime.joint_keymap",
                         "horizon": horizon,
@@ -153,15 +155,7 @@ def validate_hpt_joint_inputs(model, *, checkpoint=False):
 def validate_episode_split(root, manifest):
     root = Path(root).resolve()
     episodes, split = manifest["episodes"], manifest["split"]
-    train, validation = split["train"], split["validation"]
-    if (
-        not train
-        or not validation
-        or sorted(train + validation) != list(range(len(episodes)))
-    ):
-        raise ValueError(
-            "Every episode must belong to exactly one training or validation split"
-        )
+    validate_split(split, len(episodes))
     paths = [(root / episode["path"]).resolve() for episode in episodes]
     if len(set(paths)) != len(paths) or any(not p.is_relative_to(root) for p in paths):
         raise ValueError(
@@ -273,6 +267,7 @@ def build_config(args, manifest):
                 args.batch_size,
                 args.num_workers,
                 reject_outliers=args.reject_outliers,
+                overfit=manifest["split"].get("mode") == OVERFIT_MODE,
             )
             if args.model == "act":
                 cfg.model.robomimic_model._target_ = "egoverse_runtime.make_act"

@@ -212,24 +212,26 @@ class PolicyExportService(ClusterPolicyPreparation):
             )
         return result
 
-    def dataset(self, session, name=None, *, create=True):
+    def dataset(self, session, name=None, *, create=True, overfit_episode=None):
         resources = self.database.list_data_resources(
             provider="collection", namespace="datasets", include_archived=True
         )
-        existing = next((r for r in resources if r["name"] == session["id"]), None)
+        identity = session["id"] if overfit_episode is None else f"{session['id']}:overfit:{overfit_episode}"
+        existing = next((r for r in resources if r["name"] == identity), None)
         if existing or not create:
             return existing
         label = name or session["profile"]["display_name"]
         return self.database.create_data_resource(
             provider="collection",
             namespace="datasets",
-            name=session["id"],
+            name=identity,
             kind="demonstrations",
             description=label,
             metadata={
                 "display_name": label,
                 "session_id": session["id"],
                 "managed_dataset": True,
+                **({"overfit_episode": overfit_episode} if overfit_episode is not None else {}),
             },
         )
 
@@ -395,6 +397,7 @@ class PolicyExportService(ClusterPolicyPreparation):
         validation_percent=20,
         seed=42,
         gateway="auto",
+        overfit_episode=None,
     ):
         if format not in RECIPES:
             raise ValueError("No converter is registered for this policy")
@@ -404,6 +407,12 @@ class PolicyExportService(ClusterPolicyPreparation):
         name = name.strip()
         if not name or len(name) > 100 or any(ord(c) < 32 for c in name):
             raise ValueError("Dataset name must contain 1–100 printable characters")
+        if overfit_episode is not None:
+            if format != "egoverse" or type(overfit_episode) is not int or overfit_episode < 0:
+                raise ValueError("Single-episode overfit requires EgoVerse and a valid recording number")
+            if selections is not None or resource_id is not None:
+                raise ValueError("Single-episode overfit creates its own dataset from the selected session")
+            selections = [dict(session_id=session_id, indices=[overfit_episode])]
         if selections is None:
             selections = [dict(session_id=session_id, indices=None)]
         if (
@@ -430,6 +439,8 @@ class PolicyExportService(ClusterPolicyPreparation):
                 "The selection contains duplicate recordings; select each episode once"
             )
         split = self.split(sources, validation_percent, seed)
+        if overfit_episode is not None:
+            split = dict(mode="single_episode_overfit", train=[0], validation=[0])
         if RECIPES[format]["trainable"] and not split["validation"]:
             raise ValueError(
                 "Training needs at least two episodes and a non-zero validation split"
@@ -476,6 +487,7 @@ class PolicyExportService(ClusterPolicyPreparation):
             frozen_files["egoverse_runtime.py"] = (self.live.root / "skynet_app/adapters/egoverse_runtime.py").read_text()
             frozen_files["egoverse_models.py"] = (self.live.root / "skynet_app/adapters/egoverse_models.py").read_text()
             frozen_files["egoverse_data.py"] = (self.live.root / "skynet_app/adapters/egoverse_data.py").read_text()
+            frozen_files["egoverse_splits.py"] = (self.live.root / "skynet_app/adapters/egoverse_splits.py").read_text()
             frozen_files["conversion-dependencies.json"] = canonical_json(RECIPES[format]["conversion_dependencies"])
         converter_sha = fingerprint([frozen_files, provenance, runtime_lock])
         identity = fingerprint(
@@ -487,7 +499,7 @@ class PolicyExportService(ClusterPolicyPreparation):
             resource = (
                 self.database.get_data_resource(resource_id)
                 if resource_id
-                else self.dataset(self.live.get(selections[0]["session_id"]), name)
+                else self.dataset(self.live.get(selections[0]["session_id"]), name, overfit_episode=overfit_episode)
             )
             if resource and any(j.get("resource_id") == resource["id"] and j["state"] == "DELETE_FAILED" for j in self.list()):
                 raise ValueError("Finish dataset deletion before preparing it again")

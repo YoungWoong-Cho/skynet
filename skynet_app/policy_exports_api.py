@@ -19,6 +19,7 @@ class ExportRequest(BaseModel):
     gateway: str = "auto"
     validation_percent: int = Field(default=20, ge=0, le=50)
     seed: int = Field(default=42, ge=0, lt=2**31)
+    overfit_episode: int | None = Field(default=None, ge=0)
 
 
 class RetryRequest(BaseModel):
@@ -46,6 +47,7 @@ def create(request: ExportRequest):
             validation_percent=request.validation_percent,
             seed=request.seed,
             gateway=request.gateway,
+            overfit_episode=request.overfit_episode,
         )
     )
 

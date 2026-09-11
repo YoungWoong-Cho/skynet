@@ -21,6 +21,7 @@ def support_files():
             "egoverse_models.py",
             "egoverse_evaluation.py",
             "egoverse_data.py",
+            "egoverse_splits.py",
             "egoverse_readiness.py",
             "evaluation_video.py",
         )

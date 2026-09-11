@@ -21,6 +21,10 @@ def bind_suite_to_dataset(suite, spec):
     config = result["config_json"]
     episode_binding = config.get("dataset_episode_binding")
     if episode_binding:
+        if episode_binding.get("metadata_path") == "split.validation" and bound_metadata(
+            spec, {**episode_binding, "metadata_path": "split.mode"}
+        ) == "single_episode_overfit":
+            raise ValueError("This overfit dataset reuses its training episode; there are no held-out episodes to evaluate")
         episodes = bound_metadata(spec, episode_binding)
         if not isinstance(episodes, list) or not episodes:
             raise ValueError("The dataset has no held-out episodes")

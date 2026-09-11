@@ -45,6 +45,20 @@ try {
   runReads=0;await w.loadRuns(true);w.progressPage('settings');
   await runTimer(1500);assert.equal(runReads,1,'Leaving the workspace prevents a pending enrichment poll');
 
+  // Submission acknowledgement is not terminal: poll even after enrichment settles.
+  let activeReads=0;
+  w.api=async path=>{
+    assert.equal(path,'/api/runs');activeReads++;
+    return {progress_refresh_pending:false,runs:[{id:'resumed',status:activeReads===1?'SUBMITTING':activeReads===2?'RUNNING':'SUCCEEDED',latest_attempt:{attempt_number:2,slurm_job_id:activeReads>1?'new-job':null}}]};
+  };
+  w.progressPage('runs');await w.loadRuns(true);
+  await runTimer(5000);
+  assert.match(el('runs-body').textContent,/RUNNING/);
+  assert.match(el('runs-body').textContent,/new-job/);
+  await runTimer(5000);
+  assert.match(el('runs-body').textContent,/SUCCEEDED/);
+  assert.equal([...timers.values()].some(timer=>timer.delay===5000),false,'Polling stops when all runs are terminal');
+
   let evaluationReads=0;
   w.loadEvaluationSuites=async()=>{};
   w.api=async path=>{

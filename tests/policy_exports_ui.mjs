@@ -176,6 +176,24 @@ try {
   });
   assert.equal(el("policy-export-dialog").open, false);
   assert.equal(el("prepared-dataset-dialog").open, true);
+  options.policies.push({id:'egoverse',name:'EgoVerse',available:true,trainable:true});
+  await w.openPolicyExport('new');
+  el('policy-export-format').value='egoverse';
+  el('policy-export-format').dispatchEvent(new w.Event('change'));
+  assert.equal(el('preparation-mode-field').hidden,false);
+  el('preparation-mode').value='overfit';
+  el('preparation-mode').dispatchEvent(new w.Event('change'));
+  assert.equal(el('preparation-validation').disabled,true);
+  assert.equal(el('preparation-episode-field').hidden,false);
+  el('preparation-episode').value='1';
+  el('preparation-episode').dispatchEvent(new w.Event('change'));
+  el('policy-export-form').dispatchEvent(new w.Event('submit',{cancelable:true}));
+  await flush();
+  const oneEpisode=JSON.parse(calls.filter(([,r])=>r.method==='POST').at(-1)[1].body);
+  assert.equal(oneEpisode.overfit_episode,1);
+  assert.equal(oneEpisode.resource_id,null,'overfit cannot add a subset to the full dataset identity');
+  assert.match(oneEpisode.name,/episode 2 overfit/);
+
   options.exports = [
     {
       id: "job",

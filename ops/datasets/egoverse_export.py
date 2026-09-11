@@ -9,18 +9,15 @@ import simplejpeg
 from artifacts import digest, pack
 from policy_export import source_data
 from egoverse_zarr_writer import ZarrWriter
+from egoverse_splits import OVERFIT_MODE, validate_split
 
 
 def export(request):
     output = Path(request["output"])
     output.mkdir(exist_ok=False)
     split = request["split"]
-    if set(split["train"]) & set(split["validation"]) or sorted(
-        split["train"] + split["validation"]
-    ) != list(range(len(request["sources"]))):
-        raise ValueError("Every source must belong to exactly one split")
-    if not split["train"] or not split["validation"]:
-        raise ValueError("Training and validation episodes are required")
+    validate_split(split, len(request["sources"]))
+    overfit = split.get("mode") == OVERFIT_MODE
     episodes, common = [], None
     for index, source in enumerate(request["sources"]):
         with source_data(source, True) as (meta, n, order, src):
@@ -101,7 +98,9 @@ def export(request):
     (output / "split.json").write_text(json.dumps(split, indent=2))
     (output / "README.txt").write_text(
         "EgoVerse Zarr episodes. Native joint order and three calibrated scene cameras.\n"
-        "Train and validation episodes are separate. Native training computes normalization from training data only.\n"
+        + ("Single-episode overfit: validation reuses the training episode; it is not a held-out score.\n"
+           if overfit else "Train and validation episodes are separate.\n")
+        + "Native training computes normalization from training data only.\n"
         "Compatible with native EgoVerse ACT and the HPT recorded-joints configuration.\n"
     )
     manifest = dict(
@@ -125,7 +124,7 @@ def export(request):
                 "source_checksums",
                 "frame_alignment",
                 "native_zarr_roundtrip",
-                "disjoint_episode_split",
+                "explicit_single_episode_overfit" if overfit else "disjoint_episode_split",
             ],
         ),
         files={},

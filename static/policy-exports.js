@@ -40,7 +40,8 @@
     registrySignature = null,
     resourceId = null,
     selectedResource = null,
-    sourceSessionId = null;
+    sourceSessionId = null,
+    sourceDatasetName = "";
   let busy = false,
     timer = null,
     generation = 0,
@@ -51,6 +52,19 @@
   let deletionQueue = Promise.resolve();
   const terminal = (job) => ["READY", "FAILED", "DELETE_FAILED"].includes(job.state);
   const recipe = (id) => snapshot?.policies.find((p) => p.id === id);
+  const isOverfit = () => el("policy-export-format").value === "egoverse" && el("preparation-mode").value === "overfit";
+  function changeSelection() {
+    el("policy-export-name").value = isOverfit()
+      ? `${sourceDatasetName.slice(0,65)} · episode ${Number(el("preparation-episode").value) + 1} overfit`
+      : sourceDatasetName;
+    el("policy-export-name-help").textContent = isOverfit()
+      ? "Creates a separate dataset. Original recordings are retained."
+      : resourceId ? "Adds a prepared version to this existing dataset; its name and earlier versions are retained." : "Name the dataset created for these recordings.";
+    sourceNote();
+  }
+  const splitLabel = split => split?.mode === "single_episode_overfit"
+    ? "1 train · same episode for validation (overfit)"
+    : `${split?.train.length || 0} train / ${split?.validation.length || 0} validation`;
   function error(id, message) {
     el(id).textContent = message || "";
     el(id).hidden = !message;
@@ -58,11 +72,18 @@
   function sourceNote() {
     const policy = recipe(el("policy-export-format").value);
     const source = snapshot?.sessions.find((s) => s.id === sourceSessionId);
+    const overfit = isOverfit();
+    el("preparation-mode-field").hidden = policy?.id !== "egoverse";
+    el("preparation-episode-field").hidden = !overfit;
+    for (const id of ["preparation-validation", "preparation-seed"]) {
+      el(id).disabled = overfit;
+      el(id).closest(".field").hidden = overfit;
+    }
     const hint = el("policy-export-format-help");
     hint.textContent = policy?.available && !policy.trainable ? policy.description : "";
     hint.hidden = !hint.textContent;
     const missingSplit =
-      policy?.trainable &&
+      !overfit && policy?.trainable &&
       (source?.episodes < 2 ||
         Number(el("preparation-validation").value) === 0);
     const missingImages = policy?.observations?.includes("rgb") && source?.images < source?.episodes;
@@ -279,6 +300,8 @@
     el("policy-export-name-help").textContent = "Name the dataset created for these recordings.";
     el("preparation-validation").value = 20;
     el("preparation-seed").value = 42;
+    el("preparation-mode").value = "all";
+    el("preparation-episode").replaceChildren();
     el("create-policy-export").disabled = true;
     error("policy-export-compatibility", "Loading recordings…");
     SkynetDialog.open(dialog);
@@ -291,6 +314,7 @@
       if (!source)
         throw new Error("This recording session is no longer available.");
       resourceId = source.resource_id || null;
+      for (let i = 0; i < source.episodes; i++) el("preparation-episode").add(new Option(`Recording ${i + 1}`, String(i)));
       const resource = resourceId
         ? (await api(`/api/data/resources/${encodeURIComponent(resourceId)}`))
             .resource
@@ -308,6 +332,7 @@
       }
       el("policy-export-name").value =
         resource?.metadata?.display_name || resource?.name || source.name;
+      sourceDatasetName = el("policy-export-name").value;
       el("policy-export-name").readOnly = Boolean(resource);
       el("policy-export-name-help").textContent = resource
         ? "Adds a prepared version to this existing dataset; its name and earlier versions are retained."
@@ -357,7 +382,7 @@
     if (terminal(job)) actions.push(`<button type="button" class="text-button" data-preparation-delete-format="${esc(job.id)}" ${(job.usage || []).length ? 'disabled title="Used by an experiment"' : ""}>Delete</button>`);
     const statusNote = failed || !terminal(job) ? jobStatus(job) : policy?.trainable === false ? "Export only" : "";
     const location = locationHtml(copies);
-    return `<tr><td><strong>${esc(policy?.name || job.format)}</strong>${policy?.container ? `<span class="secondary">${esc(policy.container)}</span>` : ""}</td><td>${statusPill(state)}${statusNote ? `<span class="secondary">${esc(statusNote)}</span>` : ""}</td><td class="wrap-cell">${location}</td><td>${job.episodes || job.sources?.length || 0}${job.split ? `<span class="secondary">${job.split.train.length} train / ${job.split.validation.length} validation</span>` : ""}</td><td>${esc(formatDate(job.created_at))}</td><td><div class="row-actions">${actions.join("")}</div></td></tr>`;
+    return `<tr><td><strong>${esc(policy?.name || job.format)}</strong>${policy?.container ? `<span class="secondary">${esc(policy.container)}</span>` : ""}</td><td>${statusPill(state)}${statusNote ? `<span class="secondary">${esc(statusNote)}</span>` : ""}</td><td class="wrap-cell">${location}</td><td>${job.episodes || job.sources?.length || 0}${job.split ? `<span class="secondary">${esc(splitLabel(job.split))}</span>` : ""}</td><td>${esc(formatDate(job.created_at))}</td><td><div class="row-actions">${actions.join("")}</div></td></tr>`;
   }
   function sourceVersionRow(version) {
     const locations = (version.locations || []).filter(l => l.status === "AVAILABLE");
@@ -400,7 +425,7 @@
       const sessions = [...new Set((v.metadata?.sources || []).map(source => source.session_id))];
       const locations = sessions.flatMap(id => snapshot.sessions.find(session => session.id === id)?.locations || []);
       if (!locations.length && v.path) locations.push({kind: "local", path: v.path, label: "Recording manifest"});
-      return `<tr><td>${esc(v.revision.slice(0, 12))}</td><td class="wrap-cell">${locationHtml(locations)}</td><td>${v.metadata.episodes}</td><td>${v.metadata.split?.train.length || 0} train / ${v.metadata.split?.validation.length || 0} validation</td></tr>`;
+      return `<tr><td>${esc(v.revision.slice(0, 12))}</td><td class="wrap-cell">${locationHtml(locations)}</td><td>${v.metadata.episodes}</td><td>${esc(splitLabel(v.metadata.split))}</td></tr>`;
     }).join("");
     const usage = [...new Map(jobs.flatMap(j => j.usage || []).map(u => [`${u.experiment_id}:${u.revision_number}`, u])).values()];
     el("prepared-dataset-content").innerHTML = `<div class="table-frame"><div class="table-scroll"><table class="prepared-dataset-table"><thead><tr>${["Format", "Status", "Location", "Episodes", "Date", "Actions"].map(label => `<th scope="col">${label}</th>`).join("")}</tr></thead><tbody>${rows.join("") || `<tr><td colspan="6">${managed ? "No prepared formats yet." : "No versions yet."}</td></tr>`}</tbody></table></div></div>
@@ -487,7 +512,12 @@
   }
   dialog.addEventListener("close", () => generation++);
   detail.addEventListener("close", () => detailGeneration++);
-  el("policy-export-format").onchange = sourceNote;
+  el("policy-export-format").onchange = changeSelection;
+  el("preparation-mode").onchange = changeSelection;
+  el("preparation-episode").onchange = changeSelection;
+  el("policy-export-name").addEventListener("input", () => {
+    if (!isOverfit()) sourceDatasetName = el("policy-export-name").value;
+  });
   el("preparation-validation").oninput = sourceNote;
   el("refresh-policy-exports").onclick = refresh;
   el("refresh-data-registry").addEventListener("click", refresh);
@@ -512,7 +542,8 @@
           session_id: sourceSessionId,
           format: el("policy-export-format").value,
           name: el("policy-export-name").value.trim(),
-          resource_id: resourceId,
+          resource_id: isOverfit() ? null : resourceId,
+          ...(isOverfit() ? {overfit_episode: Number(el("preparation-episode").value)} : {}),
           gateway: el("gateway").value,
           validation_percent: Number(el("preparation-validation").value),
           seed: Number(el("preparation-seed").value),

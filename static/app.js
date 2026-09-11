@@ -938,6 +938,7 @@ let runtimeCandidates = [];
 let runtimeProfiles = [];
 let experimentBusy = false;
 const submissionRecoveryRequests = new Set();
+const runResumeRequests = new Set();
 let loadedExperimentAdapterSnapshot = null;
 let loadedExperimentCanonicalContext = null;
 let experimentConfigurationLoadRequest = 0;
@@ -6402,11 +6403,12 @@ let runProgressRefreshTimer = null;
 function scheduleRunProgressRefresh() {
   window.clearTimeout(runProgressRefreshTimer);
   runProgressRefreshTimer = null;
-  if (!runProgressRefreshPending || activeTab !== "runs" || document.visibilityState !== "visible") return;
+  const hasActiveRun = runRows.some(run => RUN_DETAIL_ACTIVE_STATES.has(normalizedRunState(run.status || run.state)));
+  if ((!runProgressRefreshPending && !hasActiveRun) || activeTab !== "runs" || document.visibilityState !== "visible") return;
   runProgressRefreshTimer = window.setTimeout(() => {
     runProgressRefreshTimer = null;
-    if (activeTab === "runs" && document.visibilityState === "visible") loadRuns(true, { background: true, progressOnly: true }).catch(() => {});
-  }, 1500);
+    if (activeTab === "runs" && document.visibilityState === "visible") loadRuns(true, { background: true, progressOnly: runProgressRefreshPending }).catch(() => {});
+  }, runProgressRefreshPending ? 1500 : 5000);
 }
 
 async function loadRuns(force = false, { background = false, progressOnly = false } = {}) {
@@ -6872,7 +6874,7 @@ function setRunAttemptLauncherActive(launcher, active) {
   row?.classList.toggle("is-active", active);
 }
 
-const RUN_DETAIL_ACTIVE_STATES = new Set(["SUBMITTED", "PENDING", "RUNNING", "REQUEUED", "RETRY_PENDING", "CANCELLING"]);
+const RUN_DETAIL_ACTIVE_STATES = new Set(["SUBMITTING", "SUBMITTED", "PENDING", "RUNNING", "REQUEUED", "RETRY_PENDING", "CANCELLING"]);
 const RUN_DETAIL_POLL_INTERVAL_MS = 5000;
 const RUN_DETAIL_FINAL_POLL_DELAY_MS = 2000;
 let runDetailLatestAttemptId = null;
@@ -7105,7 +7107,9 @@ function renderRunDetailContent(payload, id, { preserveAttempt = false } = {}) {
       const metadata = manualActions[action];
     const recovering = action === "recover_submission" && submissionRecoveryRequests.has(id);
     if (recovering) label = "Recovering submission…";
-    const enabled = metadata?.enabled === true && !recovering;
+    const resuming = action === "resume" && runResumeRequests.has(id);
+    if (resuming) label = "Submitting new attempt…";
+    const enabled = metadata?.enabled === true && !recovering && !resuming;
     const reason = typeof metadata?.reason === "string" && metadata.reason.trim()
       ? metadata.reason.trim()
       : enabled
@@ -7958,24 +7962,49 @@ async function recoverRunSubmission(id, button) {
 }
 
 async function resumeRun(id, reason = "") {
+  if (runResumeRequests.has(id)) return;
+  let submitted = false;
   const scope = `run-resume:${id}`;
   const actionLabel = /no usable|from scratch|initial pinned/i.test(reason) ? "Restart training from beginning / new attempt" : "Resume Training Run / new attempt";
   const explanation = reason.trim() ? `\n\n${reason.trim()}` : "";
-  if (!(await askUserDialog(`${actionLabel} for run ${id}?${explanation}`))) return;
+  runResumeRequests.add(id);
   try {
+    if (!(await askUserDialog(`${actionLabel} for run ${id}?${explanation}`))) return;
+    const button = elements.runDetailActions.querySelector('[data-run-action="resume"]');
+    if (button?.dataset.id === id) { button.disabled = true; button.textContent = "Submitting new attempt…"; }
     const result = await api(`/api/runs/${encodeURIComponent(id)}/resume`, {
       method: "POST",
       body: JSON.stringify({ mode: "resume", gateway: elements.gateway.value }),
     });
+    submitted = true;
+    clearNotificationScope(scope);
+    resetTrainingRunListFilters();
     await loadRuns(true);
-    // Preserve the current disclosure instead of toggling it closed.
-    if (activeRunDetailId === id) startRunDetailPolling(id, null, { initialDelay: 0, includeList: false });
-    else await viewRun(id);
+    if (activeRunDetailId === id && !elements.runDetail.hidden) {
+      stopRunDetailPolling({ clearStatus: false });
+      const payload = await api(`/api/runs/${encodeURIComponent(id)}`);
+      if (activeRunDetailId === id && !elements.runDetail.hidden) {
+        runDetailFollowLatest = true;
+        const detail = renderRunDetail(payload, id, { preserveAttempt: true });
+        if (activeRunAttemptDisclosure && detail.latestRecord) {
+          const latest = detail.latestRecord;
+          const launcher = elements.attemptsBody.querySelector(`[data-attempt-key="${CSS.escape(latest.attemptKey)}"] [data-attempt-action="view"]`);
+          await openRunAttemptDetail(latest.attemptKey, launcher, { focus: false, followLatest: true });
+        }
+        startRunDetailPolling(id, detail.state);
+      }
+    } else {
+      const launcher = elements.runsBody.querySelector(`[data-run-action="view"][data-id="${CSS.escape(id)}"]`);
+      await viewRun(id, launcher);
+    }
     const feedback = submissionFeedback(result);
     if (feedback.error) showNotice(elements.runsError, `Attempt failed: ${feedback.message}`, { scope });
     else showToast(feedback.message, false, { scope });
   } catch (error) {
-    showToast(`Resume failed: ${error.message}`, true, { scope });
+    showToast(submitted ? `Attempt submitted, but its display could not refresh: ${error.message}. Use Refresh to check its status.` : `Resume failed: ${error.message}`, true, { scope });
+  } finally {
+    runResumeRequests.delete(id);
+    if (activeRunDetailId === id) startRunDetailPolling(id, null, { initialDelay: 0 });
   }
 }
 
@@ -12468,7 +12497,7 @@ function loadActiveTab(tab, force = false) {
     return loadCollection(force);
   }
   if (tab === "datasets") return loadDataRegistry(force);
-  if (tab === "runs") return loadRuns(force);
+  if (tab === "runs") return loadRuns(true);
   if (tab === "evaluations") return loadEvaluations(force);
   if (tab === "adapters") return loadAdapters(force);
   if (tab === "settings") return loadSettings(force);

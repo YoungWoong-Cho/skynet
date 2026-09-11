@@ -73,6 +73,8 @@ def evaluate(context, repository):
             "Evaluation dataset differs from the checkpoint's training dataset"
         )
     manifest = verify(Path(config["dataset_path"]), receipt["manifest_sha256"])
+    if manifest.get("split", {}).get("mode") == "single_episode_overfit":
+        raise ValueError("This is a single-episode overfit dataset, with no held-out episodes. Use its training validation loss to check overfitting.")
     recorded = manifest["contract"] == JOINT_CONTRACT
     model = ModelWrapper(**saved["hyper_parameters"])
     model.load_state_dict(saved["state_dict"], strict=True)
