@@ -245,6 +245,24 @@ class ClusterLimits(ProfileModel):
     max_memory_gb: int = Field(default=2048, ge=1)
 
 
+class EvaluationNode(ProfileModel):
+    gpu_type: str
+    gpu_count: int = Field(ge=1)
+
+
+class IsaacEvaluationPlacement(ProfileModel):
+    nodes: dict[str, EvaluationNode] = Field(min_length=1)
+    default_node: str
+
+    @model_validator(mode="after")
+    def validate_nodes(self) -> "IsaacEvaluationPlacement":
+        if self.default_node not in self.nodes:
+            raise ValueError("Isaac evaluation default node must be in the allowed nodes")
+        if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name) for name in self.nodes):
+            raise ValueError("Isaac evaluation nodes must be concrete Slurm node names")
+        return self
+
+
 class ClusterProfile(ProfileModel):
     schema_version: int = 1
     id: str
@@ -259,6 +277,7 @@ class ClusterProfile(ProfileModel):
     dashboard: DashboardProfile
     defaults: ClusterDefaults
     limits: ClusterLimits
+    isaac_evaluation_placement: IsaacEvaluationPlacement | None = None
 
     @field_validator("gateways")
     @classmethod
@@ -274,6 +293,10 @@ class ClusterProfile(ProfileModel):
             raise ValueError("default queue policy is not configured")
         if self.defaults.gpu_type not in self.gpu_aliases:
             raise ValueError("default GPU type is not configured")
+        if self.isaac_evaluation_placement:
+            for node in self.isaac_evaluation_placement.nodes.values():
+                if not self.gpu_aliases.get(node.gpu_type):
+                    raise ValueError("Isaac evaluation nodes require a concrete configured GPU type")
         pairs = [(queue.partition, queue.account) for queue in self.queues.values()]
         if len(pairs) != len(set(pairs)):
             raise ValueError("queue partition/account pairs must be unique")

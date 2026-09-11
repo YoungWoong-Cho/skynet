@@ -15,6 +15,7 @@ from skynet_app.adapters import AdapterPlan, resolve_gpu_count, resolve_gpu_type
 from skynet_app.cluster_config import CLUSTER
 from skynet_app.cluster_runtime import HOME_ROOT, SLURM_BIN
 from skynet_app.experiments import CanonicalModel, ExperimentSpec, canonical_sha256
+from skynet_app.evaluation_placement import resolve_evaluation_resources
 from skynet_app.workspace_storage import paths_for_root
 
 
@@ -1288,6 +1289,20 @@ def compile_sbatch(
 
     gpu_count = resolve_gpu_count(spec, plan)
     gpu_type = resolve_gpu_type(spec, plan)
+    if stage == "eval":
+        try:
+            resources = resolve_evaluation_resources(
+                spec.resources,
+                canonical_evaluation if isinstance(canonical_evaluation, Mapping) else {},
+                runtime_profile_id=plan.native_config.get("evaluation_runtime_profile_id"),
+                runtime=spec.runtime.model_dump(mode="json"),
+                gpu_count=gpu_count, gpu_type=gpu_type,
+            )
+        except ValueError as error:
+            raise SlurmCompileError(str(error)) from error
+        if resources is not spec.resources:
+            spec = spec.model_copy(update={"resources": resources})
+            gpu_type = resources.gpu.gpu_type
     if gpu_count > 1 and not plan.capabilities.supports_multi_gpu_single_node:
         raise SlurmCompileError("adapter cannot use multiple GPUs on one node")
     spec_sha = canonical_sha256(spec)

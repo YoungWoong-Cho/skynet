@@ -7803,7 +7803,7 @@ async function validateEvaluationTarget(request, signature) {
     const resources = result.resolved_resources;
     const budget = document.querySelector("#evaluation-resource-summary");
     budget.textContent = resources
-      ? `Total: ${resources.gpu?.count || 1} ${document.querySelector("#evaluation-resource-gpu option:checked")?.textContent || resources.gpu?.type} GPU${resources.gpu?.count === 1 ? "" : "s"} · ${resources.cpus_per_task} CPUs · ${resources.memory_gb} GB RAM · ${resources.time_limit}`
+      ? `Total: ${resources.gpu?.count || 1} ${String(resources.gpu?.type || "any").toUpperCase()} GPU${resources.gpu?.count === 1 ? "" : "s"} · ${resources.cpus_per_task} CPUs · ${resources.memory_gb} GB RAM · ${resources.time_limit}${resources.node?.name ? ` · Node: ${resources.node.name}` : ""}`
       : "Allocation has not been resolved. Validate a compatible checkpoint and evaluation suite.";
     const evaluator = result.evaluator && typeof result.evaluator === "object" ? result.evaluator : null;
     const evaluatorLabel = evaluator

@@ -43,6 +43,7 @@ from .adapters import (
 )
 from .gpu_quota import account_gpu_quota, idle_partition_quota
 from .cluster_config import CLUSTER
+from .evaluation_placement import resolve_evaluation_resources, uses_isaac_sim
 from .cluster_runtime import (
     ClusterClient,
     ClusterError,
@@ -4610,6 +4611,32 @@ class PipelineService:
                 plan.blockers.append(compatibility_error)
         if plan is None:
             plan = resolve_adapter_plan(spec)
+        if is_evaluation_stage:
+            # Reapply current cluster safety policy to historical pinned plans,
+            # including automatic ledger resumes, before snapshots or submission.
+            evaluation_context = copy.deepcopy(stage["resolved_config_json"].get("context") or {})
+            if not evaluation_context:
+                evaluation_context = copy.deepcopy(plan.native_config.get("canonical_evaluation") or {})
+            evaluation_context.setdefault("environment", stage["resolved_config_json"].get("environment"))
+            plan.native_config["canonical_evaluation"] = evaluation_context
+            try:
+                placed_resources = resolve_evaluation_resources(
+                    spec.resources, evaluation_context,
+                    runtime_profile_id=plan.native_config.get("evaluation_runtime_profile_id"),
+                    runtime=spec.runtime.model_dump(mode="json"),
+                    gpu_count=resolve_gpu_count(spec, plan), gpu_type=resolve_gpu_type(spec, plan),
+                )
+                if placed_resources != spec.resources:
+                    execution_provenance["transformations"].append({
+                        "kind": "isaac_evaluation_placement",
+                        "before": spec.resources.model_dump(mode="json", by_alias=True),
+                        "after": placed_resources.model_dump(mode="json", by_alias=True),
+                    })
+                if placed_resources is not spec.resources:
+                    spec = spec.model_copy(update={"resources": placed_resources})
+                    plan.resolved_gpu_type = placed_resources.gpu.gpu_type
+            except ValueError as error:
+                plan.blockers.append(str(error))
         repository_argument_validation: dict[str, Any] | None = None
         if not is_evaluation_stage and not plan.blockers:
             try:
@@ -8756,7 +8783,7 @@ class PipelineService:
             )
 
         versions = copy.deepcopy(dict(profile.versions))
-        uses_isaac = suite_config.get("evaluator") in {"isaac_sim", "isaac_lab"} or "isaacsim" in profile.verification.distributions
+        uses_isaac = uses_isaac_sim({"suite": {"config": suite_config}}, runtime=profile_snapshot)
         for version_name in (("python", "isaac_sim", "isaac_lab") if uses_isaac else ("python",)):
             if not str(versions.get(version_name) or "").strip():
                 blockers.append(
@@ -9110,6 +9137,25 @@ class PipelineService:
                 )
             )
             context.update(dual_runtime_context)
+        if uses_isaac_sim(context, runtime_profile_id=runtime_profile_id or None,
+                          runtime=evaluator_spec.runtime.model_dump(mode="json")):
+            placement_resources = evaluator_spec.resources
+            if resources is None:
+                # A training-node pin is not a user-selected evaluation node.
+                placement_resources = placement_resources.model_copy(update={
+                    "node": placement_resources.node.model_copy(update={"mode": "auto", "name": None}),
+                })
+            placed_resources = resolve_evaluation_resources(
+                placement_resources, context,
+                runtime_profile_id=runtime_profile_id or None,
+                runtime=evaluator_spec.runtime.model_dump(mode="json"),
+                gpu_count=resolve_gpu_count(evaluator_spec, plan),
+                gpu_type=resolve_gpu_type(evaluator_spec, plan),
+            )
+            evaluator_spec = evaluator_spec.model_copy(update={"resources": placed_resources})
+            worker_resources["node"] = placed_resources.node.model_dump(mode="json")
+            worker_resources["gpu"]["type"] = placed_resources.gpu.gpu_type
+        if runtime_profile_id:
             if (
                 verify_evaluator_runtime
                 and "evaluator_runtime" in context
@@ -9128,13 +9174,16 @@ class PipelineService:
                 )
                 context["evaluator_runtime"]["readiness"] = readiness
                 evaluator_runtime_blockers.extend(readiness_blockers)
-            plan = resolve_adapter_evaluation_plan(
-                evaluator_spec,
-                environment=environment,
-                suite=str(suite["name"]),
-                context=context,
-                manifest=evaluator_manifest,
-            )
+        plan = resolve_adapter_evaluation_plan(
+            evaluator_spec,
+            environment=environment,
+            suite=str(suite["name"]),
+            context=context,
+            manifest=evaluator_manifest,
+        )
+        # Manual commands still carry the selected simulator's placement policy,
+        # even when the adapter has no registered evaluator command.
+        plan.native_config["canonical_evaluation"] = copy.deepcopy(context)
         plan_source = "registered_adapter"
         if manual_argv:
             plan.argv = list(manual_argv)

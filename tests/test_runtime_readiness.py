@@ -73,7 +73,7 @@ def test_rendered_readiness_job_requests_one_l40s_without_accepting_eula() -> No
     assert "#SBATCH --time=02:00:00" in script
     assert "#SBATCH --export=ALL" in script
     assert 'export TMPDIR="$probe_root/tmp"' in script
-    assert "#SBATCH --nodelist" not in script
+    assert "#SBATCH --nodelist=grom" in script
     assert re.search(
         r"^export OMNI_KIT_ACCEPT_EULA=YES$", script, flags=re.MULTILINE
     ) is None
@@ -153,13 +153,13 @@ def test_readiness_cli_renders_validated_manual_node_placement(tmp_path: Path) -
             "--suite",
             SUITE,
             "--node",
-            "node123",
+            "grom",
             "--output",
             str(output),
         ]
     ) == 0
 
-    assert "#SBATCH --nodelist=node123" in output.read_text(encoding="utf-8")
+    assert "#SBATCH --nodelist=grom" in output.read_text(encoding="utf-8")
 
 
 def test_readiness_submission_uses_gateway_and_idempotent_environment_handoff(
@@ -184,14 +184,14 @@ def test_readiness_submission_uses_gateway_and_idempotent_environment_handoff(
         SUITE,
         run_id="readiness-123",
         gateway="sky2",
-        node="node123",
+        node="grom",
         cluster=cluster,
     )
 
     assert submission.job_id == "12345"
     assert cluster.submission is not None
     script, run_id, gateway, options = cluster.submission
-    assert "#SBATCH --nodelist=node123" in script
+    assert "#SBATCH --nodelist=grom" in script
     assert run_id == "readiness-123"
     assert gateway == "sky2"
     assert options == {

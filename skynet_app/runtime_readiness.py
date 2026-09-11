@@ -273,6 +273,7 @@ def render_readiness_sbatch(
     from .cluster_config import CLUSTER
     from .experiments import ResourceSpec, parse_slurm_duration
     from .slurm import compile_slurm_placement_directives
+    from .evaluation_placement import resolve_evaluation_resources
 
     contract, capsule_source = build_readiness_contract(profile_id, suite_id)
     profile = CLUSTER.runtime_profile(profile_id)
@@ -322,6 +323,7 @@ def render_readiness_sbatch(
             "time_limit": time_limit,
         }
     )
+    resources = resolve_evaluation_resources(resources, {}, runtime_profile_id=profile_id)
     gpu_alias = CLUSTER.gpu_aliases.get(resources.gpu.gpu_type)
     if not gpu_alias:
         raise ValueError(f"runtime readiness requires a concrete configured GPU type: {gpu_type}")

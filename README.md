@@ -328,7 +328,8 @@ There is one Slurm cluster behind two interchangeable login gateways:
 - Selecting a gateway tries it first and then falls back to the other alias if SSH cannot be established.
 - Cluster reads may be retried safely on either gateway.
 - Submission resolves one healthy gateway and invokes `sbatch --parsable` once. It does not retry an ambiguous submission on a second host, which avoids accidental duplicate jobs.
-- Automatic node placement omits `#SBATCH --nodelist`; manual placement validates and emits the selected node expression.
+- Automatic node placement normally omits `#SBATCH --nodelist`; manual placement validates and emits one concrete node.
+- Isaac Sim / Isaac Lab evaluations and evaluator readiness jobs use `isaac_evaluation_placement` in the cluster profile: L40S goes to `grom`, A40 to `megazord`, and an unresolved `any` GPU uses `grom`. Both nodes support up to eight GPUs. Validation, submission, and retries enforce the same policy, including manual evaluator commands. Other node/GPU combinations are rejected; busy nodes queue without falling back elsewhere. Training and non-Isaac-Sim evaluators retain their normal placement.
 - Jobs are restricted to one node but may use multiple same-type GPUs on that node.
 - Mixed allocations such as A40 GPUs plus L40S GPUs and multi-node distributed jobs are intentionally disabled.
 - Slurm remains the source of truth for scheduling, placement, preemption, exit state, and pending reasons.

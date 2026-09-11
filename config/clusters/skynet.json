@@ -2,6 +2,13 @@
   "schema_version": 1,
   "id": "skynet",
   "label": "Skynet Slurm cluster",
+  "isaac_evaluation_placement": {
+    "default_node": "grom",
+    "nodes": {
+      "grom": {"gpu_type": "l40s", "gpu_count": 8},
+      "megazord": {"gpu_type": "a40", "gpu_count": 8}
+    }
+  },
   "gateways": [
     "sky1",
     "sky2"
