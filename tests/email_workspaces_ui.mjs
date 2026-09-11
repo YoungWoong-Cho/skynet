@@ -9,7 +9,7 @@ for (const match of html.matchAll(/data-workspace-src="([^"?]+)/g)) {
   sources.set(match[1], await readFile(new URL('..'+match[1], import.meta.url), 'utf8'));
 }
 const flush = async () => {for (let i=0; i<5; i++) await new Promise(resolve=>setImmediate(resolve));};
-function setup(session=null) {
+function setup(session=null, preferences={}) {
   const errors=[];
   const virtualConsole=new VirtualConsole();
   virtualConsole.on('jsdomError', error => {if (!error.message.includes('navigation')) errors.push(error);});
@@ -39,6 +39,7 @@ function setup(session=null) {
       catch(error){errors.push(error); node.onerror();}
     }
   };
+  for(const [key,value] of Object.entries(preferences)) w.localStorage.setItem(key,value);
   w.eval(bootstrap);
   return {w, calls, loaded, errors, setHandler(value){handler=value;}, close(){for(const observer of observers) observer.disconnect(); w.close();}, el:id=>w.document.getElementById(id)};
 }
@@ -90,5 +91,14 @@ function setup(session=null) {
   assert.equal(f.el('email-workspace-content').hidden,true);
   assert.equal(f.el('email-workspace-gate').hidden,false);
   await flush(); assert.deepEqual(f.errors,[]); f.close();
+}
+{
+  const f=setup({id:'legacy',email:'ycho420@gatech.edu'},{'skynet:ssh-gateway':'sky2','skynet.tutorial.completed.runs':'1'});
+  await flush();
+  assert.equal(f.el('gateway').value,'sky2');
+  assert.equal(f.w.localStorage.getItem('skynet:ssh-gateway:workspace:legacy'),'sky2');
+  assert.equal(f.w.localStorage.getItem('skynet.tutorial.completed.runs:workspace:legacy'),'1');
+  assert.equal(f.w.localStorage.getItem('skynet:ssh-gateway'),null);
+  assert.deepEqual(f.errors,[]); f.close();
 }
 console.log('Email workspace UI: gate, real script initialization, validation, switching and stale tabs passed');

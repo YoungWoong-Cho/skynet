@@ -76,6 +76,22 @@
       email: workspace.email,
       storageKey: key => `${key}:workspace:${workspace.id}`,
     });
+    if (workspace.id === "legacy") {
+      // Only the existing owner inherits preferences from the single-user app.
+      try {
+        const keys = Object.keys(localStorage).filter(key =>
+          !key.includes(":workspace:") &&
+          (key === "skynet:ssh-gateway" || key.startsWith("skynet.tutorial.")),
+        );
+        for (const key of keys) {
+          const scopedKey = window.SkynetWorkspace.storageKey(key);
+          if (localStorage.getItem(scopedKey) === null) {
+            localStorage.setItem(scopedKey, localStorage.getItem(key));
+          }
+          localStorage.removeItem(key);
+        }
+      } catch { /* Browser preference storage is optional. */ }
+    }
     installWorkspaceFetch();
     for (const placeholder of document.querySelectorAll("script[data-workspace-src]")) {
       await new Promise((resolve, reject) => {
