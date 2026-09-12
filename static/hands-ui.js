@@ -21,7 +21,10 @@
   const poseError = (message, { nameInvalid = false } = {}) => {
     el("hand-pose-error").textContent = message || "";
     el("hand-pose-error").hidden = !message;
-    el("hand-pose-name").setAttribute("aria-invalid", String(Boolean(message) && nameInvalid));
+    el("hand-pose-name").setAttribute(
+      "aria-invalid",
+      String(Boolean(message) && nameInvalid),
+    );
   };
   const clearPoseFeedback = () => {
     error(null);
@@ -78,7 +81,10 @@
       button.type = "button";
       button.textContent = hand.key === selected?.key ? "Selected" : "View";
       button.disabled = hand.key === selected?.key;
-      button.setAttribute("aria-label", `${button.disabled ? "Selected" : "View"} ${hand.name}`);
+      button.setAttribute(
+        "aria-label",
+        `${button.disabled ? "Selected" : "View"} ${hand.name}`,
+      );
       button.addEventListener("click", () => choose(hand.key));
       action.append(button);
       row.append(info, action);
@@ -113,7 +119,11 @@
         await choose(key, params.get("side") || undefined);
       } else if (force) {
         const refreshed = catalog.find((hand) => hand.key === selected.key);
-        if (metadata && refreshed?.revision === metadata.revision && refreshed.variants[side]?.state === "READY") {
+        if (
+          metadata &&
+          refreshed?.revision === metadata.revision &&
+          refreshed.variants[side]?.state === "READY"
+        ) {
           // Refresh catalog/poses without replacing an already loaded, pinned model.
           // This also preserves edits if refreshing the pose list fails.
           selected = refreshed;
@@ -135,7 +145,9 @@
     clearPoseFeedback();
     metadata = null;
     poses = [];
-    el("hand-pose-list").replaceChildren(new Option("Loading saved poses…", ""));
+    el("hand-pose-list").replaceChildren(
+      new Option("Loading saved poses…", ""),
+    );
     updatePoseActions();
     el("hand-use-simulation").hidden = true;
     values = {};
@@ -197,7 +209,10 @@
       const model = await api(endpoint() + "/model");
       if (token !== request) return;
       if (!viewer) {
-        const module = await import("/static/hands-viewer.js" + version);
+        const module = await import(
+          document.querySelector('meta[name="hand-viewer-module"]')?.content ||
+            "/static/hands-viewer.js" + version
+        );
         if (token !== request) return;
         viewer = new module.HandsViewer(el("hand-canvas"));
       }
@@ -233,13 +248,19 @@
       if (preserved?.revision === model.revision) {
         for (const joint of model.joints) {
           if (!joint.mimic && Number.isFinite(preserved.joints[joint.name]))
-            values[joint.name] = Math.max(joint.lower, Math.min(joint.upper, preserved.joints[joint.name]));
+            values[joint.name] = Math.max(
+              joint.lower,
+              Math.min(joint.upper, preserved.joints[joint.name]),
+            );
         }
-        if (Object.hasOwn(values, preserved.joint)) el("hand-joint").value = preserved.joint;
+        if (Object.hasOwn(values, preserved.joint))
+          el("hand-joint").value = preserved.joint;
         el("hand-pose-name").value = preserved.poseName;
         viewer.setJoints(values);
       } else if (preserved) {
-        error("The model revision changed. The refreshed model starts with its neutral pose; saved poses are still available.");
+        error(
+          "The model revision changed. The refreshed model starts with its neutral pose; saved poses are still available.",
+        );
       }
       updateJoint();
     } catch (e) {
@@ -258,7 +279,9 @@
       await loadPoses(token, preserved?.poseId);
     } catch (e) {
       if (token === request) {
-        el("hand-pose-list").replaceChildren(new Option("Saved poses unavailable — use Refresh", ""));
+        el("hand-pose-list").replaceChildren(
+          new Option("Saved poses unavailable — use Refresh", ""),
+        );
         updatePoseActions();
         error(`Saved poses could not be loaded: ${e.message}`);
       }
@@ -309,9 +332,12 @@
     const number = Number(input.value);
     if (!Number.isFinite(number)) return;
     const factor = joint.type === "prismatic" ? 1000 : 180 / Math.PI;
-    values[joint.name] = number === Number(input.max) ? joint.upper
-      : number === Number(input.min) ? joint.lower
-        : Math.max(joint.lower, Math.min(joint.upper, number / factor));
+    values[joint.name] =
+      number === Number(input.max)
+        ? joint.upper
+        : number === Number(input.min)
+          ? joint.lower
+          : Math.max(joint.lower, Math.min(joint.upper, number / factor));
     viewer.setJoints(values);
     if (input === el("hand-value") && event.type === "input")
       el("hand-angle").value = displayJointValue(values[joint.name] * factor);
@@ -327,7 +353,9 @@
     );
     for (const pose of poses) {
       const date = new Date(pose.created_at * 1000).toLocaleString();
-      select.add(new Option(`${pose.name} · ${date} · ${pose.id.slice(0, 8)}`, pose.id));
+      select.add(
+        new Option(`${pose.name} · ${date} · ${pose.id.slice(0, 8)}`, pose.id),
+      );
     }
     if (poses.some((pose) => pose.id === selectedId)) select.value = selectedId;
     updatePoseActions();
@@ -359,7 +387,11 @@
   el("hand-value").addEventListener("change", adjust);
   el("hand-value").addEventListener("input", adjust);
   el("hand-value").addEventListener("blur", () => {
-    if (el("hand-value").value === "" || !Number.isFinite(Number(el("hand-value").value))) updateJoint();
+    if (
+      el("hand-value").value === "" ||
+      !Number.isFinite(Number(el("hand-value").value))
+    )
+      updateJoint();
   });
   el("hand-reset").addEventListener("click", () => {
     if (!metadata) return;
@@ -394,12 +426,16 @@
     updateJoint();
     const name = el("hand-pose-name").value.trim();
     if (!name || name.length > 80) {
-      poseError("Give the pose a name of 1–80 characters.", { nameInvalid: true });
+      poseError("Give the pose a name of 1–80 characters.", {
+        nameInvalid: true,
+      });
       el("hand-pose-name").focus();
       return;
     }
     const token = request,
-      button = event.submitter || el("hand-pose-form").querySelector('[type="submit"]');
+      button =
+        event.submitter ||
+        el("hand-pose-form").querySelector('[type="submit"]');
     if (button.disabled) return;
     button.disabled = true;
     try {
@@ -432,27 +468,38 @@
     const url = `${endpoint()}/poses/${encodeURIComponent(pose.id)}`;
     clearPoseFeedback();
     const answer = await askUserDialog(
-      action === "rename" ? "New pose name" : `Delete “${pose.name}”? This removes the saved local pose permanently.`,
+      action === "rename"
+        ? "New pose name"
+        : `Delete “${pose.name}”? This removes the saved local pose permanently.`,
       action === "rename" ? pose.name : null,
     );
     if (token !== request || answer === null || answer === false) return;
     const button = el(`hand-pose-${action}`);
     button.disabled = true;
     try {
-      await api(url, action === "rename"
-        ? { method: "PATCH", body: JSON.stringify({ name: answer.trim() }) }
-        : { method: "DELETE" });
+      await api(
+        url,
+        action === "rename"
+          ? { method: "PATCH", body: JSON.stringify({ name: answer.trim() }) }
+          : { method: "DELETE" },
+      );
       if (token !== request) return;
       await loadPoses(token, action === "rename" ? pose.id : "");
-      if (token === request) el("hand-pose-message").textContent = action === "rename" ? "Pose renamed." : "Pose deleted.";
+      if (token === request)
+        el("hand-pose-message").textContent =
+          action === "rename" ? "Pose renamed." : "Pose deleted.";
     } catch (e) {
       if (token === request) poseError(e.message);
     } finally {
       if (token === request) updatePoseActions();
     }
   }
-  el("hand-pose-rename").addEventListener("click", () => maintainPose("rename"));
-  el("hand-pose-delete").addEventListener("click", () => maintainPose("delete"));
+  el("hand-pose-rename").addEventListener("click", () =>
+    maintainPose("rename"),
+  );
+  el("hand-pose-delete").addEventListener("click", () =>
+    maintainPose("delete"),
+  );
   el("hand-pose-export").addEventListener("click", () => {
     if (!metadata) return;
     updateJoint();

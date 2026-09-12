@@ -5,6 +5,8 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
+MAX_VIEWER_BYTES = 64_000_000
+
 
 def rotation(axis, angle):
     axis = np.asarray(axis, dtype=float)
@@ -133,3 +135,15 @@ def camera_layout(cameras, *, labels=False):
                       (i // columns) * (height + (32 if labels else 0)) + (32 if labels else 0) + (height - cameras[name]["height"]) // 2,
                       cameras[name]["width"], cameras[name]["height"]],
              **cameras[name]} for i, name in enumerate(names)]
+
+
+def replay_urdf(xml):
+    """Keep the captured transforms without exposing cluster mesh URLs to browsers."""
+    root = ET.fromstring(xml)
+    for link in root.findall("link"):
+        for child in list(link):
+            if child.tag in {"visual", "collision", "inertial"}:
+                link.remove(child)
+    for material in root.findall("material"):
+        root.remove(material)
+    return ET.tostring(root, encoding="unicode")

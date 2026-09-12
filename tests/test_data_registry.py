@@ -22,10 +22,11 @@ class DataRegistryTestCase(unittest.TestCase):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.database = Database(Path(self.temporary_directory.name) / "skynet.db")
         self.assets = self.database.create_data_resource(
+            category="file",
             provider="huggingface",
             namespace="dexverse",
             name="DexVerse_release",
-            kind="simulation-assets",
+            kind="simulation_assets",
             metadata={"license": "upstream"},
         )
         self.assets_version = self.database.create_data_resource_version(
@@ -44,6 +45,7 @@ class DataRegistryTestCase(unittest.TestCase):
 
     def _version(self, name: str, revision: str, digest: str) -> dict[str, object]:
         resource = self.database.create_data_resource(
+            category="dataset",
             provider="derived",
             namespace="dexverse",
             name=name,

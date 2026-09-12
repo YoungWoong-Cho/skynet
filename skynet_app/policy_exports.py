@@ -224,6 +224,7 @@ class PolicyExportService(ClusterPolicyPreparation):
             return existing
         label = name or session["profile"]["display_name"]
         return self.database.create_data_resource(
+            category="dataset",
             provider="collection",
             namespace="datasets",
             name=identity,
@@ -468,6 +469,7 @@ class PolicyExportService(ClusterPolicyPreparation):
             "formats.json": canonical_json(
                 {key: value["format"] for key, value in RECIPES.items()}
             ),
+            "scene_geometry.py": (Path(__file__).parent / "adapters/scene_geometry.py").read_text(),
             "images.py": (self.live.root / "ops/xr/images.py").read_text(),
             **{
                 name: (self.live.root / "skynet_app/adapters" / source).read_text()
@@ -853,9 +855,14 @@ class PolicyExportService(ClusterPolicyPreparation):
                 raise ValueError(
                     "Wait for dataset preparation to finish before deleting it"
                 )
-            return self.database.delete_prepared_dataset(
-                resource_id, self._delete_dataset_copies, identifier=identifier
-            )
+            resource = self.database.get_data_resource(resource_id)
+            if resource is None:
+                raise KeyError("Dataset not found")
+            managed = (resource["provider"], resource["namespace"]) == ("collection", "datasets")
+            # External registrations refer to source files this app does not own.
+            # Their metadata is removable; their source files must be retained.
+            cleanup = self._delete_dataset_copies if managed else lambda jobs, versions, locations: None
+            return self.database.delete_prepared_dataset(resource_id, cleanup, identifier=identifier)
 
     def _delete_dataset_copies(self, jobs, versions, locations):
         prepared = [v for v in versions if v["format"] != "skynet.episodes/v1"]
@@ -924,8 +931,10 @@ class PolicyExportService(ClusterPolicyPreparation):
         # Source manifests and the source cache describe original recordings and
         # may be shared. They contain no converted training data.
 
-    def remove_local_copy(self, identifier):
+    def remove_local_copy(self, identifier, *, validate=None):
         with self.lock:
+            if validate:
+                validate()
             job = self.get(identifier)
             if identifier in self.active or job["state"] != "READY":
                 raise ValueError(

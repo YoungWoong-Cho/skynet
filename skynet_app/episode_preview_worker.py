@@ -44,7 +44,17 @@ def prepare_preview(request):
                 raise ValueError("Images do not align with the original recording")
             cameras = {name: metadata["cameras"][name] for name in source["images"]}
             views = camera_layout(cameras)
-            warnings = []
+            scene = {"objects": metadata.get("scene_objects", []), "warnings": []}
+            if "scene_geometry" in source:
+                saved_scene = source["scene_geometry"]
+                if saved_scene.size > 12_000_000:
+                    raise ValueError("Saved scene geometry exceeds the preview limit")
+                scene = json.loads(np.asarray(saved_scene, dtype="u1").tobytes())
+                if scene.get("schema") != "skynet.scene-geometry/v1":
+                    raise ValueError("Unsupported scene geometry format")
+            warnings = list(scene.get("warnings", []))
+            if source.attrs.get("scene_geometry_error"):
+                warnings.append(str(source.attrs["scene_geometry_error"]))
             kinematics = None
             try:
                 xml = recorded_urdf(metadata, request["repository"], request.get("hand_bundle"))
@@ -68,11 +78,32 @@ def prepare_preview(request):
                             if pose is None:
                                 raise ValueError("Recorded root pose is unavailable; cannot position keypoints")
                             frame["actual"] = kinematics.points(source["state"][index], pose)
+                            frame["hand_poses"] = {"actual": {"joints": np.asarray(source["state"][index]).reshape(-1).tolist(),
+                                                               "root": np.asarray(pose).reshape(-1).tolist()}}
+                        objects = states[index].get("rigid_object", {})
+                        frame["objects"] = {name: np.asarray(value["root_pose"]).reshape(-1).tolist()
+                                            for name, value in objects.items() if "root_pose" in value}
                         frames.append(frame)
+                # A trajectory has one final state after its final camera/action pair.
+                # Keep it available to frame stepping and the recorded-values table.
+                final_state = states[-1]
+                final_frame = {"time": length * float(metadata["step_dt"]), "index": length}
+                if kinematics:
+                    robot = final_state["articulation"]["robot"]
+                    ids = [metadata["robot_joint_names"].index(name) for name in metadata["action_joint_names"]]
+                    joints = np.asarray(robot["joint_position"]).reshape(-1)[ids]
+                    pose = np.asarray(robot["root_pose"]).reshape(-1)
+                    final_frame["actual"] = kinematics.points(joints, pose)
+                    final_frame["hand_poses"] = {"actual": {"joints": joints.tolist(), "root": pose.tolist()}}
+                final_frame["objects"] = {name: np.asarray(value["root_pose"]).reshape(-1).tolist()
+                                           for name, value in final_state.get("rigid_object", {}).items() if "root_pose" in value}
+                frames.append(final_frame)
                 pending.replace(root / "views.mp4")
                 result = dict(schema="skynet.episode-viewer/v1", kind="collection", robot=metadata["robot"],
                               hand=metadata["hand"], hand_key=metadata.get("hand_key"), views=views, frames=frames,
                               edges=kinematics.edges if kinematics else [], point_names=kinematics.links if kinematics else [],
+                              kinematics_urdf=replay_urdf(xml) if kinematics else None, joint_names=metadata["action_joint_names"],
+                              scene_objects=scene.get("objects", []), scene_appearance=scene.get("appearance"),
                               duration=length * metadata["step_dt"], layers={"actual": "Recorded hand"}, warnings=warnings,
                               source_sha256=request["source_sha256"], video_file="views.mp4")
                 temporary = receipt.with_suffix(".tmp")

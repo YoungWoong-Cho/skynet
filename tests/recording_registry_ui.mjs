@@ -24,11 +24,11 @@ try {
   const copy = {...original, id: copyId, recordings: ['a']};
   const empty = {...original, id: 'unregistered'};
   let resources = [
-    {id: 'original-data', provider: 'collection', name: 'Full dataset', metadata: {session_id: originalId}, versions: [{id:'v1'}, {id:'v2'}, {id:'v3'}]},
-    {id: 'second-data', provider: 'collection', name: 'Another dataset', metadata: {session_id: originalId}, versions: []},
-    {id: 'archived-data', provider: 'collection', name: 'Archived dataset', metadata: {session_id: originalId}, archived_at: '2026-09-10', versions: []},
-    {id: 'copy-data', provider: 'collection', name: 'One episode', metadata: {session_id: originalId, recording_session_id: copyId}, versions: []},
-    {id: 'external', provider: 'huggingface', name: '<b>External</b>', metadata: {session_id: originalId}, versions: []},
+    {id: 'original-data', category: 'dataset', provider: 'collection', name: 'Full dataset', metadata: {session_id: originalId}, versions: [{id:'v1'}, {id:'v2'}, {id:'v3'}]},
+    {id: 'second-data', category: 'dataset', provider: 'collection', name: 'Another dataset', metadata: {session_id: originalId}, versions: []},
+    {id: 'archived-data', category: 'dataset', provider: 'collection', name: 'Archived dataset', metadata: {session_id: originalId}, archived_at: '2026-09-10', versions: []},
+    {id: 'copy-data', category: 'dataset', provider: 'collection', name: 'One episode', metadata: {session_id: originalId, recording_session_id: copyId}, versions: []},
+    {id: 'external', category: 'dataset', provider: 'huggingface', name: '<b>External</b>', metadata: {session_id: originalId}, versions: []},
   ];
   const requests = [];
   w.api = async path => {
@@ -37,17 +37,17 @@ try {
     return {items: []};
   };
   w.renderSimulationRecordings([original, copy, empty]);
-  assert.equal(el('simulation-recordings-body').rows[0].cells[4].textContent, '—', 'unknown counts must not appear as zero');
+  assert.equal(el('simulation-recordings-body').rows[0].cells[3].textContent, '—', 'unknown counts must not appear as zero');
   await w.loadDataRegistry(true);
   const recordingRows = () => [...el('simulation-recordings-body').rows];
-  const registered = index => recordingRows()[index].cells[4].querySelector('button');
-  assert.equal(registered(0).textContent, '3', 'count Registry resources, not their versions; include archived resources');
-  assert.equal(registered(1).textContent, '1', 'copy ownership overrides original source membership');
-  assert.equal(registered(2).textContent, '0');
+  const registered = index => recordingRows()[index].cells[3].querySelector('button');
+  assert.equal(registered(0).textContent, '3 datasets', 'count Registry resources, not their versions; include archived resources');
+  assert.equal(registered(1).textContent, '1 dataset', 'copy ownership overrides original source membership');
+  assert.equal(registered(2).textContent, '0 datasets');
   assert.equal(recordingRows()[0].cells[2].textContent, w.formatDate(original.created_at));
   assert.equal(recordingRows()[0].cells[0].textContent.includes(w.formatDate(original.created_at)), false);
-  assert.deepEqual([...recordingRows()[0].querySelectorAll('.row-actions button')].map(x => x.textContent), ['View recordings', 'Register']);
-  assert.equal(el('show-data-resource-form').textContent, 'New');
+  assert.deepEqual([...recordingRows()[0].querySelectorAll('.row-actions button')].map(x => x.textContent), ['View', 'Convert']);
+  assert.equal(el('show-data-resource-form').textContent.trim(), 'New');
   const controls = [...el('show-data-resource-form').parentElement.children];
   assert.ok(controls.indexOf(el('data-resource-search').parentElement) < controls.indexOf(el('show-data-resource-form')));
   assert.ok(controls.indexOf(el('data-show-archived').parentElement) < controls.indexOf(el('show-data-resource-form')));
@@ -58,20 +58,20 @@ try {
   assert.equal(el('data-show-archived').checked, true);
   const resourceIds = () => [...el('data-resources-body').querySelectorAll('[data-resource-id]')].map(x => x.dataset.resourceId);
   assert.deepEqual(resourceIds(), ['original-data', 'second-data', 'archived-data']);
-  assert.equal(el('data-resources-body').rows[0].cells[1].textContent, originalId.slice(0, 8) + '...');
-  assert.equal(el('data-resources-body').rows[0].cells[1].querySelector('span').title, originalId);
+  assert.equal(el('data-resources-body').rows[0].cells[1].textContent, '1 recording');
+  assert.equal(el('data-resources-body').rows[0].cells[1].querySelector('button').dataset.resourceAction, 'recordings');
   await w.loadDataRegistry(true);
   assert.deepEqual(resourceIds(), ['original-data', 'second-data', 'archived-data'], 'refresh preserves the recording filter');
   registered(1).click(); await flush();
   assert.deepEqual(resourceIds(), ['copy-data']);
   assert.equal(el('data-show-archived').checked, false);
   registered(2).click(); await flush();
-  assert.match(el('data-resources-body').textContent, /No resources match/);
-  assert.equal(el('data-resources-body').rows[0].cells[0].colSpan, 9);
+  assert.match(el('data-resources-body').textContent, /No datasets or file sets match/);
+  assert.equal(el('data-resources-body').rows[0].cells[0].colSpan, 6);
   el('data-resource-search').value = 'HUGGINGFACE';
   el('data-resource-search').dispatchEvent(new w.Event('input'));
   assert.deepEqual(resourceIds(), ['external'], 'typing replaces the exact recording filter with case-insensitive search');
-  assert.equal(el('data-resources-body').rows[0].cells[1].textContent, '', 'external resources have no recording ID');
+  assert.equal(el('data-resources-body').rows[0].cells[1].textContent, '0 recordings', 'external resources have no recording ID');
   assert.equal(el('data-resources-body').querySelector('b'), null, 'resource names are escaped');
   el('data-resource-search').value = '';
   el('data-resource-search').dispatchEvent(new w.Event('input'));
@@ -82,16 +82,47 @@ try {
   el('show-data-resource-form').click();
   assert.equal(el('data-resource-form-dialog').open, true);
   el('close-data-resource-form').click();
-  assert.equal(el('show-data-resource-form').textContent, 'New', 'closing the common modal does not restore the old label');
+  assert.equal(el('show-data-resource-form').textContent.trim(), 'New', 'closing the common modal does not restore the old label');
   resources = resources.filter(x => x.id !== 'second-data');
   await w.loadDataRegistry(true);
-  assert.equal(registered(0).textContent, '2', 'deletion refreshes Registered without reloading the page');
+  assert.equal(registered(0).textContent, '2 datasets', 'deletion refreshes Registered without reloading the page');
   const workingApi = w.api;
   w.api = async () => { throw new Error('Registry offline'); };
   await w.loadDataRegistry(true);
-  assert.equal(recordingRows()[0].cells[4].textContent, '—', 'failed refresh must not claim an accurate count');
+  assert.equal(recordingRows()[0].cells[3].textContent, '—', 'failed refresh must not claim an accurate count');
   w.api = workingApi;
   await w.loadDataRegistry(true);
-  assert.equal(registered(0).textContent, '2');
+  assert.equal(registered(0).textContent, '2 datasets');
+  // Files never expose recording ownership, even for a stale response.
+  resources.push({id:'assets', name:'Scene', kind:'simulation_assets', category:'file',provider:'collection', metadata:{session_id:originalId, recording_session_id:originalId}, versions:[]});
+  await w.loadDataRegistry(true);
+  assert.equal(registered(0).textContent, '2 datasets', 'file sets do not count as registered datasets');
+  await w.activateTab('data', true, 'files'); await flush();
+  assert.equal(el('data-resource-recording-column').hidden, true);
+  assert.deepEqual(resourceIds(), ['assets']);
+  assert.equal(el('data-resources-body').rows[0].cells.length, 6);
+  assert.equal(el('data-resources-body').rows[0].cells[1].textContent, 'simulation_assets');
+  assert.equal(el('data-resources-body').querySelector('[data-entity-kind=recording]'), null);
+  assert.equal(el('data-resource-search').placeholder, 'Filter name or source');
+  el('data-resource-search').value = 'missing';
+  el('data-resource-search').dispatchEvent(new w.Event('input'));
+  assert.equal(el('data-resources-body').rows[0].cells[0].colSpan, 6);
+  await w.activateTab('data', true, 'registry'); await flush();
+  assert.equal(el('data-resource-recording-column').hidden, false);
+  assert.equal(el('data-resources-body').rows[0].cells.length, 6);
+  assert.equal(el('data-resource-count').hidden, true);
+  resources.push({id:'multi',category:'dataset',provider:'collection',name:'Combined recordings',kind:'demonstrations',recording_ids:[originalId,copyId],metadata:{session_id:originalId},versions:[]});
+  await w.loadDataRegistry(true);
+  const multi=el('data-resources-body').querySelector('[data-resource-id=multi]');
+  assert.equal(multi.cells[1].textContent,'2 recordings');
+  multi.cells[1].querySelector('button').click();await flush();
+  assert.equal(new URL(w.location.href).searchParams.get('data_view'),'recording');
+  assert.deepEqual(recordingRows().map(r=>r.dataset.sessionId),[originalId,copyId]);
+  w.renderSimulationRecordings([original,copy,empty]);
+  assert.deepEqual(recordingRows().map(r=>r.dataset.sessionId),[originalId,copyId]);
+  recordingRows()[1].cells[3].querySelector('button').click();await flush();
+  assert.deepEqual(resourceIds(),['copy-data','multi'],'both directions use full source membership');
+  el('new-recording').click();await flush();
+  assert.equal(new URL(w.location.href).searchParams.get('data_view'),'collect');
   console.log('Recording / Registry: resource counts, source ownership, archive visibility, navigation, filtering, refresh and failure recovery passed.');
 } finally { for (const observer of observers) observer.disconnect(); await flush(); w.close(); }

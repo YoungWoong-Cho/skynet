@@ -93,4 +93,4 @@ class EpisodePreviews:
             raise KeyError("Unknown episode viewer artifact")
         transport, gateway, _, request = self.location(identifier, index, episode)
         return RemoteArtifact(transport, gateway, request["output"] + "/" + name,
-                              20_000_000 if name.endswith(".json") else None)
+                              episode_geometry.MAX_VIEWER_BYTES if name.endswith(".json") else None)

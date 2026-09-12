@@ -2,10 +2,8 @@
 (() => {
   const el = (id) => document.getElementById(id);
   let sessions = [],
-    preparations = [],
-    preparationState = "loading",
-    preparationKnown = false,
-    preparationError = "",
+    sessionsKnown = false,
+    selectedIds = null,
     signature = "",
     sourceSignature = "";
   const label = (s) => s.profile.task_name || s.profile.task;
@@ -28,12 +26,16 @@
     const query = el("simulation-recordings-search").value.trim().toLowerCase();
     const saved = sessions.filter((s) => s.recordings?.length);
     const rows = saved.filter((s) =>
-      `${label(s)} ${hand(s)} ${s.id} ${new Date(s.created_at).toLocaleString()}`
-        .toLowerCase()
-        .includes(query),
+      selectedIds
+        ? selectedIds.has(s.id)
+        : `${label(s)} ${hand(s)} ${s.id} ${new Date(s.created_at).toLocaleString()}`
+            .toLowerCase()
+            .includes(query),
     );
-    const registrations = rows.map(session => recordingRegistrationSummary(session.id));
-    const next = JSON.stringify([rows, preparations, preparationState, preparationError, query, registrations]);
+    const registrations = rows.map((session) =>
+      recordingRegistrationSummary(session.id),
+    );
+    const next = JSON.stringify([rows, query, registrations, sessionsKnown]);
     if (next === signature) return;
     signature = next;
     const count = saved.reduce(
@@ -41,37 +43,37 @@
       0,
     );
     el("collection-library-total").textContent = count || "";
-    el("simulation-recordings-count").textContent =
-      `${countLabel(count)} · ${query ? rows.length + " of " : ""}${saved.length} session${saved.length === 1 ? "" : "s"}`;
     const body = el("simulation-recordings-body");
     body.replaceChildren();
     if (!rows.length)
       text(
         text(body, "tr", "", "empty-row"),
         "td",
-        query
-          ? "No sessions match your search."
-          : "No recordings yet. Start a session in Collect.",
-      ).colSpan = 6;
+        !sessionsKnown
+          ? "Loading recordings…"
+          : query
+            ? "No sessions match your search."
+            : "No recordings yet. Start a session in Collect.",
+      ).colSpan = 5;
     for (const session of rows) {
       const row = text(body, "tr", "");
       row.dataset.sessionId = session.id;
       const name = text(row, "td", "", "wrap-cell");
       text(name, "strong", label(session));
       text(name, "span", hand(session), "secondary");
-      text(
-        name,
-        "span",
-        session.id.slice(0, 8),
-        "secondary",
-      );
+      text(name, "span", session.id.slice(0, 8), "secondary");
       const archive = session.archive;
-      const storage = archive?.state === "READY" ? "Stored on sky2"
-        : ["VERIFIED", "CLEANUP_PENDING"].includes(archive?.state) ? "On sky2 · cleanup pending"
-        : archive?.state === "COPYING" ? "Moving to sky2…"
-        : archive?.state === "FAILED" ? "Transfer needs attention"
-        : "On collection workstation";
-      text(name, "span", storage, "secondary");
+      const storage =
+        archive?.state === "READY"
+          ? ""
+          : ["VERIFIED", "CLEANUP_PENDING"].includes(archive?.state)
+            ? "On sky2 · cleanup pending"
+            : archive?.state === "COPYING"
+              ? "Moving to sky2…"
+              : archive?.state === "FAILED"
+                ? "Transfer needs attention"
+                : "On collection workstation";
+      if (storage) text(name, "span", storage, "secondary");
       if (archive?.error) text(name, "span", archive.error, "secondary");
       text(
         row,
@@ -81,58 +83,33 @@
         ),
       );
       text(row, "td", formatDate(session.created_at));
-      const jobs = preparations.filter((j) => {
-        if (Object.hasOwn(j, "recording_session_id")) return j.recording_session_id === session.id;
-        // Compatibility with an older API: only whole-session preparations can
-        // supply this entry's dataset. Source membership alone is ambiguous.
-        const selections = j.selections || [{ session_id: j.session_id }];
-        return selections.length === 1 && selections[0].session_id === session.id
-          && selections[0].indices == null && j.split?.mode !== "single_episode_overfit";
-      });
-      const ready = jobs.filter((j) => j.state === "READY");
-      const formats = new Set(ready.map(j => j.format)).size;
-      const active = jobs.find((j) => !["READY", "FAILED", "DELETE_FAILED"].includes(j.state));
-      const cell = text(row, "td", "", "wrap-cell");
-      const images = Object.keys(session.recording_images || {}).length;
-      const knownLabel = active ? active.detail
-        : ready.length ? `${formats} prepared format${formats === 1 ? "" : "s"}`
-        : images === session.recordings.length ? "Images ready" : "Original recordings saved";
-      const datasetLabel = preparationState === "unavailable" ? "Preparation status unavailable"
-        : preparationState === "loading" && !preparationKnown ? "Checking preparation status…" : knownLabel;
-      cell.innerHTML = statusPill(datasetLabel);
-      if (preparationState === "unavailable") {
-        cell.firstElementChild.className = "state-pill is-failed";
-        text(cell, "span", preparationError || "Prepared formats could not be checked.", "secondary");
-        if (jobs.length) text(cell, "span", "Last known: " + knownLabel, "secondary");
-      }
-      if (active && preparationState === "ready") cell.firstElementChild.className = `state-pill ${stateClass(active.stage || "PENDING")}`;
-      if (jobs.some((j) => ["FAILED", "DELETE_FAILED"].includes(j.state)))
-        cell.insertAdjacentHTML("beforeend", statusPill("Preparation needs attention"));
       const registration = recordingRegistrationSummary(session.id);
       const registeredCell = text(row, "td", "");
       if (registration.state === "ready") {
-        const registered = button(registeredCell, String(registration.count), () =>
-          showRecordingResources(session.id));
+        const registered = button(
+          registeredCell,
+          `${registration.count} dataset${registration.count === 1 ? "" : "s"}`,
+          () => showRecordingResources(session.id),
+        );
         registered.className = "text-button";
-        registered.setAttribute("aria-label", `${registration.count} registered resource${registration.count === 1 ? "" : "s"} for recording ${session.id.slice(0, 8)}`);
+        registered.setAttribute(
+          "aria-label",
+          `${registration.count} dataset${registration.count === 1 ? "" : "s"} for recording ${session.id.slice(0, 8)}`,
+        );
       } else {
         const pending = text(registeredCell, "span", "—", "secondary");
-        pending.title = registration.state === "unavailable" ? "Registry unavailable" : "Loading Registry…";
+        pending.title =
+          registration.state === "unavailable"
+            ? "Datasets unavailable"
+            : "Loading datasets…";
       }
       const actions = text(row, "td", "", "row-actions");
-      button(actions, "View recordings", () =>
-        window.openLiveReview(session),
-      );
-      button(actions, "Register", () =>
-        window.openPolicyExport(session.id),
-      );
-      if (preparationState === "unavailable")
-        button(actions, "Retry preparation status", () =>
-          document.dispatchEvent(new CustomEvent("dataset-preparation-refresh-requested")),
-        );
+      button(actions, "View", () => window.openLiveReview(session));
+      button(actions, "Convert", () => window.openPolicyExport(session.id));
     }
   }
   window.renderSimulationRecordings = (value) => {
+    sessionsKnown = true;
     sessions = value;
     el("simulation-recordings-error").hidden = true;
     render();
@@ -155,16 +132,17 @@
     el("simulation-recordings-error").textContent =
       "Could not refresh recordings: " + message;
   };
-  document.addEventListener("dataset-preparation-status", (event) => {
-    preparationState = event.detail.state;
-    if (preparationState === "ready") preparationKnown = true;
-    preparationError = event.detail.error || "";
+  window.filterSimulationRecordings = (ids, name) => {
+    selectedIds = new Set(ids);
+    el("simulation-recordings-search").value = name;
     render();
-  });
-  document.addEventListener("dataset-preparation-changed", (event) => {
-    preparations = event.detail;
-    render();
-  });
+  };
   document.addEventListener("recording-registry-changed", render);
-  el("simulation-recordings-search").addEventListener("input", render);
+  el("simulation-recordings-search").addEventListener("input", () => {
+    selectedIds = null;
+    render();
+  });
+  el("new-recording").addEventListener("click", () =>
+    activateTab("data", true, "collect"),
+  );
 })();

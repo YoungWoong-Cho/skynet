@@ -44,11 +44,11 @@ try {
   assert.equal(el('runs').closest('#experiment-workspace'), el('experiment-workspace'));
   assert.equal(w.document.querySelector('.tab-nav [data-tab-target="runs"]'), null);
   assert.equal(w.document.querySelector('.tab-nav [aria-selected="true"]').textContent, 'Experiments');
-  for (const view of ['submit', 'adapters', 'runs']) {
+  for (const view of ['presets', 'submit', 'adapters', 'runs']) {
     el(`experiment-tab-${view}`).click();
     assert.equal(el(`experiment-tab-${view}`).getAttribute('aria-selected'), 'true');
     assert.ok(visible(view === 'submit' ? 'experiment-form' : view));
-    assert.equal(w.document.querySelectorAll('#experiment-workspace .page-actions > button:not([hidden])').length, 2,
+    assert.equal(w.document.querySelectorAll('#experiment-workspace .page-actions > button:not([hidden])').length, view === 'presets' ? 1 : 2,
       'Only the current tutorial and refresh are displayed');
   }
 
@@ -74,7 +74,7 @@ try {
   const count = requests.length;
   el('refresh-evaluations').click(); await settle();
   assert.deepEqual(requests.slice(count), ['/api/evaluation-suites'], 'Suites Refresh reloads the global catalog only');
-  el('evaluation-tab-suites').dispatchEvent(new w.KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true}));
+  el('evaluation-tab-suites').dispatchEvent(new w.KeyboardEvent('keydown', {key: 'ArrowLeft', bubbles: true}));
   await settle();
   assert.equal(w.document.activeElement, el('evaluation-tab-runs'));
   assert.ok(visible('evaluations-body'));

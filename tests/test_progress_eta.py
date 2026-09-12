@@ -13,6 +13,15 @@ from skynet_app.adapters import TrainingProgressContract, TrainingProgressLogSou
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
+def test_queued_evaluation_does_not_count_submission_time_as_execution():
+    summary = evaluation_progress_summary(
+        {"status": "PENDING", "started_at": "2026-01-01T10:00:00Z"},
+        attempts=[{"attempt_number": 1, "status": "PENDING", "started_at": None}],
+        now=NOW,
+    )
+    assert summary["elapsed_seconds"] is None
+
+
 def test_training_eta_requires_recorded_progress_not_slurm_wall_time():
     summary = training_progress_summary(
         {"status": "RUNNING", "resolved_spec_json": {"train": {"max_steps": 100}}},

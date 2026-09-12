@@ -15,6 +15,7 @@ from psycopg import IntegrityError
 from .database_endpoint import load_endpoint
 from .db_backend import PostgresBackend, PostgresConnection, Record, DistributedRLock, lock_key
 from .data_paths import validate_mount_path
+from .data_resource_policy import validate_resource_metadata, validate_resource_type, resource_recording_ids
 from .workspace_schema import PRIVATE_TABLES, LEGACY_WORKSPACE, visible_sql
 from .training_metrics import is_scalar
 
@@ -2002,6 +2003,7 @@ class Database:
             evaluations = self._decode_many(connection.execute(
                 f"SELECT * FROM evaluations {where} ORDER BY created_at DESC", parameters
             ).fetchall())
+            self._attach_evaluation_context(connection, evaluations)
             # Fetch result summaries in batches; list rows must not depend on
             # opening each result detail (or issue one query per evaluation).
             by_id = {item["id"]: item for item in evaluations}
@@ -2021,6 +2023,33 @@ class Database:
                     ).get("aggregate", [])
             return evaluations
 
+    def _attach_evaluation_context(self, connection, evaluations):
+        """Resolve human-readable lineage for visible evaluations in bounded batches."""
+        by_id = {item["id"]: item for item in evaluations}
+        identifiers = list(by_id)
+        for start in range(0, len(identifiers), 400):
+            batch = identifiers[start:start + 400]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self._decode_many(connection.execute(f"""
+                SELECT ev.id, r.run_number AS training_run_number,
+                       ex.name AS experiment_name, ex.id AS experiment_id,
+                       cp.path AS checkpoint_path, cp.training_step AS checkpoint_step,
+                       es.description AS suite_label, ws.resolved_config_json
+                FROM evaluations ev
+                JOIN runs r ON r.id = ev.run_id
+                JOIN variants v ON v.id = r.variant_id
+                JOIN experiment_revisions er ON er.id = v.experiment_revision_id
+                JOIN experiments ex ON ex.id = er.experiment_id
+                LEFT JOIN checkpoints cp ON cp.id = ev.checkpoint_id
+                LEFT JOIN workflow_stages ws ON ws.id = ev.stage_id
+                LEFT JOIN evaluation_suites es ON es.id = ev.evaluation_suite_id
+                WHERE ev.id IN ({placeholders})
+            """, batch).fetchall())
+            for row in rows:
+                config = row.pop("resolved_config_json", None) or {}
+                row["resources"] = config.get("resources") or {}
+                by_id[row["id"]].update(row)
+
     @staticmethod
     def _unfinished_evaluation_episode_state(status: str) -> tuple[str, str] | None:
         status = str(status).upper()
@@ -2038,6 +2067,7 @@ class Database:
             evaluation = self._row_by_id(connection, "evaluations", evaluation_id)
             if evaluation is None:
                 return None
+            self._attach_evaluation_context(connection, [evaluation])
             evaluation["episodes"] = self._decode_many(connection.execute(
                 "SELECT * FROM evaluation_episodes WHERE evaluation_id = ? ORDER BY task, seed, episode_index",
                 (evaluation_id,),
@@ -3121,6 +3151,7 @@ class Database:
             cls._public_data_version(connection, version_row)
             for version_row in version_rows
         ]
+        result["recording_ids"] = resource_recording_ids(result, versions)
         result["version_count"] = len(versions)
         result["latest_version"] = versions[0] if versions else None
         if include_versions:
@@ -3134,16 +3165,20 @@ class Database:
         provider: str,
         namespace: str,
         name: str,
+        category: str,
         kind: str,
         description: str = "",
         metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        validate_resource_type(category, kind)
+        validate_resource_metadata(category, metadata)
         now = utc_now()
         values = {
             "id": new_id(),
             "provider": provider,
             "namespace": namespace,
             "name": name,
+            "category": category,
             "kind": kind,
             "description": description,
             "metadata_json": canonical_json(dict(metadata or {})),
@@ -3164,6 +3199,7 @@ class Database:
         provider: str,
         namespace: str,
         name: str,
+        category: str,
         kind: str,
         description: str = "",
         metadata: Mapping[str, Any] | None = None,
@@ -3171,7 +3207,7 @@ class Database:
         with self.transaction() as connection:
             return self._insert_data_resource(
                 connection, provider=provider, namespace=namespace, name=name,
-                kind=kind, description=description, metadata=metadata,
+                category=category, kind=kind, description=description, metadata=metadata,
             )
 
     def list_data_resources(
@@ -3229,6 +3265,11 @@ class Database:
         if archived is not None:
             fields["archived_at"] = utc_now() if archived else None
         with self.transaction() as connection:
+            if metadata is not None:
+                row = connection.execute("SELECT category FROM data_resources WHERE id=?", (resource_id,)).fetchone()
+                if row is None:
+                    raise KeyError(f"Data resource not found: {resource_id}")
+                validate_resource_metadata(row["category"], metadata)
             self._update(connection, "data_resources", resource_id, fields)
         result = self.get_data_resource(resource_id)
         assert result is not None
@@ -3255,6 +3296,7 @@ class Database:
             raise KeyError(f"Data resource not found: {resource_id}")
         if resource["archived_at"] is not None:
             raise ValueError("cannot add a version to an archived data resource")
+        validate_resource_metadata(resource["category"], metadata)
         values = {
             "id": new_id(),
             "resource_id": resource_id,
@@ -3306,7 +3348,7 @@ class Database:
                 (new_id(), version_id, kind, host, path, manifest_sha256, status, utc_now()))
             return dict(connection.execute("SELECT * FROM data_locations WHERE version_id=? AND host=? AND path=?", (version_id, host, path)).fetchone())
 
-    def delete_prepared_dataset(self, resource_id, cleanup, *, identifier=None):
+    def delete_prepared_dataset(self, resource_id, cleanup, *, identifier=None, preview=False):
         """Delete a managed dataset only after its generated copies are removed.
 
         One write transaction prevents an experiment pin racing cleanup. Immutable
@@ -3320,13 +3362,9 @@ class Database:
             ).fetchone()
             if resource is None:
                 raise KeyError("Dataset not found")
-            if (resource["provider"], resource["namespace"]) != (
-                "collection",
-                "datasets",
-            ):
-                raise ValueError(
-                    "Only prepared collection datasets can be deleted here"
-                )
+            if resource["category"] != "dataset":
+                raise ValueError("Choose a dataset to delete")
+            collection_owned = (resource["provider"], resource["namespace"]) == ("collection", "datasets")
             versions = [
                 dict(v)
                 for v in c.execute(
@@ -3341,7 +3379,7 @@ class Database:
                     (resource_id,),
                 )
             ]
-            if not json.loads(resource["metadata_json"]).get("managed_dataset"):
+            if collection_owned and (versions or jobs) and not json.loads(resource["metadata_json"]).get("managed_dataset"):
                 # Older collections can predate the display metadata flag. The
                 # preparation ledger and immutable version backlinks establish
                 # ownership without trusting a label or widening file access.
@@ -3455,15 +3493,18 @@ class Database:
             ):
                 if row[0] in version_ids and row[1] not in version_ids:
                     raise ValueError("Another dataset was derived from this dataset")
-            if any(
-                (identifier is None and row["resource_id"] == resource_id)
-                or row["version_id"] in version_ids
-                or row["bundle_id"] in {b["id"] for b in bundles}
-                for row in c.execute(
-                    "SELECT resource_id, version_id, bundle_id FROM data_imports"
-                )
-            ):
-                raise ValueError("This dataset is referenced by an import job")
+            imports = []
+            for row in c.execute("SELECT * FROM data_imports"):
+                if not ((identifier is None and row["resource_id"] == resource_id)
+                        or row["version_id"] in version_ids or row["bundle_id"] in {b["id"] for b in bundles}):
+                    continue
+                if row["resource_id"] != resource_id:
+                    raise ValueError("Another dataset import uses this dataset")
+                if row["state"] not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                    raise ValueError("Wait for dataset import to finish before deleting it")
+                imports.append(dict(row))
+            if preview:
+                return {"jobs": jobs, "versions": versions, "locations": locations, "imports": imports}
             try:
                 cleanup(jobs, versions, locations)
             except Exception as exc:
@@ -3494,6 +3535,8 @@ class Database:
             else:
                 # Transaction-local capability preserves guards in other connections.
                 c.execute("SET LOCAL skynet.allow_dataset_delete = 'on'")
+                for item in imports:
+                    c.execute("DELETE FROM data_imports WHERE id=?", (item["id"],))
                 for bundle in bundles:
                     c.execute(
                         "DELETE FROM data_bundle_assignments WHERE bundle_id=?",
@@ -3526,6 +3569,27 @@ class Database:
                 f"Dataset deletion is incomplete. Retry Delete dataset. {failure}"
             ) from failure
         return {"deleted": True, "resource_id": resource_id}
+
+    def dataset_preset_links(self):
+        """Exact dataset results referenced by any saved preset revision in this workspace."""
+        with self.connection() as connection:
+            return [dict(row) for row in connection.execute(f"""
+                SELECT DISTINCT e.id AS experiment_id, e.name AS experiment_name,
+                       er.revision_number, r.id AS resource_id, v.id AS version_id
+                FROM experiments e JOIN experiment_revisions er ON er.experiment_id=e.id
+                CROSS JOIN json_each(er.requested_spec_json, '$.data.bundle.assignments') a
+                JOIN data_resource_versions v ON (
+                    v.id=json_extract(a.value, '$.version.metadata.registered_version_id')
+                    OR (json_extract(a.value, '$.version.metadata.registered_version_id') IS NULL
+                        AND v.manifest_sha256=json_extract(a.value, '$.version.manifest_sha256')))
+                JOIN data_resources r ON r.id=v.resource_id
+                WHERE {visible_sql("experiments", "e")} AND r.category='dataset'
+                  AND (json_extract(a.value, '$.version.metadata.registered_version_id') IS NOT NULL
+                       OR (r.provider=json_extract(a.value, '$.resource.provider')
+                           AND r.namespace=json_extract(a.value, '$.resource.namespace')
+                           AND r.name=json_extract(a.value, '$.resource.name')))
+                ORDER BY e.name, er.revision_number, r.id, v.id
+            """).fetchall()]
 
     def data_version_usage(self, manifest_sha256):
         with self.connection() as connection:

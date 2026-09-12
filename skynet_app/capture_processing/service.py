@@ -606,6 +606,7 @@ print('verified')
         resource = next((r for r in resources if r["name"] == name), None)
         if resource is None:
             resource = self.database.create_data_resource(
+                category="dataset",
                 provider="collection",
                 namespace="dexverse-offline",
                 name=name,

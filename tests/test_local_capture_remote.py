@@ -27,7 +27,7 @@ def legacy_capture(tmp_path, storage=None):
     original = service.root / f'{digest}.jsonl'
     original.write_bytes(data)
     summary = VisionProTracking().inspect(original)
-    resource = db.create_data_resource(provider='collection', namespace='visionpro-local',
+    resource = db.create_data_resource(category="dataset", provider='collection', namespace='visionpro-local',
                                       name=summary['header']['session_id'], kind='raw_capture')
     version = db.create_data_resource_version(resource['id'], revision=digest,
         path=str(original), format='visionpro_tracking_jsonl_v1', manifest_sha256=digest,
@@ -202,6 +202,8 @@ def test_processing_archive_transport_preserves_frozen_execution_and_hides_manif
     assert service.get(job['id'], private=True)['archive']['manifest'] == manifest
     with pytest.raises(ValueError, match='archived'):
         service.retry(job['id'])
+    from skynet_app import local_capture_api
+    monkeypatch.setattr(local_capture_api, 'service', captures)
     from skynet_app.capture_processing import api
     monkeypatch.setattr(api, 'service', service)
     app = FastAPI(); app.include_router(api.router)

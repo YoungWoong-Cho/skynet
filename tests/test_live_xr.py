@@ -104,6 +104,7 @@ def test_frozen_session_extracts_the_complete_collection_runtime(service, tmp_pa
         "images.py",
         "render_images.py",
         "arrays.py",
+        "scene_geometry.py",
     }
     assert (entry.parent / "anatomy.py").read_text() == (
         service.root / "ops/xr/hands/anatomy.py"

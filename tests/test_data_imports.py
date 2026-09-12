@@ -125,10 +125,11 @@ def import_result(record):
     }
 
 
-def test_submit_and_reconcile_publishes_version_and_bundle():
+def test_submit_and_reconcile_publishes_directly_selectable_data():
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         resource = database.create_data_resource(
+            category="dataset",
             provider=RESOURCE["provider"],
             namespace=RESOURCE["namespace"],
             name=RESOURCE["name"],
@@ -143,13 +144,14 @@ def test_submit_and_reconcile_publishes_version_and_bundle():
         completed = next(item for item in imports if item["id"] == submitted["id"])
         assert completed["state"] == "SUCCEEDED"
         assert completed["version_id"]
-        assert completed["bundle_id"]
+        assert completed["bundle_id"] is None
+        assert database.get_data_resource_version(completed["version_id"])["status"] == "READY"
 
 
 @pytest.fixture
 def submitted_import(tmp_path):
     database = Database(tmp_path / "skynet.db")
-    resource = database.create_data_resource(**{key: RESOURCE[key] for key in ("provider", "namespace", "name", "kind")})
+    resource = database.create_data_resource(category="dataset", **{key: RESOURCE[key] for key in ("provider", "namespace", "name", "kind")})
     cluster = ImportCluster()
     cluster.state = "RUNNING"
     service = PipelineService(database, cluster)
@@ -232,7 +234,7 @@ def test_concurrent_completion_refresh_publishes_once_across_service_instances(s
     assert published == [record["id"]]
     assert current["error"] is None
     assert len(database.get_data_resource(record["resource_id"])["versions"]) == 1
-    assert len(database.list_data_bundles()) == 1
+    assert database.list_data_bundles() == []
 
 
 def test_interrupted_finalization_can_resume_publication(submitted_import):
@@ -245,7 +247,7 @@ def test_interrupted_finalization_can_resume_publication(submitted_import):
 
     assert database.get_data_import(record["id"])["state"] == "SUCCEEDED"
     assert len(database.get_data_resource(record["resource_id"])["versions"]) == 1
-    assert len(database.list_data_bundles()) == 1
+    assert database.list_data_bundles() == []
 
 
 def test_concurrent_cancellation_calls_issue_one_remote_request(submitted_import):
@@ -298,7 +300,7 @@ def test_cancelling_import_still_claims_identity_despite_changed_budget(submitte
 
 def test_concurrent_import_identity_claim_is_atomic(tmp_path):
     database = Database(tmp_path / "skynet.db")
-    resource = database.create_data_resource(**{key: RESOURCE[key] for key in ("provider", "namespace", "name", "kind")})
+    resource = database.create_data_resource(category="dataset", **{key: RESOURCE[key] for key in ("provider", "namespace", "name", "kind")})
     barrier = threading.Barrier(2)
 
     def claim():

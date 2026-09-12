@@ -66,8 +66,17 @@ def test_lists_respond_while_progress_is_blocked_and_do_not_cache_status(service
             evaluations = requests.submit(client.get, "/api/evaluations").result(timeout=1).json()
             assert runs["runs"][0]["id"] == run["id"]
             assert evaluations["evaluations"][0]["id"] == evaluation["id"]
+            assert evaluations["evaluations"][0]["experiment_name"] == "list"
+            assert evaluations["evaluations"][0]["training_run_number"] == 1
+            assert service.database.get_evaluation(evaluation["id"])["experiment_name"] == "list"
             assert runs["progress_refresh_pending"] and evaluations["progress_refresh_pending"]
             assert all(event.wait(1) for event in started.values())
+            # Detail modals also return persisted data while SSH progress reads wait.
+            run_detail = requests.submit(client.get, f"/api/runs/{run['id']}").result(timeout=1)
+            evaluation_detail = requests.submit(client.get, f"/api/evaluations/{evaluation['id']}").result(timeout=1)
+            assert run_detail.status_code == evaluation_detail.status_code == 200
+            assert run_detail.json()["run"]["id"] == run["id"]
+            assert evaluation_detail.json()["evaluation"]["id"] == evaluation["id"]
             service.database.update_run(run["id"], status="CANCELLED")
             service.database.update_evaluation(evaluation["id"], status="CANCELLED")
             assert client.get("/api/runs").json()["runs"][0]["status"] == "CANCELLED"

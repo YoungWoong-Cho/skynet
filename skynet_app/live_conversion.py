@@ -697,7 +697,7 @@ else: print('{}')
 
     def finish(self, job, result, transport):
         m = self.verify_result(job, result, transport)
-        version, bundle = self.register(job, m, result["manifest"]["sha256"])
+        version = self.register(job, m, result["manifest"]["sha256"])
         self.update(
             job["id"],
             state="READY",
@@ -707,7 +707,7 @@ else: print('{}')
             storage_location="cluster",
             version_id=version["id"],
             resource_id=version["resource_id"],
-            bundle_id=bundle["id"],
+            bundle_id=None,
             connection_error=None,
             error=None,
         )
@@ -720,6 +720,7 @@ else: print('{}')
         resource = next((r for r in resources if r["name"] == job["id"]), None)
         if resource is None:
             resource = db.create_data_resource(
+                category="dataset",
                 provider="collection",
                 namespace="dexverse-converted",
                 name=job["id"],
@@ -764,6 +765,7 @@ else: print('{}')
             )
             if source is None:
                 source = db.create_data_resource(
+                    category="dataset",
                     provider="collection",
                     namespace="dexverse-recorded",
                     name=job["session_id"],
@@ -810,27 +812,7 @@ else: print('{}')
                     "format": FORMAT,
                 },
             )
-        bundles = db.list_data_bundles(include_archived=True)
-        bundle = next(
-            (
-                b
-                for b in bundles
-                if b.get("metadata", {}).get("conversion_id") == job["id"]
-            ),
-            None,
-        )
-        if bundle is None:
-            bundle = db.create_data_bundle(
-                name=job["name"],
-                version=job["id"][:8],
-                assignments=[dict(
-                    version_id=version["id"], role="training_data",
-                    config={"location_id": location["id"]},
-                )],
-                description="Converted DexVerse demonstrations",
-                metadata={"conversion_id": job["id"], "gateway": job["gateway"]},
-            )
-        return version, bundle
+        return version
 
     def artifact(self, identifier, name):
         job = self.get(identifier)

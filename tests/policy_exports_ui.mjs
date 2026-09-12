@@ -62,6 +62,9 @@ w.askUserDialog = async () => true;
 const copied=[];
 w.navigator.clipboard={writeText:async path=>copied.push(path)};
 w.showToast=()=>{};
+w.resourceRecordingIds=r=>[r.metadata?.recording_session_id || r.metadata?.session_id].filter(Boolean);
+w.dataResourceTypeLabel=r=>r.kind || 'Dataset';
+w.activateTab=async()=>{};w.refreshDataResourceTables=()=>{};
 const options = {
   policies: [
     {
@@ -110,6 +113,7 @@ const options = {
 };
 const resource = {
   id: "dataset",
+  category: "dataset",
   name: "Hand demos",
   metadata: { managed_dataset: true, session_id: "new" },
   versions: [],
@@ -136,10 +140,10 @@ try {
   assert.equal(w.stateClass("ON CLUSTER"), "is-running");
   assert.equal(w.stateClass("LOCAL"), "is-local");
   assert.equal(w.stateClass("COPY UNAVAILABLE"), "is-failed");
-  assert.equal(el("policy-export-title").textContent, "Register");
-  assert.match(el("policy-export-title").parentElement.textContent, /Registry.*experiments/);
-  assert.equal(w.document.querySelector('label[for="policy-export-name"]').textContent, "Registry name");
-  assert.equal(el("create-policy-export").textContent, "Register");
+  assert.equal(el("policy-export-title").textContent, "Convert to a dataset");
+  assert.match(el("policy-export-title").parentElement.textContent, /Datasets.*experiment/);
+  assert.equal(w.document.querySelector('label[for="policy-export-name"]').textContent, "Dataset name");
+  assert.equal(el("create-policy-export").textContent.trim(), "Convert");
   await w.openPolicyExport("old");
   assert.equal(el("create-policy-export").disabled, true);
   assert.match(
@@ -250,8 +254,8 @@ try {
   options.exports[0].locations = savedLocations;
   delete options.exports[0].remote_archive;
   await w.openPreparedDataset("dataset");
-  assert.deepEqual([...el("prepared-dataset-content").querySelectorAll(".prepared-dataset-table th")].map(n=>n.textContent), ["Format", "Status", "Location", "Episodes", "Date", "Actions"]);
-  assert.ok(el("prepared-dataset-content").querySelector("[data-preparation-delete]"));
+  assert.deepEqual([...el("prepared-dataset-content").querySelectorAll("[data-dataset-results] th")].map(n=>n.textContent), ["Format", "Episodes", "Experiments presets", "Created", "Actions"]);
+  assert.equal(el("prepared-dataset-content").querySelector('[data-delete-kind="dataset"]'), null);
   el("prepared-dataset-content")
     .querySelector("[data-preparation-retry]")
     .click();
@@ -274,10 +278,13 @@ try {
   ];
   options.sessions[1].locations = [{kind:"remote", host:"sky2", path:"/recording/output/recordings/live"}];
   await w.openPreparedDataset("dataset");
-  assert.match(el("prepared-dataset-content").textContent,/sky2/);
-  const originalCopy = [...el("prepared-dataset-content").querySelectorAll("[data-dataset-copy-path]")].find(b=>b.dataset.datasetCopyPath.startsWith("/recording"));
-  originalCopy.click();await flush();
-  assert.equal(copied.at(-1), "/recording/output/recordings/live");
+  const content = el("prepared-dataset-content");
+  assert.equal(content.querySelector('[data-dataset-recordings]').textContent, 'View source recordings');
+  assert.doesNotMatch(content.textContent, /Original recording files|\/recording\/output/, 'Source information has a single entry point in Recordings');
+  const history = el('prepared-dataset-dialog').querySelector('[data-data-history]');
+  assert.equal(history.dataset.dataHistory, 'dataset', 'Files and history stays scoped to this dataset');
+  assert.ok(history.compareDocumentPosition(content.querySelector('[data-dataset-results]')) & w.Node.DOCUMENT_POSITION_FOLLOWING, 'Dataset-wide history appears above the result table');
+  assert.deepEqual([...content.querySelectorAll('[data-dataset-metadata] .key-value span')].map(n => n.textContent), ['Type', 'Source', 'Conversion attempts']);
   options.exports[0].source_version_id = "source-two";
   await w.openPolicyExport("new");
   assert.equal(el("preparation-validation").value, "20");
@@ -307,12 +314,12 @@ try {
   assert.match(el("prepared-dataset-content").textContent, /lerobot-v2.0/);
   assert.match(el("prepared-dataset-content").textContent, /42/);
   assert.match(el("prepared-dataset-content").textContent, /cluster\/imported/);
-  assert.ok(el("prepared-dataset-content").querySelector(".state-pill.is-running"));
-  assert.equal(el("prepared-dataset-content").querySelector("[data-preparation-delete]"), null);
+  assert.equal(el("prepared-dataset-content").querySelector(".state-pill.is-running"), null, "Usable results do not need a redundant READY badge");
+  assert.equal(el("prepared-dataset-content").querySelector('[data-delete-kind="dataset"]'), null);
   options.sessions[1].episodes = 3;
   await w.openPolicyExport("new");
   assert.equal(el("policy-export-name").readOnly, true, "Preparing another version cannot rename the dataset");
-  assert.match(el("policy-export-name-help").textContent, /existing Registry resource/);
+  assert.match(el("policy-export-name-help").textContent, /prepared result to this dataset/);
   const normalApi = w.api;
   let finishSubmission;
   w.api = (path, request = {}) => request.method === "POST"
@@ -427,7 +434,7 @@ try {
       stage: state === "PENDING" ? "QUEUED" : state, execution: "cluster", gateway: "sky2",
       cluster_partition: "rl2-lab", cluster_cpus: 4, cluster_job_id: jobId}];
     await w.openPreparedDataset("dataset");
-    const cell = el("prepared-dataset-content").querySelector("tbody tr td:nth-child(2)");
+    const cell = el("prepared-dataset-content").querySelector("tbody tr td:nth-child(1)");
     assert.equal(cell.querySelector(".state-pill").textContent.trim(), expected);
     assert.match(cell.textContent, /sky2 · rl2-lab/);
     assert.match(cell.textContent, /4 CPUs/);
@@ -447,131 +454,60 @@ try {
     {id: "published-act", resource_id: "dataset", format: "act", state: "READY", version_id: "version-act"},
     {id: "failed-dp", resource_id: "dataset", format: "dp", state: "FAILED", error: "Conversion interrupted"},
   ];
+  resource.versions = [
+    {id:"version-dp",format:"zarr",revision:"one",metadata:{}},
+    {id:"version-act",format:"hdf5",revision:"two",metadata:{}},
+  ];
   await w.openPreparedDataset("dataset");
-  assert.equal(el("prepared-dataset-context").textContent, "2 published versions · 3 preparation attempts", "Failed unpublished preparations count as attempts, not published versions");
-  assert.equal(el("prepared-dataset-content").querySelectorAll(".prepared-dataset-table tbody > tr").length, 3, "Each preparation attempt remains available in the detail rows");
-  // Two confirmed deletions may overlap a slow cluster request and a stale poll.
-  // Exercise real clicks with deferred responses; no server or real files are used.
-  w.askUserDialog = async () => true;
-  const deleteButton = id => el("prepared-dataset-content").querySelector(`[data-preparation-delete-format="${id}"]`);
-  const deletes = [];
-  let finishDelete, finishPoll;
-  let holdPoll = false;
-  w.api = (path, request = {}) => {
-    if (request.method === "DELETE") {
-      deletes.push(path);
-      return new Promise(resolve => {
-        finishDelete = () => {
-          options.exports = options.exports.filter(job => path !== `/api/data/exports/${job.id}`);
-          resolve({deleted: true});
-        };
-      });
-    }
-    if (path === "/api/data/exports" && holdPoll) {
-      holdPoll = false;
-      const stale = structuredClone(options);
-      return new Promise(resolve => { finishPoll = () => resolve(stale); });
-    }
+  assert.equal(el("prepared-dataset-context").textContent, "2 results", "Failed unpublished preparations count as attempts, not published versions");
+  assert.equal(el("prepared-dataset-content").querySelectorAll("[data-dataset-results] tbody > tr[data-dataset-result]").length, 3, "Each preparation attempt remains available in the detail rows");
+  const mainRow=el('prepared-dataset-content').querySelector('[data-dataset-result="job-published-dp"]');
+  assert.doesNotMatch(mainRow.textContent,/Download|Manifest|Delete|Storage|Settings/,'Summary keeps technical and destructive actions out of the main row');
+  const toggle=mainRow.querySelector('[data-dataset-result-toggle]');
+  const detailId=toggle.getAttribute('aria-controls');
+  assert.equal(el(detailId).hidden,true,'Per-result details start collapsed');
+  toggle.focus();toggle.click();await flush();
+  assert.equal(el(detailId).hidden,false);
+  assert.equal(toggle.getAttribute('aria-expanded'),'true');
+  const meta=el('prepared-dataset-content').querySelector('[data-dataset-metadata]');
+  assert.equal(meta.open,false,'Dataset metadata starts collapsed');
+  meta.open=true;
+  await w.openPreparedDataset('dataset');
+  assert.equal(el(detailId).hidden,false,'Refreshing preserves the expanded result');
+  assert.equal(el('prepared-dataset-content').querySelector('[data-dataset-metadata]').open,true,'Refreshing preserves dataset details');
+  assert.equal(w.document.activeElement.dataset.datasetResultToggle,'job-published-dp','Refreshing preserves the Details button focus');
+  const newToggle=el('prepared-dataset-content').querySelector('[data-dataset-result-toggle="job-published-dp"]');
+  newToggle.click();assert.equal(el(detailId).hidden,true,'Details can be collapsed again');
+  assert.equal(el('prepared-dataset-content').querySelector('[data-delete-kind]'),null,'All deletion starts from the catalog Actions column');
+  resource.experiment_presets = [
+    {experiment_id:'experiment', version_id:'version-dp', revision_number:1},
+    {experiment_id:'experiment', version_id:'version-dp', revision_number:2},
+    {experiment_id:'another', version_id:'version-act', revision_number:1},
+  ];
+  await w.openPreparedDataset('dataset');
+  const presets = el('prepared-dataset-content').querySelector('[data-dataset-result="job-published-dp"] [data-dataset-presets]');
+  assert.equal(presets.textContent, '1 preset', 'Multiple revisions count as one preset');
+  assert.deepEqual(JSON.parse(presets.dataset.presetIds), ['experiment'], 'Each result links to only presets using that exact result');
+  resource.versions.push({id:"unlinked",format:"lerobot-v3",revision:"external-import",metadata:{}});
+  await w.openPreparedDataset('dataset');
+  assert.match(el('prepared-dataset-content').textContent,/lerobot-v3/, 'A conversion failure cannot hide an earlier result lacking a conversion job');
+  assert.equal(el('prepared-dataset-context').textContent,'3 results');
+  resource.category='file';
+  w.api=async (path, request={})=>{
+    if(path==='/api/data/exports') throw new Error('Collection backend unavailable');
     return normalApi(path, request);
   };
-  deleteButton("published-dp").click();
-  await flush();
-  deleteButton("published-act").click();
-  await flush();
-  assert.deepEqual(deletes, ["/api/data/exports/published-dp"], "Rapid deletions wait their turn instead of starting overlapping operations");
-  assert.equal(deleteButton("published-dp").textContent, "Deleting…");
-  assert.equal(deleteButton("published-act").textContent, "Queued…");
-  assert.equal(el("prepared-dataset-content").querySelector("[data-preparation-delete]").disabled, true, "Whole-dataset deletion cannot race queued format deletions");
-  await w.openPreparedDataset("dataset");
-  assert.equal(deleteButton("published-dp").disabled, true, "Reopening or refreshing retains pending state");
-  deleteButton("published-dp").click();
-  assert.equal(deletes.length, 1, "A fresh row cannot submit a duplicate delete");
-  holdPoll = true;
-  w.document.dispatchEvent(new w.CustomEvent("dataset-preparation-refresh-requested"));
-  await flush();
-  finishDelete();
-  await flush();
-  finishPoll();
-  await flush();
-  assert.equal(deleteButton("published-dp"), null, "A catalog read started before deletion cannot be the final refresh");
-  assert.deepEqual(deletes, ["/api/data/exports/published-dp", "/api/data/exports/published-act"]);
-  finishDelete();
-  await flush();
-  assert.equal(deleteButton("published-act"), null);
-  assert.equal(el("prepared-dataset-context").textContent, "0 published versions · 1 preparation attempts");
-  // An older dialog read must not overwrite a newer, post-deletion catalog.
-  const olderDialogRead = structuredClone(options);
-  olderDialogRead.exports.push({id: "already-deleted", resource_id: "dataset", format: "dp", state: "READY"});
-  let finishOlderDialog;
-  w.api = (path, request = {}) => path === "/api/data/exports"
-    ? new Promise(resolve => { finishOlderDialog = () => resolve(olderDialogRead); })
-    : normalApi(path, request);
-  const olderDialog = w.openPreparedDataset("dataset");
-  await flush();
-  w.api = normalApi;
-  w.document.dispatchEvent(new w.CustomEvent("dataset-preparation-refresh-requested"));
-  await flush();
-  finishOlderDialog();
-  await olderDialog;
-  assert.equal(deleteButton("already-deleted"), null, "A late pre-deletion response cannot bring back a deleted row");
+  await w.openPreparedDataset('dataset');
+  assert.equal(el('prepared-dataset-error').hidden,true,'Files do not depend on collection availability');
+  assert.equal(el('prepared-dataset-content').querySelector('[data-registered-train]'),null,'Files cannot be offered as training datasets');
+  // Page navigation hides disclosure panels; reopening restores the shared body.
+  w.SkynetDialog.close(el('prepared-dataset-dialog'));
+  el('prepared-dataset-detail').hidden = true;
+  await w.openPreparedDataset(resource.id);
+  assert.equal(el('prepared-dataset-detail').hidden, false);
+  assert.equal(el('prepared-dataset-dialog').querySelector('[data-result-close]').textContent.trim(), 'Close');
+  console.log('Dataset registration, source selection, recovery, shared deletion entry points and direct data use passed.');
 
-  options.exports.push({id: "next-format", resource_id: "dataset", format: "act", state: "READY"});
-  await w.openPreparedDataset("dataset");
-  const queuedAfterFailure = [];
-  let rejectDelete;
-  w.api = (path, request = {}) => {
-    if (request.method !== "DELETE") return normalApi(path, request);
-    queuedAfterFailure.push(path);
-    if (path.endsWith("/failed-dp")) return new Promise((_resolve, reject) => { rejectDelete = reject; });
-    options.exports = options.exports.filter(job => path !== `/api/data/exports/${job.id}`);
-    return Promise.resolve({deleted: true});
-  };
-  deleteButton("failed-dp").click();
-  await flush();
-  deleteButton("next-format").click();
-  await flush();
-  rejectDelete(new Error("Cluster temporarily unavailable"));
-  await flush();
-  assert.deepEqual(queuedAfterFailure, ["/api/data/exports/failed-dp", "/api/data/exports/next-format"], "Failure does not drop the next confirmed deletion");
-  assert.equal(deleteButton("next-format"), null);
-  assert.equal(deleteButton("failed-dp").disabled, false, "Failed deletions can be retried");
-  assert.equal(deleteButton("failed-dp").textContent, "Delete");
-  assert.match(el("prepared-dataset-error").textContent, /Cluster temporarily unavailable/, "A later successful deletion cannot erase the earlier failure");
-  w.askUserDialog = async () => false;
-  deleteButton("failed-dp").click();
-  await flush();
-  assert.equal(queuedAfterFailure.length, 2, "Cancelling never queues a deletion");
-  assert.equal(deleteButton("failed-dp").disabled, false);
-  w.askUserDialog = async () => true;
-  w.api = (path, request = {}) => {
-    if (request.method === "DELETE") {
-      options.exports = [];
-      return Promise.resolve({deleted: true});
-    }
-    return normalApi(path, request);
-  };
-  deleteButton("failed-dp").click();
-  await flush();
-  assert.equal(deleteButton("failed-dp"), null);
-  assert.equal(el("prepared-dataset-error").hidden, true, "A successful retry clears its own error");
-
-  let finishWholeDataset;
-  w.api = (path, request = {}) => {
-    if (request.method === "DELETE") return new Promise(resolve => { finishWholeDataset = resolve; });
-    if (path === "/api/data/resources/other-dataset") return Promise.resolve({resource: {id: "other-dataset", name: "Other dataset", metadata: {}, versions: []}});
-    return normalApi(path, request);
-  };
-  el("prepared-dataset-content").querySelector("[data-preparation-delete]").click();
-  await flush();
-  await w.openPreparedDataset("other-dataset");
-  finishWholeDataset({deleted: true});
-  await flush();
-  assert.equal(el("prepared-dataset-dialog").open, true, "Finishing deletion in the background must not dismiss a different dataset");
-  assert.equal(el("prepared-dataset-title").textContent, "Other dataset");
-  w.api = normalApi;
-  console.log(
-    "Preparation UI passed: policy requirements, all session recordings, split guard, submission, grouped management, failed-stage download and retry.",
-  );
 } finally {
   w.close();
 }

@@ -53,6 +53,9 @@ already enabled, run `deploy/install-postgres-user.py --root <private-db-root>
 The optional loopback listener requires a separately provisioned PostgreSQL SCRAM
 password. Without `--loopback`, only Unix socket access is enabled.
 It does not install system packages or alter firewall rules.
+The database and backup units are restricted with `ConditionHost` to the installing
+host. This is required when the home directory and DB files are shared: another
+login host must never start a second PostgreSQL against the same data directory.
 
 The current deployment uses a hard-mounted NFS filesystem. It depends on that
 storage and sky2 being available; it is not a high-availability database. Keep

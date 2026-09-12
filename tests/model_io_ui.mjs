@@ -3,7 +3,7 @@ import {readFile} from "node:fs/promises";
 import {JSDOM} from "jsdom";
 const w = new JSDOM('<section id="experiment-model-io"></section><section id="adapter-model-io"></section>',{runScripts:"outside-only"}).window;
 const app=await readFile(new URL('../static/app.js',import.meta.url),'utf8');
-for (const name of ['escapeHtml','keyValueHtml']) {
+for (const name of ['escapeHtml','valueHtml','keyValueHtml']) {
  const start=app.indexOf(`function ${name}(`);
  w.eval(app.slice(start,app.indexOf('\nfunction ',start+1)));
 }
@@ -15,12 +15,13 @@ w.selectedAdapter=()=>({});
 w.adapterManifest=()=>({slug:'test',train:{input_fields:[{path:'secret',default:'do-not-send',sensitive:true}]}});
 w.declaredAdapterInputFields=()=>[];
 w.elements={nativeOverrides:{value:''},adapterManifest:{value:'{}'}};
-w.selectedExperimentDataBundle=()=>({id:'dataset'});
+w.selectedExperimentDataBundle=()=>({id:'dataset',selections:[{version_id:'file-version'}]});
 w.experimentBundleCompatibility=()=>({compatible:true});
 const tick=()=>new Promise(r=>setTimeout(r,220));
 try {
  w.refreshExperimentModelIO(); await tick();
- assert.equal(calls.at(-1).bundle_id,'dataset');
+ assert.deepEqual(calls.at(-1).data_selections,[{version_id:'file-version'}]);
+ assert.equal(calls.at(-1).bundle_id,undefined);
  assert.deepEqual(calls.at(-1).manifest.train.input_fields,[],'secret defaults never sent');
  w.refreshExperimentModelIO();await tick();
  pending[1]({entries:[['New shape','25 × 28']],note:'Current dataset'});

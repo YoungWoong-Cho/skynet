@@ -175,15 +175,14 @@ def test_legacy_preparation_deletes_without_flag_and_preserves_archived_sources(
     assert bool(db.get_data_resource(resource["id"])) is single_format
 
 
-def test_unmanaged_collection_without_preparation_cannot_delete(setup):
+def test_empty_collection_registration_can_be_deleted(setup):
     service, _, _ = setup
     resource = service.database.create_data_resource(
-        provider="collection", namespace="datasets", name="Raw recordings",
-        kind="demonstrations", metadata={"qa_test": True},
+        category="dataset", provider="collection", namespace="datasets",
+        name="Empty registration", kind="demonstrations",
     )
-    with pytest.raises(ValueError, match="Only prepared collection datasets"):
-        service.delete_dataset(resource["id"])
-    assert service.database.get_data_resource(resource["id"])
+    assert service.delete_dataset(resource["id"])["deleted"]
+    assert service.database.get_data_resource(resource["id"]) is None
 
 
 def test_legacy_preparation_requires_matching_version_backlink(setup):
@@ -231,3 +230,30 @@ def test_delete_unused_format_keeps_training_dataset(setup, tmp_path, monkeypatc
     assert len(list(source.rglob('*.pkl'))) == 2
     with pytest.raises(ValueError, match='used by an experiment'):
         service.delete_dataset(dp['resource_id'], dp['id'])
+
+
+def test_external_registration_deletion_preserves_source_and_blocks_active_import(setup, tmp_path):
+    from types import SimpleNamespace
+    from skynet_app import prepared_deletion
+    service, _, _ = setup
+    db = service.database
+    resource = db.create_data_resource(category='dataset', provider='huggingface', namespace='test', name='External', kind='dataset')
+    source = tmp_path / 'external.zarr'
+    source.write_bytes(b'Externally owned dataset')
+    version = db.create_data_resource_version(resource['id'], revision='1', format='zarr', path=str(source), manifest_sha256='e'*64)
+    db.record_data_location(version['id'], kind='cluster', host='test', path=str(source), manifest_sha256='e'*64)
+    job = db.create_data_import(resource['id'], request={'revision':'1'})
+    workspace = SimpleNamespace(owns=lambda *_: True)
+    blocked = prepared_deletion.preview(service, workspace, 'dataset', resource['id'])
+    assert 'import to finish' in blocked['blockers'][0]['reason']
+    db.update_data_import(job['id'], state='FAILED', version_id=version['id'])
+    plan = prepared_deletion.preview(service, workspace, 'dataset', resource['id'])
+    assert not plan['blockers'] and not plan['files']
+    assert 'source files are kept' in plan['notices'][0]
+    with pytest.raises(ValueError, match='changed'):
+        prepared_deletion.delete(service, workspace, 'dataset', resource['id'], blocked['token'])
+    assert prepared_deletion.delete(service, workspace, 'dataset', resource['id'], plan['token'])['deleted']
+    assert db.get_data_resource(resource['id']) is None
+    assert db.get_data_resource_version(version['id']) is None
+    assert db.get_data_import(job['id']) is None
+    assert source.read_bytes() == b'Externally owned dataset'

@@ -1,25 +1,6 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { applyUrdfMaterials } from "./hand-materials.js";
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import URDFLoader from "urdf-loader";
-
-function dispose(root) {
-  const geometries = new Set(),
-    materials = new Set(),
-    textures = new Set();
-  root?.traverse((node) => {
-    if (node.geometry) geometries.add(node.geometry);
-    for (const material of [node.material].flat().filter(Boolean))
-      materials.add(material);
-  });
-  for (const material of materials) {
-    for (const v of Object.values(material)) if (v?.isTexture) textures.add(v);
-    material.dispose();
-  }
-  geometries.forEach((g) => g.dispose());
-  textures.forEach((t) => t.dispose());
-}
+import { loadUrdfModel, disposeObject as dispose } from "./robot-visuals.js";
 
 export class HandsViewer {
   constructor(container) {
@@ -75,88 +56,22 @@ export class HandsViewer {
       this.robot = null;
     }
     this.render();
-    const manager = new THREE.LoadingManager();
-    let robot,
-      failure,
-      timedOut = false,
-      timer;
-    const ready = new Promise((resolve) => {
-      manager.onLoad = () => resolve();
-      manager.onError = (url) => {
-        failure = new Error(
-          `Could not load model asset: ${url.split("/").pop()}`,
-        );
-      };
-    });
-    const loader = new URDFLoader(manager);
-    loader.parseCollision = false;
-    const defaultMeshLoader = loader.loadMeshCb;
-    loader.loadMeshCb = (path, mgr, done) => {
-      if (/\.glb$/i.test(path))
-        new GLTFLoader(mgr).load(
-          path,
-          (g) => done(g.scene),
-          undefined,
-          (e) => {
-            failure = new Error(`Could not load ${path.split("/").pop()}`);
-            done(null, e);
-          },
-        );
-      else if (!/\.(stl|dae)$/i.test(path)) {
-        failure = new Error(
-          `Unsupported visual mesh format: ${path.split("/").pop()}`,
-        );
-        done(null, failure);
-      } else
-        defaultMeshLoader(path, mgr, (object, error) => {
-          if (error)
-            failure = new Error(`Could not load ${path.split("/").pop()}`);
-          done(object, error);
-        });
-    };
-    try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(30000) });
-      if (!response.ok) throw new Error("Could not load the hand description");
-      const source = await response.text();
-      manager.itemStart("description");
-      try {
-        robot = loader.parse(source, "");
-      } finally {
-        manager.itemEnd("description");
-      }
-      await Promise.race([
-        ready,
-        new Promise((_, reject) => {
-          timer = setTimeout(() => {
-            timedOut = true;
-            reject(new Error("Model loading timed out. Use Refresh to retry."));
-          }, 30000);
-        }),
-      ]);
-      if (failure) throw failure;
-      applyUrdfMaterials(robot, source);
-      if (generation !== this.generation) {
-        dispose(robot);
-        return false;
-      }
-      robot.rotation.set(...(metadata.preview_rotation || [0, 0, 0]));
-      this.robot = robot;
-      this.scene.add(robot);
-      for (const joint of metadata.joints)
-        if (!joint.mimic)
-          robot.setJointValue(
-            joint.name,
-            Math.max(joint.lower, Math.min(joint.upper, 0)),
-          );
-      this.fit();
-      return true;
-    } catch (error) {
+    const robot = await loadUrdfModel(url);
+    if (generation !== this.generation) {
       dispose(robot);
-      if (timedOut) ready.then(() => dispose(robot));
-      throw error;
-    } finally {
-      clearTimeout(timer);
+      return false;
     }
+    robot.rotation.set(...(metadata.preview_rotation || [0, 0, 0]));
+    this.robot = robot;
+    this.scene.add(robot);
+    for (const joint of metadata.joints)
+      if (!joint.mimic)
+        robot.setJointValue(
+          joint.name,
+          Math.max(joint.lower, Math.min(joint.upper, 0)),
+        );
+    this.fit();
+    return true;
   }
   fit() {
     if (!this.robot) return;
@@ -194,5 +109,12 @@ export class HandsViewer {
       this.robot = null;
     }
     this.render();
+  }
+  dispose() {
+    this.clear();
+    this.resize.disconnect();
+    this.controls.dispose();
+    this.renderer.dispose();
+    this.renderer.domElement.remove();
   }
 }

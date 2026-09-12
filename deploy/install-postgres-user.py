@@ -4,6 +4,7 @@
 import argparse
 import os
 import pwd
+from socket import gethostname
 import subprocess
 from pathlib import Path
 
@@ -88,6 +89,7 @@ def main():
     unit.mkdir(parents=True, exist_ok=True)
     (unit / "skynet-postgres.service").write_text(f"""[Unit]
 Description=Skynet central PostgreSQL (private SSH-accessible socket)
+ConditionHost={gethostname()}
 After=network-online.target
 Wants=network-online.target
 
@@ -113,6 +115,7 @@ WantedBy=default.target
         backup.chmod(0o700)
         (unit / "skynet-postgres-backup.service").write_text(f"""[Unit]
 Description=Back up the Skynet central database
+ConditionHost={gethostname()}
 Requires=skynet-postgres.service
 After=skynet-postgres.service
 

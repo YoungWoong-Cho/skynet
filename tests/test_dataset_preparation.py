@@ -275,6 +275,7 @@ def test_selection_rejects_duplicates_but_allows_training_without_validation(set
 def test_other_session_resource_is_rejected(setup):
     service, session, _ = setup
     resource = service.database.create_data_resource(
+        category="dataset",
         provider="collection",
         namespace="sessions",
         name="another",

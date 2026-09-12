@@ -1,13 +1,34 @@
 /* The recording review dialog is the shared surface for application dialogs. */
 window.SkynetDialog = (() => {
+  // Dataset results and evaluation results share exactly one layout and close control.
+  for (const dialog of document.querySelectorAll("[data-result-dialog]")) {
+    const layout = document
+      .getElementById("result-dialog-layout")
+      .content.cloneNode(true);
+    const panel = layout.querySelector("section");
+    panel.id = dialog.dataset.resultPanel;
+    const title = layout.querySelector("[data-result-title]");
+    title.id = dialog.dataset.resultTitle;
+    title.textContent = dialog.dataset.resultLabel;
+    layout.querySelector("[data-result-actions]").id =
+      dialog.dataset.resultActions;
+    layout.querySelector("[data-result-close]").id = dialog.dataset.resultClose;
+    layout.querySelector("[data-result-body]").append(...dialog.childNodes);
+    dialog.append(layout);
+  }
   const launchers = new WeakMap();
   const initialized = new WeakSet();
   const openDialogs = [];
   let fullscreenExitAt = -Infinity;
   let wasFullscreen = false;
   function isFullscreen() {
-    return Boolean(document.fullscreenElement || document.webkitFullscreenElement
-      || [...document.querySelectorAll("video")].some((video) => video.webkitDisplayingFullscreen));
+    return Boolean(
+      document.fullscreenElement ||
+        document.webkitFullscreenElement ||
+        [...document.querySelectorAll("video")].some(
+          (video) => video.webkitDisplayingFullscreen,
+        ),
+    );
   }
   function fullscreenOwnsEscape() {
     return isFullscreen() || performance.now() - fullscreenExitAt < 300;
@@ -20,12 +41,20 @@ window.SkynetDialog = (() => {
   function requestFullscreenExit() {
     let owner = document;
     let exit;
-    if (document.fullscreenElement && typeof document.exitFullscreen === "function")
+    if (
+      document.fullscreenElement &&
+      typeof document.exitFullscreen === "function"
+    )
       exit = document.exitFullscreen;
-    else if (document.webkitFullscreenElement && typeof document.webkitExitFullscreen === "function")
+    else if (
+      document.webkitFullscreenElement &&
+      typeof document.webkitExitFullscreen === "function"
+    )
       exit = document.webkitExitFullscreen;
     else {
-      owner = [...document.querySelectorAll("video")].find((video) => video.webkitDisplayingFullscreen);
+      owner = [...document.querySelectorAll("video")].find(
+        (video) => video.webkitDisplayingFullscreen,
+      );
       exit = owner?.webkitExitFullscreen;
     }
     if (typeof exit !== "function") return;
@@ -40,29 +69,50 @@ window.SkynetDialog = (() => {
   }
   document.addEventListener("fullscreenchange", fullscreenChanged, true);
   document.addEventListener("webkitfullscreenchange", fullscreenChanged, true);
-  document.addEventListener("webkitbeginfullscreen", () => { wasFullscreen = true; }, true);
-  document.addEventListener("webkitendfullscreen", () => {
-    wasFullscreen = false;
-    fullscreenExitAt = performance.now();
-  }, true);
-  document.addEventListener("keydown", (event) => {
-    if (event.key !== "Escape") return;
-    if (fullscreenOwnsEscape()) {
-      // Request exit when the key reaches the page, while preserving native fallback.
-      if (isFullscreen()) requestFullscreenExit();
-      else event.preventDefault();
+  document.addEventListener(
+    "webkitbeginfullscreen",
+    () => {
+      wasFullscreen = true;
+    },
+    true,
+  );
+  document.addEventListener(
+    "webkitendfullscreen",
+    () => {
+      wasFullscreen = false;
+      fullscreenExitAt = performance.now();
+    },
+    true,
+  );
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.key !== "Escape") return;
+      if (fullscreenOwnsEscape()) {
+        // Request exit when the key reaches the page, while preserving native fallback.
+        if (isFullscreen()) requestFullscreenExit();
+        else event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
+      const dialog = openDialogs.findLast((candidate) => candidate.open);
+      if (
+        document.body.classList.contains("has-active-tutorial") &&
+        !dialog?.hasAttribute("data-app-confirmation")
+      )
+        return;
+      if (!dialog) return;
+      event.preventDefault();
       event.stopImmediatePropagation();
-      return;
-    }
-    const dialog = openDialogs.findLast((candidate) => candidate.open);
-    if (document.body.classList.contains("has-active-tutorial") && !dialog?.hasAttribute("data-app-confirmation")) return;
-    if (!dialog) return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    close(dialog);
-  }, true);
+      close(dialog);
+    },
+    true,
+  );
   function open(dialog, { launcher = document.activeElement } = {}) {
     if (dialog.open) return;
+    if (dialog.hasAttribute("data-result-dialog")) {
+      dialog.querySelector(".row-disclosure").hidden = false;
+    }
     if (!initialized.has(dialog)) {
       dialog.addEventListener("cancel", (event) => {
         event.stopPropagation();
@@ -123,7 +173,14 @@ window.SkynetDialog = (() => {
     const button = event.target.closest("[data-dialog-close]");
     if (button) close(button.closest("dialog"));
   });
-  return { open, close, openGuide, closeGuide, placeGuide, fullscreenOwnsEscape };
+  return {
+    open,
+    close,
+    openGuide,
+    closeGuide,
+    placeGuide,
+    fullscreenOwnsEscape,
+  };
 })();
 
 function askUserDialog(message, defaultValue = null) {
@@ -173,15 +230,19 @@ function askUserDialog(message, defaultValue = null) {
     dialog.append(heading, form);
     document.body.append(dialog);
     SkynetDialog.open(dialog);
-    document.dispatchEvent(new CustomEvent("skynet:confirmation-open", {detail: {dialog}}));
+    document.dispatchEvent(
+      new CustomEvent("skynet:confirmation-open", { detail: { dialog } }),
+    );
     dialog.addEventListener(
       "close",
       () => {
         const confirmation = new CustomEvent("skynet:confirmation-close", {
-          detail: {dialog, accepted: dialog.returnValue === "confirm"}, cancelable: true,
+          detail: { dialog, accepted: dialog.returnValue === "confirm" },
+          cancelable: true,
         });
         document.dispatchEvent(confirmation);
-        const accepted = dialog.returnValue === "confirm" && !confirmation.defaultPrevented;
+        const accepted =
+          dialog.returnValue === "confirm" && !confirmation.defaultPrevented;
         const result = input ? (accepted ? input.value : null) : accepted;
         dialog.remove();
         resolve(result);

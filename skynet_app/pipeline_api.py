@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from skynet_app.evaluation_contracts import bind_suite_to_dataset
 from skynet_app.recorded_evaluation import recorded_episode_sources
+from skynet_app import data_selection
 from skynet_app.gpu_tracking import sync_gpu_statistics
 from skynet_app.model_io import resolve_model_io, preview_spec
 
@@ -26,7 +27,7 @@ from typing import Any, Literal, Mapping
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse, StreamingResponse
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from .adapters import (
     AdapterPlan,
@@ -52,6 +53,7 @@ from .cluster_runtime import (
     SubmissionOutcomeUnknown,
     approved_operator_environment,
 )
+from .data_resource_policy import RESOURCE_TYPES, validate_resource_type, validate_resource_metadata
 from .data_imports import build_huggingface_import_job
 from .data_paths import validate_mount_path
 from .data_preview import build_data_bundle_preview, resolve_data_bundle_preview_media
@@ -615,7 +617,7 @@ def evaluation_progress_summary(
         (current_attempt or {}).get("status") or (current_attempt or {}).get("state") or ""
     ).upper()
     started_at = _progress_timestamp((current_attempt or {}).get("started_at"))
-    if started_at is None and (current_attempt is None or len(attempt_rows) <= 1):
+    if current_attempt is None and status in ({"RUNNING"} | _PROGRESS_SUCCESS_STATES | _PROGRESS_FAILURE_STATES):
         started_at = _progress_timestamp(evaluation.get("started_at"))
     finished_at = _progress_timestamp(
         (current_attempt or {}).get("finished_at") or (current_attempt or {}).get("ended_at")
@@ -701,6 +703,7 @@ def _attach_run_progress_summaries(database: Database, runs: list[dict[str, Any]
             attach_attempt_display_status(attempt)
         spec = row.get("resolved_spec_json") or {}
         run["resources"] = spec.get("resources") or {}
+        run["training_data"] = data_selection.describe(spec)
         run["progress_summary"] = training_progress_summary(
             run,
             attempts=row.get("attempts") or [],
@@ -711,6 +714,9 @@ def _attach_run_progress_summaries(database: Database, runs: list[dict[str, Any]
         )
 
 
+    data_selection.attach_links(database, runs)
+
+
 def _attach_evaluation_progress_summaries(
     database: Database, evaluations: list[dict[str, Any]]
 ) -> None:
@@ -719,6 +725,7 @@ def _attach_evaluation_progress_summaries(
     ])
     for evaluation in evaluations:
         row = evidence.get(str(evaluation.get("id") or ""), {})
+        evaluation["latest_attempt"] = _latest_attempt(row.get("attempts") or [])
         attach_job_display_status(evaluation, row.get("attempts") or [])
         evaluation["progress_summary"] = evaluation_progress_summary(
             evaluation,
@@ -1275,6 +1282,7 @@ def _sweep_from_frontend(raw: str | None) -> dict[str, Any]:
 
 
 class DataResourceCreateRequest(BaseModel):
+    category: Literal["dataset", "file"]
     provider: str = Field(min_length=1, max_length=128)
     namespace: str = Field(min_length=1, max_length=255)
     name: str = Field(min_length=1, max_length=255)
@@ -1289,6 +1297,12 @@ class DataResourceCreateRequest(BaseModel):
         if not stripped:
             raise ValueError("data resource identity values cannot be blank")
         return stripped
+
+    @model_validator(mode="after")
+    def validate_classification(self):
+        validate_resource_type(self.category, self.kind)
+        validate_resource_metadata(self.category, self.metadata)
+        return self
 
 
 class DataResourceEditRequest(BaseModel):
@@ -1329,8 +1343,8 @@ class HuggingFaceImportRequest(BaseModel):
     subset: str = Field(min_length=1, max_length=512)
     format: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
     role: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-    bundle_name: str = Field(min_length=1, max_length=255)
-    bundle_version: str = Field(min_length=1, max_length=255)
+    bundle_name: str = Field(default="imported-data", min_length=1, max_length=255)
+    bundle_version: str = Field(default="import", min_length=1, max_length=255)
     gateway: str = "auto"
     queue: str = "overcap"
     cpus: int = Field(default=8, ge=1, le=64)
@@ -3195,6 +3209,11 @@ class PipelineService:
 
     def _normalize_data_input(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         data = copy.deepcopy(dict(payload.get("data") or {}))
+        selections = payload.get("data_selections")
+        if selections is not None:
+            if payload.get("data_bundle_id") or data.get("bundle") or data.get("bundle_id"):
+                raise ValueError("Choose direct data inputs or an existing input snapshot, not both")
+            data["bundle"] = data_selection.snapshot(self.database, selections)
         bundle_id = payload.get("data_bundle_id") or data.pop("bundle_id", None)
         if bundle_id is not None:
             if data.get("bundle") is not None:
@@ -3231,6 +3250,7 @@ class PipelineService:
             )
             canonical["data"] = self._normalize_data_input(canonical)
             canonical.pop("data_bundle_id", None)
+            canonical.pop("data_selections", None)
             canonical.setdefault("apiVersion", canonical.pop("api_version", "skynet.rl2/v1"))
             resources = canonical.setdefault("resources", {})
             source = dict(canonical["source"])
@@ -6616,43 +6636,13 @@ class PipelineService:
             version.get("source_uri") != result.get("source_uri"),
         )):
             raise ValueError("existing immutable version conflicts with completed import")
-        bundle = next(
-            (
-                item for item in self.database.list_data_bundles(include_archived=False)
-                if item["name"] == request["bundle_name"]
-                and item["version"] == request["bundle_version"]
-            ),
-            None,
-        )
-        expected_assignment = {
-            "role": request["role"],
-            "position": 0,
-            "version_id": version["id"],
-        }
-        if bundle is None:
-            bundle = self.database.create_data_bundle(
-                name=str(request["bundle_name"]),
-                version=str(request["bundle_version"]),
-                description=(
-                    f"Pinned Hugging Face subset {resource['namespace']}/{resource['name']}"
-                    f"/{request['subset']} at {request['revision']}"
-                ),
-                assignments=[{**expected_assignment, "required": True}],
-                metadata={"data_import_id": record["id"]},
-            )
-        else:
-            assignments = bundle.get("assignments") or []
-            if len(assignments) != 1 or any(
-                assignments[0].get(key) != value for key, value in expected_assignment.items()
-            ):
-                raise ValueError("existing immutable bundle conflicts with completed import")
         return self.database.update_data_import(
             str(record["id"]),
             state="SUCCEEDED",
             result=dict(result),
             slurm_state="COMPLETED",
             version_id=version["id"],
-            bundle_id=bundle["id"],
+            bundle_id=None,
             error=None,
         )
 
@@ -9140,6 +9130,15 @@ class PipelineService:
             context["recorded_episode_sources"] = recorded_episode_sources(
                 self.database, self.cluster, training_document
             )
+        elif environment == "isaac_lab":
+            # A reference demonstration is independent of the simulator reset policy.
+            # Only an unambiguous, verified single training recording is selected.
+            try:
+                context["recorded_episode_sources"] = recorded_episode_sources(
+                    self.database, self.cluster, training_document
+                )
+            except ValueError as error:
+                context["demonstration_unavailable"] = str(error)
         plan = resolve_adapter_evaluation_plan(
             evaluator_spec,
             environment=environment,
@@ -9625,6 +9624,7 @@ def list_data_resources(
     include_archived: bool = Query(default=False),
 ) -> dict[str, Any]:
     return {
+        "resource_types": RESOURCE_TYPES,
         "resources": service.database.list_data_resources(
             provider=provider,
             namespace=namespace,
@@ -9651,6 +9651,8 @@ def get_data_resource(resource_id: str) -> dict[str, Any]:
     resource = service.database.get_data_resource(resource_id)
     if resource is None:
         raise HTTPException(status_code=404, detail="Data resource not found")
+    resource["experiment_presets"] = [link for link in service.database.dataset_preset_links()
+                                      if link["resource_id"] == resource_id]
     return {"resource": resource}
 
 
@@ -9929,7 +9931,8 @@ def archive_data_bundle(bundle_id: str) -> dict[str, Any]:
 def preview_model_io(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     try:
         bundle_id = payload.get("bundle_id")
-        bundle = service.database.get_data_bundle(bundle_id) if bundle_id else None
+        bundle = (data_selection.snapshot(service.database, payload["data_selections"])
+                  if payload.get("data_selections") else service.database.get_data_bundle(bundle_id) if bundle_id else None)
         return resolve_model_io(payload.get("manifest") or {}, preview_spec(payload.get("values"), bundle), legacy=True)
     except (TypeError, ValueError) as error:
         raise _http_error(error) from error
@@ -10433,7 +10436,10 @@ def create_experiment(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
 @router.get("/experiments")
 def list_experiments() -> dict[str, Any]:
     records = service.database.list_experiments(limit=1000)
+    dataset_links = service.database.dataset_preset_links()
     for record in records:
+        record["dataset_ids"] = sorted({link["resource_id"] for link in dataset_links
+                                        if link["experiment_id"] == record["id"]})
         runs = service.database.list_runs(
             experiment_revision_id=record["latest_revision_id"], limit=10000
         )
@@ -11363,7 +11369,7 @@ def get_run(run_id: str) -> dict[str, Any]:
     run = service.database.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-    service._ingest_training_progress(run)
+    service._queue_list_progress_refresh("training", [run])
     for attempt in run.get("attempts") or []:
         receipt_event = _attempt_enrichment_event(
             service.database, str(attempt["id"])
@@ -11472,9 +11478,7 @@ def get_evaluation(evaluation_id: str) -> dict[str, Any]:
     evaluation = service.database.get_evaluation(evaluation_id)
     if not evaluation:
         raise HTTPException(status_code=404, detail="Evaluation not found")
-    service._ingest_evaluation_progress(evaluation)
-    evaluation = service.database.get_evaluation(evaluation_id)
-    assert evaluation is not None
+    service._queue_list_progress_refresh("evaluation", [evaluation])
     run = service.database.get_run(evaluation["run_id"])
     evaluation["attempts"] = [
         attempt
@@ -11569,6 +11573,11 @@ def get_evaluation_episode_log(
     )
 
 
+@router.get("/data/selections")
+def get_training_data_selections():
+    return {"datasets": data_selection.choices(service.database)}
+
+
 @router.get("/evaluations/{evaluation_id}/episodes/{episode_id}/viewer")
 def get_evaluation_episode_viewer(evaluation_id: str, episode_id: str):
     evaluation = service.database.get_evaluation(evaluation_id)
@@ -11591,12 +11600,29 @@ def get_evaluation_episode_viewer(evaluation_id: str, episode_id: str):
     if not video.is_absolute() or root not in video.parents or ".." in video.parts or video.suffix.lower() != ".mp4":
         raise HTTPException(status_code=409, detail="Invalid registered rollout path")
     path = str(video.with_suffix(".review.json"))
-    program = "import json,sys; from pathlib import Path; p=Path(sys.argv[1]); print(p.read_text() if p.is_file() and p.stat().st_size <= 20000000 else 'null')"
+    from .adapters.episode_geometry import MAX_VIEWER_BYTES
+    program = (
+        "import json,sys; from pathlib import Path; p=Path(sys.argv[1]); "
+        f"print(p.read_text() if p.is_file() and p.stat().st_size <= {MAX_VIEWER_BYTES} "
+        "else json.dumps({'preview_error': 'The saved replay exceeds the interactive viewer size limit.'}) "
+        "if p.is_file() else 'null')"
+    )
     try:
         _, text = service.cluster.run_with_fallback("python3 -c " + shlex.quote(program) + " " + shlex.quote(path), gateway, timeout=30)
         viewer = json.loads(text)
+        if isinstance(viewer, dict) and viewer.get("preview_error"):
+            return {"state": "UNAVAILABLE", "robot": robot, "detail": viewer["preview_error"]}
     except Exception as error:
         raise _http_error(error) from error
+    try:
+        from .rollout_preview import enrich_demonstration
+        viewer = enrich_demonstration(service.database, service.cluster, spec, viewer, gateway,
+                                      task=episode.get("task"), duration=(episode.get("episode_length") or 0) * float((dataset_metadata(spec).get("capture") or {}).get("step_dt", 0)))
+    except (ValueError, OSError, ClusterError) as error:
+        if viewer:
+            viewer.setdefault("warnings", []).append("Demonstration could not be restored: " + str(error))
+        else:
+            missing["detail"] += " Original demonstration could not be restored: " + str(error)
     if viewer is None:
         return missing
     if viewer.get("schema") != "skynet.episode-viewer/v1":

@@ -24,7 +24,7 @@ try {
   let source=await readFile(new URL('../static/'+name,import.meta.url),'utf8');
   if(name==='app.js')source+=`\nwindow.configureContractTest=(manifest)=>{
     adapterRows=[{id:'adapter-test',name:'Test policy',latest_version:{id:'version-test',version_number:1,manifest}}];
-    dataBundleRows=[{id:'bundle-test',name:'Imported source',version:'1',assignments:[{role:'training_data',position:0,version:{status:'READY',path:'/cluster/test',format:'test-zarr/v1',metadata:{contract:'state/v1',validation:{status:'PASSED'}}}}]}];
+    trainingDatasetRows=[{id:'bundle-test',selection:{version_id:'version-test'},name:'Imported source',version:'1',assignments:[{role:'training_data',position:0,version:{status:'READY',path:'/cluster/test',format:'test-zarr/v1',metadata:{contract:'state/v1',validation:{status:'PASSED'}}}}]}];
     populateExperimentAdapters(); applySelectedAdapter({loadSource:false}); populateExperimentDataBundles();
     elements.experimentDataBundle.value='bundle-test'; renderAdapterDeclaredFields();
   };`;
@@ -32,6 +32,7 @@ try {
  }
  w.configureContractTest(manifest);
  assert.equal(input('dataset').value,'/cluster/test');
+ assert.equal(input('dataset').readOnly,true,'registered file paths are derived, not editable');
  input('training_preset').value=JSON.stringify('rgb/v1');
  input('training_preset').dispatchEvent(new w.Event('change',{bubbles:true}));
  assert.equal(el('hp-batch-size').value,'8');

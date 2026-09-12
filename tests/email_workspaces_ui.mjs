@@ -3,6 +3,8 @@ import {readFile} from 'node:fs/promises';
 import {JSDOM, VirtualConsole} from 'jsdom';
 
 const html = await readFile(new URL('../static/index.html', import.meta.url), 'utf8');
+assert.doesNotMatch(html, /For your trusted team\. Anyone entering this email/);
+assert.doesNotMatch(html, /Enter your email to open your configurations/);
 const bootstrap = await readFile(new URL('../static/email-workspace.js', import.meta.url), 'utf8');
 const sources = new Map();
 for (const match of html.matchAll(/data-workspace-src="([^"?]+)/g)) {
@@ -67,6 +69,10 @@ function setup(session=null, preferences={}) {
   assert.equal(button.disabled,false);
   assert.match(f.el('workspace-message').textContent,/Try again/);
   assert.equal(f.loaded.length,0);
+  f.setHandler(async()=>new Response('Internal Server Error',{status:500}));
+  form.dispatchEvent(new f.w.Event('submit',{cancelable:true}));await flush();
+  assert.match(f.el('workspace-message').textContent,/server is temporarily unavailable/);
+  assert.doesNotMatch(f.el('workspace-message').textContent,/Unexpected token/);
   await flush(); assert.deepEqual(f.errors,[]); f.close();
 }
 // Run the actual application scripts in their production order after session load.
@@ -79,7 +85,7 @@ function setup(session=null, preferences={}) {
   assert.equal(f.el('workspace-current-email').textContent,'alice@example.com');
   const header=f.el('workspace-current-email').closest('header');
   assert.ok(header);
-  assert.equal(f.el('workspace-sign-out').textContent,'sign out');
+  assert.equal(f.el('workspace-sign-out').textContent.trim(),'sign out');
   assert.ok(f.el('workspace-current-email').compareDocumentPosition(f.el('gateway')) & f.w.Node.DOCUMENT_POSITION_FOLLOWING);
   assert.doesNotMatch(header.textContent,/Workspace:|Switch email/);
   assert.equal(f.w.SkynetWorkspace.storageKey('preference'),'preference:workspace:alice');

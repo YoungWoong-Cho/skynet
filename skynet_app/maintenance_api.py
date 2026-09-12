@@ -12,7 +12,7 @@ from .cluster_runtime import ClusterError
 from .maintenance import Maintenance
 
 router = APIRouter(prefix="/api/maintenance")
-Kind = Literal["experiment", "run", "evaluation", "adapter", "suite"]
+Kind = Literal["experiment", "run", "evaluation", "adapter", "suite", "dataset", "prepared", "local-copy"]
 
 
 class DeleteRequest(BaseModel):
@@ -56,11 +56,19 @@ def invoke(operation):
 
 @router.get("/history/{kind}/{identifier}")
 def preview(kind: Kind, identifier: str, gateway: str = "auto"):
+    if kind in {"dataset", "prepared", "local-copy"}:
+        from . import prepared_deletion
+        from .policy_exports_api import service
+        return invoke(lambda: prepared_deletion.preview(service, manager().db, kind, identifier))
     return invoke(lambda: manager().preview(kind, identifier, gateway))
 
 
 @router.delete("/history/{kind}/{identifier}")
 def delete(kind: Kind, identifier: str, request: DeleteRequest):
+    if kind in {"dataset", "prepared", "local-copy"}:
+        from . import prepared_deletion
+        from .policy_exports_api import service
+        return invoke(lambda: prepared_deletion.delete(service, manager().db, kind, identifier, request.token))
     return invoke(
         lambda: manager().delete(kind, identifier, request.token, request.gateway)
     )

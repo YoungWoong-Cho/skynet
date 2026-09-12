@@ -7,6 +7,8 @@ w.HTMLDialogElement.prototype.showModal = function(){this.open=true;};
 w.HTMLDialogElement.prototype.close = function(){this.open=false;this.dispatchEvent(new w.Event("close"));};
 w.escapeHtml = text => String(text).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll('"', "&quot;");
 w.closeActiveDisclosure = ()=>{};
+const app=await readFile(new URL('../static/app.js',import.meta.url),'utf8');
+for(const name of ['linkedValue','valueHtml']) {const start=app.indexOf(`function ${name}(`);w.eval(app.slice(start,app.indexOf('\nfunction ',start+1)));}
 const refresh=[];
 w.loadExperiments=w.loadRuns=w.loadEvaluations=async()=>{refresh.push(1);};
 w.refreshAfterDeletion = async()=>{await Promise.all([w.loadExperiments(),w.loadRuns(),w.loadEvaluations()]);};
@@ -23,7 +25,7 @@ try {
  assert.match(el("maintenance-content").textContent,/<unsafe>/);
  assert.equal(el("maintenance-content").querySelector("unsafe"),null);
  handler=async()=>({label:"Evaluation",token:"b".repeat(64),blockers:[],notices:["This suite will no longer be available to <HPT>."],counts:{evaluations:1,evaluation_episodes:1},files:[]});
- el("maintenance-content").querySelector("button").click();await flush();
+ el("maintenance-content").querySelector("[data-delete-kind]").click();await flush();
  assert.equal(el("maintenance-confirm").disabled,false);
  assert.match(el("maintenance-content").textContent,/no longer be available to <HPT>/);
  assert.equal(el("maintenance-content").querySelector("hpt"),null,"notices render as text");

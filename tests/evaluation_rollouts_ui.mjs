@@ -25,6 +25,7 @@ try {
  button.click();
  assert.equal(el('evaluation-detail').hidden,false,'panel opens before network returns');
  assert.match(el('evaluation-rollouts-body').textContent,/Loading/);
+ assert.match(el('evaluation-rollout-count').textContent,/Loading/);
  resolveDetail({evaluation:{...base,episodes,attempts:[{id:'a',slurm_job_id:'123',status:'RUNNING',attempt_number:1}]}});
  await flush();
  assert.equal(el('evaluation-rollouts-body').rows.length,2,'all episodes appear including pending');
@@ -89,15 +90,17 @@ try {
  // The new disclosure must survive the previous row's queued hidden mutation.
  w.toggleDisclosure(el('evaluation-detail'),'evaluation:other-eval',otherButton,{rowOwned:true});
  await flush();
- assert.equal(otherButton.getAttribute('aria-expanded'),'true','old close mutation cannot close the new selection');
  void w.viewEvaluation('other-eval',otherButton);
+ assert.equal(el('evaluation-detail-dialog').open,true,'switching evaluations opens the common modal');
  assert.equal(el('evaluation-detail').hidden,false,'one click switches to another evaluation');
- assert.equal(el('evaluation-detail-title').textContent,'other-eval','the newly clicked evaluation opens immediately');
+ assert.equal(el('evaluation-detail-title').textContent,w.evaluationName(other),'the newly clicked evaluation opens immediately');
  assert.equal(el('evaluation-detail').closest('tbody'),null,'result content stays outside the scrolling table');
- assert.equal(el('evaluation-detail').previousElementSibling,el('evaluations-body').closest('.table-scroll'));
- assert.equal(otherButton.getAttribute('aria-expanded'),'true','matching row remains selected');
+ assert.equal(el('evaluation-detail').closest('dialog'),el('evaluation-detail-dialog'));
+ assert.equal(otherButton.textContent,'Results','the modal launcher keeps its action label');
  resolveDetail({evaluation:{...other,episodes:[]}});
  await flush();
+ assert.match(el('evaluation-rollouts-body').textContent,/No rollouts recorded/,'empty results replace the loading state');
+ assert.equal(el('evaluation-rollout-count').textContent,'0 episodes');
  assert.equal(el('evaluation-detail').hidden,false,'switch remains open after the response');
  assert.ok(el('evaluation-search').closest('.panel-heading-tools .toolbar'),'evaluation filters reuse the training toolbar');
  const parallel=el('evaluation-parallelism').closest('.field');
@@ -134,13 +137,13 @@ try {
    assert.equal(el('evaluation-search').value,'');
    assert.equal(el('evaluation-state-filter').value,'all');
    const row=el('evaluations-body').querySelector(`[data-evaluation-id="${id}"]`);
-   assert.equal(el('evaluation-detail').previousElementSibling,el('evaluations-body').closest('.table-scroll'),'submitted details sit outside table scrolling');
+   assert.equal(el('evaluation-detail').closest('dialog'),el('evaluation-detail-dialog'),'submitted details use the common modal');
    assert.equal(el('evaluation-detail').hidden,false,'submission opens before detail response');
-   assert.equal(row.querySelector('button').getAttribute('aria-expanded'),'true');
+   assert.equal(el('evaluation-detail-dialog').open,true);
    resolveDetail({evaluation:{...submitted,episodes:[]}});
    await flush();
    w.setupEvaluationTest([submitted,base,other]);
-   assert.equal(el('evaluation-detail').previousElementSibling,el('evaluations-body').closest('.table-scroll'),'refresh preserves independent detail placement');
+   assert.equal(el('evaluation-detail').closest('dialog'),el('evaluation-detail-dialog'),'refresh preserves the modal placement');
    row.querySelector('button').click();
    assert.equal(el('evaluation-detail').hidden,true,'the submitted row closes with one click');
  }

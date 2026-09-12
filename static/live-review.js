@@ -5,9 +5,7 @@
     data = null,
     episode = null,
     frame = 0,
-    timer,
-    animation,
-    playing = false;
+    timer;
   const dialog = el("live-review-dialog");
   const video = el("live-review-video");
   let reviewSession;
@@ -74,11 +72,21 @@
       el("live-review-video-retry").hidden = true;
       videoGeneration = result.generation || "";
       const cancel = el("live-review-video-cancel");
-      cancel.hidden = !["QUEUED", "STARTING", "PREPARING", "WAITING_GPU", "CANCELLING", "INTERRUPTED"].includes(result.state);
+      cancel.hidden = ![
+        "QUEUED",
+        "STARTING",
+        "PREPARING",
+        "WAITING_GPU",
+        "CANCELLING",
+        "INTERRUPTED",
+      ].includes(result.state);
       cancel.disabled = result.state === "CANCELLING" && !result.can_cancel;
-      cancel.textContent = result.state === "CANCELLING"
-        ? (result.can_cancel ? "Retry cancellation" : "Cancelling…")
-        : "Cancel video preparation";
+      cancel.textContent =
+        result.state === "CANCELLING"
+          ? result.can_cancel
+            ? "Retry cancellation"
+            : "Cancelling…"
+          : "Cancel video preparation";
       if (result.state === "READY") {
         const url =
           base +
@@ -104,13 +112,18 @@
         throw new Error(result.error);
       } else if (["NOT_PREPARED", "CANCELLED"].includes(result.state)) {
         el("live-review-video-status").textContent =
-          (result.state === "CANCELLED" ? "Video preparation cancelled. " : "Video is not prepared. ") +
+          (result.state === "CANCELLED"
+            ? "Video preparation cancelled. "
+            : "Video is not prepared. ") +
           "Prepare video to download it or render recorded states on the collection workstation. Browsing recorded values does not start video work.";
         el("live-review-video-retry").textContent = "Prepare video";
         el("live-review-video-retry").hidden = false;
       } else {
         el("live-review-video-status").textContent =
-          (result.detail || (result.state === "STARTING" ? "Starting video preparation…" : "Preparing video…")) +
+          (result.detail ||
+            (result.state === "STARTING"
+              ? "Starting video preparation…"
+              : "Preparing video…")) +
           (["CANCELLING", "INTERRUPTED"].includes(result.state)
             ? ""
             : " You can cancel preparation. It continues if you close this review.");
@@ -151,39 +164,45 @@
   video.addEventListener("timeupdate", () => {
     if (!video.paused && video.currentTime !== mediaTime) mediaReady();
     mediaTime = video.currentTime;
-    if (!episode || !el("live-review-data").open) return;
-    let index = 0;
-    while (
-      index + 1 < episode.frames.length &&
-      episode.frames[index + 1].time_seconds <= video.currentTime
-    )
-      index++;
-    frame = index;
-    draw();
   });
   el("live-review-video-retry").onclick = () => {
     clearVideo();
-    el("live-review-video-status").textContent = "Requesting video preparation…";
+    el("live-review-video-status").textContent =
+      "Requesting video preparation…";
     loadVideo(token, videoToken, Number(el("live-review-episode").value), true);
   };
   el("live-review-video-cancel").onclick = async () => {
     const ownToken = token;
     const ownVideoToken = ++videoToken;
     clearTimeout(videoTimer);
-    const current = () => ownToken === token && ownVideoToken === videoToken && dialog.open;
+    const current = () =>
+      ownToken === token && ownVideoToken === videoToken && dialog.open;
     const button = el("live-review-video-cancel");
     if (button.disabled) return;
     button.disabled = true;
     try {
-      await request(base + `/video?episode=${Number(el("live-review-episode").value)}` +
-        (videoGeneration ? `&generation=${encodeURIComponent(videoGeneration)}` : ""), {
-        method: "DELETE",
-      }, 65000);
-      if (current()) await loadVideo(ownToken, ownVideoToken, Number(el("live-review-episode").value));
+      await request(
+        base +
+          `/video?episode=${Number(el("live-review-episode").value)}` +
+          (videoGeneration
+            ? `&generation=${encodeURIComponent(videoGeneration)}`
+            : ""),
+        {
+          method: "DELETE",
+        },
+        65000,
+      );
+      if (current())
+        await loadVideo(
+          ownToken,
+          ownVideoToken,
+          Number(el("live-review-episode").value),
+        );
     } catch (error) {
       if (current()) el("live-review-video-status").textContent = error.message;
     } finally {
-      if (current() && button.textContent !== "Cancelling…") button.disabled = false;
+      if (current() && button.textContent !== "Cancelling…")
+        button.disabled = false;
     }
   };
   const status = (message) => {
@@ -204,9 +223,7 @@
     return result;
   }
   function pause() {
-    playing = false;
-    cancelAnimationFrame(animation);
-    el("live-review-play").textContent = "Play values";
+    video.pause();
   }
   function flat(value, prefix = "", result = {}) {
     for (const [key, item] of Object.entries(value)) {
@@ -254,11 +271,6 @@
   function draw() {
     if (!episode) return;
     const current = episode.frames[frame];
-    el("live-review-frame").textContent =
-      `Frame ${current.state_index} of ${episode.steps} · ${current.time_seconds.toFixed(3)} s`;
-    el("live-review-seek").value = frame;
-    el("live-review-prev").disabled = frame === 0;
-    el("live-review-next").disabled = frame === episode.frames.length - 1;
     const field = el("live-review-field").value;
     const values =
       field === "action" ? current.action : flat(current.state)[field];
@@ -300,14 +312,30 @@
     clearVideo();
     el("live-review-video-status").textContent = "Checking video…";
     const selectedIndex = Number(el("live-review-recording").value);
-    const cameraReceipt = reviewSession.recording_images?.[reviewSession.recordings?.[selectedIndex]];
-    if (!cameraReceipt) loadVideo(token, videoToken, Number(el("live-review-episode").value));
+    const cameraReceipt =
+      reviewSession.recording_images?.[
+        reviewSession.recordings?.[selectedIndex]
+      ];
+    if (!cameraReceipt)
+      loadVideo(token, videoToken, Number(el("live-review-episode").value));
     else el("live-review-video-status").textContent = "";
-    window.SkynetEpisodeViewer?.open("live-episode-viewer", "live-review-video", base, {
-      collection: true, episode: Number(el("live-review-episode").value), robot: data.robot,
-    });
     episode = data.episodes[Number(el("live-review-episode").value)];
     frame = 0;
+    window.SkynetEpisodeViewer?.open(
+      "live-episode-viewer",
+      "live-review-video",
+      base,
+      {
+        collection: true,
+        episode: Number(el("live-review-episode").value),
+        robot: data.robot,
+        timeline: episode.frames,
+        onFrame(index) {
+          frame = index;
+          if (el("live-review-data").open) draw();
+        },
+      },
+    );
     const fields = el("live-review-field");
     fields.replaceChildren(
       new Option("Action applied before this frame", "action"),
@@ -319,9 +347,6 @@
     )
       ? "rigid_object.object.root_pose"
       : "action";
-    el("live-review-seek").max = episode.frames.length - 1;
-    el("live-review-time-note").textContent =
-      `${data.time_note} ${episode.sampled ? `Preview samples ${episode.frames.length} of ${episode.state_count} states; the original download contains every state.` : `All ${episode.state_count} saved scene states are available.`}`;
     draw();
   }
   async function load(ownToken, start = false) {
@@ -337,10 +362,8 @@
         data = await request(base + "/review.json");
         if (ownToken !== token || !dialog.open) return;
         el("live-review-content").hidden = false;
-        el("live-review-context").textContent =
-          `${data.task_name} · ${data.hand_name}`;
         status(
-          `${data.episodes.length} demonstration${data.episodes.length === 1 ? "" : "s"} · ${data.episodes.reduce((sum, ep) => sum + ep.duration_seconds, 0).toFixed(1)} s`,
+          `${data.episodes.length} demonstration${data.episodes.length === 1 ? "" : "s"} · ${data.episodes.reduce((sum, ep) => sum + ep.duration_seconds, 0).toFixed(1)} s · ${data.simulation_hz || 60} Hz`,
         );
         const select = el("live-review-episode");
         select.parentElement.hidden = data.episodes.length === 1;
@@ -379,8 +402,6 @@
     data = episode = null;
     el("live-review-content").hidden = true;
     el("live-review-retry").hidden = true;
-    el("live-review-context").textContent =
-      `Session ${reviewSession.id.slice(0, 8)} · Recording ${index + 1}`;
     status("Checking the saved recording…");
     // One idempotent request per user selection retains READY copies and
     // retries saved failures with current connection settings. Polls use GET.
@@ -422,47 +443,7 @@
   };
   el("live-review-episode").onchange = chooseEpisode;
   el("live-review-field").onchange = draw;
-  el("live-review-prev").onclick = () => {
-    pause();
-    frame = Math.max(0, frame - 1);
-    draw();
-  };
-  el("live-review-next").onclick = () => {
-    pause();
-    frame = Math.min(episode.frames.length - 1, frame + 1);
-    draw();
-  };
-  el("live-review-seek").oninput = (event) => {
-    pause();
-    frame = Number(event.target.value);
-    draw();
-  };
-  el("live-review-play").onclick = () => {
-    if (playing) {
-      pause();
-      return;
-    }
-    if (frame === episode.frames.length - 1) frame = 0;
-    playing = true;
-    el("live-review-play").textContent = "Pause";
-    const started = performance.now(),
-      offset = episode.frames[frame].time_seconds;
-    const tick = (now) => {
-      if (!playing) return;
-      const seconds = offset + (now - started) / 1000;
-      let next = frame;
-      while (
-        next + 1 < episode.frames.length &&
-        episode.frames[next + 1].time_seconds <= seconds
-      )
-        next++;
-      if (next !== frame) {
-        frame = next;
-        draw();
-      }
-      if (frame === episode.frames.length - 1) pause();
-      else animation = requestAnimationFrame(tick);
-    };
-    animation = requestAnimationFrame(tick);
-  };
+  el("live-review-data").addEventListener("toggle", () => {
+    if (el("live-review-data").open) draw();
+  });
 })();

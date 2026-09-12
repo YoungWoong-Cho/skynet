@@ -8,6 +8,8 @@ from .db_backend import PostgresConnection, Record
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Mapping, Sequence
 
+from .data_resource_policy import validate_resource_type
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .cluster_config import CLUSTER
@@ -232,6 +234,12 @@ class DataRegistrationTarget(BaseModel):
     namespace: str = Field(min_length=1, max_length=256)
     name: str = Field(min_length=1, max_length=256)
     kind: str = Field(default="demonstrations", min_length=1, max_length=128)
+
+    @field_validator("kind")
+    @classmethod
+    def dataset_type(cls, value):
+        validate_resource_type("dataset", value)
+        return value
 
 
 class CollectionStorage(BaseModel):
@@ -1036,9 +1044,11 @@ class CollectionStore:
                     "SELECT * FROM data_resources WHERE provider = ? AND namespace = ? AND name = ?",
                     (target.provider, target.namespace, target.name),
                 ).fetchone()
+                if resource is not None and resource["category"] != "dataset":
+                    raise ValueError("Recordings can only be registered in a dataset")
                 if resource is None:
                     resource = self.database._insert_data_resource(
-                        connection, provider=target.provider, namespace=target.namespace,
+                        connection, category="dataset", provider=target.provider, namespace=target.namespace,
                         name=target.name, kind=target.kind,
                         description="Native raw captures registered by collection sessions",
                         metadata={"collection_schema_version": COLLECTION_SCHEMA_VERSION,

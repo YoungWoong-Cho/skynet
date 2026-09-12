@@ -350,7 +350,8 @@ def main():
                     from episode_trace import EpisodeTrace
                     trace_cameras = CAMERAS if os.environ["SKYNET_POLICY_IMAGES"] == "1" else {"scene_front": CAMERAS["scene_front"]}
                     observation()  # Refresh camera poses after restoring the episode.
-                    trace = EpisodeTrace(context, capture, env, trace_cameras, video, policy_order=order)
+                    trace_context = context if task == capture["task"] else {**context, "recorded_episode_sources": []}
+                    trace = EpisodeTrace(trace_context, capture, env, trace_cameras, video, policy_order=order)
                     pending = []
                     success = False
                     streak = 0

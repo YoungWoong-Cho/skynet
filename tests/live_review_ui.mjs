@@ -55,6 +55,8 @@ window.fetch = (path, options) =>
     }),
   );
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+let viewerOptions;
+window.SkynetEpisodeViewer = {open: (...args) => { viewerOptions = args[3]; }, close() {}};
 const data = {
   task_name: "Stick",
   hand_name: "Right",
@@ -146,18 +148,17 @@ try {
   mediaEvent("seeked", 3);
   assert.equal(watchdogs.size, 0);
   assert.match(get("live-review-values").textContent, /Initial state/);
-  assert.equal(get("live-review-prev").disabled, true);
-  get("live-review-next").click();
-  assert.match(get("live-review-frame").textContent, /Frame 1 of 2/);
-  assert.match(
-    get("live-review-value-note").textContent,
-    /Action 0 produced scene frame 1/,
-  );
-  assert.match(get("live-review-values").textContent, /10\.00000/);
-  get("live-review-next").click();
-  assert.equal(get("live-review-next").disabled, true);
-  get("live-review-prev").click();
-  assert.match(get("live-review-frame").textContent, /Frame 1 of 2/);
+  assert.equal(get('live-review-seek'), null, 'Recorded values have no independent seek bar');
+  assert.equal(get('live-review-context'), null, 'The duplicate title subtitle was removed');
+  assert.match(get('live-review-status').textContent, /60 Hz/);
+  assert.deepEqual(viewerOptions.timeline, data.episodes[0].frames);
+  get('live-review-data').open = true;
+  viewerOptions.onFrame(1);
+  assert.match(get('live-review-value-note').textContent, /Action 0 produced scene frame 1/);
+  assert.match(get('live-review-values').textContent, /10\.00000/);
+  viewerOptions.onFrame(2);
+  assert.match(get('live-review-values').textContent, /20\.00000/);
+  viewerOptions.onFrame(1);
   get("live-review-field").value = "robot.joint_position";
   get("live-review-field").dispatchEvent(new window.Event("change"));
   assert.match(get("live-review-values").textContent, /1\.000000/);

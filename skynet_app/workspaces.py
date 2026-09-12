@@ -15,6 +15,8 @@ import time
 import uuid
 from typing import Any
 
+from psycopg import OperationalError, InterfaceError
+
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse
@@ -186,6 +188,26 @@ class WorkspaceMiddleware:
         self.app, self.services = app, services
 
     async def __call__(self, scope, receive, send):
+        started = False
+
+        async def track_send(message):
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self._dispatch(scope, receive, track_send)
+        except (OperationalError, InterfaceError, ConnectionError) as error:
+            if started or scope["type"] != "http":
+                raise
+            logging.getLogger(__name__).error("Workspace database unavailable (%s)", type(error).__name__)
+            await JSONResponse(
+                {"detail": "Central database is unavailable. Try again shortly.", "code": "database_unavailable"},
+                status_code=503, headers={"Cache-Control": "no-store", "Retry-After": "5"},
+            )(scope, receive, send)
+
+    async def _dispatch(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         request = Request(scope)

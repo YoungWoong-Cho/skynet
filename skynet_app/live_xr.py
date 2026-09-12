@@ -210,6 +210,7 @@ class LiveXRService:
         sources = {
             "collection.py": (self.root / "ops/xr/collection.py").read_text(),
             "wrist.py": (self.root / "ops/xr/wrist.py").read_text(),
+            "scene_geometry.py": (Path(__file__).parent / "adapters/scene_geometry.py").read_text(),
             "images.py": (self.root / "ops/xr/images.py").read_text(),
             "render_images.py": (self.root / "ops/xr/render_images.py").read_text(),
             "arrays.py": "import pickle\nimport numpy as np\n"

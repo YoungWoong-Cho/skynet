@@ -1,19 +1,27 @@
 /* One keyboard convention for primary and workspace tabs. */
 function installTabKeyboardNavigation(buttons, select) {
-  buttons.forEach((button, index) => button.addEventListener("keydown", (event) => {
-    if (event.key === " ") {
+  buttons.forEach((button, index) =>
+    button.addEventListener("keydown", (event) => {
+      if (event.key === " ") {
+        event.preventDefault();
+        select(button);
+        return;
+      }
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key))
+        return;
       event.preventDefault();
-      select(button);
-      return;
-    }
-    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-    event.preventDefault();
-    const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
-      : (index + (event.key === "ArrowRight" ? 1 : -1) + buttons.length) % buttons.length;
-    select(buttons[next]);
-    buttons[next].focus({ preventScroll: true });
-    buttons[next].scrollIntoView({ block: "nearest", inline: "nearest" });
-  }));
+      const next =
+        event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? buttons.length - 1
+            : (index + (event.key === "ArrowRight" ? 1 : -1) + buttons.length) %
+              buttons.length;
+      select(buttons[next]);
+      buttons[next].focus({ preventScroll: true });
+      buttons[next].scrollIntoView({ block: "nearest", inline: "nearest" });
+    }),
+  );
 }
 installTabKeyboardNavigation(
   [...document.querySelectorAll('.tab-nav [role="tab"]')],
@@ -80,9 +88,15 @@ window.dataNavigation = createWorkspaceNavigation({
   page: "data",
   parameter: "data_view",
   selector: "[data-data-tab]",
-  views: ["setup", "collect", "recording", "registry"],
+  views: ["collect", "recording", "registry", "files"],
   initial: "collect",
-  aliases: { live: "collect", recordings: "recording", cycles: "setup" },
+  aliases: {
+    live: "collect",
+    recordings: "recording",
+    setup: "collect",
+    cycles: "collect",
+    datasets: "registry",
+  },
   legacyParameters: ["collection_view"],
   legacyView(tab, current, params) {
     if (tab === "datasets") return "registry";
@@ -94,6 +108,7 @@ window.dataNavigation = createWorkspaceNavigation({
     return params.get("data_view") || params.get("collection_view");
   },
   renderView(view) {
+    if (typeof selectDataCatalog === "function") selectDataCatalog(view);
     const collectionView = {
       collect: "live",
       recording: "recordings",
@@ -103,10 +118,19 @@ window.dataNavigation = createWorkspaceNavigation({
       panel.hidden = panel.dataset.collectionView !== collectionView;
     });
     const tutorial = document.getElementById("datasets-tutorial-button");
-    if (tutorial) tutorial.hidden = view !== "registry";
-    document.getElementById("refresh-collection").hidden = view === "registry";
-    document.getElementById("refresh-data-registry").hidden =
-      view !== "registry";
+    if (tutorial) tutorial.hidden = !["registry", "files"].includes(view);
+    const heading = document.getElementById("data-catalog-title");
+    if (heading) heading.textContent = view === "files" ? "Files" : "Datasets";
+    if (typeof refreshDataResourceTables === "function")
+      refreshDataResourceTables();
+    document.getElementById("refresh-collection").hidden = [
+      "registry",
+      "files",
+    ].includes(view);
+    document.getElementById("refresh-data-registry").hidden = ![
+      "registry",
+      "files",
+    ].includes(view);
   },
 });
 
@@ -114,7 +138,7 @@ window.experimentNavigation = createWorkspaceNavigation({
   page: "experiments",
   parameter: "experiment_view",
   selector: "[data-experiment-tab]",
-  views: ["submit", "adapters", "runs"],
+  views: ["presets", "submit", "adapters", "runs"],
   initial: "submit",
   legacyView: (tab) => (["adapters", "runs"].includes(tab) ? tab : null),
   renderView(view) {
@@ -123,7 +147,8 @@ window.experimentNavigation = createWorkspaceNavigation({
       ["adapters", "adapters"],
       ["runs", "runs"],
     ]) {
-      document.getElementById(`refresh-${page}`).hidden = view !== selected;
+      document.getElementById(`refresh-${page}`).hidden =
+        view !== selected && !(page === "experiments" && view === "presets");
       const tutorial = document.getElementById(`${page}-tutorial-button`);
       if (tutorial) tutorial.hidden = view !== selected;
     }
@@ -137,7 +162,8 @@ window.evaluationNavigation = createWorkspaceNavigation({
   views: ["submit", "suites", "runs"],
   initial: "submit",
   aliases: { suits: "suites" },
-  legacyView: (tab) => ({ "evaluation-suites": "suites", "evaluation-runs": "runs" }[tab]),
+  legacyView: (tab) =>
+    ({ "evaluation-suites": "suites", "evaluation-runs": "runs" })[tab],
   renderView(view) {
     const tutorial = document.getElementById("evaluations-tutorial-button");
     if (tutorial) tutorial.hidden = view !== "submit";
@@ -151,6 +177,8 @@ function setCollectionView(view, options) {
 document.querySelectorAll("[data-collection-go]").forEach((button) =>
   button.addEventListener("click", () => {
     dataNavigation.select(button.dataset.collectionGo, { focus: true });
+    const setup = document.getElementById("collection-setup-details");
+    if (setup) setup.open = true;
     const guide = button.dataset.collectionGuide === "record";
     document
       .querySelector(guide ? "#vision-pro-guide" : "#collection-view-setup")
@@ -177,3 +205,21 @@ dataNavigation.mountTutorial = () => {
       "Advanced tutorial: configure collection adapters. Headset recording instructions are above.";
   }
 };
+
+for (const [page, views] of [
+  ["settings", ["connections", "storage", "notifications"]],
+  ["cluster", ["gpu", "jobs"]],
+]) {
+  window[page + "Navigation"] = createWorkspaceNavigation({
+    page,
+    parameter: page + "_view",
+    selector: "[data-" + page + "-tab]",
+    views,
+    initial: views[0],
+    renderView(view) {
+      document.querySelectorAll("[data-" + page + "-view]").forEach((panel) => {
+        panel.hidden = panel.getAttribute("data-" + page + "-view") !== view;
+      });
+    },
+  });
+}

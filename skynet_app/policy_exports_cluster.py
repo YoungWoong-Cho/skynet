@@ -226,12 +226,12 @@ class ClusterPolicyPreparation:
                           archive_sha256=result["archive_sha256"], remote_archive=result["archive_path"],
                           size_bytes=version["size_bytes"], episodes=len(manifest["episodes"]), steps=manifest["steps"],
                           loader_validation=result.get("loader_validation") or job.get("loader_validation"))
-        bundle = self.bundle(job, location)
+        # The prepared result is selected directly by an experiment.
         if job.get("migrating_local_copy"):
             self._remove_migrated_local_payload(job)
-        self.update(job["id"], bundle_id=bundle["id"] if bundle else None, state="READY", stage="READY",
+        self.update(job["id"], bundle_id=None, state="READY", stage="READY",
                     error=None, local_removed=True, migrating_local_copy=False, training_ready=bool(RECIPES[job["format"]]["trainable"]),
-                    detail="Ready on sky2" + (" to use in a training experiment" if bundle else ""))
+                    detail="Ready on the cluster")
 
     def migrate_local_copy(self, identifier):
         """Queue a verified move of one registered local version, retaining its identity.

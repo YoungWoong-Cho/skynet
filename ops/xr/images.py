@@ -67,7 +67,16 @@ class ImageWriter:
         self.temp = self.path.with_suffix(".part")
         self.file = h5py.File(self.temp, "x")
         self.file.attrs["schema"] = SCHEMA
-        self.file.attrs["metadata"] = json.dumps(metadata, allow_nan=False)
+        stored_metadata = dict(metadata)
+        scene = stored_metadata.pop("scene_geometry", None)
+        self.file.attrs["metadata"] = json.dumps(stored_metadata, allow_nan=False)
+        if scene:
+            # Large meshes belong in a compressed dataset, not HDF5's bounded attribute header.
+            payload = json.dumps(scene, allow_nan=False, separators=(",", ":")).encode()
+            if len(payload) <= 12_000_000:
+                self.file.create_dataset("scene_geometry", data=np.frombuffer(payload, dtype="u1"), compression="gzip")
+            else:
+                self.file.attrs["scene_geometry_error"] = "Scene geometry exceeds the recording size limit"
         self.steps = 0
         self.dimension = len(metadata["action_joint_names"])
 
@@ -145,6 +154,8 @@ def state_metadata(env, profile):
         step_dt=float(env.step_dt), alignment="image and state before action; simulation time excludes tracking pauses",
         color_space="RGB", cameras={k: dict(sensor=v, mount="fixed_scene", width=256, height=256) for k, v in CAMERAS.items()},
     )
+    from scene_geometry import scene_snapshot
+    metadata["scene_geometry"] = scene_snapshot(env.scene)
     hand = profile.get("hand_manifest")
     if hand:
         metadata.update({k: hand[k] for k in ("hand_asset", "units", "wrist_rotation_order", "hand_order", "hands") if k in hand})

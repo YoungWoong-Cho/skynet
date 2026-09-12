@@ -202,3 +202,20 @@ def test_background_reconciliation_selects_only_its_own_jobs(services, monkeypat
     assert bob.get_run(b['run']['id'])['status'] == b['run']['status']
     assert bob.run_progress_evidence([a['run']['id']]) == {}
     assert bob.evaluation_progress_evidence([a['evaluation']['id']]) == {}
+
+
+def test_database_outage_returns_json_and_preserves_session(services, monkeypatch):
+    client, _ = clients(services)
+    client.post('/api/workspace/session', json={'email':'alice@example.com'})
+    cookie = client.cookies.get(COOKIE)
+    original = services.directory.resolve
+    monkeypatch.setattr(services.directory, 'resolve', Mock(side_effect=psycopg.OperationalError('connection detail must not leak')))
+    for route in ('/api/workspace/session', '/api/data/resources'):
+        response = client.get(route)
+        assert response.status_code == 503
+        assert response.json()['code'] == 'database_unavailable'
+        assert 'connection detail' not in response.text
+        assert response.headers['retry-after'] == '5'
+        assert client.cookies.get(COOKIE) == cookie
+    monkeypatch.setattr(services.directory, 'resolve', original)
+    assert client.get('/api/workspace/session').json()['workspace']['email'] == 'alice@example.com'

@@ -65,3 +65,46 @@ class GeometryTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_camera_preview_keeps_final_saved_state(tmp_path, monkeypatch):
+    import h5py
+    import pickle
+    from contextlib import contextmanager
+    written = []
+    @contextmanager
+    def writer(path, **kwargs):
+        yield SimpleNamespace(append_data=lambda image: written.append(image.copy()))
+        Path(path).write_bytes(b'test camera stream')
+    imageio = SimpleNamespace(v2=SimpleNamespace(get_writer=writer))
+    monkeypatch.setitem(sys.modules, 'imageio', imageio)
+    monkeypatch.setitem(sys.modules, 'imageio.v2', imageio.v2)
+    from skynet_app import episode_preview_worker as worker
+    from skynet_app.adapters import episode_geometry
+    from skynet_app.live_xr_review import ArrayUnpickler
+    for name in ('HandKinematics', 'camera_layout', 'recorded_urdf', 'replay_urdf'):
+        monkeypatch.setattr(worker, name, getattr(episode_geometry, name), raising=False)
+    monkeypatch.setattr(worker, 'ArrayUnpickler', ArrayUnpickler, raising=False)
+    states = [{'articulation': {'robot': {'root_pose': np.array([ROOT]), 'joint_position': np.array([[i, .1*i]])}}} for i in range(3)]
+    recording = tmp_path / 'episode.pkl'
+    recording.write_bytes(pickle.dumps({'episodes':[{'states':states}]}))
+    metadata = {'robot':'test', 'hand':'right', 'robot_joint_names':['move','bend'], 'action_joint_names':['bend','move'],
+                'groups':[{'wrist_indices':[1]}], 'step_dt':.1, 'kinematics_urdf':XML,
+                'kinematics_sha256':hashlib.sha256(XML.encode()).hexdigest(), 'cameras':{'front':{'width':16,'height':16}}}
+    images = tmp_path / 'images.h5'
+    with h5py.File(images, 'w') as output:
+        output.attrs['schema'] = 'skynet.rgb-trajectory/v1'
+        output.attrs['complete'] = True
+        output.attrs['metadata'] = json.dumps(metadata)
+        output['state'] = np.array([[0,0],[.1,1]])
+        output['timestamps'] = np.array([0,.1])
+        output['images/front'] = np.zeros((2,16,16,3), dtype='u1')
+    result = worker.prepare_preview({'output':str(tmp_path/'preview'), 'images':{'path':str(images), 'size_bytes':images.stat().st_size, 'sha256':hashlib.sha256(images.read_bytes()).hexdigest()},
+                                    'recording':str(recording), 'source_sha256':hashlib.sha256(recording.read_bytes()).hexdigest(), 'episode':0, 'repository':'/missing'})
+    assert result == {'state':'READY'}
+    data = json.loads((tmp_path/'preview/viewer.json').read_text())
+    assert len(written) == 2
+    assert len(data['frames']) == 3
+    assert data['frames'][-1]['index'] == 2 and data['frames'][-1]['time'] == .2
+    np.testing.assert_allclose(data['frames'][-1]['hand_poses']['actual']['joints'], [.2,2])
+    np.testing.assert_allclose(data['frames'][-1]['actual'], HandKinematics(XML,['bend','move'],['move']).points([.2,2], ROOT))

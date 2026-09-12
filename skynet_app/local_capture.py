@@ -224,7 +224,7 @@ class LocalCaptureService:
                     resource = connection.execute("SELECT id FROM data_resources WHERE provider='collection' AND namespace=? AND name=?",
                                                   (provider_key, session_id)).fetchone()
                     if resource is None:
-                        resource = self.database._insert_data_resource(connection, provider="collection", namespace=provider_key,
+                        resource = self.database._insert_data_resource(connection, category="dataset", provider="collection", namespace=provider_key,
                             name=session_id, kind="raw_capture", description=summary["header"]["task"], metadata={"storage_location": "cluster"})
                     version = connection.execute("SELECT id FROM data_resource_versions WHERE resource_id=? AND revision=?",
                                                  (resource["id"], digest)).fetchone()
