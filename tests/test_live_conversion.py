@@ -93,7 +93,7 @@ def conversion(tmp_path, monkeypatch):
             "recordings/two.pkl": "b" * 64,
         },
     )
-    db = Database(tmp_path / "test.sqlite")
+    db = Database(tmp_path / "test.store")
     live = SimpleNamespace(root=ROOT, database=db, get=lambda _: session)
     service = LiveConversionService(
         LiveReviewService(live, tmp_path / "reviews"), tmp_path / "conversions"
@@ -156,7 +156,6 @@ def test_oversized_session_is_rejected_without_omitting_recordings(conversion):
 def test_api_rejects_selection_and_always_converts_the_session(
     conversion, monkeypatch, tmp_path
 ):
-    monkeypatch.setenv("SKYNET_DATABASE_PATH", str(tmp_path / "api.sqlite"))
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from skynet_app import live_xr_api as api

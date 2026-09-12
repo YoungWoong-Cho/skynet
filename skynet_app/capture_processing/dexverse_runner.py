@@ -15,7 +15,7 @@ import time
 import traceback
 
 TASK = "Dexverse-PickUpStick-v0"
-ROBOT = "floating_shadow_right"
+ROBOT = "skynet_shadow_right"
 REVISION = "30cc673e27684b9f10186fa6bea731aed246bc9f"
 SCHEMA = "skynet.dexverse-state-actions/v1"
 
@@ -34,6 +34,7 @@ def save_json(path, value):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tracking", required=True)
+    parser.add_argument("--hand-bundle-root", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=100)
@@ -97,7 +98,17 @@ def main():
             SimpleRelativeRetargeterCfg,
         )
 
-        cfg = parse_env_cfg(TASK, device=args.device, num_envs=1)
+        import runpy
+
+        adapter = runpy.run_path(str(Path(args.hand_bundle_root) / "runtime.py"))
+        manifest = adapter["install"](args.hand_bundle_root)
+        if manifest["robot"] != ROBOT:
+            raise ValueError("Prepared hand differs from the capture pipeline")
+        cfg = type(parse_env_cfg(TASK, device=args.device, num_envs=1))(
+            robot_type=ROBOT
+        )
+        cfg.sim.device = args.device
+        cfg.scene.num_envs = 1
         if cfg.robot_type != ROBOT:
             raise ValueError(f"Unexpected task embodiment {cfg.robot_type}")
         cfg.seed = args.seed
@@ -121,6 +132,7 @@ def main():
         cfg.observations.state.enable_corruption = False
         cfg.num_rerenders_on_reset = 4
         env = gym.make(TASK, cfg=cfg, render_mode="rgb_array").unwrapped
+        adapter["validate_environment"](env, manifest)
         if abs(env.step_dt - 1 / track["fps"]) > 1e-7:
             raise ValueError(
                 "Simulator control rate differs from the recorded resampling rate"
@@ -202,12 +214,16 @@ def main():
                 robot_type=ROBOT, sim_device=args.device, bound_hand=target
             )
         )
-        if not retarget._dex_retgt or env.action_manager.total_action_dim != 28:
+        if (
+            not retarget._dex_retgt
+            or env.action_manager.total_action_dim != manifest["action_dimension"]
+        ):
             raise ValueError(
-                "DexPilot retargeter or 28-dimensional Shadow action layout is unavailable"
+                "DexPilot retargeter or the prepared hand action layout is unavailable"
             )
         if any(
-            len(indices) != 22 or any(i is None or i < 0 for i in indices)
+            len(indices) != len(manifest["finger_joints"])
+            or any(i is None or i < 0 for i in indices)
             for indices in retarget._dex_to_action_finger_indices.values()
         ):
             raise ValueError("Shadow finger joint mapping is incomplete")
@@ -257,7 +273,10 @@ def main():
                 if not app.is_running():
                     raise RuntimeError("Simulator stopped during recording replay")
                 action = retarget_sample(sample)
-                if action.shape != (1, 28) or not torch.isfinite(action).all():
+                if (
+                    action.shape != (1, manifest["action_dimension"])
+                    or not torch.isfinite(action).all()
+                ):
                     raise ValueError("Retargeter produced invalid robot actions")
                 xs.append(state_vector(obs).detach().cpu().numpy()[0])
                 ys.append(action.detach().cpu().numpy()[0])
@@ -302,12 +321,15 @@ def main():
             "schema": SCHEMA,
             "task": TASK,
             "robot": ROBOT,
+            "hand_asset": manifest["hand_asset"],
+            "hand_adapter_digest": manifest["digest"],
+            "action_joint_names": manifest["wrist_joints"] + manifest["finger_joints"],
             "dexverse_revision": REVISION,
             "source_sha256": args.source_sha256,
             "tracking_sha256": sha(args.tracking),
             "observation_groups": list(keys),
             "observation_dimensions": {k: int(obs[k].numel()) for k in keys},
-            "action_dimension": 28,
+            "action_dimension": manifest["action_dimension"],
             "action_terms": env.action_manager.active_terms,
             "fps": 60,
             "frames": len(xs),
@@ -393,7 +415,7 @@ def main():
             torch.nn.Tanh(),
             torch.nn.Linear(128, 128),
             torch.nn.Tanh(),
-            torch.nn.Linear(128, 28),
+            torch.nn.Linear(128, manifest["action_dimension"]),
         ).to(args.device)
         optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
         with torch.enable_grad():

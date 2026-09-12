@@ -67,7 +67,7 @@ try {
     return {progress_refresh_pending:evaluationReads===1,evaluations:[{id:'evaluation',run_id:'run',
       suite_name:evaluationReads===1?'Stored evaluation':'Enriched evaluation',status:'FAILED',task_selection_json:[],seeds_json:[]}]};
   };
-  w.progressPage('evaluations');await w.loadEvaluations(true);
+  w.progressPage('evaluation-runs');await w.loadEvaluations(true);
   assert.match(el('evaluations-body').textContent,/Stored evaluation/);
   await runTimer(5000);
   assert.match(el('evaluations-body').textContent,/Enriched evaluation/);

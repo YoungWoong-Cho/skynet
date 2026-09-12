@@ -191,7 +191,7 @@ def test_native_numeric_and_nested_settings_remain_supported():
 
 
 def test_seeding_retires_per_config_choices_without_changing_history(tmp_path):
-    database = Database(tmp_path / "registry.sqlite")
+    database = Database(tmp_path / "registry.store")
     manifest = next(m for m in manifests() if m.slug == "egoverse-hpt")
     saved = []
     for slug in ("egoverse-hpt-joints", "egoverse-dp-joints", "egoverse-pi05-bc-aria"):

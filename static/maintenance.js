@@ -1,4 +1,4 @@
-/* One preview and confirmation flow for history and unreferenced storage. */
+/* Shared deletion entry point: use data-delete-kind / data-delete-id for every resource. */
 (() => {
   const dialog = document.querySelector("#maintenance-dialog");
   const title = document.querySelector("#maintenance-title");
@@ -8,7 +8,7 @@
   let sequence = 0, busy = false, current = null;
   const gateway = () => document.querySelector("#gateway").value;
   const bytes = value => value == null ? "—" : `${(value / 1024 / 1024).toFixed(2)} MB`;
-  const labels = {experiment: "experiment", run: "training run", evaluation: "evaluation and rollouts"};
+  const labels = {experiment: "experiment", run: "training run", evaluation: "evaluation and rollouts", adapter: "adapter", suite: "evaluation suite"};
   function setBusy(value) {
     busy = value;
     dialog.setAttribute("aria-busy", String(value));
@@ -55,11 +55,17 @@
           `<tr><td>${escapeHtml(item.label)}</td><td>${escapeHtml(item.reason)} ${item.id && labels[item.kind] ? `<button type="button" class="button button-outline" data-delete-kind="${item.kind}" data-delete-id="${escapeHtml(item.id)}">Review deletion</button>` : ""}</td></tr>`));
       } else {
         message.textContent = `${result.retry ? "Retry deletion of" : "Permanently delete"} ${result.label}? Skynet records and listed files will be removed. External tracking services keep their own history.`;
-        const counts = Object.entries(result.counts).map(([name, count]) => `${count} ${name.replaceAll("_", " ")}`).join(" · ");
+        const counts = Object.entries(result.counts).map(([name, count]) => `${count} ${({adapters: "adapter versions", evaluation_suites: "suite versions"}[name] || name.replaceAll("_", " "))}`).join(" · ");
         const paragraph = document.createElement("p"); paragraph.textContent = counts; content.append(paragraph);
         content.insertAdjacentHTML("beforeend", table(["File or directory", "Size"], result.files.map(item =>
           `<tr><td>${escapeHtml(item.path)}${item.exists ? "" : " (already absent)"}</td><td>${bytes(item.size_bytes)}</td></tr>`)));
         confirm.textContent = result.retry ? "Retry deletion" : "Delete permanently";
+      }
+      for (const notice of result.notices || []) {
+        const paragraph = document.createElement("p");
+        paragraph.className = "inline-alert is-warning dialog-notice";
+        paragraph.textContent = notice;
+        content.prepend(paragraph);
       }
     } catch (error) {
       message.textContent = error.message; message.classList.add("is-error");
@@ -92,13 +98,15 @@
         method: plan.kind === "storage" ? "POST" : "DELETE",
         body: JSON.stringify({token: plan.token, gateway: gateway(), ...(plan.kind === "storage" ? {paths} : {})}),
       });
+      let refreshError = null;
       if (plan.kind !== "storage") {
         closeActiveDisclosure({restoreFocus: false});
-        await Promise.all([loadExperiments(true), loadRuns(true), loadEvaluations(true)]);
+        try { await refreshAfterDeletion(plan.kind); }
+        catch (error) { refreshError = error; }
       }
       delete dialog.dataset.blockClose;
       SkynetDialog.close(dialog);
-      showToast("Deletion completed.");
+      showToast(refreshError ? `Deleted. Refresh the page to update the lists: ${refreshError.message}` : "Deletion completed.", Boolean(refreshError));
     } catch (error) {
       current = null;
       message.textContent = `${error.message} Close and review deletion again to retry.`;

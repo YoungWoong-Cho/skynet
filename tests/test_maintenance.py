@@ -304,8 +304,6 @@ def test_central_evaluation_delete_scrubs_journal_and_removes_retired_bodies(
     from skynet_app.tracking_journal import TrackingJournal
 
     service, db, _, _, run, evaluation, root = history
-    if not db.is_postgres:
-        pytest.skip("Run with the PostgreSQL contract plugin")
 
     def exchange(self, request):
         result = subprocess.run(

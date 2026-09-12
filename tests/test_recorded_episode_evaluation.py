@@ -57,7 +57,6 @@ def test_pins_the_source_checksum_not_the_latest_recording(tmp_path, monkeypatch
            "archive": {"state": "READY", "gateway": "sky2", "root": root,
                        "manifest": archive_manifest, "manifest_sha256": checksum}}
     with database.connection() as c:
-        c.execute("CREATE TABLE live_xr_sessions (id TEXT PRIMARY KEY, payload_json TEXT)")
         c.execute("INSERT INTO live_xr_sessions VALUES (?, ?)", ("session", json.dumps(job)))
     monkeypatch.setattr(live_xr_archive, "CLUSTER", SimpleNamespace(paths=SimpleNamespace(datasets="/datasets")))
     cluster = SimpleNamespace(candidates=lambda host: [host], _remote_path=lambda path: path)
@@ -133,6 +132,8 @@ def test_run_api_keeps_single_episode_simulation_and_explains_empty_results(tmp_
     manifest = next(m for m in manifests() if m.slug == "egoverse-hpt")
     document = native_spec(manifest, "hpt_joints").model_dump(mode="json", by_alias=True)
     assignment = spec()["data"]["bundle"]["assignments"][0]
+    from test_evaluation_compatibility import metadata
+    assignment["version"]["metadata"].update(metadata())
     assignment.update(position=0, resource={"provider":"fixture","namespace":"test","name":"one","kind":"dataset"})
     assignment["version"].update(revision="v1",format="egoverse-episodes-zarr/v1",path="/prepared",manifest_sha256="a"*64,status="READY")
     document["data"] = {"bundle": {"id":"one","name":"one","version":"v1","manifest_sha256":"a"*64,"assignments":[assignment]}}
@@ -147,15 +148,20 @@ def test_run_api_keeps_single_episode_simulation_and_explains_empty_results(tmp_
         response = client.get('/api/evaluation-suites?run_id=run')
         assert response.status_code == 200, response.text
         payload = response.json()
-        assert [s["name"] for s in payload["suites"]] == ["dexverse_training_episode"]
-        assert payload["suites"][0]["is_default"]
-        assert payload["suites"][0]["config_json"]["maximum_episodes_per_task"] == 1
-        assert "no held-out" in payload["unavailable_suites"][0]["reason"]
+        returned = {s['name']: s for s in payload['suites']}
+        assert len(payload['suites']) == len(svc.database.list_evaluation_suites())
+        assert returned['dexverse_training_episode']['is_default']
+        assert returned['dexverse_training_episode']['config_json']['maximum_episodes_per_task'] == 1
+        assert returned['dexverse_recorded']['compatibility']['ready']
+        assert returned['egoverse_held_out']['compatibility']['status'] == 'incompatible'
+        assert any('no held-out' in s['reason'] for s in payload['unavailable_suites'])
         def missing(*_):
             raise ValueError("Original recording unavailable")
         monkeypatch.setattr(pipeline, "recorded_episode_sources", missing)
         payload = client.get('/api/evaluation-suites?run_id=run').json()
-        assert not payload["suites"]
+        returned = {s['name']: s for s in payload['suites']}
+        assert returned['dexverse_training_episode']['compatibility']['status'] == 'unknown'
+        assert returned['dexverse_recorded']['compatibility']['ready']
         assert any(s["reason"] == "Original recording unavailable" for s in payload["unavailable_suites"])
     finally:
         svc.stop()

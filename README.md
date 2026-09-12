@@ -48,7 +48,7 @@ Start the local server. Restrict development reloads to source folders so saved 
 
 ```bash
 export SKYNET_SSH_HOSTS=sky1,sky2
-export SKYNET_DATABASE_PATH="$PWD/data/skynet.db"
+# Configure config/database.json as described in docs/central-database.md.
 uv run uvicorn skynet_app.main:app --reload --reload-dir skynet_app --reload-dir ops --host 127.0.0.1 --port 8080
 ```
 
@@ -57,7 +57,7 @@ Open `http://127.0.0.1:8080` and enter your email. No password or email verifica
 Run the test suite:
 
 ```bash
-uv run pytest
+SKYNET_TEST_POSTGRES_ADMIN="host=127.0.0.1 dbname=postgres user=your_test_user" uv run pytest
 npm ci
 npm run test:live
 npm run test:hands
@@ -189,7 +189,7 @@ The active, non-secret profile is returned by `GET /api/settings` and `GET /api/
 
 ## Versioned Adapter Registry
 
-The application seeds the six experiment adapters into SQLite, then treats adapters as database records rather than UI hardcoding. An adapter manifest declares repository matching metadata, allowed and recommended runtimes, capabilities, defaults, a structured training command template, checkpoint/resume behavior, evaluation metadata, warnings, and TODOs.
+The application seeds the built-in experiment adapters into PostgreSQL, then treats adapters as database records rather than UI hardcoding. An adapter manifest declares repository matching metadata, allowed and recommended runtimes, capabilities, defaults, a structured training command template, checkpoint/resume behavior, evaluation metadata, warnings, and TODOs.
 
 The DexVerse experiment adapter is retired and existing seeded records are archived on startup. Its historical manifest handler remains available for saved experiments. DexVerse simulation and the separate `dexverse-cloudxr` collection registry are unaffected.
 
@@ -199,7 +199,7 @@ Registry lifecycle semantics are:
 - **Edit** appends a new immutable version; it never mutates an older version. `expected_latest_version` provides optimistic conflict detection.
 - **Clone** copies any selected version into a new adapter at version 1 and records its origin.
 - **Validate** schema-checks the manifest and may inspect a selected exact repository commit. Validation does not execute repository code or launch training.
-- **Archive** hides the adapter from normal selection while retaining every version and historical reference. `DELETE` is an archive alias, not permanent deletion.
+- **Archive** hides the adapter from normal selection while retaining every version and historical reference. The legacy adapter `DELETE` route remains an archive alias. **Delete** in the UI uses the shared dependency preview to permanently remove an unused lineage.
 - **Restore** makes an archived adapter selectable again.
 
 Created experiment revisions embed the selected manifest and its SHA-256. Later registry edits or archival therefore cannot change an existing experiment or submitted run.
@@ -445,9 +445,9 @@ The run capsule records these exact URIs and hashes along with the code commit, 
 
 ## Database and artifact storage
 
-The application database defaults to `data/skynet.db` beside the source tree and can be overridden with `SKYNET_DATABASE_PATH`. Keep SQLite on the application host, not on a network filesystem. The schema is designed to migrate to PostgreSQL when concurrent users or multiple server processes are needed.
+The application requires the central PostgreSQL database configured in `config/database.json` or `SKYNET_DATABASE_URL`. Missing configuration or a connection failure stops startup; no host-local database is created. All app hosts use the same database and coordinate background work through PostgreSQL advisory locks.
 
-SQLite stores experiment lineage, run/stage/attempt state, evaluation progress, metadata, and file indexes. Large checkpoints, logs, videos, native configs, and result files stay below `/coc/flash7/ycho420`. Run capsules remain sufficient to audit and reconstruct application records if the local database is lost.
+PostgreSQL stores experiment lineage, run/stage/attempt state, evaluation progress and file indexes. Large metadata bodies, checkpoints, logs, videos, native configs and results live on cluster storage. See [central database setup](docs/central-database.md) and [storage maintenance](docs/storage-maintenance.md).
 
 Adapter registry rows store immutable numbered manifest versions, manifest hashes, clone provenance, archive state, and exact-commit validation reports. Archiving never removes versions referenced by experiments.
 
@@ -510,13 +510,13 @@ Secret values are never written to the capsule. Only secret references may be re
 
 Central tracking is optional. Configure either provider under **Settings**, test the connection, and enable it in an experiment. Skynet derives the remote project/experiment from the Skynet experiment and uses the Skynet run UUID as the remote run identity. Remote links and delivery status then appear on experiment and run views.
 
-Secrets entered in Settings are saved by default in the operating-system credential manager (`macOS Keychain`, Windows Credential Locker, or a Linux Secret Service/KWallet backend). They are never stored in SQLite, plaintext files, experiment specifications, `sbatch` files, run capsules, logs, or API responses. A connection can opt out with `remember: false`, which keeps the credential only in backend process memory. Environment credentials remain supported and are never copied into the credential manager.
+Secrets entered in Settings are saved by default in the operating-system credential manager (`macOS Keychain`, Windows Credential Locker, or a Linux Secret Service/KWallet backend). They are never stored in PostgreSQL, plaintext files, experiment specifications, `sbatch` files, run capsules, logs, or API responses. A connection can opt out with `remember: false`, which keeps the credential only in backend process memory. Environment credentials remain supported and are never copied into the credential manager.
 
 The tracking connection API contract is:
 
 - `POST /api/tracking/connections/{provider}/connect` accepts `remember` (default `true`) alongside the provider fields. A remembered credential is written only after remote validation succeeds.
 - `GET /api/tracking/connections` and all connection mutation responses expose only nonsecret connection metadata. `credential_source` is `credential_store`, `session`, `environment`, or `null`; `status` reports the connection state. Secret values are never returned.
-- On restart, Skynet restores a remembered credential only when its credential-manager record is pinned to the same validated endpoint stored in SQLite. A session-only credential must be entered again.
+- On restart, Skynet restores a remembered credential only when its credential-manager record is pinned to the same validated endpoint stored in PostgreSQL. A session-only credential must be entered again.
 - Disconnect deletes an app-managed credential-manager record and the nonsecret connection metadata. An environment-backed credential cannot be deleted by Skynet and remains externally managed.
 - If no supported secure credential manager is available, remembered connect/disconnect operations fail explicitly with HTTP 503. Use `remember: false` for process-only storage or configure environment variables. Plaintext/file keyring backends are rejected.
 
@@ -536,17 +536,18 @@ MLflow tracking operations are sanitized and written first to an atomic JSONL sp
 A minimal loopback-only MLflow deployment can use:
 
 ```bash
-mkdir -p /coc/flash7/ycho420/mlflow/{db,artifacts}
+mkdir -p /coc/flash7/ycho420/mlflow/artifacts
+# Set MLFLOW_DATABASE_URI to a separate PostgreSQL database for MLflow.
 
-uvx --from mlflow mlflow server \
+uvx --from mlflow --with psycopg2-binary mlflow server \
   --host 127.0.0.1 \
   --port 5000 \
-  --backend-store-uri sqlite:////coc/flash7/ycho420/mlflow/db/mlflow.db \
+  --backend-store-uri "$MLFLOW_DATABASE_URI" \
   --artifacts-destination file:///coc/flash7/ycho420/mlflow/artifacts \
   --serve-artifacts
 ```
 
-Use one server worker with SQLite. Prefer PostgreSQL before adding workers or concurrent users. Plain HTTP is accepted only for loopback endpoints. A server on another host must be exposed through HTTPS, preferably with authentication; do not expose an unauthenticated tracking server publicly.
+Keep MLflow in a separate database from Skynet. Plain HTTP is accepted only for loopback endpoints. A server on another host must be exposed through HTTPS, preferably with authentication; do not expose an unauthenticated tracking server publicly.
 
 Configure the application and jobs with:
 

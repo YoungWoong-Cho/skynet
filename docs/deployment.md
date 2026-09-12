@@ -1,6 +1,8 @@
 # Linux team deployment
 
-The current deployment is on `rl2-ws11` (`130.207.121.35`), under the Linux account `youngwoong`. The checkout and virtual environment are `/home/youngwoong/skynet` and `/home/youngwoong/skynet/.venv`. The service listens on TCP 8080. A network administrator must allow that port from the team's trusted network before direct browser access will work.
+The previous `rl2-ws11` deployment was removed. The following instructions are
+for a fresh Linux installation. Configure the same central PostgreSQL endpoint
+and cluster object store used by the Mac; the server does not get a DB copy.
 
 Email entry separates personal workspaces; it does not verify identity. Keep access limited to the trusted team. An SSH tunnel also works without opening an inbound web port:
 
@@ -23,9 +25,9 @@ systemd-analyze --user verify ~/.config/systemd/user/skynet.service
 systemctl --user daemon-reload
 ```
 
-Configure the SSH aliases in the cluster profile with non-interactive access and verified host keys. The current server has its own dedicated key for sky1/sky2; it does not contain the Mac's private SSH or GitHub credentials. Its authorized key is restricted to this server's IP, so update that restriction if the server's address changes.
+Configure the SSH aliases in the cluster profile with non-interactive access and verified host keys. Provision a dedicated SSH identity on the new app host; keep private keys out of the repository.
 
-Before starting, assign the existing workspace owner and migrate data as described below. For a new installation, prepare the intended owner instead. Enable user services outside interactive login sessions, then start one server worker:
+Before starting, configure the central endpoint as described below. For a new installation, prepare the intended workspace owner. Enable user services outside interactive login sessions, then start one server worker:
 
 ```bash
 loginctl enable-linger "$USER"
@@ -36,20 +38,21 @@ The service uses the user's Linux Secret Service for remembered tracking credent
 
 `data/operator.env` is an optional, private environment file for operator settings already approved for this installation. The service does not accept simulator licenses by default. Keep the data directory private to the service user.
 
-## Workspace cutover
+## Central workspace connection
 
-Only one Skynet scheduler may manage a copied job history. Stop the previous app, including its development reload supervisor, before taking the final SQLite snapshot. Stopping the app does not stop Slurm training jobs.
+1. Install the same code revision as the other app hosts.
+2. Configure `config/database.json` and the private DB password file using
+   [central database setup](central-database.md). Use the existing object-store root.
+3. Verify the same workspace, recording, training and evaluation IDs are visible.
+   Cluster data stays at its registered location; there is no DB-file transfer.
+4. Configure credentials on the new host through its secure credential store.
+   Credential transfer requires explicit authorization; never put keys in Git.
+5. Start the service and verify sign-in, history, artifact access and cluster access.
+   Do not submit or cancel real jobs just to verify deployment.
 
-1. Preserve a rollback copy of the old database and its matching code version.
-2. Use SQLite's backup API for a consistent database copy. Do not copy a live database without its committed WAL contents.
-3. Transfer the database and supporting `data/` files over SSH. Existing cluster recordings, prepared datasets, checkpoints and training jobs stay on the cluster.
-4. Preserve workspace IDs and ownership. The current legacy owner is `ycho420@gatech.edu`.
-5. Relocate mutable submission-host artifact paths to the new checkout, verifying file hashes. Preserve immutable dataset versions, manifests, scientific configurations, Slurm IDs and cluster paths. Reset copied browser sessions to require a fresh sign-in.
-6. Transfer remembered tracking credentials directly between secure stores over SSH; retain the source key until the target is verified. Never place credentials in a Git commit, command line, log or plaintext migration file.
-7. Verify database integrity, foreign keys, record counts, supporting file checksums and artifact accessibility before starting the new service.
-8. Verify email sign-in, run history, recording storage locations, tracking connections and cluster access on the deployed app. Do not submit or cancel real jobs just to test the deployment.
-
-The current server stores the database and supporting metadata under `~/skynet/data/`. The retained Shadow cube recordings remain on sky2. Bonjour connectivity is a separate prerequisite for collecting new data on that workstation.
+PostgreSQL chooses one background coordinator across app hosts. If cutting over,
+stop the previous app; this does not stop existing Slurm jobs. Both hosts continue
+to reference the same cluster database and files.
 
 ## Operations
 

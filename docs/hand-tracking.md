@@ -1,6 +1,6 @@
 # Hand tracking in live collection
 
-Every selectable hand uses DexVerse's `SimpleAbsoluteRetargeter` with the standard DexPilot finger solver. Start begins the episode; it does not turn the current wrist pose into a relative zero. The robot follows the tracked wrist's world pose. Each robot supplies its joint order, fingertip links, and wrist origin, including separate origins for bimanual Shadow.
+Every selectable hand uses DexVerse's `SimpleAbsoluteRetargeter` with the standard DexPilot finger solver. Start begins the episode; it does not turn the current wrist pose into a relative zero. The robot follows the tracked wrist's world pose. Hand models and their coordinate contract are defined in the [environment-independent hand bundles](hand-assets.md). DexVerse supplies the retargeter and simulator configuration. Each robot supplies its joint order, fingertip links, and wrist origin, including separate origins for bimanual Shadow.
 
 Skynet does not replace DexVerse's finger references, canonical hand conversion, or finger solver. The simulator wrapper only selects equivalent continuous wrist Euler angles so position-controlled joints do not spin backward at the ±180° boundary. Finger and translation commands remain identical to DexVerse's output. Missing origins or incomplete finger mappings stop startup with an error.
 

@@ -149,7 +149,9 @@ def test_catalog_rejects_unknown_or_model_only_hands():
             selection("Dexverse-PickUpStick-v0", hand)
     with pytest.raises(ValueError, match="Unsupported live task"):
         selection("Not-A-Task", "floating_shadow_right")
-    assert selection("Dexverse-PickCube-v0", "floating_shadow_left")[1]["available"]
+    assert selection("Dexverse-PickCube-v0", "skynet_shadow_left")[1]["available"]
+    with pytest.raises(ValueError, match="Unsupported live hand"):
+        selection("Dexverse-PickCube-v0", "floating_shadow_left")
 
 
 def test_capture_video_download_is_verified_cached_and_never_uses_gpu(review):
@@ -297,7 +299,9 @@ def test_video_waits_for_gpu_then_finishes_or_reports_bounded_failure(
     videos.download = lambda *a: (directory / "video.mp4").write_bytes(b"cached video")
     waits = []
     generation = live_xr_video.VideoGeneration()
-    monkeypatch.setattr(generation.cancel, "wait", lambda seconds: waits.append(videos.status(*key)))
+    monkeypatch.setattr(
+        generation.cancel, "wait", lambda seconds: waits.append(videos.status(*key))
+    )
     videos.generations[key] = generation
     videos.active.add(key)
     videos.prepare(*key)
@@ -393,7 +397,12 @@ def videos(review):
     reviews, job, _ = review
     reviews.directory("session", 0).mkdir(parents=True)
     reviews.prepare("session", 0)
-    job["profile"].update(execution="workstation", runtime="/runtime", repository="/repo", work_root="/work")
+    job["profile"].update(
+        execution="workstation",
+        runtime="/runtime",
+        repository="/repo",
+        work_root="/work",
+    )
     service = LiveVideoService(reviews)
     service.sources = {}
     yield service
@@ -427,8 +436,14 @@ def test_active_gpu_wait_cancel_is_prompt_and_stale_cancel_cannot_stop_retry(vid
     videos.executor.submit = lambda *args: None
     second = videos.create("session", 0)
     assert second["generation"] != first["generation"]
-    assert videos.cancel("session", 0, expected_generation=first["generation"])["state"] == "QUEUED"
-    assert videos.cancel("session", 0, expected_generation=second["generation"])["state"] == "CANCELLED"
+    assert (
+        videos.cancel("session", 0, expected_generation=first["generation"])["state"]
+        == "QUEUED"
+    )
+    assert (
+        videos.cancel("session", 0, expected_generation=second["generation"])["state"]
+        == "CANCELLED"
+    )
 
 
 def test_active_download_cancel_closes_stream_and_removes_partial(videos):
@@ -439,8 +454,14 @@ def test_active_download_cancel_closes_stream_and_removes_partial(videos):
     review_path = directory.parent / "review.json"
     review = json.loads(review_path.read_text())
     raw = b"\x00\x00\x00\x18ftypisom" + b"test payload"
-    review["episodes"][0]["video"] = dict(state="READY", path="recordings/live/demo.mp4",
-        size_bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest(), fps=30, frames=1)
+    review["episodes"][0]["video"] = dict(
+        state="READY",
+        path="recordings/live/demo.mp4",
+        size_bytes=len(raw),
+        sha256=hashlib.sha256(raw).hexdigest(),
+        fps=30,
+        frames=1,
+    )
     review_path.write_text(json.dumps(review))
     entered, closed = threading.Event(), threading.Event()
 
@@ -453,7 +474,8 @@ def test_active_download_cancel_closes_stream_and_removes_partial(videos):
             closed.set()
 
     videos.live.transport = lambda _: SimpleNamespace(
-        file_size=lambda *a: ("test-host", len(raw)), stream_file_range=stream)
+        file_size=lambda *a: ("test-host", len(raw)), stream_file_range=stream
+    )
     videos.create("session", 0)
     assert entered.wait(2)
     assert list(directory.glob("download.*.part"))
@@ -471,7 +493,9 @@ def test_cancel_during_remote_launch_cannot_publish_late_ready(videos):
     calls = []
 
     def control(transport, job, generation, root, operation, **kwargs):
-        assert not videos.lock._is_owned(), "Network operations must not hold the state lock"
+        assert not videos.lock._is_owned(), (
+            "Network operations must not hold the state lock"
+        )
         calls.append((operation, generation.token, root))
         if operation == "start":
             launched.set()
@@ -498,8 +522,13 @@ def test_failed_remote_stop_remains_cancelling_and_can_be_retried_after_restart(
     key = ("session", 0, 0)
     job, _, review, directory = videos.source(*key)
     generation = VideoGeneration(finished=True)
-    root = job["root"] + f"/output/review-videos/{review['sha256']}/0/{videos.version}/attempts/{generation.token}"
-    videos.publish(directory, state="PREPARING", generation=generation.token, remote_root=root)
+    root = (
+        job["root"]
+        + f"/output/review-videos/{review['sha256']}/0/{videos.version}/attempts/{generation.token}"
+    )
+    videos.publish(
+        directory, state="PREPARING", generation=generation.token, remote_root=root
+    )
     assert videos.status(*key)["state"] == "INTERRUPTED"
     assert videos.create(*key)["state"] == "INTERRUPTED"
     calls = []
@@ -550,14 +579,25 @@ def video_supervisor(tmp_path, monkeypatch):
 
     token = "a" * 32
     root = tmp_path / "attempts" / token
-    state = dict(LoadState="not-found", ActiveState="inactive", SubState="dead", ExecMainStatus="0",
-                 Environment=f"SKYNET_VIDEO_GENERATION={token}", MainPID="0", ControlGroup="")
+    state = dict(
+        LoadState="not-found",
+        ActiveState="inactive",
+        SubState="dead",
+        ExecMainStatus="0",
+        Environment=f"SKYNET_VIDEO_GENERATION={token}",
+        MainPID="0",
+        ControlGroup="",
+    )
     calls = []
 
     def run(args, **kwargs):
         calls.append(args)
         if args[:3] == ["systemctl", "--user", "show"]:
-            return SimpleNamespace(returncode=0, stdout="\n".join(f"{k}={v}" for k, v in state.items()), stderr="")
+            return SimpleNamespace(
+                returncode=0,
+                stdout="\n".join(f"{k}={v}" for k, v in state.items()),
+                stderr="",
+            )
         if args[:3] == ["systemctl", "--user", "stop"]:
             state.update(ActiveState="inactive", SubState="dead")
         if args[0] == "systemd-run" or args[:3] == ["systemctl", "--user", "start"]:
@@ -565,8 +605,13 @@ def video_supervisor(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", run)
-    value = dict(root=str(root), generation=token, sources={}, request={},
-                 profile=dict(runtime="/runtime", repository="/repo", work_root="/work"))
+    value = dict(
+        root=str(root),
+        generation=token,
+        sources={},
+        request={},
+        profile=dict(runtime="/runtime", repository="/repo", work_root="/work"),
+    )
     return control, value, state, calls, root
 
 
@@ -577,7 +622,9 @@ def test_remote_cancel_before_start_prevents_late_launch(video_supervisor):
     assert not any(call[0] == "systemd-run" for call in calls)
 
 
-def test_remote_cancel_stops_only_owned_unit_and_cleans_only_owned_files(video_supervisor):
+def test_remote_cancel_stops_only_owned_unit_and_cleans_only_owned_files(
+    video_supervisor,
+):
     control, value, state, calls, root = video_supervisor
     control(dict(value, operation="start"))
     sibling = root.parent / "another-generation.mp4"
@@ -586,7 +633,9 @@ def test_remote_cancel_stops_only_owned_unit_and_cleans_only_owned_files(video_s
     (root / "video.mp4").write_bytes(b"own completed file")
     assert control(dict(value, operation="cancel"))["state"] == "CANCELLED"
     stops = [call for call in calls if call[:3] == ["systemctl", "--user", "stop"]]
-    assert stops == [["systemctl", "--user", "stop", f"skynet-video-{value['generation']}.service"]]
+    assert stops == [
+        ["systemctl", "--user", "stop", f"skynet-video-{value['generation']}.service"]
+    ]
     assert sibling.read_bytes() == b"other video"
     assert not list(root.glob("*.mp4"))
     launch = next(call for call in calls if call[0] == "systemd-run")
@@ -597,7 +646,11 @@ def test_remote_cancel_stops_only_owned_unit_and_cleans_only_owned_files(video_s
 
 def test_remote_ownership_mismatch_cannot_stop_service(video_supervisor):
     control, value, state, calls, _ = video_supervisor
-    state.update(LoadState="loaded", ActiveState="active", Environment="SKYNET_LIVE_SESSION_ID=other")
+    state.update(
+        LoadState="loaded",
+        ActiveState="active",
+        Environment="SKYNET_LIVE_SESSION_ID=other",
+    )
     with pytest.raises(RuntimeError, match="ownership does not match"):
         control(dict(value, operation="cancel"))
     assert not any(call[:3] == ["systemctl", "--user", "stop"] for call in calls)
@@ -622,13 +675,22 @@ def test_remote_gpu_lock_exit_is_retryable_wait_state(video_supervisor):
     assert control(dict(value, operation="status"))["state"] == "WAITING_GPU"
     assert control(dict(value, operation="start"))["state"] == "STARTING"
     assert len([call for call in calls if call[0] == "systemd-run"]) == 1
-    assert ["systemctl", "--user", "start", f"skynet-video-{value['generation']}.service"] in calls
+    assert [
+        "systemctl",
+        "--user",
+        "start",
+        f"skynet-video-{value['generation']}.service",
+    ] in calls
 
 
 def test_invalid_recovered_video_owner_cannot_poison_active_state(videos):
     directory = videos.source("session", 0, 0)[3]
-    videos.publish(directory, state="PREPARING", generation="a" * 32,
-                   remote_root="/another/recording/attempts/" + "a" * 32)
+    videos.publish(
+        directory,
+        state="PREPARING",
+        generation="a" * 32,
+        remote_root="/another/recording/attempts/" + "a" * 32,
+    )
     for _ in range(2):
         with pytest.raises(ValueError, match="does not match this recording"):
             videos.cancel("session", 0)
@@ -639,10 +701,15 @@ def test_invalid_recovered_video_owner_cannot_poison_active_state(videos):
 def test_recovered_video_transport_validation_failure_can_be_retried(videos):
     job, _, review, directory = videos.source("session", 0, 0)
     token = "a" * 32
-    root = job["root"] + f"/output/review-videos/{review['sha256']}/0/{videos.version}/attempts/{token}"
+    root = (
+        job["root"]
+        + f"/output/review-videos/{review['sha256']}/0/{videos.version}/attempts/{token}"
+    )
     videos.publish(directory, state="PREPARING", generation=token, remote_root=root)
     original_transport = videos.live.transport
-    videos.live.transport = lambda _: (_ for _ in ()).throw(ValueError("Invalid saved workstation runtime"))
+    videos.live.transport = lambda _: (_ for _ in ()).throw(
+        ValueError("Invalid saved workstation runtime")
+    )
     failed = videos.cancel("session", 0)
     assert failed["state"] == "CANCELLING" and failed["can_cancel"]
     assert "Invalid saved workstation runtime" in failed["error"]
@@ -652,7 +719,9 @@ def test_recovered_video_transport_validation_failure_can_be_retried(videos):
 
 
 @pytest.mark.parametrize("legacy", [True, False])
-def test_remote_completed_cache_is_reused_without_new_gpu_work(video_supervisor, legacy):
+def test_remote_completed_cache_is_reused_without_new_gpu_work(
+    video_supervisor, legacy
+):
     control, value, _, calls, root = video_supervisor
     base = root.parent.parent
     cached_root = base if legacy else base / "attempts" / ("b" * 32)
@@ -664,7 +733,9 @@ def test_remote_completed_cache_is_reused_without_new_gpu_work(video_supervisor,
     assert not any(call[0] == "systemd-run" for call in calls)
 
 
-def test_remote_failed_unit_with_live_descendants_is_not_confirmed_cancelled(video_supervisor, monkeypatch):
+def test_remote_failed_unit_with_live_descendants_is_not_confirmed_cancelled(
+    video_supervisor, monkeypatch
+):
     from pathlib import Path
 
     control, value, state, _, root = video_supervisor
@@ -676,7 +747,9 @@ def test_remote_failed_unit_with_live_descendants_is_not_confirmed_cancelled(vid
     populated = True
 
     def exists(path):
-        return True if path in (group, group / "cgroup.events") else original_exists(path)
+        return (
+            True if path in (group, group / "cgroup.events") else original_exists(path)
+        )
 
     def read(path, *args, **kwargs):
         if path == group / "cgroup.events":
@@ -719,3 +792,29 @@ def test_late_worker_cleanup_does_not_repeat_a_failed_cancel_without_retry(video
     assert videos.status("session", 0)["state"] == "CANCELLING"
     assert videos.cancel("session", 0)["state"] == "CANCELLED"
     assert cancel_calls == ["cancel", "cancel"]
+
+
+def test_review_preserves_and_validates_new_hand_identity(payload):
+    payload["robot_type"] = "skynet_shadow_right"
+    header = {
+        "robot": payload["robot_type"],
+        "digest": "b" * 64,
+        "hand_asset": {"digest": "a" * 64},
+        "action_joint_names": ["joint_" + str(i) for i in range(28)],
+    }
+    payload["skynet_hand"] = header
+    profile = {
+        "task": payload["task"],
+        "robot": payload["robot_type"],
+        "hand_bundle": {k: header[k] for k in ("digest", "hand_asset")},
+    }
+    result = inspect(pickle.dumps(payload), profile)
+    assert result["hand_metadata"] == header
+    assert "not stored" not in result["value_note"]
+    header["digest"] = "c" * 64
+    with pytest.raises(ValueError, match="frozen bundle"):
+        inspect(pickle.dumps(payload), profile)
+    header["digest"] = profile["hand_bundle"]["digest"]
+    header["action_joint_names"].pop()
+    with pytest.raises(ValueError, match="dimension"):
+        inspect(pickle.dumps(payload), profile)

@@ -15,7 +15,7 @@ from .tracking_journal import chunk_document
 
 def relocate(database):
     store = database.payload_store
-    if not database.is_postgres or store is None:
+    if store is None:
         raise ValueError("Configure PostgreSQL and its cluster object store first")
     report = {"documents": 0, "bytes_before": 0, "bytes_after": 0, "tables": {}}
     with database.operation_lock("pipeline"), database.transaction() as connection:

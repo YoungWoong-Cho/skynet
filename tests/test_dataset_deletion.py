@@ -2,7 +2,7 @@
 
 import shlex
 import shutil
-import sqlite3
+import psycopg
 import subprocess
 from pathlib import Path
 
@@ -73,7 +73,7 @@ def test_complete_delete_preserves_recordings_and_does_not_reappear(
     # Immutable registry operations still reject direct deletion.
     with (
         service.database.transaction() as c,
-        pytest.raises(sqlite3.IntegrityError, match="immutable"),
+        pytest.raises(psycopg.IntegrityError, match="immutable"),
     ):
         c.execute("DELETE FROM data_resource_versions")
 

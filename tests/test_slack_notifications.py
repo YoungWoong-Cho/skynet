@@ -1,5 +1,5 @@
 import json
-import sqlite3
+import psycopg
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
@@ -137,11 +137,8 @@ def test_actual_transitions_all_events_idempotency_and_secret_storage(setup):
     assert all(row["status"] == "delivered" for row in queued(db))
     assert "secret_test_only" not in json.dumps(slack.settings())
     with db.connection() as c:
-        if getattr(c, "dialect", "sqlite") == "postgresql":
-            tables = [row[0] for row in c.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")]
-            stored = "\n".join(str(dict(row)) for table in tables for row in c.execute('SELECT * FROM "'+table+'"'))
-        else:
-            stored = "\n".join(c.iterdump())
+        tables = [row[0] for row in c.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")]
+        stored = "\n".join(str(dict(row)) for table in tables for row in c.execute('SELECT * FROM "'+table+'"'))
         assert "secret_test_only" not in stored
     payload = sender.call_args_list[0].args[1]
     assert (
@@ -201,19 +198,6 @@ def test_only_confirmed_attempts_notify_including_after_restart(setup, stage_typ
     assert sender.call_count == 3
 
 
-def test_upgrade_skips_previously_queued_unconfirmed_errors(setup):
-    system, _, create = setup
-    db, slack, sender = create()
-    slack.configure(webhook_url=WEBHOOK)
-    _, stage, attempt = graph(db)
-    with db.transaction() as c:
-        for category in ['submission_unconfirmed', 'failed']:
-            c.execute('INSERT INTO notification_outbox(owner_id,stage_id,attempt_key,category,job_status) VALUES(?,?,?,?,?)',
-                (db.workspace_id,stage['id'],attempt['id'],category,'SUBMITTING'))
-    Database(system.path)
-    assert [row['status'] for row in queued(db)] == ['skipped', 'skipped']
-    assert not slack.deliver_one()
-    sender.assert_not_called()
 
 
 def test_rollback_disabled_and_no_history_backfill(setup):
@@ -468,19 +452,16 @@ def test_failed_save_keeps_the_original_destination_and_pending_delivery(setup):
     transition(db, stage, attempt, "SUBMITTED", slurm_job_id="123")
     assert slack.settings()["pending_count"] == 1
     with db.transaction() as connection:
-        if getattr(connection, "dialect", "sqlite") == "postgresql":
-            connection.executescript("""CREATE FUNCTION reject_settings_fn() RETURNS trigger LANGUAGE plpgsql AS $$
-                BEGIN RAISE EXCEPTION 'write rejected' USING ERRCODE='23514'; END; $$;
-                CREATE TRIGGER reject_settings BEFORE UPDATE ON slack_notifications
-                FOR EACH ROW EXECUTE FUNCTION reject_settings_fn();""")
-        else:
-            connection.execute("CREATE TRIGGER reject_settings BEFORE UPDATE ON slack_notifications BEGIN SELECT RAISE(ABORT,'write rejected'); END")
+        connection.executescript("""CREATE FUNCTION reject_settings_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE EXCEPTION 'write rejected' USING ERRCODE='23514'; END; $$;
+            CREATE TRIGGER reject_settings BEFORE UPDATE ON slack_notifications
+            FOR EACH ROW EXECUTE FUNCTION reject_settings_fn();""")
     with pytest.raises(INTEGRITY_ERRORS):
         slack.configure(webhook_url=WEBHOOK.replace("BTEST", "BNEW"))
     assert slack.credentials.load("slack").credentials["webhook_url"] == WEBHOOK
     assert queued(db)[0]["status"] == "pending"
     with db.transaction() as connection:
-        connection.execute("DROP TRIGGER reject_settings ON slack_notifications" if db.is_postgres else "DROP TRIGGER reject_settings")
+        connection.execute("DROP TRIGGER reject_settings ON slack_notifications" )
     sender.side_effect = None
     slack.deliver_one()
     assert sender.call_args.args[0] == WEBHOOK

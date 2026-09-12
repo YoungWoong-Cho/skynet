@@ -89,6 +89,7 @@ def simulation_support_files():
             "evaluation_workers.py", "dexverse_readiness.py", "xpolicy_evaluation.py",
             "dexverse_evaluation.py", "evaluation_video.py", "policy_simulator.py",
             "recorded_scene.py", "xpolicy_runtime.py", "policy_transport.py",
+            "policy_contract.py", "evaluation_preflight.py", "episode_geometry.py", "episode_trace.py",
         )
     }
     files.update({

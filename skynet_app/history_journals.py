@@ -66,8 +66,6 @@ def cleaned_payload(filename, body, needles):
 
 
 def changes(connection, database, run_id, needles):
-    if not database.is_postgres:
-        return []
     result = []
     for row in connection.execute(
         "SELECT owner_id,filename,payload FROM tracking_journals WHERE run_id=?",

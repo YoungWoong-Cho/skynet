@@ -11,14 +11,34 @@ import numpy as np
 from dex_retargeting.retargeting_config import RetargetingConfig
 from dex_retargeting.robot_wrapper import RobotWrapper
 from scipy.spatial.transform import Rotation
-from runtime import read_bundle, bounded_fingers
+from runtime import read_bundle, bounded_fingers, hand_layouts
 
 
 def check(path):
     root, manifest = read_bundle(path)
+    results = []
+    for side, layout in hand_layouts(manifest).items():
+        hand = dict(manifest, **layout)
+        hand.update(side=side, action_dimension=6 + len(layout["finger_joints"]))
+        hand["neutral"] = {n: manifest["neutral"][n] for n in layout["finger_joints"]}
+        if manifest["side"] == "both":
+            hand["mimic_joints"] = [
+                j
+                for j in manifest["mimic_joints"]
+                if j["name"].startswith(side[0] + "h_")
+            ]
+        results.append(check_hand(root, hand))
+    return {
+        "robot": manifest["robot"],
+        "bundle_digest": manifest["digest"],
+        "hands": results,
+    }
+
+
+def check_hand(root, manifest):
     floating = RobotWrapper(str(root / "simulation.urdf"))
     wrist_indices = [floating.get_joint_index(n) for n in manifest["wrist_joints"]]
-    palm_index = floating.get_link_index("skynet_palm")
+    palm_index = floating.get_link_index(manifest.get("control_frame", "skynet_palm"))
     # Pinned SimpleRelativeRetargeter emits intrinsic XYZ Euler angles. Validate
     # combined rotations: single-axis checks cannot detect an incorrect chain order.
     wrist_poses = ([0, 0, 0], [0.3, -0.4, 0.7], [-0.8, 0.4, -0.2], [0.1, 1.0, -0.6])
@@ -49,9 +69,15 @@ def check(path):
     sign = 1 if manifest["side"] == "right" else -1
     assert sign * open_tips[0, 1] > 0.05, "Thumb is on the wrong side"
     assert sign * (open_tips[1, 1] - open_tips[-1, 1]) > 0.03, "Fingers are mirrored"
-    cfg = json.loads((root / "retarget.json").read_text())["retargeting"]
+    config_name = (
+        "retarget-" + manifest["side"] + ".json"
+        if manifest.get("hand_asset")
+        else "retarget.json"
+    )
+    urdf_name = "hand.urdf" if manifest.get("hand_asset") else "retarget.urdf"
+    cfg = json.loads((root / config_name).read_text())["retargeting"]
     config = RetargetingConfig.from_dict(
-        cfg, {"urdf_path": str(root / "retarget.urdf"), "low_pass_alpha": 1.0}
+        cfg, {"urdf_path": str(root / urdf_name), "low_pass_alpha": 1.0}
     )
     seq = config.build()
     opt, robot = seq.optimizer, seq.optimizer.robot
@@ -80,7 +106,10 @@ def check(path):
         if pose_index == 0:
             seq.set_qpos(q)
         start = time.perf_counter()
-        result = seq.retarget(expected)
+        fixed = np.asarray(getattr(opt, "idx_pin2fixed", []), dtype=int)
+        result = seq.retarget(
+            expected, **({"fixed_qpos": q[fixed]} if fixed.size else {})
+        )
         times.append((time.perf_counter() - start) * 1000)
         result[targets] = bounded_fingers(
             result[targets],

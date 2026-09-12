@@ -204,15 +204,19 @@ def run_loop(
     configure_virtual_wrist(robot, manifest, tracked_sides)
     wrist_commands = DexVerseWristContinuity(teleop._retargeters, tracked_sides)
     from images import state_metadata
+
     _, recorder._metadata["skynet_state_metadata"] = state_metadata(env, cfg)
     recorder._metadata["skynet_step_dt"] = float(env.step_dt)
     if cfg.get("image_capture"):
         from images import training_image_request
-        recorder._metadata["skynet_training_images"] = training_image_request(cfg["image_recipe"])
+
+        recorder._metadata["skynet_training_images"] = training_image_request(
+            cfg["image_recipe"]
+        )
         recorder._metadata["skynet_step_dt"] = float(env.step_dt)
     if manifest:
         marker_names = [
-            manifest["palm"],
+            *(h["palm"] for h in manifest.get("hands", {"hand": manifest}).values()),
             *manifest["joint_child_links"].values(),
             *manifest["tips"],
         ]
@@ -507,19 +511,24 @@ def main():
     try:
         if cfg.get("image_capture"):
             from images import camera_recipe
+
             original_strip = ns["strip_camera_cfgs"]
+
             # Capture the recipe before upstream's XR path removes all cameras.
             def strip_cameras(env_cfg):
                 cfg["image_recipe"] = camera_recipe(env_cfg)
                 return original_strip(env_cfg)
+
             ns["main"].__globals__["strip_camera_cfgs"] = strip_cameras
             original_config = ns["create_environment_config"]
+
             def create_config():
                 env_cfg, success = original_config()
                 if "image_recipe" not in cfg:
                     cfg["image_recipe"] = camera_recipe(env_cfg)
                 env_cfg = ns["prune_stale_obs_refs"](original_strip(env_cfg))
                 return env_cfg, success
+
             ns["main"].__globals__["create_environment_config"] = create_config
         if cfg.get("hand_bundle"):
             sys.path.insert(0, cfg["hand_bundle"]["root"])
@@ -553,7 +562,13 @@ def main():
                         "digest",
                         "source_names",
                         "mimic_joints",
+                        "hand_asset",
+                        "hand_order",
+                        "units",
+                        "wrist_rotation_order",
+                        "hands",
                     )
+                    if k in manifest
                 }
                 self._metadata["skynet_hand"]["action_joint_names"] = (
                     manifest["wrist_joints"] + manifest["finger_joints"]

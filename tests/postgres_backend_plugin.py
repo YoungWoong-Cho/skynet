@@ -1,12 +1,13 @@
-"""Run existing repository contract tests on PostgreSQL.
+"""Isolated PostgreSQL databases and cluster-file doubles for repository tests.
 
-Usage: SKYNET_TEST_POSTGRES_ADMIN=... pytest -p tests.postgres_backend_plugin ...
-Each test's SQLite-style temporary filenames identify isolated PostgreSQL DBs.
-This adapter exists only in tests; application configuration never does this.
+SKYNET_TEST_POSTGRES_ADMIN must point to a disposable test server. A bootstrap
+DB isolates module-level app initialization; every test gets separate DBs. Path
+arguments below are fixture keys only, never application database files.
 """
 
 import hashlib
 import os
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -15,18 +16,47 @@ import pytest
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
+from skynet_app import database as database_module
 from skynet_app.database import Database
+
+
+def pytest_configure(config):
+    admin = os.environ.get("SKYNET_TEST_POSTGRES_ADMIN")
+    if not admin:
+        raise pytest.UsageError("Set SKYNET_TEST_POSTGRES_ADMIN to an isolated PostgreSQL test server. Tests never use the app database.")
+    name = "skynet_bootstrap_" + uuid.uuid4().hex
+    with psycopg.connect(admin, autocommit=True) as c:
+        c.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    # Module-level app imports must never read the installation's endpoint or
+    # object-store configuration, even when tests run in the deployed checkout.
+    test_root = tempfile.TemporaryDirectory(prefix="skynet-test-config-")
+    previous = {key: os.environ.get(key) for key in ("SKYNET_DATABASE_URL", "SKYNET_DATA_ROOT")}
+    config._skynet_bootstrap = (admin, name, previous, database_module.APP_ROOT, test_root)
+    database_module.APP_ROOT = Path(test_root.name)
+    os.environ["SKYNET_DATA_ROOT"] = str(Path(test_root.name) / "data")
+    os.environ["SKYNET_DATABASE_URL"] = make_conninfo(admin, dbname=name)
+
+
+def pytest_unconfigure(config):
+    bootstrap = getattr(config, "_skynet_bootstrap", None)
+    if not bootstrap:
+        return
+    admin, name, previous, app_root, test_root = bootstrap
+    try:
+        with psycopg.connect(admin, autocommit=True) as c:
+            c.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+    finally:
+        database_module.APP_ROOT = app_root
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        test_root.cleanup()
 
 
 @pytest.fixture(autouse=True)
 def postgres_repository_contract(monkeypatch, request, tmp_path):
-    if request.node.name in {
-        "test_legacy_schema_migration_preserves_records_and_claims_configured_owner",
-        "test_upgrade_skips_previously_queued_unconfirmed_errors",
-    }:
-        pytest.skip(
-            "SQLite file migration is covered separately; PostgreSQL import has its own roundtrip test"
-        )
     if request.node.path.name == "test_postgres.py":
         yield
         return
@@ -61,7 +91,7 @@ def postgres_repository_contract(monkeypatch, request, tmp_path):
 
     def initialize(self, path=None, **kwargs):
         if kwargs.get("url"):
-            original(self, path, **kwargs)
+            original(self, **kwargs)
             self.path = next(
                 (
                     key
@@ -80,9 +110,8 @@ def postgres_repository_contract(monkeypatch, request, tmp_path):
         kwargs["url"] = make_conninfo(admin, dbname=names[key])
         if path is not None:
             kwargs["data_root"] = Path(path).parent
-        original(self, None, **kwargs)
-        # Legacy tests reopen their same fixture by filename. This does not
-        # represent a SQLite file, and is never used by the transport.
+        original(self, **kwargs)
+        # Tests can reopen a named fixture without sharing it across tests.
         self.path = path
 
     monkeypatch.setattr(Database, "__init__", initialize)

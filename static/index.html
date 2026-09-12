@@ -11,6 +11,7 @@
     <script type="application/skynet-script" data-workspace-src="/static/connection-settings.js?v=1" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/slack-settings.js?v=1" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/workspace-storage.js?v=1" defer></script>
+    <script type="application/skynet-script" data-workspace-src="/static/episode-viewer.js?v=episode-views-1" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/app.js?v=20260909-experiment-tabs" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/maintenance.js?v=1" defer></script>
     <script type="application/skynet-script" data-workspace-src="/static/hands-ui.js?v=20260907-imported-hands-2" defer></script>
@@ -46,12 +47,17 @@
         <a href="#cluster" class="is-active" data-tab-target="cluster" role="tab" aria-selected="true" aria-controls="cluster">Cluster</a>
         <a id="nav-data" href="#data" data-tab-target="data" data-tab-group="data" role="tab" aria-selected="false" aria-controls="data">Data</a>
         <a href="#experiments" data-tab-target="experiments" data-tab-group="experiments" role="tab" aria-selected="false" aria-controls="experiment-workspace">Experiments</a>
-        <a href="#runs" data-tab-target="runs" role="tab" aria-selected="false" aria-controls="runs">Training Runs</a>
-        <a href="#evaluations" data-tab-target="evaluations" role="tab" aria-selected="false" aria-controls="evaluations">Evaluations</a>
+        <a href="#evaluations" data-tab-target="evaluations" data-tab-group="evaluations" role="tab" aria-selected="false" aria-controls="evaluations">Evaluations</a>
         <a href="#hands" data-tab-target="hands" role="tab" aria-selected="false" aria-controls="hands">Hands</a>
         <a href="#settings" data-tab-target="settings" role="tab" aria-selected="false" aria-controls="settings">Settings</a>
       </nav>
 
+      <div class="header-controls">
+        <div class="workspace-account-bar">
+          <span id="workspace-current-email"></span>
+          <button id="workspace-sign-out" class="text-button" type="button">sign out</button>
+          <span id="workspace-sign-out-error" role="status"></span>
+        </div>
       <div class="connection-control">
         <label for="gateway">Cluster gateway</label>
         <select id="gateway" name="gateway">
@@ -61,13 +67,9 @@
         </select>
         <span id="connection-dot" class="connection-dot is-loading" aria-hidden="true"></span>
       </div>
+      </div>
     </header>
 
-    <div class="workspace-account-bar">
-      <span>Workspace: <strong id="workspace-current-email"></strong></span>
-      <button id="workspace-sign-out" class="button button-outline" type="button">Switch email / sign out</button>
-      <span id="workspace-sign-out-error" role="status"></span>
-    </div>
     <main>
       <section id="cluster" class="tab-panel" data-tab-panel="cluster" role="tabpanel">
         <div class="section-shell workspace-page">
@@ -188,10 +190,10 @@
           <div class="page-heading">
             <div class="page-title-row">
               <h1>Experiments</h1>
-              <p class="workflow-position" aria-label="Training workflow step 1 of 3"><span>01</span> Configure &amp; submit</p>
             </div>
             <div class="page-actions">
               <button id="refresh-experiments" class="button button-outline" type="button">Refresh</button>
+              <button id="refresh-runs" class="button button-outline" type="button" hidden>Refresh</button>
               <button id="refresh-adapters" class="button button-outline" type="button" hidden>Refresh</button>
             </div>
           </div>
@@ -199,6 +201,7 @@
           <nav class="workspace-subnav workspace-view-nav" role="tablist" aria-label="Experiment views">
             <button id="experiment-tab-submit" type="button" role="tab" aria-selected="true" aria-controls="experiments" data-experiment-tab="submit">Submit</button>
             <button id="experiment-tab-adapters" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="adapters" data-experiment-tab="adapters">Adapters</button>
+            <button id="experiment-tab-runs" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="runs" data-experiment-tab="runs">Runs</button>
           </nav>
           <section id="experiments" data-tab-panel="experiments" role="tabpanel" aria-labelledby="experiment-tab-submit">
           <div id="experiments-error" class="inline-alert" role="alert" hidden></div>
@@ -628,18 +631,18 @@
                 </tbody>
               </table>
             </div>
-          <form id="adapter-editor" class="dense-form adapter-editor inline-drawer row-disclosure" hidden>
-            <div class="panel-heading row-disclosure-heading">
+          <dialog id="adapter-editor-dialog" class="app-dialog" data-panel-dialog aria-labelledby="adapter-editor-title"><form id="adapter-editor" class="dense-form adapter-editor dialog-form" hidden>
+            <div class="panel-heading">
               <div>
                 <span id="adapter-editor-mode" class="quiet-label">create</span>
-                <h2 id="adapter-editor-title">Adapter</h2>
+                <h3 id="adapter-editor-title">Adapter</h3>
               </div>
               <div class="panel-heading-actions">
                 <span id="adapter-editor-status" class="quiet-label"></span>
-                <button id="close-adapter-editor" class="text-button disclosure-close" type="button">Close</button>
+                <button id="close-adapter-editor" class="button button-outline" type="button">Close</button>
               </div>
             </div>
-            <div class="row-disclosure-body">
+            <div class="dialog-body">
               <fieldset class="form-section">
                 <legend>Identity</legend>
                 <div class="form-grid">
@@ -713,24 +716,10 @@
                 </div>
               </section>
             </div>
-          </form>
+          </form></dialog>
           </section>
           </section>
-        </div>
-      </section>
-
-      <section id="runs" class="tab-panel" data-tab-panel="runs" role="tabpanel" hidden>
-        <div class="section-shell workspace-page">
-          <div class="page-heading">
-            <div class="page-title-row">
-              <h1>Training Runs</h1>
-              <p class="workflow-position" aria-label="Training workflow step 2 of 3"><span>02</span> Monitor &amp; retry</p>
-            </div>
-            <div class="page-actions">
-              <button id="refresh-runs" class="button button-outline" type="button">Refresh</button>
-            </div>
-          </div>
-
+          <section id="runs" data-tab-panel="runs" role="tabpanel" aria-labelledby="experiment-tab-runs" hidden>
           <div id="runs-error" class="inline-alert" role="alert" hidden></div>
 
           <section class="panel table-panel">
@@ -781,55 +770,17 @@
                 </tbody>
               </table>
             </div>
-            <section id="run-detail" class="row-disclosure inline-drawer" hidden>
-                        <div class="panel-heading row-disclosure-heading">
-                          <div>
-                            <h2 id="run-detail-title">Run</h2>
-                          </div>
-                          <div class="panel-heading-actions">
-                            <div id="run-detail-actions" class="page-actions"></div>
-                            <button id="close-run-detail" class="text-button disclosure-close" type="button">Close</button>
-                          </div>
-                        </div>
-                        <div class="row-disclosure-body">
-                          <div id="run-detail-meta" class="key-value-grid"></div>
-                          <div id="run-detail-tracking" class="tracking-detail-strip" hidden></div>
-
-                          <h3>Attempts</h3>
-                          <div class="table-frame">
-                            <div class="table-scroll run-attempts-table-scroll">
-                              <table>
-                                <thead>
-                                  <tr>
-                                    <th>Attempt</th>
-                                    <th>State</th>
-                                    <th>Slurm job</th>
-                                    <th>Gateway / node</th>
-                                    <th>Started</th>
-                                    <th>Ended</th>
-                                    <th>Error</th>
-                                    <th></th>
-                                  </tr>
-                                </thead>
-                                <tbody id="attempts-body"></tbody>
-                              </table>
-                            </div>
-                          </div>
-
-                          
-                        </div>
-                      </section>
           </section>
 
+          </section>
         </div>
       </section>
 
-      <section id="evaluations" class="tab-panel" data-tab-panel="evaluations" role="tabpanel" hidden>
+      <section id="evaluations" class="tab-panel" data-tab-panel="evaluation-workspace" role="tabpanel" hidden>
         <div class="section-shell workspace-page">
           <div class="page-heading">
             <div class="page-title-row">
               <h1>Evaluations</h1>
-              <p class="workflow-position" aria-label="Training workflow step 3 of 3"><span>03</span> Evaluate &amp; review</p>
             </div>
             <div class="page-actions">
               <button id="refresh-evaluations" class="button button-outline" type="button">Refresh</button>
@@ -838,6 +789,12 @@
 
           <div id="evaluations-error" class="inline-alert" role="alert" hidden></div>
 
+          <nav class="workspace-subnav workspace-view-nav" role="tablist" aria-label="Evaluation views">
+            <button id="evaluation-tab-submit" type="button" role="tab" aria-selected="true" aria-controls="evaluation-submit" data-evaluation-tab="submit">Submit</button>
+            <button id="evaluation-tab-suites" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="evaluation-suites" data-evaluation-tab="suites">Suites</button>
+            <button id="evaluation-tab-runs" type="button" role="tab" aria-selected="false" tabindex="-1" aria-controls="evaluation-runs" data-evaluation-tab="runs">Runs</button>
+          </nav>
+          <section id="evaluation-submit" data-tab-panel="evaluations" role="tabpanel" aria-labelledby="evaluation-tab-submit">
           <form id="evaluation-form" class="panel table-panel dense-form">
             <div class="panel-heading">
               <div>
@@ -944,10 +901,49 @@
             </div>
           </form>
 
+          </section>
+          <section id="evaluation-suites" data-tab-panel="evaluation-suites" role="tabpanel" aria-labelledby="evaluation-tab-suites" hidden>
+            <section class="panel table-panel">
+              <div class="panel-heading panel-heading-tools">
+                <h2>Evaluation suites</h2>
+                <div class="toolbar">
+                  <input id="evaluation-suite-search" type="search" aria-label="Find evaluation suite" placeholder="Filter suite, environment, task">
+                  <span id="evaluation-suite-count" class="quiet-label">Not loaded</span>
+                </div>
+              </div>
+              <div id="evaluation-catalog-error" class="inline-alert" role="alert" hidden></div>
+              <div class="table-scroll tall-table">
+                <table class="evaluation-suites-table">
+                  <thead><tr><th>Suite</th><th>Version</th><th>Environment</th><th>Tasks</th><th>Updated</th><th>Actions</th></tr></thead>
+                  <tbody id="evaluation-suites-body"><tr class="empty-row"><td colspan="6">Open this tab to load suites.</td></tr></tbody>
+                </table>
+              </div>
+            </section>
+          </section>
+          <dialog id="evaluation-suite-detail-dialog" class="app-dialog" data-panel-dialog aria-labelledby="evaluation-suite-detail-title">
+            <section id="evaluation-suite-detail" hidden>
+              <div class="panel-heading">
+                <h3 id="evaluation-suite-detail-title">Evaluation suite</h3>
+                <button type="button" class="button button-outline" data-dialog-close>Close</button>
+              </div>
+              <div id="evaluation-suite-detail-meta" class="key-value-grid"></div>
+              <p id="evaluation-suite-description" class="dialog-message"></p>
+              <fieldset class="form-section">
+                <legend>Tasks</legend>
+                <div class="table-scroll">
+                  <table>
+                    <thead><tr><th>Task</th><th>ID</th></tr></thead>
+                    <tbody id="evaluation-suite-tasks"></tbody>
+                  </table>
+                </div>
+              </fieldset>
+            </section>
+          </dialog>
+          <section id="evaluation-runs" data-tab-panel="evaluation-runs" role="tabpanel" aria-labelledby="evaluation-tab-runs" hidden>
           <section class="panel table-panel">
             <div class="panel-heading panel-heading-tools">
               <div>
-                <h2>Evaluation jobs and results</h2>
+                <h2>Evaluation run history</h2>
               </div>
               <div class="toolbar">
                 <input id="evaluation-search" type="search" aria-label="Find evaluation" placeholder="Filter evaluation, run, suite">
@@ -1001,6 +997,7 @@
                         </div>
                       </aside>
           </section>
+          </section>
         </div>
       </section>
 
@@ -1030,7 +1027,7 @@
               <div class="panel-heading"><h2>Recordings</h2><span id="simulation-recordings-count" class="quiet-label" role="status">Loading…</span></div>
               <div class="collection-filter-row"><div class="toolbar"><input id="simulation-recordings-search" type="search" aria-label="Find simulation recordings" placeholder="Filter hand, task or date"></div></div>
               <p id="simulation-recordings-error" class="inline-alert" role="alert" hidden></p>
-              <div class="table-scroll"><table class="simulation-recordings-table"><thead><tr><th>Session</th><th>Recordings</th><th>Dataset</th><th>Actions</th></tr></thead><tbody id="simulation-recordings-body"><tr class="empty-row"><td colspan="4">Loading recordings…</td></tr></tbody></table></div>
+              <div class="table-scroll"><table class="simulation-recordings-table"><thead><tr><th>Session</th><th>Recordings</th><th>Created at</th><th>Dataset</th><th>Registered</th><th>Actions</th></tr></thead><tbody id="simulation-recordings-body"><tr class="empty-row"><td colspan="6">Loading recordings…</td></tr></tbody></table></div>
             </section>
           </div>
           <div id="collection-view-live" data-collection-view="live" role="tabpanel" aria-labelledby="data-tab-collect" hidden>
@@ -1073,6 +1070,7 @@
             <button id="live-review-retry" class="button button-outline" type="button" hidden>Retry download</button>
             <div id="live-review-content" hidden>
               <div class="field"><label for="live-review-episode">Demonstration</label><select id="live-review-episode"></select></div>
+              <div id="live-episode-viewer"></div>
               <video id="live-review-video" controls playsinline preload="metadata" hidden aria-label="Recorded demonstration video"></video>
               <p id="live-review-video-status" class="secondary" role="status"></p>
               <div class="live-review-downloads"><button id="live-review-video-retry" class="button button-outline" type="button" hidden>Prepare video</button><button id="live-review-video-cancel" class="button button-outline" type="button" hidden>Cancel queued video</button><a id="live-review-video-download" class="text-button" download hidden>Download video</a></div>
@@ -1098,7 +1096,7 @@
                   <li>Keep your hand(s) visible and tap <strong>Start</strong> in the headset. Follow the selected task’s goal: <span id="live-xr-task-instructions">Choose a task in Collect to see its goal.</span></li>
                   <li>Success saves the episode and resets the scene. Tap <strong>Start</strong> for another episode. <strong>Restart episode</strong> discards the unfinished attempt.</li>
                   <li>Choose <strong>End collection</strong> in the headset or <strong>Stop session</strong> in Skynet. Pending saves finish and unfinished attempts are discarded. If training images are enabled, wait for <strong>Preparing training images</strong> to finish after the headset session closes.</li>
-                  <li>Open <strong>Recording</strong> to review saved episodes. For visual policy data, use <strong>Recording → Prepare for training</strong> and choose a training format.</li>
+                  <li>Open <strong>Recording</strong> to review saved episodes. For visual policy data, use <strong>Recording → Register</strong> and choose a training format.</li>
                 </ol>
                 <ul id="live-xr-unavailable"></ul>
                 <a class="text-button" href="/api/collection/live/guide" target="_blank" rel="noreferrer">Setup and troubleshooting ↗</a>
@@ -1344,16 +1342,17 @@
                 <p class="registry-section-help">A resource is a named data item, such as a dataset or simulator asset. Its exact files live in immutable versions. Imports normally register resources automatically.</p>
               </div>
               <div class="panel-heading-actions">
-                <label class="checkbox-label"><input id="data-show-archived" type="checkbox"> Show archived</label>
                 <span id="data-resource-count" class="quiet-label">Not loaded</span>
-                <button id="show-data-resource-form" class="button button-accent disclosure-launcher" type="button" aria-controls="data-resource-form" aria-expanded="false">Register a source resource</button>
+                <div class="toolbar"><input id="data-resource-search" type="search" aria-label="Filter resources" placeholder="Filter name, ID, recording, provider"></div>
+                <label class="checkbox-label"><input id="data-show-archived" type="checkbox"> Show archived</label>
+                <button id="show-data-resource-form" class="button button-accent disclosure-launcher" type="button" aria-controls="data-resource-form" aria-expanded="false">New</button>
               </div>
             </div>
             <div class="table-scroll">
               <table>
-                <thead><tr><th>Resource</th><th>Kind</th><th>Provider</th><th>Versions</th><th>Latest revision</th><th>Status</th><th>Updated</th><th></th></tr></thead>
+                <thead><tr><th>Resource</th><th>Recording ID</th><th>Kind</th><th>Provider</th><th>Versions</th><th>Latest revision</th><th>Status</th><th>Updated</th><th></th></tr></thead>
                 <tbody id="data-resources-body">
-                  <tr class="empty-row"><td colspan="8">Open this tab to load resources.</td></tr>
+                  <tr class="empty-row"><td colspan="9">Open this tab to load resources.</td></tr>
                 </tbody>
               </table>
             </div>
@@ -1837,18 +1836,18 @@
     </footer>
   <datalist id="data-format-suggestions"></datalist><datalist id="data-role-suggestions"><option value="training_data"></option><option value="evaluation_data"></option><option value="simulation_assets"></option></datalist>
     <dialog id="policy-export-dialog" class="app-dialog" aria-labelledby="policy-export-title">
-      <div class="panel-heading"><h3 id="policy-export-title">Prepare for training</h3><button id="close-policy-export" data-dialog-close type="button" class="button button-outline">Close</button></div>
+      <div class="panel-heading"><div><h3 id="policy-export-title">Register</h3><p>Register a dataset in Registry for use in experiments.</p></div><button id="close-policy-export" data-dialog-close type="button" class="button button-outline">Close</button></div>
       <form id="policy-export-form" class="dialog-form">
         <div class="dialog-body">
           <div class="form-grid">
-            <div class="field"><label for="policy-export-name">Dataset name</label><input id="policy-export-name" maxlength="100" required aria-describedby="policy-export-name-help"><small id="policy-export-name-help"></small></div>
+            <div class="field"><label for="policy-export-name">Registry name</label><input id="policy-export-name" maxlength="100" required aria-describedby="policy-export-name-help"><small id="policy-export-name-help"></small></div>
             <div class="field"><label for="policy-export-format">Policy</label><select id="policy-export-format" required></select><small id="policy-export-format-help" hidden></small></div>
             <div class="field"><label for="preparation-validation">Validation episodes (%)</label><input id="preparation-validation" type="number" min="0" max="50" value="20" required></div>
             <div class="field"><label for="preparation-seed">Split seed</label><input id="preparation-seed" type="number" min="0" max="2147483647" value="42" required></div>
           </div>
           <p id="policy-export-compatibility" role="status" class="inline-alert" hidden></p>
           <p id="policy-export-error" role="alert" class="inline-alert" hidden></p>
-          <div class="form-actions"><button id="create-policy-export" type="submit" class="button button-accent">Prepare dataset</button></div>
+          <div class="form-actions"><button id="create-policy-export" type="submit" class="button button-accent">Register</button></div>
         </div>
       </form>
     </dialog>
@@ -1866,6 +1865,39 @@
       </div>
       <p id="prepared-dataset-error" class="inline-alert" role="alert" hidden></p>
       <div id="prepared-dataset-content"></div>
+    </dialog>
+    <dialog id="run-detail-dialog" class="app-dialog" data-panel-dialog aria-labelledby="run-detail-title">
+      <section id="run-detail" hidden>
+        <div class="panel-heading">
+          <h3 id="run-detail-title">Training run</h3>
+          <button id="close-run-detail" class="button button-outline" type="button">Close</button>
+        </div>
+        <div class="dialog-body">
+          <div id="run-detail-meta" class="key-value-grid"></div>
+          <div id="run-detail-tracking" class="tracking-detail-strip" hidden></div>
+          <h3>Attempts</h3>
+          <div class="table-frame">
+            <div class="table-scroll run-attempts-table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Attempt</th>
+                    <th>State</th>
+                    <th>Slurm job</th>
+                    <th>Gateway / node</th>
+                    <th>Started</th>
+                    <th>Ended</th>
+                    <th>Error</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="attempts-body"></tbody>
+              </table>
+            </div>
+          </div>
+          <div id="run-detail-actions" class="form-actions"></div>
+        </div>
+      </section>
     </dialog>
   <dialog id="run-attempt-detail-dialog" class="app-dialog" data-panel-dialog aria-labelledby="run-attempt-detail-title">
                           <section id="run-attempt-detail" hidden>
@@ -1914,6 +1946,7 @@
       </div>
       <div class="dialog-body">
         <p id="evaluation-rollout-empty" class="secondary"></p>
+        <div id="rollout-episode-viewer"></div>
         <video id="evaluation-rollout-video" controls preload="metadata" playsinline hidden></video>
         <h3>Canonical results</h3>
         <div class="table-scroll" id="evaluation-result-summary"></div>

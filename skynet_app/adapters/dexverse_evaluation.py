@@ -96,7 +96,7 @@ def append_progress(path, row):
     print(json.dumps(row), flush=True)
 
 
-def validate_layout(env, capture, order):
+def validate_layout(env, capture, order, contract=None):
     import numpy as np
 
     names = []
@@ -117,6 +117,10 @@ def validate_layout(env, capture, order):
             target.extend(
                 np.broadcast_to(value, (1, len(term._joint_names)))[0].tolist()
             )
+    if contract is not None:
+        from policy_contract import environment_mapping
+        mapped = environment_mapping(contract, names, scales, offsets, env.step_dt)
+        return [env.scene["robot"].joint_names.index(names[i]) for i in mapped], mapped
     if (
         names != capture["action_joint_names"]
         or not np.allclose(scales, capture["action_scale"])
@@ -238,7 +242,11 @@ def main():
             None,
             ["left", "right"] if capture["hand"] == "both" else [capture["hand"]],
         )
-        ids = validate_layout(env, capture, order)
+        contract = context.get("compatibility", {}).get("io_contract")
+        if contract:
+            ids, order = validate_layout(env, capture, order, contract)
+        else:
+            ids = validate_layout(env, capture, order)
         success_fn = success_term.func
         if inspect.isclass(success_fn) and issubclass(success_fn, ManagerTermBase):
             success_fn = success_fn(success_term, env)
@@ -263,6 +271,46 @@ def main():
                 if "error" in response:
                     raise RuntimeError(response["error"])
                 return response["result"]
+
+            def observation():
+                env.sim.render()
+                images = {}
+                for scene, sensor_name in CAMERAS.items():
+                    sensor = env.scene[sensor_name]
+                    sensor.update(0.0, force_recompute=True)
+                    images[scene] = sensor.data.output["rgb"][0, :, :, :3].detach().cpu().numpy().copy()
+                state = env.scene["robot"].data.joint_pos[0, ids].detach().cpu().numpy().copy()
+                return {"state": state, "images": images}
+
+            def advance(packed):
+                action = np.empty(len(order), dtype=np.float32)
+                action[order] = packed
+                return env.step(torch.as_tensor(action, device=env.device)[None])
+
+            if contract:
+                from evaluation_preflight import verify_cycle
+                first_seed = context["seeds"][0] * 1000003
+
+                def reset_probe():
+                    env.reset(seed=first_seed)
+                    if initial_state is not None:
+                        from recorded_scene import restore_state
+                        restore_state(env, initial_state)
+                    if isinstance(success_fn, ManagerTermBase):
+                        success_fn.reset()
+                    request({"command": "reset", "seed": first_seed})
+
+                def report_probe(value):
+                    receipt = {**value, "checkpoint_sha256": context["checkpoint"]["sha256"],
+                               "implementation_sha256": context["compatibility"]["implementation_sha256"],
+                               "node": os.environ.get("SLURMD_NODENAME"), "slurm_job_id": os.environ.get("SLURM_JOB_ID")}
+                    write_json(root / "preflight.json", receipt)
+                    print(json.dumps({"event": "evaluation_preflight", **receipt}), flush=True)
+
+                with torch.no_grad():
+                    verify_cycle(contract, reset=reset_probe, observe=observation,
+                                 predict=lambda obs: request({"command": "step", "observation": obs, "predict": True}),
+                                 advance=advance, report=report_probe)
 
             assignments = assigned_episodes(context)
             for seed in context["seeds"]:
@@ -299,6 +347,10 @@ def main():
                         success_fn.reset()
                     request({"command": "reset", "seed": effective_seed})
                     video = video_root / f"episode-seed-{seed}-{index:04d}.mp4"
+                    from episode_trace import EpisodeTrace
+                    trace_cameras = CAMERAS if os.environ["SKYNET_POLICY_IMAGES"] == "1" else {"scene_front": CAMERAS["scene_front"]}
+                    observation()  # Refresh camera poses after restoring the episode.
+                    trace = EpisodeTrace(context, capture, env, trace_cameras, video, policy_order=order)
                     pending = []
                     success = False
                     streak = 0
@@ -316,35 +368,20 @@ def main():
                         torch.no_grad(),
                     ):
                         for step in range(max_steps):
-                            env.sim.render()
-                            images = {}
-                            for scene, sensor_name in CAMERAS.items():
-                                sensor = env.scene[sensor_name]
-                                sensor.update(0.0, force_recompute=True)
-                                images[scene] = (
-                                    sensor.data.output["rgb"][0, :, :, :3]
-                                    .detach()
-                                    .cpu()
-                                    .numpy()
-                                    .copy()
-                                )
+                            obs = observation()
+                            images = obs["images"]
                             if step % 2 == 0:
                                 video_views = (images if os.environ["SKYNET_POLICY_IMAGES"] == "1"
                                                else {"scene_front": images["scene_front"]})
                                 writer.append_data(compose_camera_views(video_views))
-                            state = (
-                                env.scene["robot"]
-                                .data.joint_pos[0, ids]
-                                .detach()
-                                .cpu()
-                                .numpy()
-                                .copy()
-                            )
+                            if contract:
+                                from policy_contract import validate_observation, validate_actions
+                                validate_observation(contract, obs)
                             predicted = request(
                                 {
                                     "command": "step",
                                     "observation": {
-                                        "state": state,
+                                        "state": obs["state"],
                                         "images": (
                                             images
                                             if os.environ["SKYNET_POLICY_IMAGES"] == "1"
@@ -355,13 +392,13 @@ def main():
                                 }
                             )
                             if not pending:
+                                if contract:
+                                    validate_actions(contract, predicted)
                                 pending = list(predicted)
                             packed = pending.pop(0)
-                            action = np.empty(len(order), dtype=np.float32)
-                            action[order] = packed
-                            _, reward, terminated, truncated, _ = env.step(
-                                torch.as_tensor(action, device=env.device)[None]
-                            )
+                            if step % 2 == 0:
+                                trace.append(step, packed)
+                            _, reward, terminated, truncated, _ = advance(packed)
                             reward_sum += float(reward[0])
                             if bool(terminated[0]) or bool(truncated[0]):
                                 reason = "task_termination"
@@ -376,6 +413,7 @@ def main():
                                 raise RuntimeError(
                                     "Simulator closed before the episode ended"
                                 )
+                    trace.finish(step + 1)
                     episode = dict(
                         task=task,
                         seed=seed,

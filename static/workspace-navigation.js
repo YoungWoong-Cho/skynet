@@ -20,7 +20,7 @@ installTabKeyboardNavigation(
   (button) => activateTab(button.dataset.tabTarget),
 );
 
-/* Shared workspace tabs, history and keyboard navigation for Data and Experiments. */
+/* Shared workspace tabs, history and keyboard navigation. */
 function createWorkspaceNavigation({
   page,
   parameter,
@@ -114,18 +114,33 @@ window.experimentNavigation = createWorkspaceNavigation({
   page: "experiments",
   parameter: "experiment_view",
   selector: "[data-experiment-tab]",
-  views: ["submit", "adapters"],
+  views: ["submit", "adapters", "runs"],
   initial: "submit",
-  legacyView: (tab) => (tab === "adapters" ? "adapters" : null),
+  legacyView: (tab) => (["adapters", "runs"].includes(tab) ? tab : null),
   renderView(view) {
     for (const [page, selected] of [
       ["experiments", "submit"],
       ["adapters", "adapters"],
+      ["runs", "runs"],
     ]) {
       document.getElementById(`refresh-${page}`).hidden = view !== selected;
       const tutorial = document.getElementById(`${page}-tutorial-button`);
       if (tutorial) tutorial.hidden = view !== selected;
     }
+  },
+});
+
+window.evaluationNavigation = createWorkspaceNavigation({
+  page: "evaluations",
+  parameter: "evaluation_view",
+  selector: "[data-evaluation-tab]",
+  views: ["submit", "suites", "runs"],
+  initial: "submit",
+  aliases: { suits: "suites" },
+  legacyView: (tab) => ({ "evaluation-suites": "suites", "evaluation-runs": "runs" }[tab]),
+  renderView(view) {
+    const tutorial = document.getElementById("evaluations-tutorial-button");
+    if (tutorial) tutorial.hidden = view !== "submit";
   },
 });
 

@@ -43,7 +43,7 @@ class Cluster(ClusterClient):
 
 
 @pytest.fixture
-def service(tmp_path, monkeypatch):
+def service(tmp_path, monkeypatch, prepared_hand_store):
     root = Path(__file__).resolve().parents[1]
     (tmp_path / "config").mkdir()
     (tmp_path / "ops/xr").mkdir(parents=True)
@@ -64,9 +64,15 @@ def service(tmp_path, monkeypatch):
         (root / "ops/xr/native_session.py").read_text()
     )
     (tmp_path / "ops/xr/hands").mkdir()
-    for name in ("collection.py", "hands/anatomy.py", "wrist.py", "images.py", "render_images.py"):
+    for name in (
+        "collection.py",
+        "hands/anatomy.py",
+        "wrist.py",
+        "images.py",
+        "render_images.py",
+    ):
         (tmp_path / "ops/xr" / name).write_text((root / "ops/xr" / name).read_text())
-    service = LiveXRService(Database(tmp_path / "db.sqlite"), Cluster(), root=tmp_path)
+    service = LiveXRService(Database(tmp_path / "db.store"), Cluster(), root=tmp_path)
     monkeypatch.setattr(service, "dispatch", lambda _: None)
     return service
 
@@ -170,15 +176,15 @@ def test_worker_finish_waits_for_scheduler_and_surfaces_cleanup_failure(service)
 
 
 def test_selected_hand_and_task_are_frozen_in_request(service):
-    job = service.create(True, "Dexverse-PickCube-v0", "floating_shadow_left")
+    job = service.create(True, "Dexverse-PickCube-v0", "skynet_shadow_left")
     assert job["profile"]["task"] == "Dexverse-PickCube-v0"
-    assert job["profile"]["robot"] == "floating_shadow_left"
+    assert job["profile"]["robot"] == "skynet_shadow_left"
     assert job["profile"]["hand"] == "left"
     service.prepare(job["id"])
     request = next(w[2] for w in service.cluster.writes if w[1] == "request.json")
-    assert json.loads(request)["robot"] == "floating_shadow_left"
+    assert json.loads(request)["robot"] == "skynet_shadow_left"
     with pytest.raises(ValueError, match="different live session"):
-        service.create(True, "Dexverse-PickCube-v0", "floating_shadow_right")
+        service.create(True, "Dexverse-PickCube-v0", "skynet_shadow_right")
     assert service.cluster.calls == 1
 
 
@@ -200,6 +206,7 @@ def imported_hand(monkeypatch, tmp_path):
         name="WUJI Hand 1 right",
         action_dimension=26,
         retargeting_scheme="vector",
+        hand_asset={"schema": "skynet.hand-bundle/v1", "digest": "d" * 64},
     )
     directory = tmp_path / "immutable-hand"
     monkeypatch.setattr(

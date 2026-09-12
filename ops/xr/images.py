@@ -145,6 +145,24 @@ def state_metadata(env, profile):
         step_dt=float(env.step_dt), alignment="image and state before action; simulation time excludes tracking pauses",
         color_space="RGB", cameras={k: dict(sensor=v, mount="fixed_scene", width=256, height=256) for k, v in CAMERAS.items()},
     )
+    hand = profile.get("hand_manifest")
+    if hand:
+        metadata.update({k: hand[k] for k in ("hand_asset", "units", "wrist_rotation_order", "hand_order", "hands") if k in hand})
+        metadata["hand_adapter_digest"] = hand["digest"]
+    # Keep geometry portable when a collection host or simulator checkout disappears.
+    # Only the kinematic tree is needed for replay, not meshes or physics settings.
+    import xml.etree.ElementTree as ET
+    if profile.get("hand_bundle", {}).get("root"):
+        model_path = Path(profile["hand_bundle"]["root"]) / "simulation.urdf"
+    else:
+        model_path = Path(profile.get("repository", "")) / "source/dexverse/dexverse/robot_agents/shadow/retarget" / (profile["robot"] + ".urdf")
+    if model_path.is_file() and model_path.stat().st_size <= 4_000_000:
+        tree = ET.parse(model_path).getroot()
+        for body in tree.findall("link"):
+            for item in list(body):
+                body.remove(item)
+        metadata["kinematics_urdf"] = ET.tostring(tree, encoding="unicode")
+        metadata["kinematics_sha256"] = hashlib.sha256(metadata["kinematics_urdf"].encode()).hexdigest()
     return ids, metadata
 
 

@@ -1,6 +1,9 @@
 """A single preview/confirm contract for history and storage cleanup."""
 
 from typing import Literal
+from subprocess import TimeoutExpired
+
+import psycopg
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -9,7 +12,7 @@ from .cluster_runtime import ClusterError
 from .maintenance import Maintenance
 
 router = APIRouter(prefix="/api/maintenance")
-Kind = Literal["experiment", "run", "evaluation"]
+Kind = Literal["experiment", "run", "evaluation", "adapter", "suite"]
 
 
 class DeleteRequest(BaseModel):
@@ -37,6 +40,10 @@ def invoke(operation):
         return operation()
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
+    except psycopg.IntegrityError as error:
+        raise HTTPException(409, "Dependencies changed. Review deletion again.") from error
+    except (psycopg.OperationalError, TimeoutExpired) as error:
+        raise HTTPException(503, "The database or cluster connection was interrupted. Reconnect and review the operation again.") from error
     except ValueError as error:
         raise HTTPException(409, str(error)) from error
     except (OSError, ClusterError) as error:

@@ -178,9 +178,14 @@ def configure_virtual_wrist(robot, manifest, sides):
     import torch
 
     if manifest:
-        names = manifest["wrist_joints"][3:]
-        if names != ["skynet_roll", "skynet_pitch", "skynet_yaw"]:
-            raise ValueError("Unsupported imported wrist rotation layout")
+        layouts = manifest.get("hands") or {
+            manifest["side"]: {"wrist_joints": manifest["wrist_joints"]}
+        }
+        if set(layouts) != set(sides) or any(
+            len(h["wrist_joints"]) != 6 for h in layouts.values()
+        ):
+            raise ValueError("Hand wrist layout differs from the tracked sides")
+        names = [n for h in layouts.values() for n in h["wrist_joints"][3:]]
     else:
         prefixes = ["lh_", "rh_"] if len(sides) == 2 else [""]
         names = [

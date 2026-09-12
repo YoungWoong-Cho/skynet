@@ -1,30 +1,11 @@
 """Live choices audited against one pinned DexVerse release; no simulator imports."""
 
 from copy import deepcopy
-from .capture_processing.dexverse_runner import REVISION, TASK, ROBOT
-from .simulation_hands import definitions
+from .capture_processing.dexverse_runner import REVISION, TASK
+from .hand_bundles import DEFAULT_ROBOT as ROBOT
+from .hand_bundles import definitions
 
-HANDS = [
-    {
-        "key": "floating_shadow_right",
-        "name": "Shadow · right hand",
-        "side": "right",
-        "available": True,
-    },
-    {
-        "key": "floating_shadow_left",
-        "name": "Shadow · left hand",
-        "side": "left",
-        "available": True,
-    },
-    {
-        "key": "floating_shadow_bimanual",
-        "name": "Shadow · both hands",
-        "side": "both",
-        "available": True,
-    },
-]
-# These adapters use the pinned mesh/physics descriptions from the Hands library.
+HANDS = []
 
 for hand in definitions():
     HANDS.append(
@@ -79,15 +60,29 @@ def catalog():
             "tasks": TASKS,
             "default_robot": ROBOT,
             "default_task": TASK,
-            "verified_pairs": [{"robot": ROBOT, "task": TASK}],
-            "note": "Shadow right hand + Pick up stick has passed a real headset capture. Other Shadow combinations and imported hand adapters await a headset test. Imported hands reuse the stored URDFs and meshes; first startup converts them to simulator assets and checks their joint/body mappings. Additional DexVerse tasks are not yet configured here.",
+            "verified_pairs": [],
+            "note": "All hands use the pinned Hands models with six wrist axes per hand. Simulator and teleoperation settings belong to the DexVerse adapter.",
         }
     )
 
 
-def selection(task, robot):
+def selection(task, robot, *, historical=False):
     task_info = next((item for item in TASKS if item["key"] == task), None)
     hand = next((item for item in HANDS if item["key"] == robot), None)
+    if (
+        hand is None
+        and historical
+        and robot
+        in {"floating_shadow_right", "floating_shadow_left", "floating_shadow_bimanual"}
+    ):
+        side = "both" if robot.endswith("bimanual") else robot.rsplit("_", 1)[1]
+        hand = {
+            "key": robot,
+            "name": "Shadow · " + ("both hands" if side == "both" else side + " hand"),
+            "side": side,
+            "available": True,
+            "historical": True,
+        }
     if not task_info:
         raise ValueError(
             "Unsupported live task. Choose a task listed in Live teleoperation."

@@ -203,7 +203,7 @@ def sync_gpu_statistics(service, run, capsule_root, *, force=False):
     try:
         try:
             database = getattr(service, "database", None)
-            if database is not None and database.is_postgres:
+            if database is not None:
                 with database.operation_lock("gpu-tracking:" + str(run.get("id"))):
                     return _sync(service, run, capsule_root, force)
             return _sync(service, run, capsule_root, force)

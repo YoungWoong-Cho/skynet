@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
-import sqlite3
+from .db_backend import PostgresConnection, Record
 from .db_backend import INTEGRITY_ERRORS, DATABASE_ERRORS
 import threading
 import time
@@ -126,7 +126,7 @@ class SlackNotifications:
             raise ValueError("Select a personal workspace for Slack notifications.")
         return self.database.workspace_id
 
-    def _config(self, connection: sqlite3.Connection) -> dict[str, Any] | None:
+    def _config(self, connection: PostgresConnection) -> dict[str, Any] | None:
         row = connection.execute(
             "SELECT * FROM slack_notifications WHERE owner_id=?", (self.owner,)
         ).fetchone()
@@ -334,7 +334,7 @@ class SlackNotifications:
         return payload
 
     def deliver_one(self) -> bool:
-        """Claim once, send outside SQLite, and persist retries across restarts."""
+        """Claim once, send outside PostgreSQL, and persist retries across restarts."""
         with self._lock:
             timestamp = self.clock()
             with self.database.transaction() as connection:

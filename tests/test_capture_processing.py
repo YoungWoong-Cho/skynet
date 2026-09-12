@@ -15,6 +15,8 @@ from skynet_app.local_capture import LocalCaptureService
 from capture_storage_fake import MemoryStorage
 from skynet_app.capture_processing.service import ProcessingService
 
+pytestmark = pytest.mark.usefixtures("prepared_hand_store")
+
 
 def pose(x=0, y=0, z=0):
     return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1]
@@ -140,7 +142,9 @@ def test_rotation_near_half_turn(m, expected):
 
 
 def processor(tmp_path, monkeypatch):
-    captures = LocalCaptureService(Database(tmp_path / "test.db"), storage=MemoryStorage())
+    captures = LocalCaptureService(
+        Database(tmp_path / "test.db"), storage=MemoryStorage()
+    )
     _, save = recording(tmp_path)
     capture = captures.import_file("visionpro-local", save())["capture"]
     config = Path(__file__).resolve().parents[1] / "config/capture_pipelines.json"
@@ -184,7 +188,7 @@ def test_artifact_validation_rejects_path_escape_and_incomplete_result(
                 "dataset": {
                     "schema": "skynet.dexverse-state-actions/v1",
                     "task": "Dexverse-PickUpStick-v0",
-                    "robot": "floating_shadow_right",
+                    "robot": "skynet_shadow_right",
                 },
                 "stages": {
                     s: {"status": "SUCCEEDED"}
@@ -211,7 +215,7 @@ def test_artifact_validation_rejects_path_escape_and_incomplete_result(
                 "dataset": {
                     "schema": "skynet.dexverse-state-actions/v1",
                     "task": "Dexverse-PickUpStick-v0",
-                    "robot": "floating_shadow_right",
+                    "robot": "skynet_shadow_right",
                     "dataset_sha256": "a" * 64,
                 },
                 "stages": {

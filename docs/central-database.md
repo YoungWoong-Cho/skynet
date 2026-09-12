@@ -1,8 +1,7 @@
 # One database across app hosts
 
-Skynet supports one PostgreSQL 16 database shared by multiple app hosts. SQLite
-remains available for isolated development and as an offline migration source.
-A failed PostgreSQL connection is an error; it never switches to a local DB.
+Skynet requires one PostgreSQL 16 database shared by all app hosts. Missing
+configuration or a failed connection is an error; the app never creates a local DB.
 
 On every app host, install locked dependencies with `uv sync --group dev` and
 create `config/database.json` (ignored by Git):
@@ -27,8 +26,7 @@ port is exposed to the network. Put the DB connection password in
 on exit. The original `ssh-unix` transport remains available for SSH servers that
 support forwarding to the private PostgreSQL Unix socket. A direct PostgreSQL connection can instead be provided using
 `SKYNET_DATABASE_URL`; supporting file storage still requires the SSH endpoint
-configuration. Remove `SKYNET_DATABASE_PATH` from existing launch scripts before
-using the central configuration. An explicit SQLite path selects SQLite.
+configuration. The obsolete `SKYNET_DATABASE_PATH` setting is no longer used.
 
 Only one app owns background reconciliation and notification delivery, using a
 PostgreSQL advisory lock. Other instances serve requests against the same DB and
@@ -59,24 +57,18 @@ It does not install system packages or alter firewall rules.
 The current deployment uses a hard-mounted NFS filesystem. It depends on that
 storage and sky2 being available; it is not a high-availability database. Keep
 `fsync`, `full_page_writes` and `synchronous_commit` enabled. Never expose the
-underlying PostgreSQL data directory as a SQLite-style shared file.
+underlying PostgreSQL data directory as a shared application file.
 
-## Migrate and verify
+## Backup and relocation
 
-1. Stop all old app writers. Existing Slurm jobs continue running.
-2. Take a consistent SQLite backup, retain the original, and verify its integrity.
-3. Import into an empty PostgreSQL database with
-   `python -m skynet_app.postgres_migration --source <snapshot> --report <report>`;
-   provide the connection through `SKYNET_DATABASE_URL`. The importer verifies
-   every table's row count and content hash in one transaction and refuses to
-   overwrite existing records.
-4. Migrate indexed supporting files and sanitized tracking journals. Verify
-   checksums before changing location references; retain immutable execution
-   snapshots as historical evidence.
-5. Install identical app code and central configuration on each host. Verify both
-   clients see the same rows before starting the application.
-6. Make a custom-format backup and restore it to a separate test database. Compare
-   table counts before deleting the verification database.
+To add an app host, configure the same central endpoint and object store. Do not
+copy or create a second application database. Verify that the host sees the same
+workspace IDs and histories; the database lock selects one background coordinator.
+
+To relocate the database itself, stop app writers, take a custom-format `pg_dump`
+backup and restore it with `pg_restore` into an empty PostgreSQL database. Verify
+record counts, ownership and referenced cluster files before updating all app
+hosts to the new endpoint. Keep the verified backup until the cutover is complete.
 
 Backups are private files under `<private-db-root>/backups`; the newest 28
 successful dumps are retained. Failed backups do not replace valid backups.
@@ -84,14 +76,14 @@ This is a point-in-time snapshot schedule, not continuous WAL archiving. Copy
 backups to a separate storage system if protection against loss of the cluster
 filesystem is required.
 
-Do not resume an old SQLite copy after the central app has made changes. Stop all
-writers first and restore a verified central backup; old local snapshots are
-historical rollback material, not an automatically synchronized second DB.
+Do not restore stale local copies over the central database. Stop all writers
+before restoring a verified PostgreSQL backup.
 
 ## Regression tests
 
-Set `SKYNET_TEST_POSTGRES_ADMIN` to an isolated PostgreSQL admin connection and run
-`pytest tests/test_postgres.py`. Existing repository contracts can also run on
-PostgreSQL with `pytest -p tests.postgres_backend_plugin <test files>`. The test
-plugin creates and drops isolated test databases and stubs cluster file transfers.
-No production training or evaluation jobs are submitted by these tests.
+Set `SKYNET_TEST_POSTGRES_ADMIN` to a disposable PostgreSQL server with permission
+to create test databases, then run `pytest`. The default test harness creates and
+drops isolated databases, including module initialization, and stubs cluster file
+transfers. It never selects the app's configured production database and never
+submits real training/evaluation jobs. Tests fail early if the test server is not
+configured. Browser-only tests continue to run through the npm scripts.

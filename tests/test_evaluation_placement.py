@@ -173,6 +173,9 @@ def test_native_evaluators_resolve_safe_resources_and_frozen_capsules(evaluation
     spec = native_spec(source={"repository": manifest.default_repository, "revision": "a" * 40,
                               "adapter": slug, "adapter_manifest": canonical_adapter_manifest(manifest)}, native={"config": config})
     run = {**run, "resolved_spec_json": spec.model_dump(mode="json", by_alias=True)}
+    if suite_name == "dexverse_training_episode":
+        from test_evaluation_compatibility import recorded_bundle
+        run["resolved_spec_json"]["data"] = {"bundle": recorded_bundle()}
     suite = next(s for s in service.database.list_evaluation_suites() if s["name"] == suite_name)
     checkpoint = {"id": "checkpoint", "path": "/checkpoint", "sha256": "b" * 64}
     resources = request_for(run, suite, gpu).resources

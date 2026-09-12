@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
@@ -11,590 +10,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
+from psycopg import IntegrityError
+
 from .database_endpoint import load_endpoint
-from .db_backend import PostgresBackend, Record, DistributedRLock, lock_key
+from .db_backend import PostgresBackend, PostgresConnection, Record, DistributedRLock, lock_key
 from .data_paths import validate_mount_path
-from .notification_schema import migrate_notifications
-from .workspace_schema import PRIVATE_TABLES, LEGACY_WORKSPACE, migrate_workspaces, visible_sql
+from .workspace_schema import PRIVATE_TABLES, LEGACY_WORKSPACE, visible_sql
 from .training_metrics import is_scalar
 
 
 APP_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_DATABASE_PATH = APP_ROOT / "data" / "skynet.db"
-
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS projects (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    description TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL,
-    archived_at TEXT
-);
-
-CREATE TABLE IF NOT EXISTS experiments (
-    id TEXT PRIMARY KEY,
-    project_id TEXT REFERENCES projects(id) ON DELETE RESTRICT,
-    name TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'DRAFT',
-    mlflow_experiment_id TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(project_id, name)
-);
-
-CREATE TABLE IF NOT EXISTS experiment_revisions (
-    id TEXT PRIMARY KEY,
-    experiment_id TEXT NOT NULL REFERENCES experiments(id) ON DELETE CASCADE,
-    revision_number INTEGER NOT NULL,
-    spec_schema_version TEXT NOT NULL,
-    requested_spec_json TEXT NOT NULL,
-    requested_spec_sha256 TEXT NOT NULL,
-    created_by TEXT,
-    created_at TEXT NOT NULL,
-    submitted_at TEXT,
-    UNIQUE(experiment_id, revision_number)
-);
-
-CREATE TABLE IF NOT EXISTS variants (
-    id TEXT PRIMARY KEY,
-    experiment_revision_id TEXT NOT NULL REFERENCES experiment_revisions(id) ON DELETE CASCADE,
-    variant_index INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    parameters_json TEXT NOT NULL,
-    resolved_spec_json TEXT NOT NULL,
-    resolved_spec_sha256 TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE(experiment_revision_id, variant_index),
-    UNIQUE(experiment_revision_id, resolved_spec_sha256)
-);
-
-CREATE TABLE IF NOT EXISTS runtime_profiles (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    backend TEXT NOT NULL,
-    version INTEGER NOT NULL DEFAULT 1,
-    config_json TEXT NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS adapters (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    version TEXT NOT NULL,
-    repository_url TEXT,
-    capabilities_json TEXT NOT NULL,
-    schema_json TEXT NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    adapter_key TEXT,
-    version_number INTEGER,
-    description TEXT NOT NULL DEFAULT '',
-    manifest_json TEXT,
-    manifest_sha256 TEXT,
-    archived_at TEXT,
-    created_by TEXT,
-    change_note TEXT NOT NULL DEFAULT '',
-    seed_key TEXT,
-    source_adapter_key TEXT,
-    source_version_number INTEGER,
-    UNIQUE(name, version)
-);
-
-CREATE TABLE IF NOT EXISTS adapter_validations (
-    id TEXT PRIMARY KEY,
-    adapter_key TEXT NOT NULL,
-    adapter_version_id TEXT NOT NULL REFERENCES adapters(id) ON DELETE RESTRICT,
-    status TEXT NOT NULL,
-    repository_url TEXT,
-    source_revision TEXT,
-    evidence_json TEXT NOT NULL,
-    errors_json TEXT NOT NULL,
-    resolved_runtime_json TEXT NOT NULL,
-    created_by TEXT,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS runs (
-    id TEXT PRIMARY KEY,
-    variant_id TEXT NOT NULL REFERENCES variants(id) ON DELETE RESTRICT,
-    seed INTEGER NOT NULL,
-    run_number INTEGER NOT NULL DEFAULT 1 CHECK(run_number >= 1),
-    restarted_from_run_id TEXT REFERENCES runs(id) ON DELETE RESTRICT,
-    status TEXT NOT NULL DEFAULT 'PENDING',
-    adapter_name TEXT NOT NULL,
-    adapter_version TEXT NOT NULL,
-    source_commit TEXT,
-    runtime_profile TEXT,
-    run_directory TEXT NOT NULL,
-    mlflow_run_id TEXT,
-    created_at TEXT NOT NULL,
-    started_at TEXT,
-    completed_at TEXT,
-    updated_at TEXT NOT NULL,
-    UNIQUE(variant_id, seed, run_number),
-    CHECK(restarted_from_run_id IS NULL OR restarted_from_run_id <> id)
-);
-
-CREATE TABLE IF NOT EXISTS workflow_stages (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    stage_type TEXT NOT NULL,
-    name TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'PENDING',
-    resolved_config_json TEXT NOT NULL,
-    auto_resume INTEGER NOT NULL DEFAULT 0,
-    max_attempts INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL,
-    started_at TEXT,
-    completed_at TEXT,
-    updated_at TEXT NOT NULL,
-    UNIQUE(run_id, name)
-);
-
-CREATE TABLE IF NOT EXISTS stage_dependencies (
-    stage_id TEXT NOT NULL REFERENCES workflow_stages(id) ON DELETE CASCADE,
-    depends_on_stage_id TEXT NOT NULL REFERENCES workflow_stages(id) ON DELETE CASCADE,
-    dependency_type TEXT NOT NULL DEFAULT 'AFTER_OK',
-    created_at TEXT NOT NULL,
-    PRIMARY KEY(stage_id, depends_on_stage_id),
-    CHECK(stage_id <> depends_on_stage_id)
-);
-
-CREATE TABLE IF NOT EXISTS job_attempts (
-    id TEXT PRIMARY KEY,
-    stage_id TEXT NOT NULL REFERENCES workflow_stages(id) ON DELETE CASCADE,
-    attempt_number INTEGER NOT NULL,
-    slurm_job_id TEXT,
-    slurm_array_job_id TEXT,
-    slurm_array_task_id TEXT,
-    gateway TEXT,
-    account TEXT,
-    partition_name TEXT,
-    node_list TEXT,
-    gpu_type TEXT,
-    gpu_count INTEGER,
-    cpu_count INTEGER,
-    memory_mb INTEGER,
-    time_limit_seconds INTEGER,
-    status TEXT NOT NULL DEFAULT 'CREATED',
-    slurm_state TEXT,
-    slurm_reason TEXT,
-    exit_code TEXT,
-    restart_count INTEGER NOT NULL DEFAULT 0,
-    sbatch_path TEXT,
-    stdout_path TEXT,
-    stderr_path TEXT,
-    resume_checkpoint_id TEXT,
-    cluster_snapshot_id TEXT,
-    execution_snapshot_json TEXT,
-    execution_snapshot_sha256 TEXT,
-    submitted_at TEXT,
-    started_at TEXT,
-    finished_at TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(stage_id, attempt_number)
-);
-
-CREATE TABLE IF NOT EXISTS checkpoints (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    produced_by_attempt_id TEXT REFERENCES job_attempts(id) ON DELETE SET NULL,
-    training_step INTEGER,
-    checkpoint_type TEXT NOT NULL,
-    path TEXT NOT NULL,
-    sha256 TEXT,
-    size_bytes INTEGER,
-    is_resumable INTEGER NOT NULL DEFAULT 0,
-    is_selected_for_inference INTEGER NOT NULL DEFAULT 0,
-    validation_metric TEXT,
-    validation_metric_value REAL,
-    status TEXT NOT NULL DEFAULT 'AVAILABLE',
-    metadata_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    pruned_at TEXT,
-    UNIQUE(run_id, path)
-);
-
-CREATE TABLE IF NOT EXISTS evaluation_suites (
-    id TEXT PRIMARY KEY,
-    evaluator_adapter TEXT NOT NULL,
-    evaluator_version TEXT NOT NULL,
-    name TEXT NOT NULL,
-    suite_version TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    catalog_path TEXT,
-    config_json TEXT NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(evaluator_adapter, evaluator_version, name, suite_version)
-);
-
-CREATE TRIGGER IF NOT EXISTS evaluation_suite_versions_immutable
-BEFORE UPDATE OF evaluator_adapter, evaluator_version, name, suite_version,
-                 description, catalog_path, config_json, created_at
-ON evaluation_suites
-BEGIN
-    SELECT RAISE(ABORT, 'evaluation suite versions are immutable');
-END;
-
-CREATE TABLE IF NOT EXISTS evaluations (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    stage_id TEXT REFERENCES workflow_stages(id) ON DELETE SET NULL,
-    checkpoint_id TEXT REFERENCES checkpoints(id) ON DELETE RESTRICT,
-    evaluation_suite_id TEXT REFERENCES evaluation_suites(id) ON DELETE RESTRICT,
-    evaluator_adapter TEXT NOT NULL,
-    evaluator_version TEXT NOT NULL,
-    suite_name TEXT NOT NULL,
-    suite_version TEXT NOT NULL,
-    task_selection_json TEXT NOT NULL,
-    seeds_json TEXT NOT NULL,
-    episodes_per_task INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'PENDING',
-    progress_completed INTEGER NOT NULL DEFAULT 0,
-    progress_total INTEGER NOT NULL DEFAULT 0,
-    result_path TEXT,
-    created_at TEXT NOT NULL,
-    started_at TEXT,
-    completed_at TEXT,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS evaluation_episodes (
-    id TEXT PRIMARY KEY,
-    evaluation_id TEXT NOT NULL REFERENCES evaluations(id) ON DELETE CASCADE,
-    task TEXT NOT NULL,
-    seed INTEGER NOT NULL,
-    episode_index INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'PENDING',
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    success INTEGER,
-    reward REAL,
-    episode_length INTEGER,
-    failure_reason TEXT,
-    metrics_json TEXT NOT NULL,
-    video_path TEXT,
-    raw_result_path TEXT,
-    started_at TEXT,
-    completed_at TEXT,
-    updated_at TEXT NOT NULL,
-    UNIQUE(evaluation_id, task, seed, episode_index)
-);
-
-CREATE TABLE IF NOT EXISTS metrics (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    evaluation_id TEXT REFERENCES evaluations(id) ON DELETE CASCADE,
-    name TEXT NOT NULL,
-    scope TEXT NOT NULL,
-    step INTEGER,
-    value REAL NOT NULL,
-    unit TEXT,
-    sample_count INTEGER,
-    recorded_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS training_progress_samples (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    attempt_id TEXT NOT NULL REFERENCES job_attempts(id) ON DELETE CASCADE,
-    restart_count INTEGER NOT NULL DEFAULT 0,
-    completed INTEGER NOT NULL CHECK(completed >= 0),
-    total INTEGER CHECK(total > 0),
-    unit TEXT NOT NULL,
-    source_kind TEXT NOT NULL,
-    evidence_json TEXT NOT NULL,
-    recorded_at TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE(attempt_id, restart_count, completed)
-);
-
-CREATE TABLE IF NOT EXISTS artifacts (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    stage_id TEXT REFERENCES workflow_stages(id) ON DELETE SET NULL,
-    evaluation_id TEXT REFERENCES evaluations(id) ON DELETE SET NULL,
-    artifact_type TEXT NOT NULL,
-    path TEXT NOT NULL,
-    sha256 TEXT,
-    size_bytes INTEGER,
-    retention_policy TEXT,
-    mlflow_artifact_uri TEXT,
-    metadata_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    deleted_at TEXT,
-    UNIQUE(run_id, path)
-);
-
-CREATE TABLE IF NOT EXISTS tracking_connections (
-    provider TEXT PRIMARY KEY,
-    endpoint TEXT,
-    workspace TEXT,
-    config_json TEXT NOT NULL DEFAULT '{}',
-    updated_at TEXT NOT NULL,
-    CHECK(provider IN ('mlflow', 'wandb'))
-);
-
-CREATE TABLE IF NOT EXISTS tracking_bindings (
-    id TEXT PRIMARY KEY,
-    provider TEXT NOT NULL,
-    scope_type TEXT NOT NULL,
-    scope_id TEXT NOT NULL,
-    remote_id TEXT,
-    remote_url TEXT,
-    status TEXT NOT NULL,
-    metadata_json TEXT NOT NULL DEFAULT '{}',
-    last_error TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(provider, scope_type, scope_id),
-    CHECK(provider IN ('mlflow', 'wandb')),
-    CHECK(scope_type IN ('experiment', 'run'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_tracking_bindings_scope
-ON tracking_bindings(scope_type, scope_id);
-
-CREATE TABLE IF NOT EXISTS manifests (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    attempt_id TEXT REFERENCES job_attempts(id) ON DELETE SET NULL,
-    manifest_type TEXT NOT NULL,
-    schema_version TEXT NOT NULL,
-    path TEXT NOT NULL,
-    sha256 TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE(run_id, manifest_type, path)
-);
-
-CREATE TABLE IF NOT EXISTS cluster_snapshots (
-    id TEXT PRIMARY KEY,
-    gateway TEXT NOT NULL,
-    captured_at TEXT NOT NULL,
-    gpu_usage_json TEXT NOT NULL,
-    nodes_json TEXT NOT NULL,
-    queue_json TEXT NOT NULL,
-    sha256 TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS events (
-    id TEXT PRIMARY KEY,
-    entity_type TEXT NOT NULL,
-    entity_id TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    old_status TEXT,
-    new_status TEXT,
-    details_json TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS data_resources (
-    id TEXT PRIMARY KEY,
-    provider TEXT NOT NULL,
-    namespace TEXT NOT NULL,
-    name TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    metadata_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    archived_at TEXT,
-    UNIQUE(provider, namespace, name)
-);
-
-CREATE TABLE IF NOT EXISTS data_resource_versions (
-    id TEXT PRIMARY KEY,
-    resource_id TEXT NOT NULL REFERENCES data_resources(id) ON DELETE RESTRICT,
-    revision TEXT NOT NULL,
-    format TEXT NOT NULL,
-    path TEXT NOT NULL,
-    source_uri TEXT,
-    manifest_sha256 TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'READY',
-    size_bytes INTEGER,
-    metadata_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE(resource_id, revision, format)
-);
-
-CREATE TABLE IF NOT EXISTS data_locations (
-    id TEXT PRIMARY KEY,
-    version_id TEXT NOT NULL REFERENCES data_resource_versions(id) ON DELETE RESTRICT,
-    kind TEXT NOT NULL,
-    host TEXT NOT NULL,
-    path TEXT NOT NULL,
-    manifest_sha256 TEXT NOT NULL,
-    status TEXT NOT NULL,
-    verified_at TEXT NOT NULL,
-    UNIQUE(version_id, host, path)
-);
-
-CREATE TABLE IF NOT EXISTS data_derivations (
-    id TEXT PRIMARY KEY,
-    output_version_id TEXT NOT NULL UNIQUE REFERENCES data_resource_versions(id) ON DELETE RESTRICT,
-    converter_repository TEXT NOT NULL,
-    converter_commit TEXT NOT NULL,
-    converter_config_json TEXT NOT NULL,
-    runtime_lock_sha256 TEXT,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS data_derivation_inputs (
-    derivation_id TEXT NOT NULL REFERENCES data_derivations(id) ON DELETE RESTRICT,
-    input_version_id TEXT NOT NULL REFERENCES data_resource_versions(id) ON DELETE RESTRICT,
-    role TEXT NOT NULL DEFAULT 'input',
-    position INTEGER NOT NULL,
-    PRIMARY KEY(derivation_id, role, position),
-    UNIQUE(derivation_id, input_version_id, role)
-);
-
-CREATE TABLE IF NOT EXISTS data_bundles (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    version TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    manifest_json TEXT NOT NULL,
-    manifest_sha256 TEXT NOT NULL,
-    metadata_json TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    archived_at TEXT,
-    UNIQUE(name, version)
-);
-
-CREATE TABLE IF NOT EXISTS data_bundle_assignments (
-    bundle_id TEXT NOT NULL REFERENCES data_bundles(id) ON DELETE RESTRICT,
-    role TEXT NOT NULL,
-    position INTEGER NOT NULL,
-    version_id TEXT NOT NULL REFERENCES data_resource_versions(id) ON DELETE RESTRICT,
-    mount_path TEXT,
-    required INTEGER NOT NULL DEFAULT 1,
-    config_json TEXT NOT NULL,
-    PRIMARY KEY(bundle_id, role, position)
-);
-
-CREATE TABLE IF NOT EXISTS data_imports (
-    id TEXT PRIMARY KEY,
-    resource_id TEXT NOT NULL REFERENCES data_resources(id) ON DELETE RESTRICT,
-    state TEXT NOT NULL,
-    request_json TEXT NOT NULL,
-    result_json TEXT,
-    gateway TEXT,
-    slurm_job_id TEXT,
-    slurm_state TEXT,
-    exit_code TEXT,
-    node_list TEXT,
-    run_directory TEXT,
-    script_path TEXT,
-    result_path TEXT,
-    stdout_path TEXT,
-    stderr_path TEXT,
-    version_id TEXT REFERENCES data_resource_versions(id) ON DELETE RESTRICT,
-    bundle_id TEXT REFERENCES data_bundles(id) ON DELETE RESTRICT,
-    error TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_experiments_project ON experiments(project_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_revisions_experiment ON experiment_revisions(experiment_id, revision_number);
-CREATE INDEX IF NOT EXISTS idx_variants_revision ON variants(experiment_revision_id, variant_index);
-CREATE INDEX IF NOT EXISTS idx_runs_variant_status ON runs(variant_id, status, created_at);
-CREATE INDEX IF NOT EXISTS idx_stages_run_status ON workflow_stages(run_id, status, created_at);
-CREATE INDEX IF NOT EXISTS idx_attempts_stage_status ON job_attempts(stage_id, status, attempt_number);
-CREATE INDEX IF NOT EXISTS idx_attempts_slurm_job ON job_attempts(slurm_job_id);
-CREATE INDEX IF NOT EXISTS idx_checkpoints_run_step ON checkpoints(run_id, training_step, created_at);
-CREATE INDEX IF NOT EXISTS idx_evaluations_run_status ON evaluations(run_id, status, created_at);
-CREATE INDEX IF NOT EXISTS idx_episodes_evaluation_status ON evaluation_episodes(evaluation_id, status, task);
-CREATE INDEX IF NOT EXISTS idx_metrics_run_name ON metrics(run_id, name, step);
-CREATE INDEX IF NOT EXISTS idx_artifacts_run_type ON artifacts(run_id, artifact_type, created_at);
-CREATE INDEX IF NOT EXISTS idx_manifests_run_type ON manifests(run_id, manifest_type, created_at);
-CREATE INDEX IF NOT EXISTS idx_snapshots_captured ON cluster_snapshots(captured_at);
-CREATE INDEX IF NOT EXISTS idx_events_entity ON events(entity_type, entity_id, created_at);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_attempt_common_hyperparameter_receipt
-ON events(entity_type, entity_id, event_type)
-WHERE entity_type = 'job_attempt'
-  AND event_type = 'COMMON_HYPERPARAMETERS_ENRICHED_V1';
-CREATE INDEX IF NOT EXISTS idx_data_resources_identity ON data_resources(provider, namespace, name);
-CREATE INDEX IF NOT EXISTS idx_data_resources_kind ON data_resources(kind, archived_at);
-CREATE INDEX IF NOT EXISTS idx_data_versions_resource ON data_resource_versions(resource_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_data_versions_status ON data_resource_versions(status, format);
-CREATE INDEX IF NOT EXISTS idx_data_derivation_inputs_version ON data_derivation_inputs(input_version_id);
-CREATE INDEX IF NOT EXISTS idx_data_bundles_state ON data_bundles(archived_at, name, version);
-CREATE INDEX IF NOT EXISTS idx_data_bundle_assignments_version ON data_bundle_assignments(version_id);
-CREATE INDEX IF NOT EXISTS idx_data_imports_state ON data_imports(state, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_data_imports_resource ON data_imports(resource_id, created_at DESC);
-
-CREATE TRIGGER IF NOT EXISTS data_resource_versions_no_update
-BEFORE UPDATE ON data_resource_versions
-BEGIN
-    SELECT RAISE(ABORT, 'data resource versions are immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS data_resource_versions_no_delete
-BEFORE DELETE ON data_resource_versions
-BEGIN
-    SELECT RAISE(ABORT, 'data resource versions are immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS data_derivations_no_update
-BEFORE UPDATE ON data_derivations
-BEGIN
-    SELECT RAISE(ABORT, 'data derivations are immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS data_derivations_no_delete
-BEFORE DELETE ON data_derivations
-BEGIN
-    SELECT RAISE(ABORT, 'data derivations are immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS data_derivation_inputs_no_update
-BEFORE UPDATE ON data_derivation_inputs
-BEGIN
-    SELECT RAISE(ABORT, 'data derivation inputs are immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS data_derivation_inputs_no_delete
-BEFORE DELETE ON data_derivation_inputs
-BEGIN
-    SELECT RAISE(ABORT, 'data derivation inputs are immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS data_bundle_assignments_no_update
-BEFORE UPDATE ON data_bundle_assignments
-BEGIN
-    SELECT RAISE(ABORT, 'data bundle assignments are immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS data_bundle_assignments_no_delete
-BEFORE DELETE ON data_bundle_assignments
-BEGIN
-    SELECT RAISE(ABORT, 'data bundle assignments are immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS attempt_common_hyperparameter_receipt_no_update
-BEFORE UPDATE ON events
-WHEN OLD.entity_type = 'job_attempt'
- AND OLD.event_type = 'COMMON_HYPERPARAMETERS_ENRICHED_V1'
-BEGIN
-    SELECT RAISE(ABORT, 'attempt common hyperparameter receipts are immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS attempt_common_hyperparameter_receipt_no_delete
-BEFORE DELETE ON events
-WHEN OLD.entity_type = 'job_attempt'
- AND OLD.event_type = 'COMMON_HYPERPARAMETERS_ENRICHED_V1'
-BEGIN
-    SELECT RAISE(ABORT, 'attempt common hyperparameter receipts are immutable');
-END;
-"""
 
 
 JSON_COLUMNS = frozenset(
@@ -644,32 +69,29 @@ def content_sha256(value: Any) -> str:
 
 
 class Database:
-    """Workspace-scoped persistence using SQLite or the central PostgreSQL backend."""
+    """Workspace-scoped persistence in the central PostgreSQL database."""
 
-    def __init__(self, path: str | os.PathLike[str] | None = None, *, workspace_id: str | None = None,
+    def __init__(self, *, workspace_id: str | None = None,
                  url: str | None = None, data_root: str | os.PathLike[str] | None = None) -> None:
         self.workspace_id = workspace_id
         self.data_root = Path(data_root or os.environ.get("SKYNET_DATA_ROOT") or APP_ROOT / "data").expanduser().resolve()
-        self.url = url or (os.environ.get("SKYNET_DATABASE_URL") if path is None else None)
+        self.url = url or os.environ.get("SKYNET_DATABASE_URL")
         endpoint_file = self.data_root / "database.json"
         if not endpoint_file.exists():
             endpoint_file = APP_ROOT / "config/database.json"
         self.endpoint_config = json.loads(endpoint_file.read_text()) if endpoint_file.exists() else {}
-        if not self.url and path is None and not os.environ.get("SKYNET_DATABASE_PATH") and endpoint_file.exists():
+        if not self.url and endpoint_file.exists():
             self.url = load_endpoint(endpoint_file)
-        self.is_postgres = bool(self.url)
+        if not self.url:
+            raise ValueError("PostgreSQL is required. Configure config/database.json or SKYNET_DATABASE_URL before starting Skynet.")
         if isinstance(self.url, str) and not self.url.startswith(("postgresql://", "postgres://", "dbname=", "host=", "user=")):
             raise ValueError("SKYNET_DATABASE_URL must describe a PostgreSQL connection")
-        self.backend = PostgresBackend(self.url, workspace_id) if self.is_postgres else None
+        self.backend = PostgresBackend(self.url, workspace_id)
         self.payload_store = None
         object_config = getattr(self.url, "config", None) or self.endpoint_config
-        if self.is_postgres and object_config.get("object_store_root"):
+        if object_config.get("object_store_root"):
             from .payload_store import PayloadStore
             self.payload_store = PayloadStore(self)
-        configured = path if path is not None else os.environ.get("SKYNET_DATABASE_PATH")
-        self.path = None if self.is_postgres else Path(configured or DEFAULT_DATABASE_PATH).expanduser().resolve()
-        if data_root is None and path is not None:
-            self.data_root = Path(path).expanduser().resolve().parent
         self._write_lock = threading.RLock()
         if workspace_id is None:
             self.initialize()
@@ -679,446 +101,21 @@ class Database:
                     raise ValueError("Unknown workspace")
 
     def for_workspace(self, workspace_id: str):
-        return Database(self.path, url=self.url, workspace_id=workspace_id, data_root=self.data_root)
+        return Database(url=self.url, workspace_id=workspace_id, data_root=self.data_root)
 
     def operation_lock(self, name: str):
-        return DistributedRLock(self.backend, name) if self.is_postgres else threading.RLock()
+        return DistributedRLock(self.backend, name)
 
-    def _connect(self) -> sqlite3.Connection:
-        if self.is_postgres:
-            connection = self.backend.connect()
-            connection.payload_store = self.payload_store
-            return connection
-        connection = sqlite3.connect(self.path, timeout=30.0, isolation_level=None)
-        connection.row_factory = sqlite3.Row
-        connection.create_function("current_workspace_id", 0, lambda: self.workspace_id)
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 30000")
+    def _connect(self) -> PostgresConnection:
+        connection = self.backend.connect()
+        connection.payload_store = self.payload_store
         return connection
 
     def initialize(self) -> None:
-        if self.is_postgres:
-            self.backend.initialize()
-            return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._write_lock:
-            connection = self._connect()
-            try:
-                connection.execute("PRAGMA journal_mode = WAL")
-                connection.execute("PRAGMA synchronous = NORMAL")
-                connection.executescript(SCHEMA)
-                self._migrate_runs(connection)
-                self._migrate_experiment_revision_lifecycle(connection)
-                self._migrate_adapter_registry(connection)
-                self._migrate_job_attempt_snapshots(connection)
-                self._ensure_execution_immutability_triggers(connection)
-                migrate_workspaces(connection)
-                migrate_notifications(connection)
-                from .maintenance_schema import SCHEMA as MAINTENANCE_SCHEMA
-                connection.executescript(MAINTENANCE_SCHEMA)
-            finally:
-                connection.close()
-
-    @staticmethod
-    def _migrate_runs(connection: sqlite3.Connection) -> None:
-        """Add independent run numbering and restart lineage to legacy databases."""
-
-        columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(runs)").fetchall()
-        }
-        unique_indexes: set[tuple[str, ...]] = set()
-        for index in connection.execute("PRAGMA index_list(runs)").fetchall():
-            if not index["unique"]:
-                continue
-            index_name = str(index["name"]).replace('"', '""')
-            unique_indexes.add(tuple(
-                row["name"]
-                for row in connection.execute(
-                    f'PRAGMA index_info("{index_name}")'
-                ).fetchall()
-            ))
-        current = (
-            {"run_number", "restarted_from_run_id"} <= columns
-            and ("variant_id", "seed", "run_number") in unique_indexes
-            and ("variant_id", "seed") not in unique_indexes
-        )
-        if current:
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_runs_restarted_from "
-                "ON runs(restarted_from_run_id)"
-            )
-            return
-
-        if connection.execute("PRAGMA foreign_key_check").fetchall():
-            raise RuntimeError("cannot migrate runs while foreign-key violations exist")
-        foreign_keys = int(connection.execute("PRAGMA foreign_keys").fetchone()[0])
-        connection.execute("PRAGMA foreign_keys = OFF")
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute("DROP TABLE IF EXISTS _skynet_runs_migration_v2")
-            connection.execute("""
-                CREATE TABLE _skynet_runs_migration_v2 (
-                    id TEXT PRIMARY KEY,
-                    variant_id TEXT NOT NULL REFERENCES variants(id) ON DELETE RESTRICT,
-                    seed INTEGER NOT NULL,
-                    run_number INTEGER NOT NULL DEFAULT 1 CHECK(run_number >= 1),
-                    restarted_from_run_id TEXT REFERENCES runs(id) ON DELETE RESTRICT,
-                    status TEXT NOT NULL DEFAULT 'PENDING',
-                    adapter_name TEXT NOT NULL,
-                    adapter_version TEXT NOT NULL,
-                    source_commit TEXT,
-                    runtime_profile TEXT,
-                    run_directory TEXT NOT NULL,
-                    mlflow_run_id TEXT,
-                    created_at TEXT NOT NULL,
-                    started_at TEXT,
-                    completed_at TEXT,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(variant_id, seed, run_number),
-                    CHECK(restarted_from_run_id IS NULL OR restarted_from_run_id <> id)
-                )
-            """)
-            run_number = "COALESCE(run_number, 1)" if "run_number" in columns else "1"
-            restarted_from = (
-                "restarted_from_run_id"
-                if "restarted_from_run_id" in columns
-                else "NULL"
-            )
-            connection.execute(f"""
-                INSERT INTO _skynet_runs_migration_v2 (
-                    id, variant_id, seed, run_number, restarted_from_run_id,
-                    status, adapter_name, adapter_version, source_commit,
-                    runtime_profile, run_directory, mlflow_run_id, created_at,
-                    started_at, completed_at, updated_at
-                )
-                SELECT id, variant_id, seed, {run_number}, {restarted_from},
-                       status, adapter_name, adapter_version, source_commit,
-                       runtime_profile, run_directory, mlflow_run_id, created_at,
-                       started_at, completed_at, updated_at
-                FROM runs
-            """)
-            connection.execute("DROP TABLE runs")
-            connection.execute(
-                "ALTER TABLE _skynet_runs_migration_v2 RENAME TO runs"
-            )
-            connection.execute(
-                "CREATE INDEX idx_runs_variant_status "
-                "ON runs(variant_id, status, created_at)"
-            )
-            connection.execute(
-                "CREATE INDEX idx_runs_restarted_from ON runs(restarted_from_run_id)"
-            )
-            if connection.execute("PRAGMA foreign_key_check").fetchall():
-                raise RuntimeError("run migration produced foreign-key violations")
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.execute(f"PRAGMA foreign_keys = {foreign_keys}")
-
-    @staticmethod
-    def _migrate_experiment_revision_lifecycle(
-        connection: sqlite3.Connection,
-    ) -> None:
-        """Add and backfill the one-way revision submission lock."""
-
-        columns = {
-            row["name"]
-            for row in connection.execute(
-                "PRAGMA table_info(experiment_revisions)"
-            ).fetchall()
-        }
-        connection.execute("BEGIN IMMEDIATE")
-        try:
-            if "submitted_at" not in columns:
-                connection.execute(
-                    "ALTER TABLE experiment_revisions ADD COLUMN submitted_at TEXT"
-                )
-            connection.execute("""
-                UPDATE experiment_revisions
-                SET submitted_at = created_at
-                WHERE submitted_at IS NULL
-                  AND EXISTS (
-                      SELECT 1
-                      FROM variants v
-                      JOIN runs r ON r.variant_id = v.id
-                      WHERE v.experiment_revision_id = experiment_revisions.id
-                        AND (
-                            r.status <> 'DRAFT'
-                            OR EXISTS (
-                                SELECT 1
-                                FROM workflow_stages s
-                                JOIN job_attempts a ON a.stage_id = s.id
-                                WHERE s.run_id = r.id
-                            )
-                        )
-                  )
-            """)
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-
-    @staticmethod
-    def _ensure_execution_immutability_triggers(
-        connection: sqlite3.Connection,
-    ) -> None:
-        connection.executescript("""
-            CREATE TRIGGER IF NOT EXISTS experiment_revision_spec_immutable
-            BEFORE UPDATE OF experiment_id, revision_number, spec_schema_version,
-                             requested_spec_json, requested_spec_sha256,
-                             created_by, created_at
-            ON experiment_revisions
-            BEGIN
-                SELECT RAISE(ABORT, 'experiment revision specifications are immutable');
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS variants_immutable
-            BEFORE UPDATE ON variants
-            BEGIN
-                SELECT RAISE(ABORT, 'experiment variants are immutable');
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS run_identity_immutable
-            BEFORE UPDATE OF variant_id, seed, run_number, restarted_from_run_id,
-                             adapter_name, adapter_version, source_commit,
-                             runtime_profile, created_at
-            ON runs
-            BEGIN
-                SELECT RAISE(ABORT, 'run identity is immutable');
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS attempt_snapshot_immutable
-            BEFORE UPDATE OF execution_snapshot_json, execution_snapshot_sha256
-            ON job_attempts
-            BEGIN
-                SELECT RAISE(ABORT, 'attempt execution snapshots are immutable');
-            END;
-        """)
-
-    @staticmethod
-    def _migrate_job_attempt_snapshots(connection: sqlite3.Connection) -> None:
-        """Add immutable per-attempt execution provenance to existing databases."""
-        columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(job_attempts)").fetchall()
-        }
-        additions = {
-            "execution_snapshot_json": "TEXT",
-            "execution_snapshot_sha256": "TEXT",
-        }
-        connection.execute("BEGIN IMMEDIATE")
-        try:
-            for name, declaration in additions.items():
-                if name not in columns:
-                    connection.execute(
-                        f"ALTER TABLE job_attempts ADD COLUMN {name} {declaration}"
-                    )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-
-    @staticmethod
-    def _migrate_adapter_registry(connection: sqlite3.Connection) -> None:
-        """Add registry metadata to legacy adapter rows without replacing them."""
-        additions = {
-            "adapter_key": "TEXT",
-            "version_number": "INTEGER",
-            "description": "TEXT NOT NULL DEFAULT ''",
-            "manifest_json": "TEXT",
-            "manifest_sha256": "TEXT",
-            "archived_at": "TEXT",
-            "created_by": "TEXT",
-            "change_note": "TEXT NOT NULL DEFAULT ''",
-            "seed_key": "TEXT",
-            "source_adapter_key": "TEXT",
-            "source_version_number": "INTEGER",
-        }
-        connection.execute("BEGIN IMMEDIATE")
-        try:
-            columns = {
-                row["name"]
-                for row in connection.execute("PRAGMA table_info(adapters)").fetchall()
-            }
-            for trigger in (
-                "adapter_versions_immutable",
-                "adapter_registry_name_insert",
-                "adapter_registry_name_update",
-                "adapter_registry_seed_insert",
-                "adapter_registry_seed_update",
-            ):
-                connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
-            for name, declaration in additions.items():
-                if name not in columns:
-                    connection.execute(f"ALTER TABLE adapters ADD COLUMN {name} {declaration}")
-
-            rows = connection.execute(
-                "SELECT * FROM adapters ORDER BY lower(name), created_at, version, id"
-            ).fetchall()
-            grouped: dict[str, list[sqlite3.Row]] = {}
-            needs_backfill = any(
-                row["adapter_key"] is None
-                or row["version_number"] is None
-                or row["manifest_json"] is None
-                or row["manifest_sha256"] is None
-                for row in rows
-            )
-            if needs_backfill:
-                for row in rows:
-                    grouped.setdefault(str(row["name"]).casefold(), []).append(row)
-
-            for group in grouped.values():
-                adapter_key = next(
-                    (str(row["adapter_key"]) for row in group if row["adapter_key"]),
-                    str(group[0]["id"]),
-                )
-                used_versions = {
-                    int(row["version_number"])
-                    for row in group
-                    if row["version_number"] is not None
-                }
-                next_version = 1
-                for row in group:
-                    version_number = row["version_number"]
-                    if version_number is None:
-                        while next_version in used_versions:
-                            next_version += 1
-                        version_number = next_version
-                        used_versions.add(next_version)
-                        next_version += 1
-
-                    manifest_json = row["manifest_json"]
-                    if not manifest_json:
-                        try:
-                            capabilities = json.loads(row["capabilities_json"] or "{}")
-                        except (TypeError, json.JSONDecodeError):
-                            capabilities = {}
-                        try:
-                            parameter_schema = json.loads(row["schema_json"] or "{}")
-                        except (TypeError, json.JSONDecodeError):
-                            parameter_schema = {}
-                        manifest_json = canonical_json({
-                            "schema_version": "skynet.adapter/v1",
-                            "legacy_adapter_version": row["version"],
-                            "repository": {"url": row["repository_url"]},
-                            "capabilities": capabilities,
-                            "parameter_schema": parameter_schema,
-                        })
-                    manifest_sha256 = row["manifest_sha256"] or content_sha256(manifest_json)
-                    archived_at = row["archived_at"]
-                    if not bool(row["enabled"]) and archived_at is None:
-                        archived_at = row["updated_at"] or row["created_at"] or utc_now()
-                    connection.execute(
-                        """
-                        UPDATE adapters
-                        SET adapter_key = ?, version_number = ?, description = COALESCE(description, ''),
-                            manifest_json = ?, manifest_sha256 = ?, archived_at = ?,
-                            created_by = COALESCE(created_by, '__migration__')
-                        WHERE id = ?
-                        """,
-                        (
-                            adapter_key,
-                            version_number,
-                            manifest_json,
-                            manifest_sha256,
-                            archived_at,
-                            row["id"],
-                        ),
-                    )
-                latest_legacy_row = group[-1]
-                group_archived_at = None
-                if not bool(latest_legacy_row["enabled"]):
-                    group_archived_at = (
-                        latest_legacy_row["archived_at"]
-                        or latest_legacy_row["updated_at"]
-                        or latest_legacy_row["created_at"]
-                        or utc_now()
-                    )
-                connection.execute(
-                    "UPDATE adapters SET enabled = ?, archived_at = ? WHERE adapter_key = ?",
-                    (int(group_archived_at is None), group_archived_at, adapter_key),
-                )
-
-            connection.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_adapter_key_version "
-                "ON adapters(adapter_key, version_number)"
-            )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_adapters_registry_state "
-                "ON adapters(adapter_key, archived_at, version_number DESC)"
-            )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_adapters_seed_key ON adapters(seed_key)"
-            )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_adapter_validations_version "
-                "ON adapter_validations(adapter_version_id, created_at DESC)"
-            )
-            connection.execute("""
-                CREATE TRIGGER adapter_versions_immutable
-                BEFORE UPDATE OF adapter_key, version_number, manifest_json, manifest_sha256,
-                                 name, description, repository_url, capabilities_json, schema_json,
-                                 created_by, change_note, created_at, source_adapter_key,
-                                 source_version_number
-                ON adapters
-                BEGIN
-                    SELECT RAISE(ABORT, 'adapter versions are immutable');
-                END
-            """)
-            connection.execute("""
-                CREATE TRIGGER IF NOT EXISTS adapter_registry_name_insert
-                BEFORE INSERT ON adapters
-                WHEN NEW.adapter_key IS NOT NULL AND EXISTS (
-                    SELECT 1 FROM adapters
-                    WHERE lower(name) = lower(NEW.name) AND adapter_key <> NEW.adapter_key
-                )
-                BEGIN
-                    SELECT RAISE(ABORT, 'adapter name already exists');
-                END
-            """)
-            connection.execute("""
-                CREATE TRIGGER IF NOT EXISTS adapter_registry_name_update
-                BEFORE UPDATE OF name, adapter_key ON adapters
-                WHEN NEW.adapter_key IS NOT NULL AND EXISTS (
-                    SELECT 1 FROM adapters
-                    WHERE lower(name) = lower(NEW.name) AND adapter_key <> NEW.adapter_key
-                )
-                BEGIN
-                    SELECT RAISE(ABORT, 'adapter name already exists');
-                END
-            """)
-            connection.execute("""
-                CREATE TRIGGER IF NOT EXISTS adapter_registry_seed_insert
-                BEFORE INSERT ON adapters
-                WHEN NEW.seed_key IS NOT NULL AND EXISTS (
-                    SELECT 1 FROM adapters
-                    WHERE seed_key = NEW.seed_key AND adapter_key <> NEW.adapter_key
-                )
-                BEGIN
-                    SELECT RAISE(ABORT, 'adapter seed key already exists');
-                END
-            """)
-            connection.execute("""
-                CREATE TRIGGER IF NOT EXISTS adapter_registry_seed_update
-                BEFORE UPDATE OF seed_key, adapter_key ON adapters
-                WHEN NEW.seed_key IS NOT NULL AND EXISTS (
-                    SELECT 1 FROM adapters
-                    WHERE seed_key = NEW.seed_key AND adapter_key <> NEW.adapter_key
-                )
-                BEGIN
-                    SELECT RAISE(ABORT, 'adapter seed key already exists');
-                END
-            """)
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
+        self.backend.initialize()
 
     @contextmanager
-    def connection(self) -> Iterator[sqlite3.Connection]:
+    def connection(self) -> Iterator[PostgresConnection]:
         connection = self._connect()
         try:
             yield connection
@@ -1126,12 +123,12 @@ class Database:
             connection.close()
 
     @contextmanager
-    def transaction(self, *, immediate: bool = True) -> Iterator[sqlite3.Connection]:
+    def transaction(self, *, immediate: bool = True) -> Iterator[PostgresConnection]:
         with self._write_lock:
             connection = self._connect()
             try:
-                connection.execute("BEGIN" if self.is_postgres or not immediate else "BEGIN IMMEDIATE")
-                if self.is_postgres and immediate:
+                connection.execute("BEGIN")
+                if immediate:
                     # Preserve the repository's read-modify-write serialization
                     # across app hosts, not only threads in one Python process.
                     connection.execute("SELECT pg_advisory_xact_lock(?)", (lock_key("repository-write"),))
@@ -1144,7 +141,7 @@ class Database:
                 connection.close()
 
     @staticmethod
-    def _decode(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    def _decode(row: Record | None) -> dict[str, Any] | None:
         if row is None:
             return None
         result = dict(row)
@@ -1159,11 +156,11 @@ class Database:
         return result
 
     @classmethod
-    def _decode_many(cls, rows: Sequence[sqlite3.Row]) -> list[dict[str, Any]]:
+    def _decode_many(cls, rows: Sequence[Record]) -> list[dict[str, Any]]:
         return [decoded for row in rows if (decoded := cls._decode(row)) is not None]
 
     @staticmethod
-    def _insert(connection: sqlite3.Connection, table: str, values: Mapping[str, Any]) -> None:
+    def _insert(connection: PostgresConnection, table: str, values: Mapping[str, Any]) -> None:
         from .maintenance_guard import guard_write
         guard_write(connection, table, values)
         if getattr(connection, "payload_store", None):
@@ -1171,8 +168,6 @@ class Database:
         if table in PRIVATE_TABLES:
             values = dict(values)
             values["owner_id"] = connection.execute("SELECT current_workspace_id()").fetchone()[0] or LEGACY_WORKSPACE
-            if table == "adapters" and values.get("seed_key"):
-                values["owner_id"] = None
         columns = ", ".join(values)
         placeholders = ", ".join("?" for _ in values)
         connection.execute(
@@ -1182,7 +177,7 @@ class Database:
 
     @classmethod
     def _row_by_id(
-        cls, connection: sqlite3.Connection, table: str, entity_id: str
+        cls, connection: PostgresConnection, table: str, entity_id: str
     ) -> dict[str, Any] | None:
         return cls._decode(connection.execute(f"SELECT * FROM {table} WHERE id = ? AND {visible_sql(table)}", (entity_id,)).fetchone())
 
@@ -1201,7 +196,7 @@ class Database:
     @classmethod
     def _update(
         cls,
-        connection: sqlite3.Connection,
+        connection: PostgresConnection,
         table: str,
         entity_id: str,
         fields: Mapping[str, Any],
@@ -1263,7 +258,7 @@ class Database:
 
     @staticmethod
     def _attach_tracking_links(
-        connection: sqlite3.Connection,
+        connection: PostgresConnection,
         records: list[dict[str, Any]],
         scope_type: str,
     ) -> None:
@@ -2802,7 +1797,7 @@ class Database:
                     "id", "created_at", "is_selected_for_inference",
                 }
                 if any(existing[key] != values[key] for key in receipt_fields):
-                    raise sqlite3.IntegrityError(
+                    raise IntegrityError(
                         "checkpoint path is already registered with a different receipt"
                     )
                 values["id"] = existing["id"]
@@ -2868,7 +1863,7 @@ class Database:
                 SELECT * FROM checkpoints
                 WHERE run_id = ? AND is_resumable = 1 AND is_selected_for_inference = 0 AND pruned_at IS NULL
                 ORDER BY COALESCE(training_step, -1) DESC, created_at DESC
-                {"OFFSET ?" if self.is_postgres else "LIMIT -1 OFFSET ?"}
+                OFFSET ?
             """, (run_id, keep_last)).fetchall())
 
     def register_evaluation_suite(
@@ -2922,8 +1917,8 @@ class Database:
                     (now, evaluator_adapter, name, suite_id),
                 )
             connection.execute(
-                "UPDATE evaluation_suites SET enabled = ?, updated_at = ? WHERE id = ?",
-                (int(enabled), now, suite_id),
+                "UPDATE evaluation_suites SET enabled = ?, updated_at = ? WHERE id = ? AND enabled <> ?",
+                (int(enabled), now, suite_id, int(enabled)),
             )
             result = self._row_by_id(connection, "evaluation_suites", suite_id)
         assert result is not None
@@ -3542,8 +2537,8 @@ class Database:
         return None
 
     @classmethod
-    def _adapter_version_payload(cls, row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
-        decoded = cls._decode(row) if isinstance(row, (sqlite3.Row, Record)) else dict(row)
+    def _adapter_version_payload(cls, row: Record | Mapping[str, Any]) -> dict[str, Any]:
+        decoded = cls._decode(row) if isinstance(row, Record) else dict(row)
         assert decoded is not None
         return {
             "id": decoded["id"],
@@ -3565,7 +2560,7 @@ class Database:
     @classmethod
     def _adapter_bundle(
         cls,
-        rows: Sequence[sqlite3.Row],
+        rows: Sequence[Record],
         *,
         selected_version: int | None = None,
         include_versions: bool = False,
@@ -3609,8 +2604,8 @@ class Database:
 
     @staticmethod
     def _adapter_rows(
-        connection: sqlite3.Connection, adapter_id: str
-    ) -> list[sqlite3.Row]:
+        connection: PostgresConnection, adapter_id: str
+    ) -> list[Record]:
         return connection.execute(
             f"""
             SELECT * FROM adapters
@@ -3626,7 +2621,7 @@ class Database:
     @classmethod
     def _insert_adapter_version(
         cls,
-        connection: sqlite3.Connection,
+        connection: PostgresConnection,
         *,
         adapter_key: str,
         version_number: int,
@@ -3977,7 +2972,7 @@ class Database:
         return result
 
     @staticmethod
-    def _adapter_validation_payload(row: sqlite3.Row) -> dict[str, Any]:
+    def _adapter_validation_payload(row: Record) -> dict[str, Any]:
         decoded = dict(row)
         return {
             "id": decoded["id"],
@@ -4081,8 +3076,8 @@ class Database:
             return [self._adapter_validation_payload(row) for row in validations]
 
     @classmethod
-    def _public_data_resource(cls, row: sqlite3.Row | Mapping[str, Any]) -> dict[str, Any]:
-        result = cls._decode(row) if isinstance(row, (sqlite3.Row, Record)) else dict(row)
+    def _public_data_resource(cls, row: Record | Mapping[str, Any]) -> dict[str, Any]:
+        result = cls._decode(row) if isinstance(row, Record) else dict(row)
         assert result is not None
         result["metadata"] = result.pop("metadata_json", {})
         return result
@@ -4090,12 +3085,12 @@ class Database:
     @classmethod
     def _public_data_version(
         cls,
-        connection: sqlite3.Connection,
-        row: sqlite3.Row | Mapping[str, Any],
+        connection: PostgresConnection,
+        row: Record | Mapping[str, Any],
         *,
         include_resource: bool = False,
     ) -> dict[str, Any]:
-        result = cls._decode(row) if isinstance(row, (sqlite3.Row, Record)) else dict(row)
+        result = cls._decode(row) if isinstance(row, Record) else dict(row)
         assert result is not None
         result["metadata"] = result.pop("metadata_json", {})
         result["locations"] = [dict(item) for item in connection.execute("SELECT * FROM data_locations WHERE version_id=? ORDER BY kind, host", (result["id"],)).fetchall()]
@@ -4111,8 +3106,8 @@ class Database:
     @classmethod
     def _data_resource_payload(
         cls,
-        connection: sqlite3.Connection,
-        row: sqlite3.Row,
+        connection: PostgresConnection,
+        row: Record,
         *,
         include_versions: bool,
     ) -> dict[str, Any]:
@@ -4134,7 +3129,7 @@ class Database:
 
     def _insert_data_resource(
         self,
-        connection: sqlite3.Connection,
+        connection: PostgresConnection,
         *,
         provider: str,
         namespace: str,
@@ -4241,7 +3236,7 @@ class Database:
 
     def _insert_data_resource_version(
         self,
-        connection: sqlite3.Connection,
+        connection: PostgresConnection,
         resource_id: str,
         *,
         revision: str,
@@ -4497,27 +3492,8 @@ class Database:
                         (utc_now(), bundle["id"]),
                     )
             else:
-                trigger_names = [
-                    f"{table}_no_delete"
-                    for table in (
-                        "data_resource_versions",
-                        "data_derivations",
-                        "data_derivation_inputs",
-                        "data_bundle_assignments",
-                    )
-                ]
-                triggers = []
-                if self.is_postgres:
-                    # Transaction-local capability; other connections retain the
-                    # immutable-record guards throughout this cleanup.
-                    c.execute("SET LOCAL skynet.allow_dataset_delete = 'on'")
-                else:
-                    triggers = [
-                        c.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (name,)).fetchone()[0]
-                        for name in trigger_names
-                    ]
-                    for name in trigger_names:
-                        c.execute(f"DROP TRIGGER {name}")
+                # Transaction-local capability preserves guards in other connections.
+                c.execute("SET LOCAL skynet.allow_dataset_delete = 'on'")
                 for bundle in bundles:
                     c.execute(
                         "DELETE FROM data_bundle_assignments WHERE bundle_id=?",
@@ -4545,8 +3521,6 @@ class Database:
                     c.execute("DELETE FROM policy_exports WHERE id=?", (job["id"],))
                 if identifier is None:
                     c.execute("DELETE FROM data_resources WHERE id=?", (resource_id,))
-                for trigger in triggers:
-                    c.execute(trigger)
         if failure:
             raise ValueError(
                 f"Dataset deletion is incomplete. Retry Delete dataset. {failure}"
@@ -4590,7 +3564,7 @@ class Database:
             return result
 
     @classmethod
-    def _public_data_import(cls, row: sqlite3.Row) -> dict[str, Any]:
+    def _public_data_import(cls, row: Record) -> dict[str, Any]:
         result = cls._decode(row)
         assert result is not None
         result["request"] = result.pop("request_json", {})
@@ -4719,7 +3693,7 @@ class Database:
 
     @classmethod
     def _data_derivation_payload(
-        cls, connection: sqlite3.Connection, row: sqlite3.Row
+        cls, connection: PostgresConnection, row: Record
     ) -> dict[str, Any]:
         result = cls._decode(row)
         assert result is not None
@@ -4857,7 +3831,7 @@ class Database:
 
     @classmethod
     def _data_bundle_payload(
-        cls, connection: sqlite3.Connection, row: sqlite3.Row
+        cls, connection: PostgresConnection, row: Record
     ) -> dict[str, Any]:
         result = cls._decode(row)
         assert result is not None
@@ -4891,7 +3865,7 @@ class Database:
     @classmethod
     def _bundle_manifest_assignment(
         cls,
-        connection: sqlite3.Connection,
+        connection: PostgresConnection,
         assignment: Mapping[str, Any],
     ) -> dict[str, Any]:
         version_row = connection.execute(
@@ -5085,7 +4059,6 @@ class Database:
 
 __all__ = [
     "Database",
-    "DEFAULT_DATABASE_PATH",
     "canonical_json",
     "content_sha256",
     "new_id",

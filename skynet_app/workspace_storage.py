@@ -110,7 +110,7 @@ class WorkspaceStorage:
         if self.database.workspace_id is None:
             raise ValueError("Open an email workspace before setting up a base path")
         root = validate_work_root(work_root)
-        # Serialize setup without keeping a SQLite transaction open during SSH.
+        # Serialize setup without keeping a PostgreSQL transaction open during SSH.
         # A cluster-side ownership marker also protects retries and other servers.
         with _SETUP_LOCK:
             with self.database.connection() as connection:

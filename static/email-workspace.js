@@ -71,6 +71,7 @@
 
   async function loadApplication() {
     document.getElementById("workspace-current-email").textContent = workspace.email;
+    document.getElementById("workspace-current-email").title = workspace.email;
     window.SkynetWorkspace = Object.freeze({
       id: workspace.id,
       email: workspace.email,
@@ -106,6 +107,13 @@
     }
     gate.hidden = true;
     content.hidden = false;
+    // Keep sticky page headings below the header when its controls wrap.
+    if (typeof ResizeObserver !== "undefined") {
+      new ResizeObserver(entries => {
+        const height = entries[0].target.getBoundingClientRect().height;
+        if (height) document.documentElement.style.setProperty("--topbar-height", `${height}px`);
+      }).observe(content.querySelector(".topbar"));
+    }
     if (window.SkynetStorageConfigured === false) {
       document.getElementById("workspace-storage-form").scrollIntoView({block: "center"});
       document.getElementById("workspace-base-path").focus({preventScroll: true});

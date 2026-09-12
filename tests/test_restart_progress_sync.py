@@ -34,7 +34,7 @@ def stored_attempt(progress):
 
 
 def epoch(number, loss=None):
-    return json.dumps({"epoch": number, "val_loss": 1 / (number + 1) if loss is None else loss}) + "\n"
+    return json.dumps({"epoch": number, "train_loss": 1 / (number + 1) if loss is None else loss}) + "\n"
 
 
 def ingest(progress):
@@ -106,7 +106,7 @@ def test_real_counter_reset_still_assigns_the_new_segment_to_the_restart(progres
     assert {sample["id"] for sample in old}.issubset({sample["id"] for sample in samples})
     restarted = [sample for sample in samples if sample["restart_count"] == 1]
     assert len(restarted) == 1 and restarted[0]["completed"] == 1
-    assert restarted[0]["evidence_json"]["metrics"]["val_loss"] == 0.125
+    assert restarted[0]["evidence_json"]["metrics"]["train_loss"] == 0.125
 
 
 def test_trimmed_tail_after_observed_reset_keeps_equal_valued_new_rows_in_current_restart(progress):

@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from skynet_app import simulation_hands as hands
+from skynet_app import hand_bundles
 from skynet_app.hands import HandLibrary, parse_urdf, joint_metadata
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,7 +59,7 @@ def source(tmp_path, monkeypatch):
         alignment_rpy=[0, 0, 0],
         retargeting_scheme="vector",
     )
-    monkeypatch.setattr(hands, "definition", lambda robot: dict(spec))
+    monkeypatch.setattr(hand_bundles, "definition", lambda robot: dict(spec))
     return library, tmp_path / "bundles"
 
 
@@ -183,12 +184,12 @@ def test_remote_upload_rejects_corrupt_bundle_without_ready_marker(source, tmp_p
     assert not list(remote_root.rglob(".hand-*"))
 
 
-def test_catalog_exposes_ten_imported_variants_and_missing_mesh_reason():
+def test_catalog_exposes_thirteen_imported_variants_and_missing_mesh_reason():
     from skynet_app.live_xr_catalog import catalog, selection
 
     imported = [h for h in catalog()["hands"] if h.get("imported")]
-    assert len(imported) == 10
-    assert len({h["key"] for h in imported}) == 10
+    assert len(imported) == 13
+    assert len({h["key"] for h in imported}) == 13
     for hand in imported:
         for task in catalog()["tasks"]:
             assert selection(task["key"], hand["key"])[1] == hand
@@ -240,3 +241,141 @@ def test_mesh_filenames_are_safe_for_usd_prim_names(source, monkeypatch):
     assert "." not in Path(name).stem
     assert (directory / name).read_bytes() == original.read_bytes()
     assert manifest["source_assets"]["link.0.stl"] == name
+
+
+def test_canonical_hand_has_no_simulator_or_teleop_code(source):
+    path, hand = hand_bundles.build(
+        "skynet_test_right", library=source[0], output_root=source[1] / "canonical"
+    )
+    assert hand["schema"] == "skynet.hand-bundle/v1"
+    assert not any(n.endswith((".py", ".json")) for n in hand["files"])
+    assert not any(
+        k in hand for k in ("retargeting_scheme", "collision_neighbor_depth")
+    )
+    adapter_path, adapter = build(source)
+    assert adapter["hand_asset"]["digest"] == hand["digest"]
+    assert (adapter_path / "hand.urdf").read_bytes() == (
+        path / "hand.urdf"
+    ).read_bytes()
+    retarget = json.loads((adapter_path / "retarget-right.json").read_text())[
+        "retargeting"
+    ]
+    assert retarget["target_joint_names"] == hand["finger_joints"]
+
+
+@pytest.mark.parametrize("side", ["right", "left"])
+def test_official_shadow_palm_subtree_preserves_all_physical_properties(side):
+    import xml.etree.ElementTree as ET
+
+    original = parse_urdf(
+        (ROOT / f"config/hand_models/shadow/{side}.urdf").read_bytes()
+    )
+    prefix = side[0] + "h_"
+    tips = [prefix + finger + "tip" for finger in ("th", "ff", "mf", "rf", "lf")]
+    physical = hand_bundles.palm_subtree(original, prefix + "palm", tips)
+    joints = joint_metadata(physical)
+    assert len(joints) == 22
+    assert not any("WRJ" in j["name"] for j in joints)
+    for element in physical:
+        source = original.find(f"{element.tag}[@name='{element.get('name')}']")
+        assert ET.tostring(element) == ET.tostring(source)
+    assert (
+        float(
+            physical.find(f"link[@name='{prefix}ffdistal']/inertial/mass").get("value")
+        )
+        == 0.012
+    )
+    assert (
+        float(
+            physical.find(f"link[@name='{prefix}thdistal']/inertial/mass").get("value")
+        )
+        == 0.016
+    )
+
+
+def test_two_hands_preserve_action_order_across_serialization(source, monkeypatch):
+    from types import SimpleNamespace
+
+    library, _ = source
+    spec = hand_bundles.definition("test")
+
+    def definition(robot):
+        side = (
+            "both"
+            if robot.endswith("bimanual")
+            else "left"
+            if robot.endswith("left")
+            else "right"
+        )
+        return dict(spec, key="test", side=side, robot=robot)
+
+    monkeypatch.setattr(hand_bundles, "definition", definition)
+    # A second copy of the fixture model is enough to exercise actual assembly,
+    # meshes, namespace references and ordering (not a mocked composed manifest).
+    import shutil
+
+    directory = library.directory(library.entry("test", "right"), "right")
+    left = directory.with_name("left")
+    shutil.copytree(directory, left)
+    model = left / "model.urdf"
+    model.write_text(model.read_text().replace("/right/assets/", "/left/assets/"))
+    library.catalog[0]["sides"]["left"] = "hand.urdf"
+    # The installed side is recorded inside the manifest.
+    for filename in ("manifest.json",):
+        mpath = left / filename
+        data = json.loads(mpath.read_text())
+        data["side"] = "left"
+        mpath.write_text(json.dumps(data))
+    path, m = hands.build(
+        "skynet_test_bimanual", library=library, output_root=source[1]
+    )
+    loaded = RUNTIME["read_bundle"](path)[1]
+    layouts = RUNTIME["hand_layouts"](loaded)
+    assert list(layouts) == ["right", "left"]
+    assert loaded["action_dimension"] == 14
+    terms = RUNTIME["action_terms"](loaded, SimpleNamespace)
+    assert [n for term in terms.values() for n in term.joint_names] == loaded[
+        "wrist_joints"
+    ] + loaded["finger_joints"]
+    assert (
+        len(terms["right_wrist"].joint_names)
+        == len(terms["left_wrist"].joint_names)
+        == 6
+    )
+    assert (
+        terms["right_wrist"].use_default_offset
+        and not terms["fingers"].use_default_offset
+    )
+    assert all(
+        (path / x.get("filename")).is_file()
+        for x in parse_urdf((path / "simulation.urdf").read_bytes()).findall(".//mesh")
+    )
+    assert set(loaded["neutral"]) <= set(loaded["finger_joints"])
+    loaded["wrist_joints"] = list(reversed(loaded["wrist_joints"]))
+    with pytest.raises(ValueError, match="order"):
+        RUNTIME["hand_layouts"](loaded)
+
+
+def test_historical_adapter_keeps_its_recorded_layout(source):
+    _, m = build(source)
+    for key in ("hands", "hand_order", "hand_asset"):
+        m.pop(key)
+    assert RUNTIME["hand_layouts"](m)["right"]["wrist_joints"] == m["wrist_joints"]
+
+
+def test_adapter_code_changes_do_not_change_physical_identity(
+    source, tmp_path, monkeypatch
+):
+    import shutil
+
+    _, before = build(source)
+    runtime_dir = tmp_path / "adapter-source" / "ops/xr/hands"
+    runtime_dir.mkdir(parents=True)
+    for name in ("runtime.py", "record.py", "anatomy.py"):
+        shutil.copyfile(ROOT / "ops/xr/hands" / name, runtime_dir / name)
+    with (runtime_dir / "runtime.py").open("a") as f:
+        f.write("\n# A different adapter implementation.\n")
+    monkeypatch.setattr(hands, "ROOT", tmp_path / "adapter-source")
+    _, after = build(source)
+    assert before["digest"] != after["digest"]
+    assert before["hand_asset"] == after["hand_asset"]

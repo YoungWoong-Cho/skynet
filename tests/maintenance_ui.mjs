@@ -9,6 +9,7 @@ w.escapeHtml = text => String(text).replaceAll("&", "&amp;").replaceAll("<", "&l
 w.closeActiveDisclosure = ()=>{};
 const refresh=[];
 w.loadExperiments=w.loadRuns=w.loadEvaluations=async()=>{refresh.push(1);};
+w.refreshAfterDeletion = async()=>{await Promise.all([w.loadExperiments(),w.loadRuns(),w.loadEvaluations()]);};
 w.showToast = ()=>{};
 const flush = async()=>{for(let i=0;i<6;i++)await new Promise(r=>setImmediate(r));};
 let calls=[], handler;
@@ -21,9 +22,11 @@ try {
  assert.equal(el("maintenance-confirm").disabled,true);
  assert.match(el("maintenance-content").textContent,/<unsafe>/);
  assert.equal(el("maintenance-content").querySelector("unsafe"),null);
- handler=async()=>({label:"Evaluation",token:"b".repeat(64),blockers:[],counts:{evaluations:1,evaluation_episodes:1},files:[]});
+ handler=async()=>({label:"Evaluation",token:"b".repeat(64),blockers:[],notices:["This suite will no longer be available to <HPT>."],counts:{evaluations:1,evaluation_episodes:1},files:[]});
  el("maintenance-content").querySelector("button").click();await flush();
  assert.equal(el("maintenance-confirm").disabled,false);
+ assert.match(el("maintenance-content").textContent,/no longer be available to <HPT>/);
+ assert.equal(el("maintenance-content").querySelector("hpt"),null,"notices render as text");
  let finish;
  handler=()=>new Promise(resolve=>{finish=resolve;});
  el("maintenance-confirm").click();el("maintenance-confirm").click();

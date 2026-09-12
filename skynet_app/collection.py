@@ -4,7 +4,7 @@ import base64
 import json
 import re
 import shlex
-import sqlite3
+from .db_backend import PostgresConnection, Record
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Mapping, Sequence
 
@@ -35,100 +35,6 @@ SESSION_STATES = (
     "CANCELLED",
 )
 _CAPTURE_OUTCOME_STATES = frozenset({"CAPTURED", "COMPLETED", "FAILED", "CANCELLED"})
-
-COLLECTION_SCHEMA = """
-CREATE TABLE IF NOT EXISTS collection_adapters (
-    id TEXT PRIMARY KEY,
-    adapter_key TEXT NOT NULL UNIQUE,
-    display_name TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    manifest_json TEXT NOT NULL,
-    manifest_sha256 TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    archived_at TEXT
-);
-
-CREATE TABLE IF NOT EXISTS collection_sessions (
-    id TEXT PRIMARY KEY,
-    adapter_id TEXT NOT NULL REFERENCES collection_adapters(id) ON DELETE RESTRICT,
-    name TEXT NOT NULL,
-    status TEXT NOT NULL,
-    adapter_snapshot_json TEXT NOT NULL,
-    config_snapshot_json TEXT NOT NULL,
-    software_snapshot_json TEXT NOT NULL,
-    calibration_snapshot_json TEXT NOT NULL,
-    storage_snapshot_json TEXT NOT NULL,
-    resources_snapshot_json TEXT NOT NULL,
-    capture_snapshot_json TEXT NOT NULL,
-    capabilities_snapshot_json TEXT NOT NULL,
-    canonical_manifest_json TEXT NOT NULL,
-    manifest_sha256 TEXT NOT NULL,
-    sbatch_text TEXT,
-    sbatch_sha256 TEXT,
-    gateway TEXT,
-    slurm_job_id TEXT,
-    sbatch_path TEXT,
-    stdout_path TEXT,
-    stderr_path TEXT,
-    error_json TEXT,
-    restart_of_session_id TEXT REFERENCES collection_sessions(id) ON DELETE RESTRICT,
-    registered_resource_id TEXT REFERENCES data_resources(id) ON DELETE RESTRICT,
-    registered_version_id TEXT REFERENCES data_resource_versions(id) ON DELETE RESTRICT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    preflighted_at TEXT,
-    prepared_at TEXT,
-    submitted_at TEXT,
-    started_at TEXT,
-    captured_at TEXT,
-    completed_at TEXT
-);
-
-CREATE TABLE IF NOT EXISTS collection_session_events (
-    id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL REFERENCES collection_sessions(id) ON DELETE CASCADE,
-    event_type TEXT NOT NULL,
-    old_status TEXT,
-    new_status TEXT,
-    details_json TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_collection_adapters_state
-ON collection_adapters(archived_at, adapter_key);
-
-CREATE INDEX IF NOT EXISTS idx_collection_sessions_state
-ON collection_sessions(status, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_collection_sessions_adapter
-ON collection_sessions(adapter_id, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_collection_sessions_job
-ON collection_sessions(slurm_job_id);
-
-CREATE INDEX IF NOT EXISTS idx_collection_events_session
-ON collection_session_events(session_id, created_at);
-
-CREATE TRIGGER IF NOT EXISTS collection_session_snapshots_immutable
-BEFORE UPDATE OF
-    adapter_id,
-    adapter_snapshot_json,
-    config_snapshot_json,
-    software_snapshot_json,
-    calibration_snapshot_json,
-    storage_snapshot_json,
-    resources_snapshot_json,
-    capture_snapshot_json,
-    capabilities_snapshot_json,
-    canonical_manifest_json,
-    manifest_sha256,
-    restart_of_session_id
-ON collection_sessions
-BEGIN
-    SELECT RAISE(ABORT, 'collection session snapshots are immutable');
-END;
-"""
 
 
 class CollectionValidationError(ValueError):
@@ -525,56 +431,15 @@ class CompiledCollectionJob(BaseModel):
 class CollectionStore:
     def __init__(self, database: Database) -> None:
         self.database = database
-        if database.is_postgres:
-            return  # Versioned PostgreSQL migrations own the schema.
-        with self.database.transaction() as connection:
-            connection.executescript(COLLECTION_SCHEMA)
-            columns = {
-                row["name"]
-                for row in connection.execute(
-                    "PRAGMA table_info(collection_sessions)"
-                ).fetchall()
-            }
-            for column in ("capture_snapshot_json", "capabilities_snapshot_json"):
-                if column not in columns:
-                    connection.execute(
-                        f"ALTER TABLE collection_sessions ADD COLUMN {column} "
-                        "TEXT NOT NULL DEFAULT '{}'"
-                    )
-            connection.execute(
-                "DROP TRIGGER IF EXISTS collection_session_snapshots_immutable"
-            )
-            connection.executescript(
-                """
-                CREATE TRIGGER collection_session_snapshots_immutable
-                BEFORE UPDATE OF
-                    adapter_id,
-                    adapter_snapshot_json,
-                    config_snapshot_json,
-                    software_snapshot_json,
-                    calibration_snapshot_json,
-                    storage_snapshot_json,
-                    resources_snapshot_json,
-                    capture_snapshot_json,
-                    capabilities_snapshot_json,
-                    canonical_manifest_json,
-                    manifest_sha256,
-                    restart_of_session_id
-                ON collection_sessions
-                BEGIN
-                    SELECT RAISE(ABORT, 'collection session snapshots are immutable');
-                END;
-                """
-            )
 
     @staticmethod
-    def _adapter(row: sqlite3.Row) -> dict[str, Any]:
+    def _adapter(row: Record) -> dict[str, Any]:
         result = dict(row)
         result["manifest"] = json.loads(result.pop("manifest_json"))
         return result
 
     @staticmethod
-    def _session(row: sqlite3.Row) -> dict[str, Any]:
+    def _session(row: Record) -> dict[str, Any]:
         result = dict(row)
         for column in (
             "adapter_snapshot_json",
@@ -593,14 +458,14 @@ class CollectionStore:
         return result
 
     @staticmethod
-    def _event(row: sqlite3.Row) -> dict[str, Any]:
+    def _event(row: Record) -> dict[str, Any]:
         result = dict(row)
         result["details"] = json.loads(result.pop("details_json"))
         return result
 
     @staticmethod
     def _insert_event(
-        connection: sqlite3.Connection,
+        connection: PostgresConnection,
         session_id: str,
         event_type: str,
         old_status: str | None,
@@ -1740,7 +1605,6 @@ class CollectionService:
             )
             return {"session": completed, "version": None, "registered": False}
         return self.store.complete_registered_capture(session, storage, request)
-
 
 
 __all__ = [

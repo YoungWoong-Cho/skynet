@@ -66,7 +66,7 @@ def test_existing_log_contracts_keep_their_snapshot_shape():
     assert TrainingProgressContract.model_validate(legacy).source.kind == "log_regex"
 
 
-def test_dp_parser_reads_completed_epochs_and_ignores_partial_or_invalid_rows():
+def test_dp_parser_accepts_training_only_observations_and_ignores_incomplete_json():
     content = (
         "\n".join(
             [
@@ -85,10 +85,13 @@ def test_dp_parser_reads_completed_epochs_and_ignores_partial_or_invalid_rows():
     records = pipeline.parse_declared_training_progress(
         content, manifest().train.progress, resolved_spec=spec()
     )
-    assert [row["completed"] for row in records] == [1, 2]
+    assert [row["completed"] for row in records] == [1, 1, 2]
+    assert records[0]["metrics"]["train/loss"] == 1.0
+    assert "validation/loss" not in records[0]["metrics"]
+    # A later observation of the same epoch may enrich it with validation.
     assert records[0]["total"] == 100  # The generic max_steps default is irrelevant.
-    assert records[0]["metrics"]["validation/loss"] == 0.05
-    assert "train/loss" not in records[1]["metrics"]
+    assert records[1]["metrics"]["validation/loss"] == 0.05
+    assert "train/loss" not in records[2]["metrics"]
 
 
 def test_epoch_eta_uses_completed_work_and_excludes_step_checkpoints():
@@ -169,7 +172,7 @@ def test_epoch_ingestion_and_wandb_publication_are_idempotent(tmp_path, monkeypa
     assert service._ingest_training_progress(db.get_run(run["id"])) == 20
     assert calls[0] == (
         "/cluster/run/artifacts/logs.json.txt",
-        {"lines": 1000, "max_bytes": 1_000_000, "contains": '"val_loss"'},
+        {"lines": 1000, "max_bytes": 1_000_000, "contains": '"train_loss"'},
     )
     service._training_progress_last_reads = {}
     assert service._ingest_training_progress(db.get_run(run["id"])) == 0
@@ -188,7 +191,9 @@ def test_epoch_ingestion_and_wandb_publication_are_idempotent(tmp_path, monkeypa
     assert len(calls) == reads
     assert service._publish_training_progress_tracking(run["id"]) == 21
     assert service._publish_training_progress_tracking(run["id"]) == 0
-    spool = tmp_path / "capsules" / run["id"] / "wandb-spool.jsonl"
+    from skynet_app.tracking_journal import TrackingJournal
+    spool = TrackingJournal(db, run["id"]).file("wandb-spool.jsonl")
+    assert not (tmp_path / "capsules" / run["id"] / "wandb-spool.jsonl").exists()
     events = [json.loads(line) for line in spool.read_text().splitlines()]
     assert len(events) == 21
     assert events[-1]["payload"]["step"] == 21

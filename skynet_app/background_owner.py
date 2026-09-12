@@ -32,28 +32,27 @@ class BackgroundOwner:
         connection = None
         started = False
         try:
-            if self.database.is_postgres:
-                self.state = "standby"
-                while not self.stop_event.is_set():
-                    try:
-                        connection = self.database.backend.connect()
-                        acquired = connection.execute(
-                            "SELECT pg_try_advisory_lock(?)",
-                            (lock_key("background-owner"),),
-                        ).fetchone()[0]
-                    except Exception as exc:
-                        log.error(
-                            "Background ownership unavailable (%s)", type(exc).__name__
-                        )
-                        acquired = False
-                    if acquired:
-                        break
-                    if connection:
-                        connection.close()
-                        connection = None
-                    self.stop_event.wait(self.interval)
-                if self.stop_event.is_set():
-                    return
+            self.state = "standby"
+            while not self.stop_event.is_set():
+                try:
+                    connection = self.database.backend.connect()
+                    acquired = connection.execute(
+                        "SELECT pg_try_advisory_lock(?)",
+                        (lock_key("background-owner"),),
+                    ).fetchone()[0]
+                except Exception as exc:
+                    log.error(
+                        "Background ownership unavailable (%s)", type(exc).__name__
+                    )
+                    acquired = False
+                if acquired:
+                    break
+                if connection:
+                    connection.close()
+                    connection = None
+                self.stop_event.wait(self.interval)
+            if self.stop_event.is_set():
+                return
             started = True
             self.start_services()
             self.state = "active"

@@ -1,4 +1,4 @@
-"""Exercise personal path routing through real SQLite, compilation and SSH commands."""
+"""Exercise personal path routing through real PostgreSQL, compilation and SSH commands."""
 
 import json
 from skynet_app.db_backend import INTEGRITY_ERRORS

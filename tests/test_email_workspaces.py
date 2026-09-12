@@ -1,5 +1,5 @@
-"""Real SQLite/session isolation; cluster side effects are forbidden in these tests."""
-import sqlite3
+"""Real PostgreSQL/session isolation; cluster side effects are forbidden in these tests."""
+import psycopg
 import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
@@ -107,10 +107,7 @@ def test_personal_graphs_and_writes_are_isolated(services):
     assert alice.get_run(a['run']['id'])['status'] != 'CANCELLED'
     assert len(alice.get_evaluation(a['evaluation']['id'])['episodes']) == 1
     with services.system.database.connection() as connection:
-        if getattr(connection, "dialect", "sqlite") == "postgresql":
-            assert connection.execute("SELECT conname FROM pg_constraint WHERE contype='f' AND NOT convalidated").fetchall() == []
-        else:
-            assert connection.execute('PRAGMA foreign_key_check').fetchall() == []
+        assert connection.execute("SELECT conname FROM pg_constraint WHERE contype='f' AND NOT convalidated").fetchall() == []
 
 
 def test_saved_settings_and_shared_adapters(services, monkeypatch):
@@ -183,25 +180,6 @@ def test_api_requires_email_and_rejects_cross_workspace_actions(services):
     assert a.post('/api/workspace/session', json={'email': 'eve@example.com'}, headers={'Origin': 'https://another-site.example'}).status_code == 403
 
 
-def test_legacy_schema_migration_preserves_records_and_claims_configured_owner(tmp_path):
-    from skynet_app.database import SCHEMA
-    path = tmp_path / 'legacy.db'
-    with sqlite3.connect(path) as connection:
-        connection.executescript(SCHEMA)
-        connection.execute("INSERT INTO projects(id,name,description,created_at) VALUES ('saved','Existing project','Keep me','2026-01-01')")
-        connection.execute("INSERT INTO tracking_connections(provider,endpoint,workspace,config_json,updated_at) VALUES ('wandb','https://api.wandb.ai','existing','{}','2026-01-01')")
-    path.with_name('workspace-owner.json').write_text('{"email":"ycho420@gatech.edu"}')
-    system = PipelineService(Database(path), cluster=Mock(), credential_store=Mock(load=lambda _: None))
-    manager = WorkspaceServices(system)
-    owner = open_db(manager, 'YCHO420@gatech.edu')
-    other = open_db(manager, 'teammate@example.com')
-    assert owner.list_projects()[0]['id'] == 'saved'
-    assert owner.get_tracking_connection('wandb')['workspace'] == 'existing'
-    assert other.list_projects() == []
-    assert other.get_tracking_connection('wandb') is None
-    reopened = Database(path)
-    assert reopened.list_projects()[0]['description'] == 'Keep me'
-    assert WorkspaceDirectory(reopened).open('ycho420@gatech.edu')[0]['id'] == 'legacy'
 
 
 def test_background_reconciliation_selects_only_its_own_jobs(services, monkeypatch):

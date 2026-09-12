@@ -12,14 +12,14 @@ const w = dom.window,
   el = (id) => w.document.getElementById(id);
 let reviewed,
   prepared,
-  viewed,
   changes = 0;
 w.openLiveReview = (s) => (reviewed = s.id);
 w.openPolicyExport = (id) => (prepared = id);
-w.openPreparedDataset = (id) => (viewed = id);
+w.recordingRegistrationSummary = () => ({state: "ready", count: 0});
+w.showRecordingResources = () => {};
 w.document.addEventListener("collection-recordings-changed", () => changes++);
 const app = await readFile(new URL("../static/app.js", import.meta.url), "utf8");
-for (const name of ["escapeHtml", "stateClass", "statusPill"]) {
+for (const name of ["escapeHtml", "stateClass", "statusPill", "formatDate"]) {
   const start = app.indexOf(`function ${name}(`);
   const end = app.indexOf("\n}\n", start) + 3;
   w.eval(app.slice(start, end));
@@ -48,13 +48,13 @@ try {
   assert.doesNotMatch(el("simulation-recordings-body").textContent, /Original recordings saved|Images ready/);
   let refreshRequests = 0;
   w.document.addEventListener("dataset-preparation-refresh-requested", () => refreshRequests++);
-  [...el("simulation-recordings-body").querySelectorAll("button")].find(b => b.textContent === "Retry preparation status").click();
+  [...el("simulation-recordings-body").querySelectorAll(".row-actions button")].find(b => b.textContent === "Retry preparation status").click();
   assert.equal(refreshRequests, 1);
   w.document.dispatchEvent(new w.CustomEvent("dataset-preparation-status", {detail:{state:"ready"}}));
   assert.match(el("simulation-recordings-body").textContent, /Images ready/);
   assert.ok(el("simulation-recordings-body").querySelector(".state-pill.is-running"));
   assert.doesNotMatch(el("simulation-recordings-body").textContent, /Earlier state HDF5/);
-  let buttons = el("simulation-recordings-body").querySelectorAll("button");
+  let buttons = el("simulation-recordings-body").querySelectorAll(".row-actions button");
   buttons[0].click();
   buttons[1].click();
   assert.equal(reviewed, "session");
@@ -88,12 +88,10 @@ try {
   assert.match(el("simulation-recordings-body").textContent, /Preparation needs attention/);
   w.document.dispatchEvent(new w.CustomEvent("dataset-preparation-status", {detail:{state:"unavailable", error:"Host unavailable"}}));
   assert.match(el("simulation-recordings-body").textContent, /Last known: 2 prepared formats/);
-  assert.ok([...el("simulation-recordings-body").querySelectorAll("button")].some(b => b.textContent === "View dataset"));
+  assert.ok(![...el("simulation-recordings-body").querySelectorAll(".row-actions button")].some(b => b.textContent === "View dataset"));
   w.document.dispatchEvent(new w.CustomEvent("dataset-preparation-status", {detail:{state:"ready"}}));
   assert.doesNotMatch(el("simulation-recordings-body").textContent, /Host unavailable|Last known/);
-  buttons = el("simulation-recordings-body").querySelectorAll("button");
-  buttons[2].click();
-  assert.equal(viewed, "data");
+  assert.deepEqual([...el("simulation-recordings-body").querySelectorAll(".row-actions button")].map(b => b.textContent), ["View recordings", "Register"]);
   const subset = {...s, id: "subset", recordings: ["a"], recording_images: {a: {}}};
   w.renderSimulationRecordings([s, subset]);
   const mixed = [
@@ -103,17 +101,17 @@ try {
   for (const detail of [mixed, [...mixed].reverse()]) {
     w.document.dispatchEvent(new w.CustomEvent("dataset-preparation-changed", {detail}));
     const rows = [...el("simulation-recordings-body").rows];
-    rows[0].querySelectorAll("button")[2].click();
-    assert.equal(viewed, "data", "original link must not depend on preparation order");
-    rows[1].querySelectorAll("button")[2].click();
-    assert.equal(viewed, "subset-data", "derived entry opens its own prepared dataset");
+    assert.equal(rows[0].cells.length, 6);
+    assert.equal(rows[1].cells.length, 6);
+    assert.equal(rows[0].querySelectorAll(".row-actions button").length, 2);
+    assert.equal(rows[1].querySelectorAll(".row-actions button").length, 2);
     assert.match(rows[0].textContent, /2 episodes/);
     assert.match(rows[1].textContent, /1 episode/);
   }
   w.document.dispatchEvent(new w.CustomEvent("dataset-preparation-changed", {detail: [
     {...mixed[0], recording_session_id: null}, mixed[1],
   ]}));
-  assert.equal(el("simulation-recordings-body").rows[1].querySelectorAll("button").length, 2, "unassigned subset cannot hijack another entry");
+  assert.equal(el("simulation-recordings-body").rows[1].querySelectorAll(".row-actions button").length, 2, "unassigned subset cannot hijack another entry");
   assert.equal(el("conversion-dialog"), null);
   assert.doesNotMatch(
     el("simulation-recordings-body").textContent,

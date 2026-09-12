@@ -90,7 +90,9 @@ class LiveXRService:
             if k not in {"worker", "script", "hand_bundle_path"}
         }
         if result.get("archive"):
-            result["archive"] = {k: v for k, v in result["archive"].items() if k != "manifest"}
+            result["archive"] = {
+                k: v for k, v in result["archive"].items() if k != "manifest"
+            }
         return result
 
     def get(self, identifier):
@@ -178,7 +180,9 @@ class LiveXRService:
             return WorkstationClient(job["profile"])
         return self.cluster
 
-    def create(self, accepted_license=False, task=None, robot=None, image_capture=False):
+    def create(
+        self, accepted_license=False, task=None, robot=None, image_capture=False
+    ):
         if not self.consent(accepted_license)["accepted"]:
             raise ValueError(
                 "Accept the NVIDIA CloudXR license before starting a session"
@@ -201,13 +205,15 @@ class LiveXRService:
             instructions=task_info["instructions"],
         )
         from .live_xr_review import ArrayUnpickler
+
         worker = (self.root / "ops/xr/native_session.py").read_text()
         sources = {
             "collection.py": (self.root / "ops/xr/collection.py").read_text(),
             "wrist.py": (self.root / "ops/xr/wrist.py").read_text(),
             "images.py": (self.root / "ops/xr/images.py").read_text(),
             "render_images.py": (self.root / "ops/xr/render_images.py").read_text(),
-            "arrays.py": "import pickle\nimport numpy as np\n" + inspect.getsource(ArrayUnpickler),
+            "arrays.py": "import pickle\nimport numpy as np\n"
+            + inspect.getsource(ArrayUnpickler),
             "anatomy.py": (self.root / "ops/xr/hands/anatomy.py").read_text(),
         }
         worker = worker.replace(
@@ -224,11 +230,17 @@ class LiveXRService:
                             "A different live session is already running. Stop it before changing the hand or task."
                         )
                     if bool(job["profile"].get("image_capture")) != image_capture:
-                        raise ValueError("Stop the current session before changing image capture.")
+                        raise ValueError(
+                            "Stop the current session before changing image capture."
+                        )
                     return job
             hand_bundle_path = None
             if hand.get("imported"):
                 path, manifest = build_hand(hand["key"])
+                if manifest["robot"] != hand["key"]:
+                    raise ValueError(
+                        "Prepared hand bundle differs from the selected hand"
+                    )
                 hand_bundle_path = str(path)
                 profile["hand_bundle"] = {
                     key: manifest[key]
@@ -239,6 +251,7 @@ class LiveXRService:
                         "name",
                         "action_dimension",
                         "retargeting_scheme",
+                        "hand_asset",
                     )
                 }
             identifier = str(uuid4())
@@ -594,9 +607,9 @@ print(json.dumps(value))
                 "Submission is still being resolved. Refresh before stopping this session."
             )
         # Ask the worker to stop cleanly; cancellation covers sessions still queued.
-        if (
-            job["state"] == "PENDING"
-            or (job["profile"].get("execution") == "workstation" and not job["profile"].get("image_capture"))
+        if job["state"] == "PENDING" or (
+            job["profile"].get("execution") == "workstation"
+            and not job["profile"].get("image_capture")
         ):
             transport.cancel(job["job_id"], job["gateway"])
         else:

@@ -193,7 +193,7 @@ def test_pose_export_validates_without_creating_saved_pose(library):
         ("leap-v1", "right", "skynet_leap_v1_right"),
         ("wuji-1", "left", "skynet_wuji_1_left"),
         ("inspire-rh56", "right", "skynet_inspire_rh56_right"),
-        ("shadow", "left", "floating_shadow_left"),
+        ("shadow", "left", "skynet_shadow_left"),
         ("leap-v1", "left", None),
     ],
 )

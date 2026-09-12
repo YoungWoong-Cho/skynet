@@ -109,7 +109,7 @@ def test_any_gpu_queue_uses_available_columns_without_persisting_snapshot(quota,
 
 def test_preview_uses_same_live_queue_resolution_as_create():
     service = PipelineService.__new__(PipelineService)
-    service.storage = SimpleNamespace(work_root=CLUSTER.paths.work_root)
+    service.storage = SimpleNamespace(require_root=lambda: CLUSTER.paths.work_root)
     value = spec(resources={"queue_policy": "auto", "gpu": {"mode": "explicit", "count": 1, "type": "a40"}})
     service.normalize_spec = lambda payload: value
     service._validate_tracking_requirements = lambda value: None

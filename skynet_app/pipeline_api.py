@@ -16,7 +16,6 @@ import json
 import os
 import re
 import shlex
-import sqlite3
 from .db_backend import INTEGRITY_ERRORS, DATABASE_ERRORS
 import subprocess
 import threading
@@ -45,6 +44,7 @@ from .adapters import (
 from .gpu_quota import account_gpu_quota, idle_partition_quota
 from .cluster_config import CLUSTER
 from .evaluation_placement import resolve_evaluation_resources, uses_isaac_sim
+from .evaluation_compatibility import inspect_compatibility, compose_evaluator, declaration_matches, policy_loader, dataset_metadata
 from .cluster_runtime import (
     ClusterClient,
     ClusterError,
@@ -1453,8 +1453,6 @@ class PipelineService:
         self._seed_registries()
 
     def _tracking_journal(self, capsule):
-        if not self.database.is_postgres:
-            return {}
         from .tracking_journal import TrackingJournal
         path = Path(capsule)
         scope = path.name if re.fullmatch(r"[a-f0-9-]{36}", path.name) else str(path.resolve().relative_to(LOCAL_CAPSULE_ROOT.resolve()))
@@ -1479,7 +1477,16 @@ class PipelineService:
     def _seed_registries(self) -> None:
         if self.database.workspace_id is not None:
             return
+        with self.database.operation_lock("pipeline"):
+            self._seed_registries_unlocked()
+
+    def _seed_registries_unlocked(self) -> None:
+        from .registry_policy import suite_key
+        with self.database.connection() as connection:
+            exclusions = {(row["kind"], row["seed_key"]) for row in connection.execute("SELECT kind,seed_key FROM registry_exclusions").fetchall()}
         for manifest in builtin_adapter_manifests():
+            if ("adapter", manifest.slug) in exclusions:
+                continue
             self.database.upsert_seed_adapter(
                 seed_key=manifest.slug,
                 name=manifest.display_name,
@@ -1508,6 +1515,8 @@ class PipelineService:
             except (TypeError, ValueError):
                 self.database.archive_adapter(str(record["id"]))
         for suite in get_evaluation_catalog():
+            if ("suite", suite_key(suite.evaluator, suite.suite)) in exclusions:
+                continue
             suite_config = suite.model_dump(
                 mode="json", exclude={"catalog_path", "current"}
             )
@@ -4256,43 +4265,22 @@ class PipelineService:
         return submissions
 
     def _local_capsule(self, run_id: str, compiled: CompiledSlurmJob) -> Path:
-        root = LOCAL_CAPSULE_ROOT / run_id
-        if self.database.is_postgres:
-            # Compiled files are embedded in the submitted cluster capsule.
-            # Central journals do not require a second persistent host copy.
-            return root
-        root.mkdir(parents=True, exist_ok=True)
-        for name, content in compiled.files.items():
-            target = root / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
-        (root / "job.sbatch").write_text(compiled.script, encoding="utf-8")
-        return root
+        # Logical journal identity; actual capsule files are submitted to the cluster.
+        return LOCAL_CAPSULE_ROOT / run_id
 
     def _save_submission_script(self, run_id: str, attempt_id: str, script: str) -> dict[str, Any]:
         """Keep the exact transport payload independently of later run capsules."""
-        path = LOCAL_CAPSULE_ROOT / run_id / "submissions" / f"{attempt_id}.sbatch"
         content = script.encode("utf-8")
         digest = hashlib.sha256(content).hexdigest()
-        if not self.database.is_postgres:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                with path.open("xb") as target:
-                    target.write(content)
-            except FileExistsError:
-                if path.read_bytes() != content:
-                    raise ValueError("The saved submission script differs from this attempt")
         existing = next((item for item in self.database.list_artifacts(run_id, artifact_type="SUBMISSION_SCRIPT")
                          if item.get("metadata_json", {}).get("attempt_id") == attempt_id), None)
         if existing:
             if existing.get("sha256") != digest:
                 raise ValueError("The saved submission checksum differs from this attempt")
             return existing
-        location = "submission_host"
-        if self.database.is_postgres:
-            from .metadata_objects import MetadataObjects
-            path = MetadataObjects(self.database).put(content, name=f"{attempt_id}.sbatch")
-            location = "cluster_objects"
+        from .metadata_objects import MetadataObjects
+        path = MetadataObjects(self.database).put(content, name=f"{attempt_id}.sbatch")
+        location = "cluster_objects"
         return self.database.create_artifact(run_id, artifact_type="SUBMISSION_SCRIPT", path=str(path),
             sha256=digest, size_bytes=len(content), retention_policy="preserve", metadata={"attempt_id": attempt_id, "location": location})
 
@@ -5957,8 +5945,6 @@ class PipelineService:
         for existing in bindings:
             run_id = str(existing["scope_id"])
             capsule = LOCAL_CAPSULE_ROOT / run_id
-            if not capsule.exists() and not self.database.is_postgres:
-                continue
             try:
                 if provider == "wandb":
                     settings = self._wandb_settings()
@@ -8735,6 +8721,18 @@ class PipelineService:
             stage=stage,
         )
 
+    def _evaluation_source(self, training_spec: ExperimentSpec):
+        document = training_spec.model_dump(mode="json", by_alias=True)
+        source = copy.deepcopy(document["source"])
+        # Independent policy loaders use the training receipt. Updating the
+        # trainer registry cannot change how an old checkpoint is interpreted.
+        if policy_loader(document) and source.get("adapter_manifest"):
+            return source, AdapterManifest.model_validate(source["adapter_manifest"])
+        for key in ("adapter_id", "adapter_version_id", "adapter_version", "adapter_manifest", "adapter_manifest_sha256"):
+            source.pop(key, None)
+        source, manifest, _ = self._snapshot_adapter(source, training_spec.source.adapter)
+        return source, manifest
+
     @staticmethod
     def _adapter_identity(spec: ExperimentSpec) -> dict[str, Any]:
         return {
@@ -9045,19 +9043,14 @@ class PipelineService:
         training_document = training_spec.model_dump(mode="json", by_alias=True)
 
         evaluator_document = copy.deepcopy(training_document)
-        evaluator_source = evaluator_document["source"]
-        for key in (
-            "adapter_id",
-            "adapter_version_id",
-            "adapter_version",
-            "adapter_manifest",
-            "adapter_manifest_sha256",
-        ):
-            evaluator_source.pop(key, None)
-        evaluator_source["adapter"] = training_spec.source.adapter
-        evaluator_document["source"], evaluator_manifest, _ = self._snapshot_adapter(
-            evaluator_source, training_spec.source.adapter
-        )
+        evaluator_document["source"], evaluator_manifest = self._evaluation_source(training_spec)
+        compatibility, _ = inspect_compatibility(training_document, evaluator_manifest, suite, checkpoint)
+        if manual_argv:
+            compatibility.update(status="unknown", label="Custom command: unverified", ready=False,
+                                 runtime_verification="custom_command")
+            compatibility["messages"] = ["Custom commands are responsible for their own model and environment compatibility checks."]
+        evaluator_manifest = compose_evaluator(training_document, evaluator_manifest, suite)
+        compatibility["implementation_sha256"] = adapter_manifest_sha256(evaluator_manifest)
         if resources is not None:
             evaluator_document["resources"] = resources.model_dump(mode="json", by_alias=True)
         # Evaluation uses its episode ledger, not the training checkpoint signal policy.
@@ -9081,6 +9074,7 @@ class PipelineService:
         suite_config = copy.deepcopy(suite["config_json"])
         context = {
             "schema_version": "skynet.evaluation-context/v1",
+            "compatibility": compatibility,
             "run_id": run["id"],
             "checkpoint": {
                 key: checkpoint.get(key)
@@ -9225,6 +9219,8 @@ class PipelineService:
             plan.blockers = list(
                 dict.fromkeys([*plan.blockers, *evaluator_runtime_blockers])
             )
+        if not manual_argv:
+            plan.blockers = list(dict.fromkeys([*plan.blockers, *compatibility["messages"]]))
         return (
             evaluator_spec,
             plan,
@@ -9388,7 +9384,18 @@ class PipelineService:
                 }
             )[:20]
             try:
-                evaluator_spec, plan, _, _, evaluator_adapter, plan_source = (
+                if not argv:
+                    training_spec = ExperimentSpec.model_validate(run["resolved_spec_json"])
+                    _, manifest = self._evaluation_source(training_spec)
+                    compatibility, _ = inspect_compatibility(
+                        training_spec.model_dump(mode="json", by_alias=True), manifest, suite, checkpoint
+                    )
+                    if not compatibility["ready"]:
+                        validation.update(valid=False, compatibility=compatibility,
+                                          plan_blockers=compatibility["messages"],
+                                          plan_message="; ".join(compatibility["messages"]))
+                        return validation
+                evaluator_spec, plan, context, _, evaluator_adapter, plan_source = (
                     self._resolve_evaluation_implementation(
                         run,
                         checkpoint,
@@ -9403,7 +9410,7 @@ class PipelineService:
                         resources=resources,
                         manual_argv=list(argv or []),
                         manual_resume_argv=list(resume_argv or []),
-                        verify_evaluator_runtime=True,
+                        verify_evaluator_runtime=False,
                         evaluator_runtime_gateway=gateway,
                     )
                 )
@@ -9422,6 +9429,7 @@ class PipelineService:
                     {
                         "resolved_resources": evaluator_spec.resources.model_dump(mode="json", by_alias=True) if evaluator_spec is not None else None,
                         "plan_valid": not blockers and bool(plan.argv),
+                        "compatibility": context.get("compatibility"),
                         "evaluator": public_evaluator,
                         "plan_blockers": blockers,
                         "plan_source": plan_source,
@@ -9464,6 +9472,15 @@ class PipelineService:
             raise ValueError(next(iter(suite_errors.values())))
         assert suite is not None
         assert canonical_environment is not None
+
+        if not request.argv:
+            training_spec = ExperimentSpec.model_validate(run["resolved_spec_json"])
+            _, evaluator_manifest = self._evaluation_source(training_spec)
+            compatibility, _ = inspect_compatibility(
+                training_spec.model_dump(mode="json", by_alias=True), evaluator_manifest, suite, checkpoint
+            )
+            if not compatibility["ready"]:
+                raise ValueError("; ".join(compatibility["messages"]))
 
         checkpoint_id = checkpoint["id"]
         checkpoint_path = checkpoint["path"]
@@ -9933,6 +9950,7 @@ def adapters(include_archived: bool = Query(default=False)) -> dict[str, Any]:
         capabilities = normalized_manifest.get("capabilities") or {}
         records.append({
             **row,
+            "editable": service.database.owns("adapters", row["id"], writable=True),
             "slug": normalized_manifest.get("slug") or row.get("seed_key") or row["id"],
             "label": normalized_manifest.get("display_name") or row["name"],
             "version": version.get("version_number"),
@@ -9981,6 +9999,7 @@ def adapter_detail(
     )
     if not record:
         raise HTTPException(status_code=404, detail="Adapter not found")
+    record["editable"] = service.database.owns("adapters", adapter_id, writable=True)
     return {"adapter": record}
 
 
@@ -10322,25 +10341,7 @@ def evaluation_suites(
             evaluator_document = copy.deepcopy(
                 training_spec.model_dump(mode="json", by_alias=True)
             )
-            evaluator_source = evaluator_document.get("source")
-            if not isinstance(evaluator_source, dict):
-                raise ValueError("the run has no canonical source configuration")
-            for key in (
-                "adapter_id",
-                "adapter_version_id",
-                "adapter_version",
-                "adapter_manifest",
-                "adapter_manifest_sha256",
-            ):
-                evaluator_source.pop(key, None)
-            evaluator_source["adapter"] = training_spec.source.adapter
-            (
-                evaluator_document["source"],
-                evaluator_manifest,
-                _,
-            ) = service._snapshot_adapter(
-                evaluator_source, training_spec.source.adapter
-            )
+            evaluator_document["source"], evaluator_manifest = service._evaluation_source(training_spec)
             evaluator_spec = ExperimentSpec.model_validate(evaluator_document)
             spec_document = evaluator_spec.model_dump(mode="python", by_alias=True)
             evaluator_identity = service._adapter_identity(evaluator_spec)
@@ -10354,69 +10355,47 @@ def evaluation_suites(
                 ),
             ) from error
 
-    missing = object()
-
-    def dotted_value(document: Mapping[str, Any], path: str) -> Any:
-        current: Any = document
-        for part in path.split("."):
-            if not isinstance(current, Mapping) or part not in current:
-                return missing
-            current = current[part]
-        return current
-
-    def declaration_enabled(entry: Any) -> bool:
-        conditions = getattr(entry, "enabled_when", {}) or {}
-        if not isinstance(conditions, Mapping) or spec_document is None:
-            return not conditions
-        for path, choices in conditions.items():
-            actual = dotted_value(spec_document, str(path))
-            if actual is missing:
-                return False
-            allowed = choices if isinstance(choices, (list, tuple, set)) else [choices]
-            if not any(actual == choice for choice in allowed):
-                return False
-        return True
-
-    def runnable_for_current_evaluator(row: Mapping[str, Any]) -> bool:
-        if evaluator_manifest is None:
-            return True
-        return any(
-            entry.environment == row["evaluator_adapter"]
-            and row["name"] in entry.suites
-            and entry.command is not None
-            and declaration_enabled(entry)
-            for entry in evaluator_manifest.evaluations
-        )
-
     suites = []
     unavailable_suites = []
-    for row in service.database.list_evaluation_suites():
-        if not runnable_for_current_evaluator(row):
-            continue
+    checkpoint = next((c for c in (run.get("checkpoints", []) if run_id else [])
+                       if c.get("is_selected_for_inference") and c.get("status") == "AVAILABLE" and not c.get("pruned_at")), None)
+    for original in service.database.list_evaluation_suites():
+        row = original
+        compatibility = None
+        resolved_manifest = evaluator_manifest
         if run_id is not None:
-            try:
-                row = bind_suite_to_dataset(row, spec_document or {})
-                if row["config_json"].get("initial_state") == "single_training_episode":
+            compatibility, row = inspect_compatibility(spec_document or {}, evaluator_manifest, row, checkpoint)
+            resolved_manifest = compose_evaluator(spec_document or {}, evaluator_manifest, row)
+            if compatibility["ready"] and row["config_json"].get("initial_state") == "single_training_episode":
+                try:
                     recorded_episode_sources(service.database, service.cluster, spec_document or {})
-            except ValueError as error:
-                unavailable_suites.append({"id": row["id"], "reason": sanitize(str(error))})
-                continue
+                except ValueError as error:
+                    compatibility.update(status="unknown", label="Missing information", ready=False)
+                    compatibility["messages"].append(sanitize(str(error)))
+                    compatibility["checks"].append({"field": "recording", "status": "unknown", "message": sanitize(str(error))})
+            if not compatibility["ready"]:
+                unavailable_suites.append({"id": row["id"], "reason": "; ".join(compatibility["messages"])})
         config = row["config_json"]
+        isaac_evaluation = uses_isaac_sim({
+            "environment": row["evaluator_adapter"], "suite": {"config": config},
+        })
+        placement = CLUSTER.isaac_evaluation_placement
+        allowed_gpu_types = sorted({node.gpu_type for node in placement.nodes.values()}) if placement else []
         suites.append({
             **row,
             "slug": row["id"],
-            "is_default": run_id is not None and config.get("initial_state") == "single_training_episode",
+            "can_delete": service.database.workspace_id in (None, "legacy"),
+            "is_default": bool(compatibility and compatibility["ready"] and config.get("initial_state") == "single_training_episode"),
+            "compatibility": compatibility,
+            "allowed_gpu_types": allowed_gpu_types if isaac_evaluation else None,
             "maximum_episodes_per_task": config.get("maximum_episodes_per_task"),
             "label": row["description"] or row["name"],
-            "evaluator": row["evaluator_adapter"],
-            "version": row["suite_version"],
-            "tasks": config.get("tasks", []),
-            "task_options": config.get("task_options", []),
+            "evaluator": row["evaluator_adapter"], "version": row["suite_version"],
+            "tasks": config.get("tasks", []), "task_options": config.get("task_options", []),
             "default_tasks": config.get("default_tasks", []),
             "maximum_parallelism": max((entry.maximum_parallelism or 1
-                for entry in (evaluator_manifest.evaluations if evaluator_manifest else [])
-                if entry.environment == row["evaluator_adapter"] and row["name"] in entry.suites
-                and declaration_enabled(entry)), default=1),
+                for entry in (resolved_manifest.evaluations if resolved_manifest else [])
+                if declaration_matches(entry, spec_document or {}, row)), default=1),
             "task_source": config.get("task_source"),
             "task_catalog_complete": bool(config.get("task_catalog_complete")),
             "task_selection_mode": config.get("task_selection_mode", "subset"),
@@ -10425,11 +10404,7 @@ def evaluation_suites(
             "task_catalog_sha256": config.get("task_catalog_sha256"),
             "catalog_sha256": config.get("catalog_sha256"),
             "current": bool(row["enabled"]),
-            **(
-                {"evaluator_implementation": copy.deepcopy(evaluator_identity)}
-                if evaluator_identity is not None
-                else {}
-            ),
+            **({"evaluator_implementation": copy.deepcopy(evaluator_identity)} if evaluator_identity is not None else {}),
         })
     return {"suites": suites, "evaluation_suites": suites, "unavailable_suites": unavailable_suites}
 
@@ -11594,6 +11569,41 @@ def get_evaluation_episode_log(
     )
 
 
+@router.get("/evaluations/{evaluation_id}/episodes/{episode_id}/viewer")
+def get_evaluation_episode_viewer(evaluation_id: str, episode_id: str):
+    evaluation = service.database.get_evaluation(evaluation_id)
+    if not evaluation:
+        raise HTTPException(status_code=404, detail="Evaluation not found")
+    episode = next((item for item in evaluation.get("episodes", []) if item["id"] == episode_id), None)
+    if not episode:
+        raise HTTPException(status_code=404, detail="Rollout not found")
+    run = service.database.get_run(evaluation["run_id"]) or {}
+    attempts = [a for a in run.get("attempts", []) if a.get("stage_id") == evaluation.get("stage_id")]
+    gateway = (max(attempts, key=lambda a: a.get("attempt_number") or 0).get("gateway") if attempts else "auto") or "auto"
+    spec = run.get("resolved_spec_json") or {}
+    robot = (dataset_metadata(spec).get("capture") or {}).get("robot")
+    missing = {"state": "UNAVAILABLE", "robot": robot,
+               "detail": "This episode has no saved replay trace. Camera separation and keypoints are available for new recorded-simulator evaluations."}
+    if not episode.get("video_path"):
+        return missing
+    video = PurePosixPath(episode["video_path"])
+    root = PurePosixPath(evaluation["result_path"]).parent / "videos"
+    if not video.is_absolute() or root not in video.parents or ".." in video.parts or video.suffix.lower() != ".mp4":
+        raise HTTPException(status_code=409, detail="Invalid registered rollout path")
+    path = str(video.with_suffix(".review.json"))
+    program = "import json,sys; from pathlib import Path; p=Path(sys.argv[1]); print(p.read_text() if p.is_file() and p.stat().st_size <= 20000000 else 'null')"
+    try:
+        _, text = service.cluster.run_with_fallback("python3 -c " + shlex.quote(program) + " " + shlex.quote(path), gateway, timeout=30)
+        viewer = json.loads(text)
+    except Exception as error:
+        raise _http_error(error) from error
+    if viewer is None:
+        return missing
+    if viewer.get("schema") != "skynet.episode-viewer/v1":
+        raise HTTPException(status_code=409, detail="Unsupported episode replay format")
+    return {"state": "READY", "viewer": viewer}
+
+
 @router.get("/evaluations/{evaluation_id}/episodes/{episode_id}/video")
 def get_evaluation_episode_video(
     evaluation_id: str,
@@ -11780,7 +11790,7 @@ def settings() -> dict[str, Any]:
     return {
         "paths": {
             "work_root": service.storage.work_root,
-            "database": "central-postgresql" if service.database.is_postgres else str(service.database.path),
+            "database": "central-postgresql",
             "local_capsules": str(LOCAL_CAPSULE_ROOT),
             "evaluation_root": service.storage.public_paths()["evaluation"],
         },

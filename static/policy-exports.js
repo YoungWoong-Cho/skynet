@@ -285,7 +285,7 @@
     el("policy-export-format").replaceChildren();
     el("policy-export-name").value = "";
     el("policy-export-name").readOnly = false;
-    el("policy-export-name-help").textContent = "Name the dataset created for these recordings.";
+    el("policy-export-name-help").textContent = "Name the Registry resource for these recordings.";
     el("preparation-validation").value = 20;
     el("preparation-seed").value = 42;
     el("create-policy-export").disabled = true;
@@ -319,8 +319,8 @@
         resource?.metadata?.display_name || resource?.name || source.name;
       el("policy-export-name").readOnly = Boolean(resource);
       el("policy-export-name-help").textContent = resource
-        ? "Adds a prepared version to this existing dataset; its name and earlier versions are retained."
-        : "Name the dataset created for these recordings.";
+        ? "Adds a version to this existing Registry resource."
+        : "Name the Registry resource for these recordings.";
       sourceNote();
       renderHistory();
     } catch (e) {

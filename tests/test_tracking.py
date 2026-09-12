@@ -9,11 +9,14 @@ from typing import Any, Mapping
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from psycopg import sql
+
 from skynet_app.credential_store import (
     CredentialStoreUnavailable,
     KeyringCredentialStore,
 )
 from skynet_app.database import Database
+from skynet_app.tracking_journal import TrackingJournal
 from skynet_app.experiments import TrackingSpec
 from skynet_app.pipeline_api import PipelineService, TrackingConnectionRequest, router
 
@@ -39,6 +42,21 @@ from skynet_app.tracking import (
 )
 
 
+def database_contents(database):
+    """Scan every persisted application row for accidental credential storage."""
+    rows = []
+    with database.connection() as connection:
+        tables = connection.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname='public'"
+        ).fetchall()
+        for table in tables:
+            statement = sql.SQL("SELECT row_to_json(record)::text FROM {} AS record").format(
+                sql.Identifier("public", table[0])
+            )
+            rows.extend(row[0] for row in connection.raw.execute(statement))
+    return "\n".join(rows).encode()
+
+
 class FakePlatformKeyring:
     priority = 1
 
@@ -62,7 +80,7 @@ class FakePlatformKeyring:
 
 class FakeMLflowBridge(MLflowBridge):
     def __init__(
-        self, run_capsule: Path, settings: TrackingSettings | None = None
+        self, run_capsule: Path, settings: TrackingSettings | None = None, *, journal=None
     ) -> None:
         self.experiments: dict[str, str] = {}
         self.runs: dict[str, dict[str, Any]] = {}
@@ -71,6 +89,7 @@ class FakeMLflowBridge(MLflowBridge):
         super().__init__(
             run_capsule,
             settings or TrackingSettings("http://mlflow.test:5000", auto_flush=True),
+            journal=journal,
         )
 
     def _request(
@@ -135,6 +154,7 @@ class FakeWandBBridge(WandBBridge):
         settings: WandBSettings | None = None,
         *,
         api_key: str = "fake-wandb-key",
+        journal=None,
     ) -> None:
         self.remote_runs: dict[str, dict[str, Any]] = {}
         self.states: list[str] = []
@@ -144,6 +164,7 @@ class FakeWandBBridge(WandBBridge):
         super().__init__(
             run_capsule,
             settings or WandBSettings(api_key=api_key, entity="team", auto_flush=True),
+            journal=journal,
         )
 
     def _append_history_rows(self, run, rows):
@@ -576,7 +597,7 @@ class TrackingConnectionSecurityTestCase(unittest.TestCase):
             serialized = json.dumps({"response": response, "listed": listed})
             self.assertNotIn(secret, serialized)
             self.assertEqual(response["connection"]["credential_source"], "session")
-            self.assertNotIn(secret.encode(), database.path.read_bytes())
+            self.assertNotIn(secret.encode(), database_contents(database))
             for path in (root / "capsules").rglob("*"):
                 if path.is_file():
                     self.assertNotIn(secret.encode(), path.read_bytes())
@@ -598,7 +619,7 @@ class TrackingConnectionSecurityTestCase(unittest.TestCase):
                     )
             self.assertNotIn(secret, str(raised.exception))
             self.assertIsNone(database.get_tracking_connection("wandb"))
-            self.assertNotIn(secret.encode(), database.path.read_bytes())
+            self.assertNotIn(secret.encode(), database_contents(database))
 
     def test_mlflow_token_is_session_only(self) -> None:
         secret = "mlflow-secret-never-persist"
@@ -619,7 +640,7 @@ class TrackingConnectionSecurityTestCase(unittest.TestCase):
                 )
             self.assertNotIn(secret, json.dumps(response))
             self.assertEqual(response["connection"]["credential_source"], "session")
-            self.assertNotIn(secret.encode(), database.path.read_bytes())
+            self.assertNotIn(secret.encode(), database_contents(database))
 
     def test_remembered_wandb_key_restores_after_backend_restart(self) -> None:
         secret = "restart-safe-wandb-secret"
@@ -662,7 +683,7 @@ class TrackingConnectionSecurityTestCase(unittest.TestCase):
             self.assertEqual(restarted_service._wandb_settings().api_key, secret)
             self.assertNotIn(secret, json.dumps({"connected": connected, "restored": restored}))
             self.assertNotIn(secret, repr(credential_store.load("wandb")))
-            self.assertNotIn(secret.encode(), database_path.read_bytes())
+            self.assertNotIn(secret.encode(), database_contents(restarted_service.database))
 
     def test_remembered_mlflow_basic_auth_restores_after_backend_restart(self) -> None:
         password = "restart-safe-mlflow-password"
@@ -702,7 +723,7 @@ class TrackingConnectionSecurityTestCase(unittest.TestCase):
             self.assertEqual(settings.username, "alice")
             self.assertEqual(settings.password, password)
             self.assertNotIn(password, json.dumps(restored))
-            self.assertNotIn(password.encode(), database_path.read_bytes())
+            self.assertNotIn(password.encode(), database_contents(restarted_service.database))
 
     def test_disconnect_deletes_remembered_credential(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -853,6 +874,7 @@ class ProviderFlushBindingTestCase(unittest.TestCase):
             project = "openai-test-v0"
             endpoint = "https://api.wandb.ai"
             capsule = capsule_root / run_id
+            database = Database(root / "skynet.db")
             offline = WandBBridge(
                 capsule,
                 WandBSettings(
@@ -861,6 +883,7 @@ class ProviderFlushBindingTestCase(unittest.TestCase):
                     entity="team",
                     auto_flush=False,
                 ),
+                journal=TrackingJournal(database, run_id),
             )
             offline.ensure_experiment("team", project)
             offline.ensure_run(
@@ -872,7 +895,6 @@ class ProviderFlushBindingTestCase(unittest.TestCase):
             )
             offline.set_tags(run_id, {"adapter": "openpi"})
 
-            database = Database(root / "skynet.db")
             database.upsert_tracking_binding(
                 "wandb", "experiment", experiment_id,
                 remote_id=f"team/{project}",
@@ -940,9 +962,11 @@ class ProviderFlushBindingTestCase(unittest.TestCase):
             experiment_name = "openai-test-v0"
             endpoint = "http://mlflow.test:5000"
             capsule = capsule_root / run_id
+            database = Database(root / "skynet.db")
             offline = MLflowBridge(
                 capsule,
                 TrackingSettings(None, auto_flush=False),
+                journal=TrackingJournal(database, run_id),
             )
             offline.ensure_experiment(experiment_name)
             offline.ensure_run(
@@ -952,7 +976,6 @@ class ProviderFlushBindingTestCase(unittest.TestCase):
             )
             offline.log_params(run_id, {"adapter": "openpi"})
 
-            database = Database(root / "skynet.db")
             database.upsert_tracking_binding(
                 "mlflow", "experiment", experiment_id,
                 remote_id=None,

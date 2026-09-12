@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import tempfile
-import sqlite3
+import psycopg
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor

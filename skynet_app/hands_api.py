@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, StrictFloat
 from .hands import HandLibrary
-from .simulation_hands import definitions
+from .hand_bundles import definitions
 
 router = APIRouter(prefix="/api/hands", tags=["Hands"])
 library = HandLibrary()
@@ -29,18 +29,11 @@ def install(key: str, side: str):
 @router.get("/{key}/{side}/model")
 def model(key: str, side: str):
     result = checked(library.model, key, side)
-    robot = (
-        ("floating_shadow_" + side)
-        if key == "shadow"
-        else next(
-            (
-                d["robot"]
-                for d in definitions()
-                if d["key"] == key and d["side"] == side
-            ),
-            None,
-        )
+    robot = next(
+        (d["robot"] for d in definitions() if d["key"] == key and d["side"] == side),
+        None,
     )
+
     return dict(
         {k: v for k, v in result.items() if k != "files"}, simulation_robot=robot
     )

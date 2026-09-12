@@ -177,7 +177,7 @@ def test_storage_stage_is_cluster_native_and_rejects_other_hosts():
     assert len(calls) == 2
 
 
-def test_processing_archive_transport_preserves_frozen_execution_and_hides_manifest(tmp_path, monkeypatch):
+def test_processing_archive_transport_preserves_frozen_execution_and_hides_manifest(tmp_path, monkeypatch, prepared_hand_store):
     from skynet_app.capture_processing.service import ProcessingService
     from skynet_app.cluster_config import CLUSTER
     captures = LocalCaptureService(Database(tmp_path / 'test.db'), storage=MemoryStorage())

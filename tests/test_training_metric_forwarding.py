@@ -13,6 +13,7 @@ from skynet_app.adapters import builtin_adapter_manifests
 from skynet_app.database import Database
 from skynet_app.experiments import ExperimentSpec
 from skynet_app.tracking import WandBBridge, WandBSettings
+from skynet_app.tracking_journal import TrackingJournal
 
 
 JSONL_ADAPTERS = [
@@ -128,6 +129,7 @@ def test_invalid_or_missing_alias_values_do_not_hide_other_produced_metrics(adap
     row = {
         "epoch": 0,
         "val_loss": float("nan"),
+        "train_loss": float("nan"),
         "lr": True,
         "global_step": "9007199254740993",
         "best_val_loss": 0.2,
@@ -228,7 +230,8 @@ def forwarding_service(tmp_path, monkeypatch):
 
 
 def spool_events(fixture):
-    path = fixture.capsule / "wandb-spool.jsonl"
+    path = TrackingJournal(fixture.database, fixture.run_id).file("wandb-spool.jsonl")
+    assert not (fixture.capsule / "wandb-spool.jsonl").exists()
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
@@ -298,7 +301,7 @@ def test_historical_sample_and_spool_gain_only_unsent_metrics_once(forwarding_se
         "training/total": 10, "training/progress": 0.1, **legacy_aliases,
     }
     timestamp_ms = int(datetime.fromisoformat(recorded_at.replace("Z", "+00:00")).timestamp() * 1000)
-    bridge = WandBBridge(fixture.capsule, fixture.settings)
+    bridge = WandBBridge(fixture.capsule, fixture.settings, journal=TrackingJournal(fixture.database, fixture.run_id))
     bridge.log_metrics(
         fixture.run_id, original_metrics, step=1, timestamp_ms=timestamp_ms,
         idempotency_key=f"training-progress:{old_sample['id']}",

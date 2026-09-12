@@ -38,7 +38,13 @@ if __name__ == "__main__":
                     "digest",
                     "source_names",
                     "mimic_joints",
+                    "hand_asset",
+                    "hand_order",
+                    "units",
+                    "wrist_rotation_order",
+                    "hands",
                 )
+                if key in manifest
             }
             self._metadata["skynet_hand"]["action_joint_names"] = (
                 manifest["wrist_joints"] + manifest["finger_joints"]

@@ -24,11 +24,11 @@ const get = (id) => window.document.getElementById(id);
 get("collection").hidden = false;
 get("collection-view-live").hidden = false;
 const catalog = {
-  default_robot: "floating_shadow_right",
+  default_robot: "skynet_shadow_right",
   default_task: "Dexverse-PickUpStick-v0",
   hands: [
-    { key: "floating_shadow_right", name: "Right", available: true },
-    { key: "floating_shadow_left", name: "Left", available: true },
+    { key: "skynet_shadow_right", name: "Right", available: true },
+    { key: "skynet_shadow_left", name: "Left", available: true },
     {
       key: "skynet_allegro_v4_left",
       name: "Allegro left",
@@ -51,7 +51,7 @@ const catalog = {
     { key: "Dexverse-PickCube-v0", name: "Cube", instructions: "Lift cube" },
   ],
   verified_pairs: [
-    { robot: "floating_shadow_right", task: "Dexverse-PickUpStick-v0" },
+    { robot: "skynet_shadow_right", task: "Dexverse-PickUpStick-v0" },
   ],
   note: "Pinned release",
 };
@@ -64,7 +64,7 @@ const job = {
   hand_prepared_at: "2026-09-07T00:00:02Z",
   job_id: "123",
   server_ready: false,
-  profile: { robot: "floating_shadow_left", task: "Dexverse-PickCube-v0" },
+  profile: { robot: "skynet_shadow_left", task: "Dexverse-PickCube-v0" },
 };
 try {
   window.eval(
@@ -90,14 +90,14 @@ try {
   get("live-xr-hand").dispatchEvent(new window.Event("change"));
   assert.match(get("live-xr-selection-note").textContent, /Not headset-tested/);
   assert.equal(get("live-xr-start").disabled, false);
-  get("live-xr-hand").value = "floating_shadow_left";
+  get("live-xr-hand").value = "skynet_shadow_left";
   get("live-xr-task").value = "Dexverse-PickCube-v0";
   get("live-xr-task").dispatchEvent(new window.Event("change"));
   assert.match(get("live-xr-task-instructions").textContent, /Lift cube/);
   assert.match(get("live-xr-selection-note").textContent, /Not headset-tested/);
   assert.equal(
     new URL(window.location).searchParams.get("live_hand"),
-    "floating_shadow_left",
+    "skynet_shadow_left",
   );
   window.loadLiveXR(); // Pending refresh must not erase subsequent accepted submission.
   get("live-xr-start-form").dispatchEvent(
@@ -106,7 +106,7 @@ try {
   assert.equal(get("live-xr-start").textContent, "Starting…");
   assert.equal(
     JSON.parse(requests[2].options.body).robot,
-    "floating_shadow_left",
+    "skynet_shadow_left",
   );
   assert.equal(
     JSON.parse(requests[2].options.body).task,

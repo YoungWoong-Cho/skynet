@@ -32,7 +32,8 @@
         .toLowerCase()
         .includes(query),
     );
-    const next = JSON.stringify([rows, preparations, preparationState, preparationError, query]);
+    const registrations = rows.map(session => recordingRegistrationSummary(session.id));
+    const next = JSON.stringify([rows, preparations, preparationState, preparationError, query, registrations]);
     if (next === signature) return;
     signature = next;
     const count = saved.reduce(
@@ -51,7 +52,7 @@
         query
           ? "No sessions match your search."
           : "No recordings yet. Start a session in Collect.",
-      ).colSpan = 4;
+      ).colSpan = 6;
     for (const session of rows) {
       const row = text(body, "tr", "");
       row.dataset.sessionId = session.id;
@@ -61,7 +62,7 @@
       text(
         name,
         "span",
-        `${new Date(session.created_at).toLocaleString()} · ${session.id.slice(0, 8)}`,
+        session.id.slice(0, 8),
         "secondary",
       );
       const archive = session.archive;
@@ -79,6 +80,7 @@
           session.recording_summary?.episodes || session.recordings.length,
         ),
       );
+      text(row, "td", formatDate(session.created_at));
       const jobs = preparations.filter((j) => {
         if (Object.hasOwn(j, "recording_session_id")) return j.recording_session_id === session.id;
         // Compatibility with an older API: only whole-session preparations can
@@ -106,17 +108,24 @@
       if (active && preparationState === "ready") cell.firstElementChild.className = `state-pill ${stateClass(active.stage || "PENDING")}`;
       if (jobs.some((j) => ["FAILED", "DELETE_FAILED"].includes(j.state)))
         cell.insertAdjacentHTML("beforeend", statusPill("Preparation needs attention"));
+      const registration = recordingRegistrationSummary(session.id);
+      const registeredCell = text(row, "td", "");
+      if (registration.state === "ready") {
+        const registered = button(registeredCell, String(registration.count), () =>
+          showRecordingResources(session.id));
+        registered.className = "text-button";
+        registered.setAttribute("aria-label", `${registration.count} registered resource${registration.count === 1 ? "" : "s"} for recording ${session.id.slice(0, 8)}`);
+      } else {
+        const pending = text(registeredCell, "span", "—", "secondary");
+        pending.title = registration.state === "unavailable" ? "Registry unavailable" : "Loading Registry…";
+      }
       const actions = text(row, "td", "", "row-actions");
-      button(actions, "Review recordings", () =>
+      button(actions, "View recordings", () =>
         window.openLiveReview(session),
       );
-      button(actions, "Prepare for training", () =>
+      button(actions, "Register", () =>
         window.openPolicyExport(session.id),
       );
-      if (jobs[0]?.resource_id)
-        button(actions, "View dataset", () =>
-          window.openPreparedDataset(jobs[0].resource_id),
-        );
       if (preparationState === "unavailable")
         button(actions, "Retry preparation status", () =>
           document.dispatchEvent(new CustomEvent("dataset-preparation-refresh-requested")),
@@ -156,5 +165,6 @@
     preparations = event.detail;
     render();
   });
+  document.addEventListener("recording-registry-changed", render);
   el("simulation-recordings-search").addEventListener("input", render);
 })();

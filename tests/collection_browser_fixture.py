@@ -7,6 +7,12 @@ This exercises the actual conversion API, artifact download, and registry UI.
 # Environment must be configured before importing the application database.
 # ruff: noqa: E402
 
+import atexit
+import uuid
+import psycopg
+from psycopg import sql
+from psycopg.conninfo import make_conninfo
+
 import hashlib
 import io
 import json
@@ -21,11 +27,31 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 qa_root = Path(tempfile.mkdtemp(prefix="skynet-browser-qa-"))
-os.environ["SKYNET_DATABASE_PATH"] = str(qa_root / "database.sqlite")
+test_admin = os.environ.get("SKYNET_TEST_POSTGRES_ADMIN")
+if not test_admin:
+    raise RuntimeError("Set SKYNET_TEST_POSTGRES_ADMIN to a disposable PostgreSQL test server")
+qa_database = "skynet_browser_" + uuid.uuid4().hex
+with psycopg.connect(test_admin, autocommit=True) as connection:
+    connection.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(qa_database)))
+os.environ["SKYNET_DATABASE_URL"] = make_conninfo(test_admin, dbname=qa_database)
+
+
+def remove_qa_database():
+    with psycopg.connect(test_admin, autocommit=True) as connection:
+        connection.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(qa_database)))
+
+
+atexit.register(remove_qa_database)
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from skynet_app import database as database_module
+
+# Keep real endpoint and object-store settings out of this synthetic server.
+database_module.APP_ROOT = qa_root
+os.environ["SKYNET_DATA_ROOT"] = str(qa_root / "data")
+
 from skynet_app.database import canonical_json
 from skynet_app import live_xr_api as api
 from skynet_app.cluster_runtime import ClusterClient

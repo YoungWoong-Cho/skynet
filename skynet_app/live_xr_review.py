@@ -72,11 +72,32 @@ def inspect(path, profile):
         raise ValueError(
             "Unsupported native recording format; expected DexVerse trajectory v3"
         )
-    task, hand = selection(profile["task"], profile["robot"])
+    task, hand = selection(profile["task"], profile["robot"], historical=True)
     if payload.get("task") != task["key"] or payload.get("robot_type") != hand["key"]:
         raise ValueError(
             "The saved recording does not match this session's hand and task"
         )
+    hand_metadata = payload.get("skynet_hand")
+    if hand_metadata is not None:
+        if (
+            not isinstance(hand_metadata, dict)
+            or hand_metadata.get("robot") != profile["robot"]
+        ):
+            raise ValueError("Recording hand metadata differs from the session")
+        names = hand_metadata.get("action_joint_names")
+        if (
+            not isinstance(names, list)
+            or not names
+            or any(not isinstance(n, str) for n in names)
+            or len(set(names)) != len(names)
+        ):
+            raise ValueError("Recording has an invalid hand joint order")
+        bundle = profile.get("hand_bundle")
+        if bundle and (
+            hand_metadata.get("digest") != bundle["digest"]
+            or hand_metadata.get("hand_asset") != bundle.get("hand_asset")
+        ):
+            raise ValueError("Recording hand model differs from its frozen bundle")
     episodes = payload.get("episodes")
     if (
         not isinstance(episodes, list)
@@ -94,6 +115,12 @@ def inspect(path, profile):
             or not np.isfinite(actions).all()
         ):
             raise ValueError("Recording contains invalid action values")
+        if hand_metadata and actions.shape[1] != len(
+            hand_metadata["action_joint_names"]
+        ):
+            raise ValueError(
+                "Recording action dimension differs from its hand joint order"
+            )
         states = episode.get("states")
         steps = len(actions)
         if (
@@ -146,12 +173,17 @@ def inspect(path, profile):
         "task_name": task["name"],
         "robot": hand["key"],
         "hand_name": hand["name"],
+        "hand_metadata": hand_metadata,
         "episodes": reviewed,
         "sha256": hashlib.sha256(raw).hexdigest(),
         "size_bytes": len(raw),
         "simulation_hz": 60,
         "time_note": "Simulation time at 60 Hz; pauses and headset setup are excluded.",
-        "value_note": "Actions and scene states use DexVerse's saved simulator order. Joint names and action units are not stored in this format; no guessed mapping is applied.",
+        "value_note": (
+            "Action joint order and model identity are preserved in the recorded hand metadata."
+            if hand_metadata
+            else "Actions and scene states use DexVerse's saved simulator order. Joint names and action units are not stored in this format; no guessed mapping is applied."
+        ),
         "reviewed_at": utc_now(),
     }
 
@@ -201,17 +233,27 @@ class LiveReviewService:
             if path.exists()
             else {"state": "NOT_DOWNLOADED"}
         )
-        if result["state"] == "READY" and getattr(self.live, "archive", None) is not None:
-            if result.get("storage_path") != self.remote_location(identifier, index, "review.json").path:
+        if (
+            result["state"] == "READY"
+            and getattr(self.live, "archive", None) is not None
+        ):
+            if (
+                result.get("storage_path")
+                != self.remote_location(identifier, index, "review.json").path
+            ):
                 return {"state": "NOT_DOWNLOADED"}
         if result["state"] == "DOWNLOADING" and (identifier, index) not in self.active:
             return {
                 "state": "FAILED",
                 "error": "Download was interrupted. Retry to resume review.",
             }
-        if result["state"] == "READY" and result.get("storage") != "remote" and not all(
-            (directory / name).is_file()
-            for name in ("review.json", "summary.json", "recording.pkl")
+        if (
+            result["state"] == "READY"
+            and result.get("storage") != "remote"
+            and not all(
+                (directory / name).is_file()
+                for name in ("review.json", "summary.json", "recording.pkl")
+            )
         ):
             return {
                 "state": "FAILED",
@@ -227,8 +269,12 @@ class LiveReviewService:
 
     def create(self, identifier, index=0):
         with self.lock:
-            if (self.live.get(identifier).get("archive") or {}).get("state") == "COPYING":
-                raise ValueError("Recordings are moving to sky2. Retry review after transfer completes.")
+            if (self.live.get(identifier).get("archive") or {}).get(
+                "state"
+            ) == "COPYING":
+                raise ValueError(
+                    "Recordings are moving to sky2. Retry review after transfer completes."
+                )
             current = self.status(identifier, index)
             key = (identifier, index)
             if current["state"] == "READY" or key in self.active:
@@ -277,13 +323,19 @@ class LiveReviewService:
             return RemoteArtifact(transport, gateway, path, MAX_BYTES)
         if name not in {"review.json", "summary.json"}:
             raise KeyError("Review file not found")
-        if (job.get("archive") or {}).get("state") in {"VERIFIED", "CLEANUP_PENDING", "READY"}:
+        if (job.get("archive") or {}).get("state") in {
+            "VERIFIED",
+            "CLEANUP_PENDING",
+            "READY",
+        }:
             root = archive.derived_root(job)
             transport, gateway = archive.cluster, job["archive"]["gateway"]
         else:
             transport, gateway = self.live.transport(job), job["gateway"]
             root = job["root"] + "/output"
-        return RemoteArtifact(transport, gateway, f"{root}/reviews/{index}/{name}", 50 * 1024 * 1024)
+        return RemoteArtifact(
+            transport, gateway, f"{root}/reviews/{index}/{name}", 50 * 1024 * 1024
+        )
 
     def prepare_remote(self, identifier, index):
         """Validate bounded bytes in memory and save review data beside remote storage."""
@@ -294,26 +346,53 @@ class LiveReviewService:
         if not expected and len(job["recordings"]) == 1:
             expected = (job.get("recording_summary") or {}).get("sha256")
         if expected and result["sha256"] != expected:
-            raise ValueError("The recording checksum differs from its saved validation report")
+            raise ValueError(
+                "The recording checksum differs from its saved validation report"
+            )
         text = canonical_json(result)
         if len(text.encode()) > 50 * 1024 * 1024:
             raise ValueError("Recording preview exceeds the 50 MB review limit")
         summary = {k: v for k, v in result.items() if k != "episodes"}
-        summary["episodes"] = [{k: v for k, v in ep.items() if k != "frames"} for ep in result["episodes"]]
+        summary["episodes"] = [
+            {k: v for k, v in ep.items() if k != "frames"} for ep in result["episodes"]
+        ]
         for _ in range(2):
             location_job = self.live.get(identifier)
-            targets = {name: self.remote_location(identifier, index, name, job=location_job)
-                       for name in ("review.json", "summary.json")}
-            for name, content in (("review.json", text), ("summary.json", canonical_json(summary))):
+            targets = {
+                name: self.remote_location(identifier, index, name, job=location_job)
+                for name in ("review.json", "summary.json")
+            }
+            for name, content in (
+                ("review.json", text),
+                ("summary.json", canonical_json(summary)),
+            ):
                 target = targets[name]
                 program = "import json,sys; from pathlib import Path; p=Path(sys.argv[1]); p.parent.mkdir(parents=True,exist_ok=True); t=p.with_suffix('.tmp'); t.write_text(sys.stdin.read()); t.replace(p)"
-                target.transport.ssh(target.gateway, "python3 -c " + shlex.quote(program) + " " + shlex.quote(target.path), stdin=content, timeout=40)
+                target.transport.ssh(
+                    target.gateway,
+                    "python3 -c "
+                    + shlex.quote(program)
+                    + " "
+                    + shlex.quote(target.path),
+                    stdin=content,
+                    timeout=40,
+                )
             current = self.remote_location(identifier, index, "review.json")
-            if (current.gateway, current.path) == (targets["review.json"].gateway, targets["review.json"].path):
-                self.publish(self.directory(identifier, index), state="READY", storage="remote",
-                             storage_path=current.path, summary=summary)
+            if (current.gateway, current.path) == (
+                targets["review.json"].gateway,
+                targets["review.json"].path,
+            ):
+                self.publish(
+                    self.directory(identifier, index),
+                    state="READY",
+                    storage="remote",
+                    storage_path=current.path,
+                    summary=summary,
+                )
                 return
-        raise ValueError("Recording storage changed during review. Retry after transfer completes.")
+        raise ValueError(
+            "Recording storage changed during review. Retry after transfer completes."
+        )
 
     def prepare(self, identifier, index):
         directory = self.directory(identifier, index)

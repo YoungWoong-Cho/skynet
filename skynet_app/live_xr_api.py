@@ -11,11 +11,13 @@ from .live_xr_video import LiveVideoService
 from .live_conversion import LiveConversionService
 from .live_xr_archive import LiveArchiveService
 from .remote_artifacts import RemoteArtifact
+from .episode_previews import EpisodePreviews
 
 router = APIRouter(prefix="/api/collection/live", tags=["collection"])
 service = LiveXRService(collection.database)
 archive = service.archive = LiveArchiveService(service)
 reviews = LiveReviewService(service)
+episode_previews = EpisodePreviews(reviews)
 videos = LiveVideoService(reviews)
 conversions = LiveConversionService(reviews)
 service.conversions = conversions
@@ -171,6 +173,22 @@ def video_create(identifier: str, index: int, episode: int = 0):
 @router.delete("/sessions/{identifier}/recordings/{index}/video")
 def video_cancel(identifier: str, index: int, episode: int = 0, generation: str | None = None):
     return checked(videos.cancel, identifier, index, episode, generation)
+
+
+@router.get("/sessions/{identifier}/recordings/{index}/viewer")
+def episode_viewer_status(identifier: str, index: int, episode: int = 0):
+    return checked(episode_previews.status, identifier, index, episode)
+
+
+@router.post("/sessions/{identifier}/recordings/{index}/viewer", status_code=202)
+def episode_viewer_prepare(identifier: str, index: int, episode: int = 0):
+    return checked(lambda: episode_previews.status(identifier, index, episode, start=True))
+
+
+@router.get("/sessions/{identifier}/recordings/{index}/viewer/{name}")
+def episode_viewer_artifact(identifier: str, index: int, name: str, request: Request, episode: int = 0):
+    artifact = checked(episode_previews.artifact, identifier, index, episode, name)
+    return checked(lambda: artifact.response(request, media_type="application/json" if name.endswith(".json") else "video/mp4"))
 
 
 @router.get("/sessions/{identifier}/recordings/{index}/{name}")

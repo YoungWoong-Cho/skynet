@@ -12,6 +12,12 @@ w.fetch = () => new Promise(() => {});
 w.scrollTo = w.HTMLElement.prototype.scrollIntoView = () => {};
 w.matchMedia = () => ({matches: false, addEventListener() {}, removeEventListener() {}});
 w.CSS = {escape: value => value};
+w.HTMLDialogElement.prototype.showModal = function() { this.open = true; };
+w.HTMLDialogElement.prototype.close = function() {
+  if (!this.open) return;
+  this.open = false;
+  this.dispatchEvent(new w.Event('close'));
+};
 const el = id => w.document.getElementById(id);
 const flush = async () => { for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve)); };
 
@@ -129,15 +135,15 @@ try {
   el('run-detail-actions').append(trackingButton);
   w.api = async () => { throw new Error('temporary tracking failure'); };
   await w.attachRunTracking('new-run', 'wandb', '/api/runs/new-run/tracking/wandb/attach', trackingButton);
-  assert.match(el('toast').textContent, /temporary tracking failure/);
+  assert.match(el('run-detail-dialog').querySelector('.dialog-notice').textContent, /temporary tracking failure/);
   assert.match(el('runs-error').textContent, /temporary tracking failure/);
   w.showToast('Other run remains blocked', true, {scope: 'run-resume:other'});
   w.showNotice(el('runs-error'), 'Other run remains blocked', {scope: 'run-resume:other'});
   w.api = async () => ({run: {id: 'new-run', status: 'CANCELLED', attempts: []}});
   await w.attachRunTracking('new-run', 'wandb', '/api/runs/new-run/tracking/wandb/attach', trackingButton);
-  assert.doesNotMatch(el('toast').textContent, /temporary tracking failure/);
+  assert.doesNotMatch(el('run-detail-dialog').querySelector('.dialog-notice').textContent, /temporary tracking failure/);
   assert.doesNotMatch(el('runs-error').textContent, /temporary tracking failure/);
-  assert.match(el('toast').textContent, /Other run remains blocked/);
+  assert.match(el('run-detail-dialog').querySelector('.dialog-notice').textContent, /Other run remains blocked/);
   assert.match(el('runs-error').textContent, /Other run remains blocked/);
   w.clearNotificationScope('run-resume:other');
 
@@ -160,6 +166,8 @@ try {
   assert.equal(el('run-detail-title').textContent, 'other-run', 'late attachment must not replace the selected title');
   assert.equal(el('run-detail-meta').textContent, selectedDetail, 'late attachment must not replace the selected run');
   assert.doesNotMatch(el('run-detail-tracking').textContent, /original-run/);
+
+  el('close-run-detail').click();
 
   // Filters changed during a slow refresh cannot hide the run just submitted.
   const opened = [];

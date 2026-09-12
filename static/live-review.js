@@ -45,6 +45,7 @@
     el("live-review-video-retry").textContent = "Retry video";
   }
   function clearVideo() {
+    window.SkynetEpisodeViewer?.close("live-episode-viewer");
     ++videoToken;
     videoGeneration = "";
     el("live-review-video-cancel").disabled = false;
@@ -298,7 +299,13 @@
     pause();
     clearVideo();
     el("live-review-video-status").textContent = "Checking video…";
-    loadVideo(token, videoToken, Number(el("live-review-episode").value));
+    const selectedIndex = Number(el("live-review-recording").value);
+    const cameraReceipt = reviewSession.recording_images?.[reviewSession.recordings?.[selectedIndex]];
+    if (!cameraReceipt) loadVideo(token, videoToken, Number(el("live-review-episode").value));
+    else el("live-review-video-status").textContent = "";
+    window.SkynetEpisodeViewer?.open("live-episode-viewer", "live-review-video", base, {
+      collection: true, episode: Number(el("live-review-episode").value), robot: data.robot,
+    });
     episode = data.episodes[Number(el("live-review-episode").value)];
     frame = 0;
     const fields = el("live-review-field");

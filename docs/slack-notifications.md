@@ -7,7 +7,7 @@ Open **Settings → Slack** in your email workspace.
 3. **Disconnect** stops notifications and removes the saved webhook. There is no separate test, enable switch or event configuration.
 
 
-Your Slack settings and secret webhook are separate from other email workspaces. The webhook is stored in your workspace's secure credential store on the Skynet server, not the browser, SQLite database or job capsule. This uses the same supported secure store as tracking credentials. Email selection remains unverified, as with the rest of Skynet's trusted-team workspace design.
+Your Slack settings and secret webhook are separate from other email workspaces. The webhook is stored in your workspace's secure credential store on the Skynet server, not the browser, PostgreSQL database or job capsule. This uses the same supported secure store as tracking credentials. Email selection remains unverified, as with the rest of Skynet's trusted-team workspace design.
 
 ## Events and delivery
 
@@ -33,4 +33,4 @@ npm run test:slack
 npm run test:workspaces
 ```
 
-These tests use actual SQLite transactions, lifecycle methods, the workspace middleware and real settings scripts with mocked Slack delivery. They do not send messages to a real Slack channel or submit cluster jobs.
+These tests use actual PostgreSQL transactions, lifecycle methods, the workspace middleware and real settings scripts with mocked Slack delivery. They do not send messages to a real Slack channel or submit cluster jobs.

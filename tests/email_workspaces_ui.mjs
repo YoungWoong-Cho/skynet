@@ -77,6 +77,11 @@ function setup(session=null, preferences={}) {
   assert.equal(f.el('email-workspace-content').hidden,false);
   assert.equal(f.el('email-workspace-gate').hidden,true);
   assert.equal(f.el('workspace-current-email').textContent,'alice@example.com');
+  const header=f.el('workspace-current-email').closest('header');
+  assert.ok(header);
+  assert.equal(f.el('workspace-sign-out').textContent,'sign out');
+  assert.ok(f.el('workspace-current-email').compareDocumentPosition(f.el('gateway')) & f.w.Node.DOCUMENT_POSITION_FOLLOWING);
+  assert.doesNotMatch(header.textContent,/Workspace:|Switch email/);
   assert.equal(f.w.SkynetWorkspace.storageKey('preference'),'preference:workspace:alice');
   assert.ok(f.calls.filter(c=>c.path!=='/api/workspace/session').every(c=>new Headers(c.options.headers).get('X-Skynet-Workspace')==='alice'));
   await f.w.fetch(new f.w.URL('/api/fixture', f.w.location.href));

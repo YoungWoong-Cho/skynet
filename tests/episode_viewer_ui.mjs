@@ -1,0 +1,41 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {JSDOM} from 'jsdom';
+const w=new JSDOM('<div id="host"></div><video id="video"></video><script src="http://localhost/static/episode-viewer.js"></script>',{runScripts:'outside-only',pretendToBeVisual:true,url:'http://localhost/'}).window;
+Object.defineProperty(w.document,'currentScript',{get:()=>w.document.querySelector('script')});
+w.ResizeObserver=class {observe(){} disconnect(){}};
+w.AbortSignal.timeout=()=>undefined;
+const drawn=[];
+const context={save(){},restore(){},beginPath(){},rect(){},clip(){},moveTo(){},lineTo(){},stroke(){},drawImage(){},fill(){},arc(x,y){drawn.push([this.fillStyle,x,y]);}};
+w.HTMLCanvasElement.prototype.getContext=()=>context;
+const video=w.document.querySelector('video');
+Object.defineProperties(video,{readyState:{get:()=>2},duration:{get:()=>2},videoWidth:{get:()=>20},videoHeight:{get:()=>20}});
+video.pause=()=>{};video.load=()=>{};
+let onFrame;
+video.requestVideoFrameCallback=callback=>{onFrame=callback;return 1;};
+video.cancelVideoFrameCallback=()=>{onFrame=null;};
+const camera={id:'front',label:'Front',width:20,height:20,rect:[0,0,20,20],position_world:[0,0,0],quaternion_world_ros:[1,0,0,0],intrinsic_matrix:[[1,0,10],[0,1,10],[0,0,1]]};
+const data={robot:'unknown',duration:2,views:[camera],edges:[],frames:[
+ {time:0,actual:[[0,0,1]],prediction:[[1,0,1]],demonstration:[[2,0,1]]},
+ {time:1,actual:[[3,0,1]],prediction:[[4,0,1]]},
+]};
+let resolveStale;
+w.fetch=async url=>({ok:true,json:async()=>url==='/api/hands'?{hands:[]}:url.startsWith('/stale')?await new Promise(r=>resolveStale=r):{state:'READY',viewer:data}});
+w.eval(await readFile(new URL('../static/episode-viewer.js',import.meta.url),'utf8'));
+const flush=async()=>{for(let i=0;i<5;i++)await new Promise(r=>setImmediate(r));};
+const viewer=w.SkynetEpisodeViewer.open('host','video','/episode');await flush();
+assert.equal(w.document.querySelectorAll('input[type="checkbox"]').length,3);
+video.currentTime=1.5;onFrame(0,{mediaTime:0});
+assert.deepEqual(drawn.slice(-3).map(p=>p[1]),[10,11,12],'overlay follows the decoded frame, not a newer playback clock');
+const prediction=w.document.querySelectorAll('input[type="checkbox"]')[0];
+prediction.checked=false;prediction.dispatchEvent(new w.Event('change'));
+drawn.length=0;onFrame(0,{mediaTime:1});
+assert.deepEqual(drawn.map(p=>p[1]),[13],'prediction toggle does not hide actual; expired demonstration is absent');
+assert.equal(viewer.enabled.has('actual'),true);
+w.SkynetEpisodeViewer.open('host','video','/stale');await flush();
+w.SkynetEpisodeViewer.open('host','video','/new');await flush();
+resolveStale({state:'READY',viewer:{...data,robot:'stale'}});await flush();
+assert.equal(viewer.data.robot,'unknown','old episode responses cannot replace the current viewer');
+w.SkynetEpisodeViewer.close('host');assert.equal(onFrame,null,'closing releases video callbacks');
+w.close();
+console.log('Episode viewer: frame alignment, layer independence, stale responses and cleanup passed');

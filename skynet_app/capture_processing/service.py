@@ -22,6 +22,7 @@ from skynet_app.cluster_runtime import (
 from skynet_app.database import canonical_json, utc_now
 from skynet_app.cluster_config import CLUSTER
 from .visionpro import convert
+from skynet_app.simulation_hands import build as build_hand, upload as upload_hand
 from .dexverse_runner import TASK, ROBOT, REVISION
 from .slurm import compile_isaac_job
 
@@ -36,7 +37,14 @@ def file_sha(path):
 
 
 def upload_capture(
-    cluster, path, run_id, digest, gateway, *, relative_path="original.jsonl", timeout=120
+    cluster,
+    path,
+    run_id,
+    digest,
+    gateway,
+    *,
+    relative_path="original.jsonl",
+    timeout=120,
 ):
     """Bounded-memory upload; immutable destination and verified original bytes."""
     cluster.candidates(gateway)
@@ -107,19 +115,34 @@ class ProcessingService:
             # never reinterpret the frozen execution profile as its storage host.
             saved = self.get(job["id"], private=True)
             archive = saved.get("archive") or {}
-            manifest, checksum = archive.get("manifest"), archive.get("manifest_sha256", "")
-            if (saved["state"] not in TERMINAL or archive.get("state") not in {"VERIFIED", "READY"}
-                    or not isinstance(manifest, dict) or manifest.get("schema") != "skynet.live-archive/v1"
-                    or manifest.get("session_id") != saved["id"]
-                    or not re.fullmatch(r"[a-f0-9]{64}", checksum)
-                    or hashlib.sha256(canonical_json(manifest).encode()).hexdigest() != checksum):
+            manifest, checksum = (
+                archive.get("manifest"),
+                archive.get("manifest_sha256", ""),
+            )
+            if (
+                saved["state"] not in TERMINAL
+                or archive.get("state") not in {"VERIFIED", "READY"}
+                or not isinstance(manifest, dict)
+                or manifest.get("schema") != "skynet.live-archive/v1"
+                or manifest.get("session_id") != saved["id"]
+                or not re.fullmatch(r"[a-f0-9]{64}", checksum)
+                or hashlib.sha256(canonical_json(manifest).encode()).hexdigest()
+                != checksum
+            ):
                 raise ValueError("The saved processing archive has not been verified")
             expected = f"{CLUSTER.paths.datasets}/raw/dexverse-live/{saved['id']}/{checksum}/output"
             root = str(Path(expected).parent)
-            if (archive.get("gateway") != "sky2" or archive.get("root") != expected
-                    or saved.get("root") != root or saved.get("gateway") != "sky2"
-                    or job.get("root") != root or job.get("gateway") != "sky2"):
-                raise ValueError("The saved processing archive location does not match its verified manifest")
+            if (
+                archive.get("gateway") != "sky2"
+                or archive.get("root") != expected
+                or saved.get("root") != root
+                or saved.get("gateway") != "sky2"
+                or job.get("root") != root
+                or job.get("gateway") != "sky2"
+            ):
+                raise ValueError(
+                    "The saved processing archive location does not match its verified manifest"
+                )
             return self.cluster
         if job["config"]["pipeline"].get("execution") == "workstation":
             from skynet_app.live_xr_workstation import WorkstationClient
@@ -143,8 +166,13 @@ class ProcessingService:
         item.update(json.loads(item.pop("payload_json")))
         item.pop("script", None)
         item.pop("runner_source", None)
+        item.pop("hand_bundle_path", None)
         if isinstance(item.get("archive"), dict):
-            item["archive"] = {key: value for key, value in item["archive"].items() if key != "manifest"}
+            item["archive"] = {
+                key: value
+                for key, value in item["archive"].items()
+                if key != "manifest"
+            }
         return item
 
     def get(self, identifier, private=False):
@@ -218,8 +246,14 @@ class ProcessingService:
             )
         runner = (Path(__file__).parent / "dexverse_runner.py").read_text()
         runner_sha = hashlib.sha256(runner.encode()).hexdigest()
+        hand_path, hand_manifest = build_hand(pipeline["robot"])
+        if hand_manifest["robot"] != pipeline["robot"]:
+            raise ValueError("Prepared hand differs from the capture pipeline")
         params = {
             "pipeline": pipeline,
+            "hand_bundle": {
+                k: hand_manifest[k] for k in ("robot", "digest", "hand_asset")
+            },
             "seed": seed,
             "epochs": epochs,
             "eval_episodes": eval_episodes,
@@ -243,6 +277,7 @@ class ProcessingService:
                 "name": capture["summary"]["header"]["task"],
                 "gateway": pipeline["gateway"],
                 "runner_source": runner,
+                "hand_bundle_path": str(hand_path),
                 "stages": {},
                 "error": None,
             }
@@ -301,7 +336,8 @@ class ProcessingService:
                     + str(error)
                 ) from error
             self.update(
-                identifier, preparation="Staging and verifying the original recording on sky2"
+                identifier,
+                preparation="Staging and verifying the original recording on sky2",
             )
             self.captures.stage(job["capture_sha256"], identifier, gateway)
             self.cluster.write_capsule_file(
@@ -313,6 +349,16 @@ class ProcessingService:
             self.cluster.write_capsule_file(
                 identifier, "request.json", canonical_json(cfg), gateway
             )
+            if cfg.get("hand_bundle"):
+                hand_root = upload_hand(
+                    job["hand_bundle_path"], WORK_ROOT, self.transport(job), gateway
+                )
+                cfg["hand_bundle"]["root"] = hand_root
+                self.update(identifier, config=cfg)
+                job["config"] = cfg
+                self.cluster.write_capsule_file(
+                    identifier, "request.json", canonical_json(cfg), gateway
+                )
             script = self.compile(job, root, converted)
             self.update(
                 identifier,
@@ -364,6 +410,8 @@ class ProcessingService:
             "--device",
             "cuda:0",
         ]
+        if config.get("hand_bundle"):
+            argv.extend(["--hand-bundle-root", config["hand_bundle"]["root"]])
         return compile_isaac_job(
             profile,
             root,
@@ -497,10 +545,11 @@ print(json.dumps(out))
     def verify_artifacts(self, job, result):
         artifacts = result.get("artifacts", {})
         dataset = result.get("dataset", {})
+        profile = job.get("config", {}).get("pipeline", {})
         if (
             dataset.get("schema") != "skynet.dexverse-state-actions/v1"
-            or dataset.get("task") != TASK
-            or dataset.get("robot") != ROBOT
+            or dataset.get("task") != profile.get("task", TASK)
+            or dataset.get("robot") != profile.get("robot", ROBOT)
         ):
             raise ValueError("Completed cycle has an unsupported dataset contract")
         if set(result.get("stages", {})) != {
@@ -603,7 +652,9 @@ print('verified')
     def retry(self, identifier):
         job = self.get(identifier, private=True)
         if job.get("archive"):
-            raise ValueError("This completed cycle has been archived. Create a new cycle to run it again; archived files are read-only.")
+            raise ValueError(
+                "This completed cycle has been archived. Create a new cycle to run it again; archived files are read-only."
+            )
         if job["state"] not in ("FAILED", "SUBMISSION_UNKNOWN"):
             raise ValueError(
                 "Only a failed preparation or uncertain submission can be recovered"

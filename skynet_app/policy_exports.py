@@ -251,14 +251,9 @@ class PolicyExportService(ClusterPolicyPreparation):
         )
         if old:
             return old
-        path = self.root / "manifests" / (revision + ".json")
-        path.parent.mkdir(parents=True, exist_ok=True)
         content = canonical_json({"sources": sources, "split": split})
-        if self.database.is_postgres:
-            from .metadata_objects import MetadataObjects
-            path = MetadataObjects(self.database).put(content.encode())
-        elif not path.exists():
-            path.write_text(content)
+        from .metadata_objects import MetadataObjects
+        path = MetadataObjects(self.database).put(content.encode())
         return self.database.create_data_resource_version(
             resource["id"],
             revision=revision,

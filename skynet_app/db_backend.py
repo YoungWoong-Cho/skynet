@@ -1,21 +1,20 @@
 """PostgreSQL transport for the repository's parameterized SQL.
 
 Only placeholder syntax is adapted here; schema and transaction differences are
-explicit. PostgreSQL never falls back to a host-local SQLite database.
+explicit. The application requires PostgreSQL and never creates a host-local database.
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
-import sqlite3
 import threading
 from pathlib import Path
 
 import psycopg
 
-INTEGRITY_ERRORS = (sqlite3.IntegrityError, psycopg.IntegrityError)
-DATABASE_ERRORS = (sqlite3.Error, psycopg.Error)
+INTEGRITY_ERRORS = (psycopg.IntegrityError,)
+DATABASE_ERRORS = (psycopg.Error,)
 
 
 class Record:

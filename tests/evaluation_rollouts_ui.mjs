@@ -17,7 +17,7 @@ const flush=async()=>{for(let i=0;i<5;i++)await new Promise(r=>setImmediate(r));
 const base={id:'eval',run_id:'run',status:'RUNNING',suite_name:'dexverse_recorded'};
 const episodes=[{id:'ep-a',task:'cube',episode_index:0,seed:0,status:'SUCCEEDED',success:false,video_path:'/videos/a.mp4'}, {id:'ep-b',task:'stick',episode_index:0,seed:1,status:'PENDING',success:null}];
 try {
- for(const file of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js']) w.eval(await readFile(new URL('../static/'+file,import.meta.url),'utf8')+(file==='app.js'?'\nwindow.setupEvaluationTest=rows=>{activeTab="evaluations";evaluationRows=rows;renderEvaluations();};window.prepareEvaluationSubmission=()=>{evaluationTargetValidationState={pending:false,valid:true,signature:evaluationTargetSignature()};};':''));
+ for(const file of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js']) w.eval(await readFile(new URL('../static/'+file,import.meta.url),'utf8')+(file==='app.js'?'\nwindow.setupEvaluationTest=rows=>{activeTab="evaluation-runs";evaluationRows=rows;renderEvaluations();};window.prepareEvaluationSubmission=()=>{evaluationTargetValidationState={pending:false,valid:true,signature:evaluationTargetSignature()};};':''));
  let resolveDetail; const logReplies=[];
  w.api=url=>url.includes('/logs') ? new Promise(resolve=>logReplies.push(resolve)) : new Promise(resolve=>{resolveDetail=resolve;});
  w.setupEvaluationTest([base]);
@@ -30,6 +30,39 @@ try {
  assert.equal(el('evaluation-rollouts-body').rows.length,2,'all episodes appear including pending');
  assert.match(el('evaluation-rollouts-body').rows[0].textContent,/0%/);
  assert.equal(logReplies.length,0,'opening results never waits for or downloads logs');
+ // Lifecycle actions refresh even while the Results disclosure preserves its launcher.
+ const evaluationRow=()=>el('evaluations-body').querySelector('[data-evaluation-id="eval"]');
+ for(const status of ['CREATED','SUBMITTING','PENDING','PENDING_SLURM','RUNNING','RETRY_PENDING']) {
+   w.updateEvaluationRow({...base,status});
+   assert.equal(evaluationRow().querySelector('[data-cancel-action]').textContent,'Cancel');
+   assert.equal(evaluationRow().querySelector('[data-delete-kind]'),null);
+ }
+ const originalApi=w.api, originalConfirm=w.askUserDialog;
+ const cancelCalls=[];
+ w.api=(url,options)=>{cancelCalls.push({url,options});return Promise.reject(new Error('offline'));};
+ w.askUserDialog=async()=>false;
+ evaluationRow().querySelector('[data-cancel-action]').click();await flush();
+ assert.equal(cancelCalls.length,0,'dismissing confirmation sends no cancellation');
+ w.askUserDialog=async()=>true;
+ evaluationRow().querySelector('[data-cancel-action]').click();await flush();
+ assert.equal(cancelCalls.length,1);
+ assert.equal(cancelCalls[0].url,'/api/evaluations/eval/cancel');
+ assert.equal(cancelCalls[0].options.method,'POST','row Cancel uses the existing cancellation endpoint');
+ assert.equal(evaluationRow().querySelector('[data-cancel-action]').disabled,false,'failed cancellation restores the row button');
+ w.api=originalApi;w.askUserDialog=originalConfirm;
+ w.updateEvaluationRow({...base,status:'CANCELLING'});
+ assert.equal(evaluationRow().querySelector('[data-cancel-action]').textContent,'Cancelling…');
+ assert.equal(evaluationRow().querySelector('[data-cancel-action]').disabled,true);
+ assert.equal(evaluationRow().querySelector('[data-delete-kind]'),null);
+ for(const status of ['CANCELLED','SUCCEEDED','FAILED']) {
+   w.updateEvaluationRow({...base,status});
+   assert.equal(evaluationRow().querySelector('[data-cancel-action]'),null);
+   assert.equal(evaluationRow().querySelector('[data-delete-kind]').textContent,'Delete');
+   assert.equal(evaluationRow().querySelector('[data-evaluation-action]'),button,'status changes preserve the open Results launcher');
+   assert.equal(el('evaluation-detail').hidden,false);
+ }
+ w.updateEvaluationRow(base);
+
  const launch=el('evaluation-rollouts-body').querySelector('button'); launch.click();
  assert.equal(el('evaluation-rollout-dialog').open,true,'modal opens before log requests complete');
  assert.match(el('evaluation-rollout-video').src,/ep-a\/video$/);

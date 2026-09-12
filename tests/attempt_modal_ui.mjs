@@ -13,7 +13,7 @@ w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
 w.HTMLDialogElement.prototype.close=function(value=''){if(this.open){this.open=false;this.returnValue=value;this.dispatchEvent(new w.Event('close'));}};
 const flush=async()=>{for(let i=0;i<4;i++)await new Promise(r=>setImmediate(r));};
 try{
- for(const file of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js'])w.eval((await readFile(new URL('../static/'+file,import.meta.url),'utf8')) + (file==='app.js' ? '\nwindow.setupAttemptTest=()=>{activeRunDetailId="test-run";elements.runDetail.hidden=false;};' : ''));
+ for(const file of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js'])w.eval((await readFile(new URL('../static/'+file,import.meta.url),'utf8')) + (file==='app.js' ? '\nwindow.setupAttemptTest=()=>{activeRunDetailId="test-run";elements.runDetail.hidden=false;};window.setupRunHistoryTest=(rows)=>{activeTab="runs";runRows=rows;renderRuns();};window.runModalContext=()=>({id:activeRunDetailId,poll:runDetailPollRunId});' : ''));
  w.api=async()=>({content:'sample log'});
  w.setupAttemptTest();
  const payload={run:{id:'test-run',status:'RUNNING',adapter_name:'egoverse-act',adapter_version:7,stages:[
@@ -80,5 +80,55 @@ try{
  w.renderRunAttemptMetadata({attempt:{adapter_settings:{'native.config.epochs':10},common_hyperparameters:Object.fromEntries(commonKeys.map(key=>[key,null])),common_hyperparameter_provenance:Object.fromEntries(commonKeys.map(key=>[key,{status:'not_applicable',source:'not_applicable'}]))},attemptNumber:4});
  assert.equal(el('run-attempt-hyperparameters').closest('section').hidden,true);
  assert.equal(el('run-attempt-adapter-section').hidden,false,'adapter settings remain visible without common hyperparameters');
- console.log('Attempt modal: adapter configuration, escaping, switching, opening, close, Escape and refresh behavior passed.');
+ // Exercise the actual history launcher, shared parent dialog, and nested attempt dialog.
+ w.closeRunAttemptDisclosure({restoreFocus:false});
+ w.setupRunHistoryTest([payload.run]);
+ let releaseDetail;
+ w.api=path=>path==='/api/runs/test-run'
+   ? new Promise(resolve=>{releaseDetail=resolve;})
+   : Promise.resolve({content:'sample log'});
+ const historyLaunch=el('runs-body').querySelector('[data-run-action="view"]');
+ historyLaunch.focus();historyLaunch.click();await flush();
+ const historyDialog=el('run-detail-dialog');
+ assert.equal(historyDialog.open,true,'View attempts opens the shared dialog while loading');
+ assert.equal(historyDialog.classList.contains('app-dialog'),true);
+ assert.equal(historyLaunch.getAttribute('aria-haspopup'),'dialog');
+ assert.equal(historyLaunch.getAttribute('aria-controls'),historyDialog.id);
+ assert.equal(historyLaunch.hasAttribute('aria-expanded'),false);
+ assert.equal(historyLaunch.textContent,'View attempts');
+ assert.match(el('attempts-body').textContent,/Loading attempts/);
+ assert.equal(el('run-detail').closest('dialog'),historyDialog,'run details stay inside the shared modal');
+ assert.equal(el('runs-body').querySelector('.row-disclosure-companion'),null,'no inline detail row remains');
+ releaseDetail(payload);await flush();
+ assert.equal(el('attempts-body').rows.length,1);
+ assert.equal(w.runModalContext().poll,'test-run','active run polling continues in the modal');
+ assert.match(el('run-detail-actions').textContent,/Start evaluation/);
+ el('attempts-body').querySelector('[data-attempt-action="view"]').click();await flush();
+ assert.equal(historyDialog.open,true);
+ assert.equal(el('run-attempt-detail-dialog').open,true);
+ w.document.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+ assert.equal(el('run-attempt-detail-dialog').open,false,'Escape closes only the topmost attempt dialog');
+ assert.equal(historyDialog.open,true,'parent attempt list remains open');
+ w.renderRuns({background:true});
+ w.renderRunDetail({...payload,run:{...payload.run,updated_at:'2026-09-12T01:00:00Z'}},'test-run',{preserveAttempt:true,background:true});
+ await flush();
+ assert.equal(historyDialog.open,true,'background updates keep the run dialog open');
+ assert.equal(el('run-detail').closest('dialog'),historyDialog);
+ assert.equal(el('run-attempt-detail-dialog').open,false,'background updates do not reopen the dismissed attempt');
+ el('close-run-detail').click();await flush();
+ assert.equal(historyDialog.open,false);
+ assert.equal(el('run-detail').hidden,true);
+ assert.equal(w.runModalContext().id,null);
+ assert.equal(w.runModalContext().poll,null,'closing the run dialog stops its polling');
+ await new Promise(resolve=>w.requestAnimationFrame(resolve));
+ assert.equal(w.document.activeElement,historyLaunch,'closing restores focus to View attempts');
+ // A response arriving after dismissal must not reopen either dialog.
+ historyLaunch.click();await flush();
+ assert.equal(historyDialog.open,true);
+ w.document.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+ releaseDetail(payload);await flush();
+ assert.equal(historyDialog.open,false,'late detail responses cannot reopen a closed run');
+ assert.equal(el('run-detail').hidden,true);
+ assert.equal(w.runModalContext().poll,null);
+ console.log('Run and attempt modals: history launcher, nested dialogs, polling, refresh, focus, stale responses and adapter details passed.');
 }finally{for(const observer of observers)observer.disconnect();await flush();w.close();}

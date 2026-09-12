@@ -108,7 +108,9 @@ try:
                 human[1 + 4 * f + j] = end * (0.35 + j * 0.65 / 3)
         points[hand] = human
         palm = (
-            "skynet_palm"
+            manifest.get("hands", {side: {"control_frame": "skynet_palm"}})[side][
+                "control_frame"
+            ]
             if manifest
             else (
                 ("rh_" if side == "right" else "lh_") + "palm"

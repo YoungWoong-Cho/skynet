@@ -82,7 +82,7 @@ def setup(tmp_path, monkeypatch):
                 while block := f.read(8192):
                     yield block
     session = dict(id="session-1", state="STOPPED", root=str(source.parent), gateway="test-host", created_at="2026-09-08", profile=dict(display_name="Test hand", task="test-task", robot="floating_shadow_bimanual"), recordings=[r["path"] for r in receipts], recording_checksums={r["path"]: r["sha256"] for r in receipts}, recording_images={r["path"]: r["images"] for r in receipts})
-    live = SimpleNamespace(root=ROOT, database=Database(tmp_path / "db.sqlite"), get=lambda identifier: session, list=lambda: [session], transport=lambda _: Transport())
+    live = SimpleNamespace(root=ROOT, database=Database(tmp_path / "db.store"), get=lambda identifier: session, list=lambda: [session], transport=lambda _: Transport())
     service = PolicyExportService(LiveReviewService(live, root=tmp_path / "reviews"), root=tmp_path / "exports")
     monkeypatch.setattr(service, "dispatch", lambda _: None)
     # Exercise the actual converter locally against tiny synthetic recordings.

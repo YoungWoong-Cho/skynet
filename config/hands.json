@@ -13,7 +13,33 @@
       "packages": {},
       "source_kind": "Official",
       "notes": "",
-      "license_path": "LICENSE"
+      "license_path": "LICENSE",
+      "floating_hand": {
+        "sides": [
+          "right",
+          "left"
+        ],
+        "palm": "{side}_palm_link",
+        "tips": [
+          "{side}_finger1_tip_link",
+          "{side}_finger2_tip_link",
+          "{side}_finger3_tip_link",
+          "{side}_finger4_tip_link",
+          "{side}_finger5_tip_link"
+        ],
+        "alignment_rpy": {
+          "right": [
+            -0.0,
+            1.5707963267948966,
+            0.0
+          ],
+          "left": [
+            -0.0,
+            1.5707963267948966,
+            0.0
+          ]
+        }
+      }
     },
     {
       "key": "wuji-2",
@@ -32,7 +58,33 @@
         3.141592653589793,
         0,
         0
-      ]
+      ],
+      "floating_hand": {
+        "sides": [
+          "right",
+          "left"
+        ],
+        "palm": "{s}_wrist",
+        "tips": [
+          "{s}_thumb_tip",
+          "{s}_index_finger_tip",
+          "{s}_middle_finger_tip",
+          "{s}_ring_finger_tip",
+          "{s}_pinky_tip"
+        ],
+        "alignment_rpy": {
+          "right": [
+            -1.5707963267948966,
+            0.0,
+            1.5707963267948966
+          ],
+          "left": [
+            1.5707963267948966,
+            0.0,
+            -1.5707963267948966
+          ]
+        }
+      }
     },
     {
       "key": "shadow",
@@ -47,7 +99,7 @@
         "sr_description": "sr_description"
       },
       "source_kind": "Official",
-      "notes": "Official E3M5 hand with PST fingertips, expanded from the pinned Shadow Xacro for each side. DexVerse uses a separate floating-hand model; joint orders are not interchangeable.",
+      "notes": "Official E3M5 hand with PST fingertips. Floating environments use the palm and fingers from this model with a six-axis wrist; the original forearm and two hardware wrist joints are excluded.",
       "license_path": "LICENSE",
       "generated_urdfs": {
         "right": {
@@ -58,6 +110,33 @@
           "path": "config/hand_models/shadow/left.urdf",
           "sha256": "056fa528548c9abc6d40a0b7602c362c34e4fb2398f22cd067f3787555fcb2c2"
         }
+      },
+      "floating_hand": {
+        "sides": [
+          "right",
+          "left"
+        ],
+        "palm": "{s}h_palm",
+        "tips": [
+          "{s}h_thtip",
+          "{s}h_fftip",
+          "{s}h_mftip",
+          "{s}h_rftip",
+          "{s}h_lftip"
+        ],
+        "alignment_rpy": {
+          "right": [
+            1.5707963267948966,
+            0,
+            1.5707963267948966
+          ],
+          "left": [
+            1.5707963267948966,
+            0,
+            1.5707963267948966
+          ]
+        },
+        "bimanual": true
       }
     },
     {
@@ -75,7 +154,33 @@
       },
       "source_kind": "Official",
       "notes": "",
-      "license_path": "LICENSE.txt"
+      "license_path": "LICENSE.txt",
+      "floating_hand": {
+        "sides": [
+          "right",
+          "left"
+        ],
+        "palm": "{side}_hand_C_MC",
+        "tips": [
+          "{side}_thumb_fingertip",
+          "{side}_index_fingertip",
+          "{side}_middle_fingertip",
+          "{side}_ring_fingertip",
+          "{side}_pinky_fingertip"
+        ],
+        "alignment_rpy": {
+          "right": [
+            -0.0,
+            1.5707963267948966,
+            0.0
+          ],
+          "left": [
+            -0.0,
+            1.5707963267948966,
+            0.0
+          ]
+        }
+      }
     },
     {
       "key": "allegro-v4",
@@ -94,6 +199,25 @@
       "license_path": "LICENSE",
       "unsupported_sides": {
         "left": "The official V4 source references link_12.0_left.STL, which is absent from the pinned repository. The right model is available."
+      },
+      "floating_hand": {
+        "sides": [
+          "right"
+        ],
+        "palm": "palm_link",
+        "tips": [
+          "link_15.0_tip",
+          "link_3.0_tip",
+          "link_7.0_tip",
+          "link_11.0_tip"
+        ],
+        "alignment_rpy": {
+          "right": [
+            -0.0,
+            1.5707963267948966,
+            0.0
+          ]
+        }
       }
     },
     {
@@ -107,7 +231,26 @@
       "packages": {},
       "source_kind": "Official",
       "notes": "The upstream source supplies one right-hand model; no mirrored left model is substituted.",
-      "license_path": "LICENSE.txt"
+      "license_path": "LICENSE.txt",
+      "floating_hand": {
+        "sides": [
+          "right"
+        ],
+        "palm": "palm_lower",
+        "tips": [
+          "thumb_fingertip",
+          "fingertip",
+          "fingertip_2",
+          "fingertip_3"
+        ],
+        "alignment_rpy": {
+          "right": [
+            2.220446049250313e-16,
+            0.0,
+            2.220446049250313e-16
+          ]
+        }
+      }
     },
     {
       "key": "inspire-rh56",
@@ -123,7 +266,33 @@
       },
       "source_kind": "Third-party \u00b7 Renesas",
       "notes": "Renesas models derived from manufacturer CAD. Linked finger joints follow the URDF mimic relationships.",
-      "license_path": "urdf/reference/LICENSE.txt"
+      "license_path": "urdf/reference/LICENSE.txt",
+      "floating_hand": {
+        "sides": [
+          "right",
+          "left"
+        ],
+        "palm": "base",
+        "tips": [
+          "thumb_tip",
+          "index_tip",
+          "middle_tip",
+          "ring_tip",
+          "pinky_tip"
+        ],
+        "alignment_rpy": {
+          "right": [
+            -0.0,
+            1.5707963267948966,
+            0.0
+          ],
+          "left": [
+            -0.0,
+            1.5707963267948966,
+            0.0
+          ]
+        }
+      }
     }
   ]
 }

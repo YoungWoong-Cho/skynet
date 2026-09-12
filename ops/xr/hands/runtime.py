@@ -22,6 +22,7 @@ def read_bundle(directory):
             or hashlib.sha256(p.read_bytes()).hexdigest() != expected["sha256"]
         ):
             raise ValueError("Simulation hand asset checksum mismatch: " + name)
+    hand_layouts(manifest)
     return root, manifest
 
 
@@ -112,6 +113,72 @@ def configure_mimic_constraints(usd, joints):
     stage.GetRootLayer().Save()
 
 
+def hand_layouts(manifest):
+    """One common six-axis contract; retain support for archived v1 bundles."""
+    layouts = manifest.get("hands") or {
+        manifest["side"]: {
+            "palm": manifest["palm"],
+            "tips": manifest["tips"],
+            "control_frame": "skynet_palm",
+            "wrist_joints": manifest["wrist_joints"],
+            "finger_joints": manifest["finger_joints"],
+        }
+    }
+    order = manifest.get("hand_order") or sorted(
+        layouts,
+        key=lambda side: manifest["wrist_joints"].index(
+            layouts[side]["wrist_joints"][0]
+        ),
+    )
+    if len(order) != len(set(order)) or set(order) != set(layouts):
+        raise ValueError("Hand order does not match the hand layout")
+    layouts = {side: layouts[side] for side in order}
+    if set(layouts) not in ({"right"}, {"left"}, {"right", "left"}):
+        raise ValueError("Unsupported hand side layout")
+    for layout in layouts.values():
+        if len(layout["wrist_joints"]) != 6 or not layout["finger_joints"]:
+            raise ValueError("Each hand requires six wrist axes and finger joints")
+    if [n for h in layouts.values() for n in h["wrist_joints"]] != manifest[
+        "wrist_joints"
+    ] or [n for h in layouts.values() for n in h["finger_joints"]] != manifest[
+        "finger_joints"
+    ]:
+        raise ValueError("Hand layout order differs from the action contract")
+    names = manifest["wrist_joints"] + manifest["finger_joints"]
+    if len(set(names)) != len(names) or len(names) != manifest["action_dimension"]:
+        raise ValueError("Invalid hand action contract")
+    return layouts
+
+
+def initial_joint_positions(manifest):
+    positions = dict(manifest["neutral"])
+    layouts = hand_layouts(manifest)
+    for side, layout in layouts.items():
+        y = (-0.3 if side == "right" else 0.3) if len(layouts) == 2 else 0.0
+        positions.update(zip(layout["wrist_joints"], (0.5, y, 0.3, 0.0, 0.0, 0.0)))
+    return positions
+
+
+def action_terms(manifest, action_type):
+    # Field order is the stored action order: all wrists, then all fingers.
+    terms = {
+        side + "_wrist": action_type(
+            asset_name="robot",
+            joint_names=h["wrist_joints"],
+            preserve_order=True,
+            use_default_offset=True,
+        )
+        for side, h in hand_layouts(manifest).items()
+    }
+    terms["fingers"] = action_type(
+        asset_name="robot",
+        joint_names=manifest["finger_joints"],
+        preserve_order=True,
+        use_default_offset=False,
+    )
+    return terms
+
+
 def install(directory):
     root, m = read_bundle(directory)
     import isaaclab.sim as sim
@@ -152,27 +219,19 @@ def install(directory):
         root / "simulation.urdf", converter.usd_path, m["collision_neighbor_depth"]
     )
     wrist, fingers = m["wrist_joints"], m["finger_joints"]
+    layouts = hand_layouts(m)
 
-    @configclass
-    class Actions:
-        translation = JointPositionActionCfg(
-            asset_name="robot",
-            joint_names=wrist[:3],
-            preserve_order=True,
-            use_default_offset=True,
+    terms = action_terms(m, JointPositionActionCfg)
+    Actions = configclass(
+        type(
+            "Actions",
+            (),
+            {
+                "__annotations__": {key: JointPositionActionCfg for key in terms},
+                **terms,
+            },
         )
-        rotation = JointPositionActionCfg(
-            asset_name="robot",
-            joint_names=wrist[3:],
-            preserve_order=True,
-            use_default_offset=True,
-        )
-        fingers_action = JointPositionActionCfg(
-            asset_name="robot",
-            joint_names=fingers,
-            preserve_order=True,
-            use_default_offset=False,
-        )
+    )
 
     articulation = ArticulationCfg(
         prim_path="{ENV_REGEX_NS}/Robot",
@@ -190,15 +249,7 @@ def install(directory):
         ),
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(-0.75, 0.0, 0.5),
-            joint_pos=dict(
-                m["neutral"],
-                skynet_x=0.5,
-                skynet_y=0.0,
-                skynet_z=0.3,
-                skynet_yaw=0.0,
-                skynet_pitch=0.0,
-                skynet_roll=0.0,
-            ),
+            joint_pos=initial_joint_positions(m),
         ),
         actuators={
             "wrist": ImplicitActuatorCfg(
@@ -226,8 +277,16 @@ def install(directory):
                 palm_body_name=m["palm"],
                 fingertip_body_names=m["tips"],
                 hand_tips_body_names=[m["palm"], *m["tips"]],
-                wrist_joint_name="skynet_(yaw|pitch|roll)",
-                arm_joint_names_expr=["skynet_(x|y|z)"],
+                right_palm_body_name=layouts.get("right", {}).get("palm"),
+                left_palm_body_name=layouts["left"]["palm"]
+                if len(layouts) == 2
+                else None,
+                wrist_joint_name="("
+                + "|".join(n for h in layouts.values() for n in h["wrist_joints"][3:])
+                + ")",
+                arm_joint_names_expr=[
+                    n for h in layouts.values() for n in h["wrist_joints"][:3]
+                ],
                 setup_contact_sensors=True,
             ),
             scene_robot=articulation,
@@ -248,32 +307,55 @@ def install(directory):
     )
     module_name = "skynet_imported_" + m["robot"]
     module = ModuleType(module_name)
+    action_names = wrist + fingers
     module.LAYOUT = {
         "output_dim": m["action_dimension"],
         "hands": {
-            m["side"]: {
-                "wrist_trans_indices": (0, 1, 2),
-                "wrist_rot_indices": (3, 4, 5),
+            side: {
+                "wrist_trans_indices": tuple(
+                    action_names.index(n) for n in h["wrist_joints"][:3]
+                ),
+                "wrist_rot_indices": tuple(
+                    action_names.index(n) for n in h["wrist_joints"][3:]
+                ),
                 "wrist_rot_order": "xyz",
                 "wrist_rot_signs": (1.0, 1.0, 1.0),
-                "finger_indices": tuple(range(6, m["action_dimension"])),
-                "finger_joint_names": fingers,
-                "finger_permutation": tuple(range(len(fingers))),
+                "finger_indices": tuple(
+                    action_names.index(n) for n in h["finger_joints"]
+                ),
+                "finger_joint_names": h["finger_joints"],
+                "finger_permutation": tuple(range(len(h["finger_joints"]))),
             }
+            for side, h in layouts.items()
         },
     }
     from dexverse.devices.wrist_origin import compute_wrist_joint_origin
 
     module.SIMPLE_ABSOLUTE_WRIST_ORIGIN = {
-        m["side"]: compute_wrist_joint_origin(articulation, wrist[:3], wrist[3:])
+        side: compute_wrist_joint_origin(
+            articulation, h["wrist_joints"][:3], h["wrist_joints"][3:]
+        )
+        for side, h in layouts.items()
     }
     module.SIMPLE_RELATIVE_DEX_RETARGETING = {
         "hands": {
-            m["side"]: {
-                "config_paths": {m["retargeting_scheme"]: str(root / "retarget.json")},
-                "urdf_path": str(root / "retarget.urdf"),
+            side: {
+                "config_paths": {
+                    m["retargeting_scheme"]: str(
+                        root
+                        / (
+                            "retarget-" + side + ".json"
+                            if m.get("hand_asset")
+                            else "retarget.json"
+                        )
+                    )
+                },
+                "urdf_path": str(
+                    root / ("hand.urdf" if m.get("hand_asset") else "retarget.urdf")
+                ),
             }
-        }
+            for side in layouts
+        },
     }
     sys.modules[module_name] = module
     retargeting.SIMPLE_RETARGETER_LAYOUT_SOURCES[m["robot"]] = (module_name, "LAYOUT")

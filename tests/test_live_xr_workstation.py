@@ -15,14 +15,20 @@ from skynet_app.live_xr_workstation import (
 
 
 @pytest.fixture
-def service(tmp_path, monkeypatch):
+def service(tmp_path, monkeypatch, prepared_hand_store):
     source = Path(__file__).resolve().parents[1]
     (tmp_path / "config").mkdir()
     (tmp_path / "ops/xr").mkdir(parents=True)
     for name in ("config/capture_pipelines.json", "ops/xr/native_session.py"):
         (tmp_path / name).write_text((source / name).read_text())
     (tmp_path / "ops/xr/hands").mkdir()
-    for name in ("collection.py", "hands/anatomy.py", "wrist.py", "images.py", "render_images.py"):
+    for name in (
+        "collection.py",
+        "hands/anatomy.py",
+        "wrist.py",
+        "images.py",
+        "render_images.py",
+    ):
         (tmp_path / "ops/xr" / name).write_text((source / "ops/xr" / name).read_text())
     (tmp_path / "config/live_xr.json").write_text(
         json.dumps(
@@ -38,7 +44,7 @@ def service(tmp_path, monkeypatch):
             }
         )
     )
-    service = LiveXRService(Database(tmp_path / "db.sqlite"), root=tmp_path)
+    service = LiveXRService(Database(tmp_path / "db.store"), root=tmp_path)
     monkeypatch.setattr(service, "dispatch", lambda _: None)
     return service
 
@@ -181,13 +187,22 @@ def test_workstation_gpu_lock_conflict_is_explicit(service, monkeypatch):
         client._remote_path("/home/test/skynet-xr/../../other.pkl")
 
 
-def test_image_capture_stop_requests_graceful_shutdown_and_rendering(service, monkeypatch):
+def test_image_capture_stop_requests_graceful_shutdown_and_rendering(
+    service, monkeypatch
+):
     job = service.create(True, image_capture=True)
-    service.update(job["id"], state="COLLECTING", job_id="skynet-live-" + job["id"] + ".service")
+    service.update(
+        job["id"], state="COLLECTING", job_id="skynet-live-" + job["id"] + ".service"
+    )
     calls = []
+
     class Client:
-        def ssh(self, *a, **k): calls.append((a, k))
-        def cancel(self, *a, **k): pytest.fail("Cancelling systemd would kill image preparation")
+        def ssh(self, *a, **k):
+            calls.append((a, k))
+
+        def cancel(self, *a, **k):
+            pytest.fail("Cancelling systemd would kill image preparation")
+
     monkeypatch.setattr(service, "transport", lambda _: Client())
     service.stop(job["id"])
     assert calls and "stop.request" in str(calls)

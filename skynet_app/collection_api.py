@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 from .db_backend import INTEGRITY_ERRORS, DATABASE_ERRORS
 from typing import Any
 

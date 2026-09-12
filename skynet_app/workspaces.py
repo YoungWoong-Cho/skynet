@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse
 from starlette.datastructures import MutableHeaders
 
-from .database import Database
+from .database import APP_ROOT, Database
 from .workspace_schema import LEGACY_WORKSPACE, normalize_email
 
 
@@ -261,7 +261,7 @@ async def require_workspace_records(request: Request):
     adapter_id = request.path_params.get("adapter_id")
     if adapter_id and request.method != "GET" and not request.url.path.endswith(("/clone", "/validate")):
         if not database.owns("adapters", adapter_id, writable=True):
-            raise HTTPException(403, "Shared adapters are read-only. Clone one into your workspace to change it.")
+            raise HTTPException(403, "This adapter belongs to another workspace and cannot be changed here.")
 
 
 class EmailRequest(BaseModel):
@@ -305,12 +305,12 @@ def session_router(directory: WorkspaceDirectory) -> APIRouter:
 
 def main():
     parser = argparse.ArgumentParser(description="Assign pre-workspace Skynet records to their owner")
-    parser.add_argument("--database", required=True)
+    parser.add_argument("--data-root", default=os.environ.get("SKYNET_DATA_ROOT", str(APP_ROOT / "data")))
     parser.add_argument("--legacy-owner", required=True)
     parser.add_argument("--prepare-owner", action="store_true", help="Save the owner for the next app startup without opening or migrating the database")
     args = parser.parse_args()
     if args.prepare_owner:
-        owner_file = Path(args.database).expanduser().resolve().with_name("workspace-owner.json")
+        owner_file = Path(args.data_root).expanduser().resolve() / "workspace-owner.json"
         email = normalize_email(args.legacy_owner)
         if owner_file.exists() and json.loads(owner_file.read_text()).get("email") != email:
             parser.error("An owner is already configured; update it explicitly")
@@ -318,7 +318,7 @@ def main():
         owner_file.write_text(json.dumps({"email": email}) + "\n")
         print("Existing workspace owner saved for the next startup")
         return
-    WorkspaceDirectory(Database(args.database)).claim_legacy(args.legacy_owner)
+    WorkspaceDirectory(Database(data_root=args.data_root)).claim_legacy(args.legacy_owner)
     print("Existing workspace assigned")
 
 

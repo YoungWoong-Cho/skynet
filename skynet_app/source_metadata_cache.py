@@ -18,47 +18,6 @@ class SourceMetadataStore:
 
     def __init__(self, database: Database) -> None:
         self.database = database
-        if database.is_postgres:
-            return  # Versioned PostgreSQL migrations own the schema.
-        with self.database.transaction() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS source_metadata_cache (
-                    cache_key TEXT PRIMARY KEY,
-                    cache_kind TEXT NOT NULL,
-                    repository_url TEXT NOT NULL,
-                    parameters_json TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE INDEX IF NOT EXISTS source_metadata_cache_lookup
-                ON source_metadata_cache(cache_kind, repository_url, updated_at)
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS source_repository_selections (
-                    owner_id TEXT NOT NULL DEFAULT 'legacy',
-                    repository_url TEXT NOT NULL,
-                    branch_name TEXT NOT NULL,
-                    commits_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY(owner_id, repository_url)
-                )
-                """
-            )
-            columns = {row["name"] for row in connection.execute("PRAGMA table_info(source_repository_selections)")}
-            if "owner_id" not in columns:
-                connection.execute("ALTER TABLE source_repository_selections RENAME TO source_selections_legacy")
-                connection.execute("CREATE TABLE source_repository_selections(owner_id TEXT NOT NULL, repository_url TEXT NOT NULL, branch_name TEXT NOT NULL, commits_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(owner_id, repository_url))")
-                connection.execute("INSERT INTO source_repository_selections SELECT 'legacy', * FROM source_selections_legacy")
-                connection.execute("DROP TABLE source_selections_legacy")
 
     @staticmethod
     def _key(kind: str, repository_url: str, parameters: Mapping[str, Any]) -> str:
@@ -145,7 +104,7 @@ class SourceMetadataStore:
                     FROM source_metadata_cache
                     WHERE cache_kind = ?
                     ORDER BY updated_at DESC, cache_key DESC
-                    {"OFFSET ?" if self.database.is_postgres else "LIMIT -1 OFFSET ?"}
+                    OFFSET ?
                 )
                 """,
                 (kind, MAX_CACHE_ENTRIES_PER_KIND),

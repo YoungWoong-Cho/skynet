@@ -9,7 +9,7 @@ let saved = [];
 let snapshot = {};
 let failPoseList = false;
 let modelLoads = 0;
-const model = {revision:'a'.repeat(40),urdf_url:'/model.urdf',license_url:'/LICENSE',mesh_count:1,simulation_robot:'floating_shadow_left',joints:[{name:'bend',type:'revolute',lower:-Math.PI/9,upper:Math.PI/18,mimic:null}]};
+const model = {revision:'a'.repeat(40),urdf_url:'/model.urdf',license_url:'/LICENSE',mesh_count:1,simulation_robot:'skynet_shadow_left',joints:[{name:'bend',type:'revolute',lower:-Math.PI/9,upper:Math.PI/18,mimic:null}]};
 const catalog = {hands:[{key:'shadow',name:'Shadow Hand',source_kind:'URDF',notes:'Model',repository:'test/test',revision:model.revision,sides:{right:'right.urdf',left:'left.urdf'},variants:{right:{state:'READY'},left:{state:'READY'}}}]};
 w.AbortSignal.timeout = () => undefined;
 w.fetch = async (url, options={}) => {

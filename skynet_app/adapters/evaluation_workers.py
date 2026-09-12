@@ -175,7 +175,7 @@ def main():
         resources = context["worker_resources"]
         command = [
             sys.executable,
-            str(Path(__file__).with_name("xpolicy_evaluation.py")),
+            str(Path(__file__).with_name("recorded_policy_evaluation.py" if context.get("compatibility", {}).get("policy_loader") else "xpolicy_evaluation.py")),
             "--context",
             str(path),
             "--source-dir",

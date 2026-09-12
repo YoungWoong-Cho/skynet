@@ -894,6 +894,7 @@ const adapterDeclaredValueState = new Map();
 const adapterDeclaredScopeHashes = new Map();
 let renderedAdapterDeclaredScope = null;
 let dataResourceRows = [];
+let dataResourceCatalogState = "loading";
 let dataImportRows = [];
 let selectedDataImportId = null;
 const dataImportLogCache = new Map();
@@ -908,6 +909,8 @@ let collectionAdapterTemplates = [];
 let collectionSessionRows = [];
 let activeCollectionSession = null;
 let evaluationSuites = [];
+let evaluationCatalogRows = [];
+let evaluationCatalogRequest = 0;
 let evaluationSuitesScope = "global";
 const evaluationSuitesCache = new Map();
 const evaluationSuiteReasons = new Map();
@@ -1617,7 +1620,7 @@ function setSelectOptions(select, rows, selectedValue) {
     const label = row.label || row.display_name || row.name || id;
     return `<option value="${escapeHtml(id)}">${escapeHtml(label)}</option>`;
   }).join("");
-  if (options) select.innerHTML = options;
+  select.innerHTML = options;
   if (selectedValue && [...select.options].some((option) => option.value === selectedValue)) {
     select.value = selectedValue;
   }
@@ -3119,9 +3122,10 @@ function renderAdapters() {
         <td>${escapeHtml(formatDate(adapter.updated_at || adapter.latest_version?.created_at || adapter.created_at))}</td>
         <td class="row-actions adapter-row-actions">
           <button type="button" data-adapter-action="view" data-id="${escapeHtml(id)}">View</button>
-          ${archived || adapter.shared ? "" : `<button type="button" data-adapter-action="edit" data-id="${escapeHtml(id)}">Edit</button>`}
+          ${archived || adapter.editable === false ? "" : `<button type="button" data-adapter-action="edit" data-id="${escapeHtml(id)}">Edit</button>`}
           ${archived ? "" : `<button type="button" data-adapter-action="clone" data-id="${escapeHtml(id)}">Clone</button>`}
-          ${adapter.shared ? `<span class="secondary">Shared · clone to customize</span>` : `<button type="button" data-adapter-action="${archived ? "restore" : "archive"}" data-id="${escapeHtml(id)}">${archived ? "Restore" : "Archive"}</button>`}
+          ${adapter.editable === false ? "" : `<button type="button" data-adapter-action="${archived ? "restore" : "archive"}" data-id="${escapeHtml(id)}">${archived ? "Restore" : "Archive"}</button>
+          <button type="button" data-delete-kind="adapter" data-delete-id="${escapeHtml(id)}">Delete</button>`}
         </td>
       </tr>`;
   }).join("");
@@ -3257,7 +3261,7 @@ function setAdapterEditorMode(mode) {
   elements.adapterManifest.readOnly = !editing;
   elements.adapterDescription.disabled = !editing;
   elements.adapterChangeNote.disabled = !editing;
-  elements.editAdapter.hidden = editing || adapterArchived(adapterEditorState.adapter) || Boolean(adapterEditorState.adapter?.shared);
+  elements.editAdapter.hidden = editing || adapterArchived(adapterEditorState.adapter) || adapterEditorState.adapter?.editable === false;
   elements.saveAdapter.hidden = !editing;
   elements.validateAdapter.disabled = false;
   elements.saveAdapter.textContent = creating ? "Create adapter" : "Create version";
@@ -3335,31 +3339,6 @@ function mountRowDisclosure(panel, launcher) {
   selectedRow.after(detailRow);
   detailCell.append(panel);
   return true;
-}
-
-function unmountRunDetail() {
-  unmountRowDisclosure(elements.runDetail);
-}
-
-function mountRunDetailBelow(launcher) {
-  return mountRowDisclosure(elements.runDetail, launcher);
-}
-
-function remountActiveRunDetail() {
-  if (
-    !activeDisclosure
-    || activeDisclosure.panel !== elements.runDetail
-    || !activeRunDetailId
-    || activeDisclosure.revealKey !== `run:${activeRunDetailId}`
-  ) return;
-  const launcher = [...elements.runsBody.querySelectorAll('[data-run-action="view"][data-id]')]
-    .find((candidate) => String(candidate.dataset.id) === String(activeRunDetailId));
-  if (!launcher) {
-    closeActiveDisclosure({ restoreFocus: false });
-    return;
-  }
-  mountRunDetailBelow(launcher);
-  synchronizeDisclosureLaunchers(elements.runsBody);
 }
 
 function remountActiveRunAttemptDisclosure() {
@@ -3707,7 +3686,7 @@ function installDisclosureBehavior() {
       closeDisclosurePanel(panel);
       if (panel === elements.dataResourceForm) {
         resetDataResourceEditor(false);
-        elements.showDataResourceForm.textContent = "Register a source resource";
+        elements.showDataResourceForm.textContent = "New";
       }
       return;
     }
@@ -3761,6 +3740,7 @@ function installDisclosureBehavior() {
 function startAdapterCreate(launcher = null) {
   adapterEditorState = { mode: "create", id: null, adapter: null, versions: [] };
   elements.adapterEditor.reset();
+  elements.adapterEditor.querySelector(".dialog-body").hidden = false;
   elements.adapterEditor.hidden = false;
   elements.adapterEditorTitle.textContent = "New adapter";
   elements.adapterEditorSlug.value = "new-adapter";
@@ -3818,8 +3798,11 @@ async function openAdapter(id, editable = false, launcher = null) {
   const revealLauncher = launcher || currentRevealLauncher();
   const requestToken = disclosureToken(elements.adapterEditor, revealLauncher);
   elements.adapterEditor.hidden = false;
+  elements.adapterEditorMode.textContent = editable ? "NEW IMMUTABLE VERSION" : "ADAPTER DETAIL";
   elements.adapterEditorTitle.textContent = "Loading adapter...";
   elements.adapterEditorStatus.textContent = "Loading";
+  elements.adapterEditor.querySelector(".dialog-body").hidden = true;
+  revealPanel(elements.adapterEditor, { focusTarget: elements.adapterEditorTitle, launcher: revealLauncher });
   try {
     const payload = await api(`/api/adapters/${encodeURIComponent(id)}`);
     if (!disclosureTokenIsCurrent(elements.adapterEditor, requestToken)) return;
@@ -3840,7 +3823,8 @@ async function openAdapter(id, editable = false, launcher = null) {
     elements.adapterValidationRevision.value = jobRepoMatches ? elements.experimentRevision.value : "";
     elements.adapterEditorTitle.textContent = adapter.name || adapter.label || id;
     renderAdapterVersions(versions);
-    setAdapterEditorMode(editable && !adapterArchived(adapter) && !adapter.shared ? "edit" : "view");
+    elements.adapterEditor.querySelector(".dialog-body").hidden = false;
+    setAdapterEditorMode(editable && !adapterArchived(adapter) && adapter.editable !== false ? "edit" : "view");
     revealPanel(elements.adapterEditor, { focusTarget: elements.adapterEditorTitle, launcher: revealLauncher });
   } catch (error) {
     if (!disclosureTokenIsCurrent(elements.adapterEditor, requestToken)) return;
@@ -4014,7 +3998,7 @@ function populateEvaluationSuites(preferredSuiteId = "", { runId = "" } = {}) {
   if (!evaluationSuites.length) {
     elements.evaluationSuite.innerHTML = '<option value="">No suites available</option>';
     elements.evaluationSuiteStatus.textContent = runId
-      ? `No compatible evaluation suites are declared for training run ${runId}.`
+      ? "No registered evaluation suites are available."
       : "Evaluation suite API is unavailable or empty.";
     elements.evaluationSuite.setCustomValidity(runId
       ? "No compatible evaluation suites are available for this training run."
@@ -4023,10 +4007,12 @@ function populateEvaluationSuites(preferredSuiteId = "", { runId = "" } = {}) {
     return;
   }
   const desiredSuiteId = String(pendingEvaluationSuiteId || preferredSuiteId || elements.evaluationSuite.value || "");
-  setSelectOptions(elements.evaluationSuite, evaluationSuites);
+  setSelectOptions(elements.evaluationSuite, evaluationSuites.map(suite => ({
+    ...suite, label: `${suite.label || suite.name}${suite.compatibility ? ` — ${suite.compatibility.label}` : ""}`,
+  })));
   elements.evaluationSuite.insertAdjacentHTML("afterbegin", '<option value="">Choose a suite...</option>');
   const desiredExists = evaluationSuites.some((suite) => evaluationSuiteId(suite) === desiredSuiteId);
-  const firstCompatibleSuiteId = runId ? evaluationSuiteId(evaluationSuites.find((suite) => suite.is_default) || {}) : "";
+  const firstCompatibleSuiteId = runId ? evaluationSuiteId(evaluationSuites.find((suite) => suite.is_default && evaluationSuiteIsRunnable(suite)) || {}) : "";
   const selectedSuiteId = desiredExists ? desiredSuiteId : firstCompatibleSuiteId;
   elements.evaluationSuite.value = selectedSuiteId;
   elements.evaluationSuite.setCustomValidity("");
@@ -4038,18 +4024,19 @@ function populateEvaluationSuites(preferredSuiteId = "", { runId = "" } = {}) {
       : `Selected ${selectedSuite?.label || selectedSuite?.name || selectedSuiteId}, the first compatible suite for this run.`
     : desiredSuiteId && !desiredExists
       ? `Unsupported: the previously selected suite is not compatible with this run. Choose a listed suite.`
-      : `${evaluationSuites.length} ${runId ? "compatible" : "registered"} suites available. Choose an evaluation suite.`;
+      : `${evaluationSuites.length} registered suites available. Choose a suite to check compatibility.`;
   elements.evaluationSuiteStatus.textContent = selectionMessage;
   updateEvaluationEnvironmentFromSuite({ preserveTasks: desiredExists && selectedSuiteId === desiredSuiteId });
   if (elements.evaluationRunId.value.trim()) scheduleEvaluationTargetValidation();
 }
 
-async function loadEvaluationSuites(force = false, explicitRunId = undefined) {
+async function loadEvaluationSuites(force = false, explicitRunId = undefined, { apply = true } = {}) {
   const runId = String(explicitRunId === undefined ? elements.evaluationRunId.value : explicitRunId || "").trim();
   const scope = evaluationSuiteScope(runId);
   const desiredSuiteId = String(pendingEvaluationSuiteId || elements.evaluationSuite.value || "");
   const currentFormScope = () => evaluationSuiteScope(elements.evaluationRunId.value);
   const applySuites = (suites, error = null) => {
+    if (!apply) return;
     if (!runId) {
       setSelectOptions(elements.experimentEvaluationSuites, suites);
       if (Array.isArray(pendingEvaluationSuiteDefaults)) applyEvaluationSuiteDefaults(pendingEvaluationSuiteDefaults);
@@ -4099,7 +4086,101 @@ async function loadEvaluationSuites(force = false, explicitRunId = undefined) {
   if (evaluationSuiteRequestGenerations.get(scope) === result.generation) {
     applySuites(result.suites, result.error);
   }
+  if (!apply && result.error) throw result.error;
   return result.suites;
+}
+
+async function refreshAfterDeletion(kind) {
+  if (kind === "adapter" || kind === "suite") {
+    // Invalidate pending responses too, so a pre-delete response cannot revive an option.
+    for (const [scope, generation] of evaluationSuiteRequestGenerations) {
+      evaluationSuiteRequestGenerations.set(scope, generation + 1);
+    }
+    evaluationSuitesCache.clear();
+    evaluationSuitesPromises.clear();
+    evaluationSuiteReasons.clear();
+    if (kind === "adapter") await loadAdapters(true);
+    await loadEvaluationCatalog(true);
+    await loadEvaluationSuites(true, "");
+    if (elements.evaluationRunId.value.trim()) await loadEvaluationSuites(true);
+    return;
+  }
+  await Promise.all([loadExperiments(true), loadRuns(true), loadEvaluations(true)]);
+}
+
+function evaluationCatalogTasks(suite) {
+  const config = evaluationSuiteConfig(suite);
+  const labels = new Map((suite.task_options || config.task_options || []).map(task => [task.id, task.label]));
+  return evaluationSuiteTasks(suite).map(task => ({ ...task, label: labels.get(task.id) || task.label }));
+}
+
+function evaluationCatalogDescription(suite) {
+  return evaluationSuiteConfig(suite).task_selection_reason || suite.task_selection_reason || suite.description || "";
+}
+
+function openEvaluationSuite(id, launcher) {
+  const suite = evaluationCatalogRows.find(suite => String(suite.id) === String(id));
+  if (!suite) return showToast("This suite is no longer available. Refresh the list.", true);
+  const panel = document.getElementById("evaluation-suite-detail");
+  const tasks = evaluationCatalogTasks(suite);
+  document.getElementById("evaluation-suite-detail-title").textContent = suite.label || suite.name;
+  document.getElementById("evaluation-suite-detail-meta").innerHTML = keyValueHtml([
+    ["Suite", suite.name], ["Version", suite.version || suite.suite_version],
+    ["Environment", suite.evaluator || suite.evaluator_adapter],
+    ["Updated", formatDate(suite.updated_at || suite.created_at)],
+  ]);
+  const description = document.getElementById("evaluation-suite-description");
+  description.textContent = evaluationCatalogDescription(suite);
+  description.hidden = !description.textContent;
+  document.getElementById("evaluation-suite-tasks").innerHTML = tasks.length
+    ? tasks.map(task => `<tr><td class="wrap-cell">${escapeHtml(task.label)}</td><td class="wrap-cell"><code>${escapeHtml(task.id)}</code></td></tr>`).join("")
+    : emptyRow(2, evaluationSuiteConfig(suite).task_source === "training_dataset" ? "Tasks are resolved from the selected training dataset." : "No tasks registered.");
+  revealPanel(panel, { launcher, focusTarget: document.getElementById("evaluation-suite-detail-title") });
+}
+
+function renderEvaluationCatalog() {
+  const query = document.querySelector("#evaluation-suite-search").value.trim().toLowerCase();
+  const rows = evaluationCatalogRows.filter(suite => [
+    suite.label, suite.name, suite.version || suite.suite_version, suite.evaluator || suite.evaluator_adapter,
+    evaluationCatalogDescription(suite), ...evaluationCatalogTasks(suite).flatMap(task => [task.id, task.label]),
+  ].join(" ").toLowerCase().includes(query));
+  document.querySelector("#evaluation-suite-count").textContent = query
+    ? `${rows.length} of ${evaluationCatalogRows.length} suites`
+    : `${rows.length} suites`;
+  document.querySelector("#evaluation-suites-body").innerHTML = rows.map(suite => {
+    const tasks = evaluationCatalogTasks(suite);
+    const taskCount = tasks.length ? `${tasks.length} task${tasks.length === 1 ? "" : "s"}`
+      : evaluationSuiteConfig(suite).task_source === "training_dataset" ? "From training data" : "0 tasks";
+    return `<tr>
+      <td><strong>${escapeHtml(suite.label || suite.name)}</strong><span class="secondary">${escapeHtml(suite.name)}</span></td>
+      <td>${escapeHtml(suite.version || suite.suite_version)}</td>
+      <td>${escapeHtml(suite.evaluator || suite.evaluator_adapter)}</td>
+      <td>${taskCount}</td>
+      <td>${escapeHtml(formatDate(suite.updated_at || suite.created_at))}</td>
+      <td class="row-actions"><button type="button" data-suite-view="${escapeHtml(suite.id)}" aria-haspopup="dialog" aria-controls="evaluation-suite-detail-dialog">View</button>${suite.can_delete ? `<button type="button" data-delete-kind="suite" data-delete-id="${escapeHtml(suite.id)}">Delete</button>` : ""}</td>
+    </tr>`;
+  }).join("") || emptyRow(6, query ? "No suites match the filter." : "No evaluation suites registered.");
+}
+
+async function loadEvaluationCatalog(force = false) {
+  const request = ++evaluationCatalogRequest;
+  const errorBox = document.querySelector("#evaluation-catalog-error");
+  clearNotice(errorBox);
+  elements.refreshEvaluations.disabled = true;
+  try {
+    // The registry has its own state: browsing it must not replace the run's compatible suites.
+    const suites = await loadEvaluationSuites(force, "", { apply: false });
+    if (request !== evaluationCatalogRequest) return;
+    evaluationCatalogRows = suites;
+    renderEvaluationCatalog();
+  } catch (error) {
+    if (request !== evaluationCatalogRequest) return;
+    showNotice(errorBox, `Evaluation suites could not be loaded: ${error.message}`);
+    document.querySelector("#evaluation-suite-count").textContent = "Unavailable";
+    document.querySelector("#evaluation-suites-body").innerHTML = emptyRow(6, "Evaluation suites could not be loaded.");
+  } finally {
+    if (request === evaluationCatalogRequest) elements.refreshEvaluations.disabled = false;
+  }
 }
 
 function resetSourceSelect(select, message) {
@@ -6380,15 +6461,7 @@ function renderRuns({ background = false } = {}) {
       elements.runsBody.append(row);
       return;
     }
-    const companion = elements.runDetail.closest("tr.row-disclosure-companion");
-    const activeRow = activeRunDetailId
-      ? orderedRows.find((row) => row.dataset.runId === String(activeRunDetailId))
-      : null;
-    reconcileTableSequence(
-      elements.runsBody,
-      orderedRows.flatMap((row) => row === activeRow && companion ? [row, companion] : [row]),
-    );
-    if (activeRow && !companion) remountActiveRunDetail();
+    reconcileTableSequence(elements.runsBody, orderedRows);
     synchronizeDisclosureLaunchers(elements.runsBody);
   }, { background });
 }
@@ -7223,7 +7296,7 @@ function updateRunSummary(run, id) {
 function renderRunDetail(payload, id, { preserveAttempt = false, background = false } = {}) {
   const run = entityFrom(payload, "run");
   const attempts = runAttemptRecords({...run, attempts: Array.isArray(run.attempts) ? run.attempts : listFrom(payload, ["attempts"])});
-  const panel = elements.runsBody.closest(".panel") || elements.runDetail;
+  const panel = elements.runDetail.closest("dialog") || elements.runDetail;
   let rendered = null;
   commitPanelRefresh(panel, `run-detail:${id}`, { run, attempts }, () => {
     updateRunSummary(run, id);
@@ -7247,7 +7320,6 @@ async function viewRun(id, launcher = null) {
   const scope = `run-detail:${id}`;
   const revealLauncher = launcher || currentRevealLauncher();
   resetRunAttemptContext(id);
-  mountRunDetailBelow(revealLauncher);
   const requestToken = disclosureToken(elements.runDetail, revealLauncher);
   elements.runDetailTitle.textContent = id;
   elements.runDetailActions.innerHTML = "";
@@ -7461,7 +7533,7 @@ function evaluationSuiteConfig(suite) {
 function evaluationSuiteIsRunnable(suite) {
   const config = evaluationSuiteConfig(suite);
   const unavailable = (value) => value === false || value === 0 || String(value || "").toLowerCase() === "false";
-  return !unavailable(suite?.enabled) && !unavailable(suite?.runnable) && !unavailable(config.enabled) && !unavailable(config.runnable);
+  return (!suite?.compatibility || suite.compatibility.ready === true) && !unavailable(suite?.enabled) && !unavailable(suite?.runnable) && !unavailable(config.enabled) && !unavailable(config.runnable);
 }
 
 function evaluationSuitePreference(run, suite) {
@@ -7614,6 +7686,14 @@ function populateEvaluationTasks(suite, { preserve = false } = {}) {
 function updateEvaluationEnvironmentFromSuite({ preserveTasks = false } = {}) {
   const suite = selectedEvaluationSuite();
   const config = evaluationSuiteConfig(suite);
+  if (suite?.compatibility) {
+    const report = suite.compatibility;
+    elements.evaluationSuiteStatus.textContent = `${report.label}: ${report.messages?.length
+      ? report.messages.join(" ")
+      : report.executor === "recorded_simulator"
+        ? "Metadata matches. Model loading and one simulator step will be checked when the job starts."
+        : "Native integration available. Runtime checks are performed by its evaluator."}`;
+  }
   const environment = firstValue(
     suite?.environment,
     suite?.default_environment,
@@ -7626,6 +7706,7 @@ function updateEvaluationEnvironmentFromSuite({ preserveTasks = false } = {}) {
     "",
   );
   elements.evaluationEnvironment.value = suite ? String(environment || "") : "";
+  updateEvaluationGpuOptions(suite);
   const episodeLimit = Number(config.maximum_episodes_per_task || 10000);
   elements.evaluationEpisodes.max = String(episodeLimit);
   if (Number(elements.evaluationEpisodes.value) > episodeLimit) elements.evaluationEpisodes.value = String(episodeLimit);
@@ -7637,6 +7718,19 @@ function updateEvaluationEnvironmentFromSuite({ preserveTasks = false } = {}) {
   document.querySelector("#evaluation-parallelism-help").textContent = limit > 1
     ? "One GPU per worker, in one Slurm allocation."
     : "This evaluator runs one worker.";
+}
+
+function updateEvaluationGpuOptions(suite) {
+  const select = document.getElementById("evaluation-resource-gpu");
+  const previous = select.value;
+  const allowed = Array.isArray(suite?.allowed_gpu_types) ? new Set(suite.allowed_gpu_types) : null;
+  const options = Array.from(elements.experimentGpuType.options)
+    .filter(option => option.value !== "auto" && (!allowed || allowed.has(option.value)));
+  select.replaceChildren(...options.map(option => option.cloneNode(true)));
+  if (options.some(option => option.value === previous)) select.value = previous;
+  else select.value = options[0]?.value || "";
+  select.disabled = !options.length;
+  if (!options.length) select.add(new Option("No compatible GPU configured", ""));
 }
 
 function initializeEvaluationResources() {
@@ -7668,6 +7762,10 @@ function initializeEvaluationResources() {
 initializeEvaluationResources();
 
 function validateEvaluationResources() {
+  if (!document.getElementById("evaluation-resource-gpu").value) {
+    document.querySelector("#evaluation-resource-summary").textContent = "No compatible GPU is configured for this suite.";
+    return false;
+  }
   const time = document.querySelector("#evaluation-resource-time");
   const raw = time.value.trim();
   const match = /^(?:(\d+)-)?(\d{1,2}):(\d{2}):(\d{2})$/.exec(raw);
@@ -7758,6 +7856,7 @@ async function validateEvaluationTarget(request, signature) {
   try {
     const result = await api("/api/evaluations/validate-target", {
       method: "POST",
+      timeoutMs: 30000,
       body: JSON.stringify({
         run_id: runId,
         checkpoint_path: checkpointPath || null,
@@ -7816,7 +7915,9 @@ async function validateEvaluationTarget(request, signature) {
       : planValid
         ? result.plan_source === "manual_override"
           ? "Ready: manual evaluator command override."
-          : String(result.plan_message || `Ready: ${evaluatorLabel || "registered evaluator adapter"}.`)
+          : result.compatibility?.executor === "recorded_simulator"
+            ? "Ready to submit. Model loading, camera/joint inputs and one simulator step will be verified before scoring."
+            : String(result.plan_message || `Ready: ${evaluatorLabel || "registered evaluator adapter"}.`)
         : String(
           errors.suite_id
           || errors.environment
@@ -7915,7 +8016,7 @@ async function startEvaluationForRun(id) {
   elements.evaluationCheckpoint.value = evaluationAction.checkpointPath;
   scheduleEvaluationTargetValidation({ immediate: true });
   evaluationSuitesCache.delete(evaluationSuiteScope(requestedRunId));
-  activateTab("evaluations");
+  activateTab("evaluations", true, "submit");
   await loadEvaluationSuites(false, requestedRunId);
   if (request !== evaluationPrefillRequest) return;
 
@@ -8008,7 +8109,7 @@ function cancellationRequestKey(kind, id) {
   return `${kind}:${id}`;
 }
 
-function cancellationActionButton(kind, id, manualActions) {
+function cancellationActionButton(kind, id, manualActions, options = {}) {
   const metadata = manualActions?.cancel;
   if (!metadata || typeof metadata !== "object") return "";
   const actionEnabled = metadata.enabled === true;
@@ -8018,25 +8119,24 @@ function cancellationActionButton(kind, id, manualActions) {
       ? ""
       : "Cancellation is not available for this job.";
   const pending = cancellationRequests.has(cancellationRequestKey(kind, id));
-  const label = kind === "run" ? "Cancel Training Run" : "Cancel evaluation";
+  const label = options.label || (kind === "run" ? "Cancel Training Run" : "Cancel evaluation");
   const visibleLabel = pending ? "Cancellation requested..." : label;
   const accessibleLabel = pending
     ? `${label}: cancellation request in progress`
     : reason
       ? `${label}: ${reason}`
       : label;
-  return `<button class="button button-danger" type="button" data-cancel-action data-cancel-kind="${escapeHtml(kind)}" data-cancel-action-enabled="${actionEnabled}" data-cancel-label="${escapeHtml(label)}" data-cancel-reason="${escapeHtml(reason)}" data-id="${escapeHtml(id)}" title="${escapeHtml(reason)}" aria-label="${escapeHtml(accessibleLabel)}"${pending ? ' aria-busy="true"' : ""}${actionEnabled && !pending ? "" : " disabled"}>${escapeHtml(visibleLabel)}</button>`;
+  return `<button class="${escapeHtml(options.className ?? "button button-danger")}" type="button" data-cancel-action data-cancel-kind="${escapeHtml(kind)}" data-cancel-action-enabled="${actionEnabled}" data-cancel-label="${escapeHtml(label)}" data-cancel-reason="${escapeHtml(reason)}" data-id="${escapeHtml(id)}" title="${escapeHtml(reason)}" aria-label="${escapeHtml(accessibleLabel)}"${pending ? ' aria-busy="true"' : ""}${actionEnabled && !pending ? "" : " disabled"}>${escapeHtml(visibleLabel)}</button>`;
 }
 
 function restoreCancellationButton(kind, id) {
-  const container = kind === "run" ? elements.runDetailActions : elements.evaluationDetailActions;
-  const button = container?.querySelector(
+  document.querySelectorAll(
     `[data-cancel-kind="${CSS.escape(String(kind))}"][data-id="${CSS.escape(String(id))}"]`,
-  );
-  if (!button) return;
-  button.disabled = button.dataset.cancelActionEnabled !== "true";
-  button.textContent = button.dataset.cancelLabel || "Cancel";
-  button.removeAttribute("aria-busy");
+  ).forEach((button) => {
+    button.disabled = button.dataset.cancelActionEnabled !== "true";
+    button.textContent = button.dataset.cancelLabel || "Cancel";
+    button.removeAttribute("aria-busy");
+  });
 }
 
 async function requestCancellation(kind, id, button, reason = "") {
@@ -8170,17 +8270,38 @@ function evaluationRowCells(evaluation) {
   ];
 }
 
+function evaluationLifecycleAction(evaluation, id) {
+  const state = String(evaluation.status || evaluation.state || "").toUpperCase();
+  if (!EVALUATION_ACTIVE_STATES.has(state)) {
+    return `<button type="button" data-delete-kind="evaluation" data-delete-id="${escapeHtml(id)}">Delete</button>`;
+  }
+  const cancelling = state === "CANCELLING";
+  const actions = cancelling
+    ? { cancel: { enabled: false, reason: "Cancellation has already been requested." } }
+    : evaluation.manual_actions || { cancel: { enabled: true } };
+  return cancellationActionButton("evaluation", id, actions, {
+    label: cancelling ? "Cancelling…" : "Cancel", className: "",
+  });
+}
+
+function patchEvaluationRow(row, descriptor) {
+  patchTableRow(row, descriptor.cells);
+  // Keep the open Results launcher while updating the adjacent lifecycle action.
+  setHtmlIfChanged(row.querySelector("[data-evaluation-lifecycle]"), descriptor.lifecycleAction);
+}
+
 function evaluationRowDescriptor(evaluation) {
   const id = String(evaluation.id || evaluation.evaluation_id || "");
   const active = activeDisclosure?.panel === elements.evaluationDetail && activeEvaluationDetailId === id;
+  const lifecycleAction = evaluationLifecycleAction(evaluation, id);
   return {
-    id,
+    id, lifecycleAction,
     cells: [
       ...evaluationRowCells(evaluation).map((html) => ({ html })),
       {
         className: "row-actions",
         preserve: active,
-        html: `<button type="button" data-evaluation-action="view" data-id="${escapeHtml(id)}">Results</button><button type="button" data-delete-kind="evaluation" data-delete-id="${escapeHtml(id)}">Delete</button>`,
+        html: `<button type="button" data-evaluation-action="view" data-id="${escapeHtml(id)}">Results</button><span data-evaluation-lifecycle>${lifecycleAction}</span>`,
       },
     ],
   };
@@ -8190,7 +8311,7 @@ function patchEvaluationSummaryRow(evaluation) {
   const descriptor = evaluationRowDescriptor(evaluation);
   const row = elements.evaluationsBody.querySelector(`:scope > tr[data-evaluation-id="${CSS.escape(descriptor.id)}"]`);
   if (!row) return false;
-  patchTableRow(row, descriptor.cells);
+  patchEvaluationRow(row, descriptor);
   return true;
 }
 
@@ -8229,7 +8350,7 @@ function renderEvaluations({ background = false } = {}) {
     const orderedRows = descriptors.map((descriptor) => {
       const row = existingRows.get(descriptor.id) || document.createElement("tr");
       row.dataset.evaluationId = descriptor.id;
-      patchTableRow(row, descriptor.cells);
+      patchEvaluationRow(row, descriptor);
       existingRows.delete(descriptor.id);
       return row;
     });
@@ -8269,7 +8390,7 @@ function updateEvaluationRow(evaluation, { background = false } = {}) {
 }
 
 const EVALUATION_ACTIVE_STATES = new Set([
-  "CREATED", "SUBMITTING", "PENDING", "SUBMITTED", "QUEUED", "CONFIGURING", "RUNNING", "REQUEUED", "RETRY_PENDING", "CANCELLING",
+  "CREATED", "SUBMITTING", "PENDING", "PENDING_SLURM", "SUBMITTED", "QUEUED", "CONFIGURING", "RUNNING", "REQUEUED", "RETRY_PENDING", "CANCELLING",
 ]);
 const EVALUATION_LIST_POLL_INTERVAL_MS = 5000;
 
@@ -8289,7 +8410,7 @@ function stopEvaluationListPolling() {
 function evaluationListPollEligible() {
   return Boolean(
     document.visibilityState === "visible"
-    && activeTab === "evaluations"
+    && activeTab === "evaluation-runs"
     && (evaluationProgressRefreshPending || evaluationRows.some((evaluation) => EVALUATION_ACTIVE_STATES.has(
       String(evaluation.status || evaluation.state || "").toUpperCase(),
     ))),
@@ -8442,7 +8563,7 @@ async function createEvaluation(event) {
     showToast(`Evaluation ${evaluationId} created.`);
     document.querySelector("#evaluation-search").value = "";
     document.querySelector("#evaluation-state-filter").value = "all";
-    await activateTab("evaluations");
+    await activateTab("evaluations", true, "runs");
     await loadEvaluations(true);
     const launcher = [...elements.evaluationsBody.querySelectorAll("[data-evaluation-action='view']")]
       .find((candidate) => String(candidate.dataset.id) === String(evaluationId));
@@ -8499,6 +8620,7 @@ function evaluationEpisodeResult(episode) {
 }
 
 function closeEvaluationRollout() {
+  window.SkynetEpisodeViewer?.close("rollout-episode-viewer");
   const dialog = document.querySelector("#evaluation-rollout-dialog");
   activeEvaluationRollout = null;
   evaluationRolloutGeneration += 1;
@@ -8549,6 +8671,8 @@ function renderEvaluationRolloutModal(evaluation, episode) {
     if (episode.video_path) video.src = `/api/evaluations/${encodeURIComponent(evaluation.id)}/episodes/${encodeURIComponent(episode.id)}/video`;
     else video.removeAttribute("src");
     video.load();
+    window.SkynetEpisodeViewer?.open("rollout-episode-viewer", "evaluation-rollout-video",
+      `/api/evaluations/${encodeURIComponent(evaluation.id)}/episodes/${encodeURIComponent(episode.id)}`);
   }
   video.onerror = () => { empty.hidden = false; empty.textContent = "Unable to load the video. Close and reopen Detail to retry."; };
   const values = [["Task", episode.task], ["Episode", Number(episode.episode_index) + 1], ["State", episode.status],
@@ -8632,7 +8756,7 @@ function evaluationDetailPollEligible(id) {
   return Boolean(
     id
     && document.visibilityState === "visible"
-    && activeTab === "evaluations"
+    && activeTab === "evaluation-runs"
     && activeEvaluationDetailId === String(id)
     && activeDisclosure?.panel === elements.evaluationDetail
     && !elements.evaluationDetail.hidden
@@ -8868,15 +8992,72 @@ function dataVersionPath(version) {
   return location?.path || (locations.length ? "No available copy" : version.path || "-");
 }
 
+// Explicit recording ownership takes precedence over the original source session
+// for resources made from a separate single-episode recording entry.
+function resourceRecordingId(resource) {
+  const metadata = resource.metadata || {};
+  return String(metadata.recording_session_id
+    || ((resource.provider === "collection" || metadata.managed_dataset) ? metadata.session_id : "")
+    || "");
+}
+
+function recordingRegistrationSummary(recordingId) {
+  const resources = dataResourceRows.filter(resource => resourceRecordingId(resource) === String(recordingId));
+  return {
+    state: dataResourceCatalogState,
+    count: new Set(resources.map(resource => resource.id || resource.resource_id)).size,
+  };
+}
+
+function notifyRecordingRegistryChanged() {
+  document.dispatchEvent(new CustomEvent("recording-registry-changed"));
+}
+
+async function showRecordingResources(recordingId) {
+  const search = document.getElementById("data-resource-search");
+  search.value = recordingId;
+  search.dataset.recordingId = recordingId;
+  // Include archived entries when needed so the list matches Registered exactly.
+  document.getElementById("data-show-archived").checked = dataResourceRows.some(
+    resource => resourceRecordingId(resource) === recordingId && resource.archived_at,
+  );
+  refreshDataResourceTables();
+  await activateTab("data", true, "registry");
+  document.getElementById("data-resource-create-details").scrollIntoView({block: "start"});
+  search.focus({preventScroll: true});
+}
+
+function visibleDataResources() {
+  return dataResourceRows.filter(resource => document.getElementById("data-show-archived").checked || !resource.archived_at);
+}
+
+function refreshDataResourceTables() {
+  dataVersionRows = visibleDataResources().flatMap(resource =>
+    (resource.versions || []).map(version => ({...version, _resource: resource})));
+  renderDataResources();
+  renderDataVersions();
+}
+
 function renderDataResources() {
-  elements.dataResourceCount.textContent = `${dataResourceRows.length} resource${dataResourceRows.length === 1 ? "" : "s"}`;
-  elements.dataResourcesBody.innerHTML = dataResourceRows.length
-    ? dataResourceRows.map((resource) => {
+  const search = document.getElementById("data-resource-search");
+  const query = search.value.trim().toLowerCase();
+  const recordingId = search.dataset.recordingId;
+  const available = visibleDataResources();
+  const rows = available.filter(resource => {
+    if (recordingId) return resourceRecordingId(resource) === recordingId;
+    return !query || [resource.id, resource.resource_id, resource.metadata?.display_name,
+      resource.namespace, resource.name, resource.kind, resource.provider, resourceRecordingId(resource)]
+      .filter(Boolean).join(" ").toLowerCase().includes(query);
+  });
+  elements.dataResourceCount.textContent = `${query ? rows.length + " of " : ""}${available.length} resource${available.length === 1 ? "" : "s"}`;
+  elements.dataResourcesBody.innerHTML = rows.length
+    ? rows.map((resource) => {
       const id = resource.id || resource.resource_id;
       const latest = resource.latest_version || resource.versions?.[0];
       const versionCount = resource.version_count ?? resource.versions?.length ?? 0;
       return `<tr data-resource-id="${escapeHtml(id)}">
         <td><span class="node-name">${escapeHtml(resource.metadata?.display_name || [resource.namespace, resource.name].filter(Boolean).join("/"))}</span><span class="secondary">${escapeHtml(id)}</span></td>
+        <td>${resourceRecordingId(resource) ? `<span title="${escapeHtml(resourceRecordingId(resource))}">${escapeHtml(shortId(resourceRecordingId(resource), 8))}</span>` : ""}</td>
         <td>${escapeHtml(resource.kind || "-")}</td>
         <td>${escapeHtml(resource.provider || "-")}</td>
         <td>${escapeHtml(versionCount)}</td>
@@ -8886,7 +9067,7 @@ function renderDataResources() {
         <td class="row-actions data-resource-row-actions"><button type="button" data-resource-action="dataset" data-id="${escapeHtml(id)}">${resource.kind === "simulation_assets" ? "View versions" : "View dataset"}</button>${!resource.archived_at && resource.provider === "huggingface" ? `<button type="button" data-resource-action="import" data-id="${escapeHtml(id)}">Import</button>` : ""}${resource.archived_at ? "" : `<button type="button" data-resource-action="version" data-id="${escapeHtml(id)}">Add version</button>`}<button type="button" data-resource-action="edit" data-id="${escapeHtml(id)}">View / edit</button><button type="button" data-resource-action="${resource.archived_at ? "restore" : "archive"}" data-id="${escapeHtml(id)}">${resource.archived_at ? "Restore" : "Archive"}</button></td>
       </tr>`;
     }).join("")
-    : emptyRow(8, "No source resources have been registered.");
+    : emptyRow(9, query ? "No resources match your filter." : "No source resources have been registered.");
 }
 
 function renderDataImports() {
@@ -9501,7 +9682,7 @@ async function loadDataRegistry(force = false) {
   clearNotice(elements.dataRegistryError);
   try {
     const [resourcePayload, importPayload, derivationPayload, bundlePayload] = await Promise.all([
-      api(`/api/data/resources?include_archived=${Boolean(document.querySelector("#data-show-archived").checked)}`),
+      api("/api/data/resources?include_archived=true"),
       api("/api/data/imports"),
       api("/api/data/derivations"),
       api("/api/data/bundles"),
@@ -9519,23 +9700,23 @@ async function loadDataRegistry(force = false) {
     }));
     if (generation !== dataRegistryGeneration) return;
     dataResourceRows = details;
+    dataResourceCatalogState = "ready";
+    notifyRecordingRegistryChanged();
     dataImportRows = listFrom(importPayload, ["imports"]);
     if (selectedDataImportId && !dataImportRows.some((item) => String(item.id) === String(selectedDataImportId))) selectedDataImportId = null;
-    dataVersionRows = details.flatMap((resource) =>
-      (Array.isArray(resource.versions) ? resource.versions : [])
-        .map((version) => ({ ...version, _resource: resource })));
     dataDerivationRows = listFrom(derivationPayload, ["derivations"]);
     dataBundleRows = listFrom(bundlePayload, ["bundles"]);
     dataBundlesLoaded = true;
-    renderDataResources();
+    refreshDataResourceTables();
     renderDataImports();
-    renderDataVersions();
     renderDataDerivations();
     renderDataBundles();
     loadedTabs.add("datasets");
   } catch (error) {
     if (generation !== dataRegistryGeneration) return;
-    elements.dataResourcesBody.innerHTML = emptyRow(8, "Dataset registry could not be loaded.");
+    dataResourceCatalogState = "unavailable";
+    notifyRecordingRegistryChanged();
+    elements.dataResourcesBody.innerHTML = emptyRow(9, "Dataset registry could not be loaded.");
     elements.dataImportsBody.innerHTML = emptyRow(7, "Dataset import jobs could not be loaded.");
     elements.dataVersionsBody.innerHTML = emptyRow(7, "Dataset registry could not be loaded.");
     elements.dataDerivationsBody.innerHTML = emptyRow(5, "Dataset registry could not be loaded.");
@@ -9594,7 +9775,7 @@ async function createDataResource(event) {
     const id = resource.id || resource.resource_id;
     showToast(`Resource ${dataResourceIdentity(resource)} registered.`);
     closeDisclosurePanel(elements.dataResourceForm, elements.showDataResourceForm);
-    elements.showDataResourceForm.textContent = "Register a source resource";
+    elements.showDataResourceForm.textContent = "New";
     elements.dataResourceName.value = "";
     elements.dataResourceDescription.value = "";
     elements.dataResourceForm.reset();
@@ -10469,8 +10650,6 @@ const tutorialTours = {
   evaluations: {
     title: "Evaluations",
     steps: [
-      { selector: "#evaluations-body", title: "Review existing evaluations", instruction: "Start with recorded evaluation state, suite, checkpoint, progress, and result. View is available only when rows exist." },
-      { selector: "#evaluation-result-json", title: "Inspect canonical results", instruction: "A row's View action normally populates this panel. The tutorial reveals it without requesting or changing a record.", reveal: ["#evaluation-detail"] },
       { selector: "#evaluation-run-id", title: "Choose an existing run", instruction: "Select the exact training run whose checkpoint should be evaluated." },
       { selector: "#evaluation-checkpoint", title: "Pin the checkpoint", instruction: "Use a registered inference checkpoint or exact known path. Do not guess a checkpoint location." },
       { selector: "#evaluation-suite", title: "Choose a returned suite", instruction: "Suites define evaluator behavior and environments. Select only a suite returned by the API." },
@@ -12056,7 +12235,7 @@ function endTutorial(completed = false) {
 
 function workspaceHeading(page) {
   const workspace = ["collection", "datasets"].includes(page) ? "data"
-    : ["experiments", "adapters"].includes(page) ? "experiment-workspace" : page;
+    : ["experiments", "adapters", "runs"].includes(page) ? "experiment-workspace" : page;
   return document.querySelector(`#${workspace} .page-heading`);
 }
 
@@ -12496,6 +12675,8 @@ function loadActiveTab(tab, force = false) {
   if (tab === "datasets") return loadDataRegistry(force);
   if (tab === "runs") return loadRuns(true);
   if (tab === "evaluations") return loadEvaluations(force);
+  if (tab === "evaluation-runs") return loadEvaluations(force);
+  if (tab === "evaluation-suites") return loadEvaluationCatalog(force);
   if (tab === "adapters") return loadAdapters(force);
   if (tab === "settings") return loadSettings(force);
   if (tab === "hands") return window.loadHands?.(force);
@@ -12506,11 +12687,13 @@ function activateTab(tab, updateHash = true, requestedView = null) {
   if (window.SkynetStorageConfigured === false) { tab = "settings"; requestedView = null; }
   const allowed = ["cluster", "experiments", "collection", "datasets", "runs", "evaluations", "adapters", "settings", "hands"];
   const isData = ["data", "collection", "datasets"].includes(tab);
-  const isExperiments = ["experiments", "adapters"].includes(tab);
-  const navigation = isData ? dataNavigation : isExperiments ? experimentNavigation : null;
+  const isExperiments = ["experiments", "adapters", "runs"].includes(tab);
+  const isEvaluations = ["evaluations", "evaluation-suites", "evaluation-runs"].includes(tab);
+  const navigation = isData ? dataNavigation : isExperiments ? experimentNavigation : isEvaluations ? evaluationNavigation : null;
   const view = navigation ? requestedView || navigation.viewForTab(tab) : null;
   const next = isData ? view === "registry" ? "datasets" : "collection"
-    : isExperiments ? view === "adapters" ? "adapters" : "experiments"
+    : isExperiments ? view === "submit" ? "experiments" : view
+    : isEvaluations ? view === "submit" ? "evaluations" : `evaluation-${view}`
     : allowed.includes(tab) ? tab : "cluster";
   if (next !== activeTab) {
     elements.toast.replaceChildren();
@@ -12523,12 +12706,14 @@ function activateTab(tab, updateHash = true, requestedView = null) {
   document.querySelectorAll("[data-tab-panel]").forEach((panel) => {
     panel.hidden = panel.dataset.tabPanel === "data" ? !isData
       : panel.dataset.tabPanel === "experiment-workspace" ? !isExperiments
+      : panel.dataset.tabPanel === "evaluation-workspace" ? !isEvaluations
       : panel.dataset.tabPanel !== next;
   });
   navigation?.render(view);
   document.querySelectorAll("[data-tab-target]").forEach((link) => {
     const selected = link.dataset.tabGroup === "data" ? isData
       : link.dataset.tabGroup === "experiments" ? isExperiments
+      : link.dataset.tabGroup === "evaluations" ? isEvaluations
       : link.dataset.tabTarget === next;
     link.classList.toggle("is-active", selected);
     if (link.getAttribute("role") === "tab") {
@@ -12764,14 +12949,19 @@ document.addEventListener("visibilitychange", () => {
   if (activeTab === "runs" && activeRunDetailId && !elements.runDetail.hidden) {
     startRunDetailPolling(activeRunDetailId, null, { initialDelay: 0 });
   }
-  if (activeTab === "evaluations" && activeEvaluationDetailId && !elements.evaluationDetail.hidden) {
+  if (activeTab === "evaluation-runs" && activeEvaluationDetailId && !elements.evaluationDetail.hidden) {
     scheduleEvaluationDetailPolling(activeEvaluationDetailId);
   }
-  if (activeTab === "evaluations") scheduleEvaluationListPolling(0);
+  if (activeTab === "evaluation-runs") scheduleEvaluationListPolling(0);
   if (activeTab === "cluster") refreshCluster({ force: true });
 });
 
-elements.refreshEvaluations.addEventListener("click", () => loadEvaluations(true));
+elements.refreshEvaluations.addEventListener("click", () => loadActiveTab(activeTab, true));
+document.querySelector("#evaluation-suite-search").addEventListener("input", renderEvaluationCatalog);
+document.getElementById("evaluation-suites-body").addEventListener("click", event => {
+  const button = event.target.closest("[data-suite-view]");
+  if (button) openEvaluationSuite(button.dataset.suiteView, button);
+});
 elements.evaluationSuite.addEventListener("change", () => {
   elements.evaluationSuite.setCustomValidity("");
   elements.evaluationSuite.removeAttribute("aria-invalid");
@@ -12827,10 +13017,15 @@ elements.evaluationsBody.addEventListener("click", (event) => {
   const button = event.target.closest("[data-evaluation-action]");
   if (button?.dataset.evaluationAction === "view") viewEvaluation(button.dataset.id, button);
 });
+elements.evaluationsBody.addEventListener("click", handleCancellationAction);
 elements.evaluationDetailActions.addEventListener("click", handleCancellationAction);
 
 elements.refreshDataRegistry.addEventListener("click", () => loadDataRegistry(true));
-document.querySelector("#data-show-archived").addEventListener("change", () => loadDataRegistry(true));
+document.getElementById("data-resource-search").addEventListener("input", () => {
+  delete document.getElementById("data-resource-search").dataset.recordingId;
+  renderDataResources();
+});
+document.querySelector("#data-show-archived").addEventListener("change", refreshDataResourceTables);
 elements.dataResourceForm.addEventListener("submit", createDataResource);
 if (elements.showDataResourceForm) {
   elements.showDataResourceForm.addEventListener("click", (event) => {

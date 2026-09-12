@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import sqlite3
+import psycopg
 from skynet_app.db_backend import DATABASE_ERRORS, INTEGRITY_ERRORS
 import tempfile
 import threading
@@ -1138,17 +1138,12 @@ def test_reconcile_repeated_checkpoint_finalization_succeeds(tmp_path, monkeypat
         job_statuses = cluster.job_statuses
 
         def simultaneous_completion(*args, **kwargs):
-            if not database.is_postgres:
-                barrier.wait(timeout=10)
             return job_statuses(*args, **kwargs)
 
         monkeypatch.setattr(cluster, "job_statuses", simultaneous_completion)
         with ThreadPoolExecutor(max_workers=2) as pool:
             reports = list(pool.map(lambda worker: worker.reconcile(), [service, other]))
-        if database.is_postgres:
-            assert sum(report.get("updated", 0) for report in reports) == 1
-        else:
-            assert all(report["updated"] == 1 for report in reports)
+        assert sum(report.get("updated", 0) for report in reports) == 1
     else:
         # A process can exit after registration but before updating run state.
         checkpoint = service._capture_checkpoint(run_id, attempt_id, required=True)
@@ -1210,7 +1205,7 @@ def test_reconcile_fails_run_when_required_checkpoint_registration_fails(monkeyp
         })
 
         def fail_checkpoint_registration(*_args, **_kwargs):
-            raise sqlite3.IntegrityError("forced checkpoint registration failure")
+            raise psycopg.IntegrityError("forced checkpoint registration failure")
 
         monkeypatch.setattr(database, "create_checkpoint", fail_checkpoint_registration)
         cluster.state = "COMPLETED"

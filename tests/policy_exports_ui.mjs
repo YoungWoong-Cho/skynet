@@ -136,6 +136,10 @@ try {
   assert.equal(w.stateClass("ON CLUSTER"), "is-running");
   assert.equal(w.stateClass("LOCAL"), "is-local");
   assert.equal(w.stateClass("COPY UNAVAILABLE"), "is-failed");
+  assert.equal(el("policy-export-title").textContent, "Register");
+  assert.match(el("policy-export-title").parentElement.textContent, /Registry.*experiments/);
+  assert.equal(w.document.querySelector('label[for="policy-export-name"]').textContent, "Registry name");
+  assert.equal(el("create-policy-export").textContent, "Register");
   await w.openPolicyExport("old");
   assert.equal(el("create-policy-export").disabled, true);
   assert.match(
@@ -308,7 +312,7 @@ try {
   options.sessions[1].episodes = 3;
   await w.openPolicyExport("new");
   assert.equal(el("policy-export-name").readOnly, true, "Preparing another version cannot rename the dataset");
-  assert.match(el("policy-export-name-help").textContent, /earlier versions are retained/);
+  assert.match(el("policy-export-name-help").textContent, /existing Registry resource/);
   const normalApi = w.api;
   let finishSubmission;
   w.api = (path, request = {}) => request.method === "POST"

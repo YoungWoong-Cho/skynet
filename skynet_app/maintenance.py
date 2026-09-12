@@ -16,8 +16,11 @@ from . import history_journals, storage_files
 from .database import canonical_json, utc_now
 from .workspace_schema import visible_sql
 from .workspace_storage import WorkspaceStorage
+from .registry_dependencies import extend_graph, suite_removal_notices
+from .registry_policy import suppress_defaults
 
-KINDS = {"experiment": "experiments", "run": "runs", "evaluation": "evaluations"}
+KINDS = {"experiment": "experiments", "run": "runs", "evaluation": "evaluations",
+         "adapter": "adapters", "suite": "evaluation_suites"}
 TERMINAL = frozenset(
     {
         "SUCCEEDED",
@@ -113,12 +116,22 @@ class Maintenance:
         table = KINDS.get(kind)
         if table is None:
             raise ValueError("Unknown history type")
+        condition, params = self._identity(kind, identifier)
         target = c.execute(
-            f"SELECT * FROM {table} WHERE id=? AND {visible_sql(table)}", (identifier,)
+            f"SELECT * FROM {table} WHERE {condition} AND {visible_sql(table)}"
+            + (" ORDER BY version_number DESC" if kind == "adapter" else ""), params
         ).fetchone()
         if target is None:
             raise KeyError("History item not found")
+        if kind == "adapter" and self.db.workspace_id is not None and target["owner_id"] != self.db.workspace_id:
+            raise KeyError("Adapter is not editable in this workspace")
+        if kind == "suite" and self.db.workspace_id not in (None, "legacy"):
+            raise KeyError("Only the installation owner can remove default evaluation suites")
         return dict(target)
+
+    @staticmethod
+    def _identity(kind, identifier):
+        return ("(id=? OR adapter_key=?)", (identifier, identifier)) if kind == "adapter" else ("id=?", (identifier,))
 
     def _graph(self, c, kind, identifier):
         target = self._target(c, kind, identifier)
@@ -136,20 +149,22 @@ class Maintenance:
                 None,
                 self.db.workspace_id,
             )
-            blockers.append(
-                {
-                    "kind": kind,
-                    "id": record["id"] if visible else None,
-                    "label": (
-                        record.get("name") or record.get("suite_name") or record["id"]
-                    )
-                    if visible
-                    else "Another workspace's item",
-                    "reason": reason,
-                }
-            )
+            entry = {
+                "kind": kind,
+                "id": record["id"] if visible else None,
+                "label": (
+                    record.get("name") or record.get("suite_name") or record["id"]
+                )
+                if visible
+                else "Another workspace's item",
+                "reason": reason,
+            }
+            if not any((b["kind"], b["id"], b["label"]) == (entry["kind"], entry["id"], entry["label"]) for b in blockers):
+                blockers.append(entry)
 
-        if kind == "experiment":
+        if kind in {"adapter", "suite"}:
+            extend_graph(c, kind, target, graph, block, rows)
+        elif kind == "experiment":
             revisions = add("experiment_revisions", "experiment_id", [identifier])
             variants = add("variants", "experiment_revision_id", revisions)
             query, params = in_ids("variant_id", variants)
@@ -263,14 +278,6 @@ class Maintenance:
                         if record.get(key)
                     )
         for table, column in JSON_PATH_COLUMNS.items():
-            if (
-                not self.db.is_postgres
-                and not c.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                    (table,),
-                ).fetchone()
-            ):
-                continue
             for record in rows(c, table):
                 if record["id"] not in excluded.get(table, set()):
                     refs.extend(
@@ -297,7 +304,7 @@ class Maintenance:
 
     def _file_groups(self, c, kind, target, graph, blockers):
         groups = {}
-        if kind == "experiment":
+        if kind in {"experiment", "adapter", "suite"}:
             return groups
         run = (
             target
@@ -417,6 +424,7 @@ class Maintenance:
     def preview(self, kind, identifier, gateway="auto"):
         with self.db.connection() as c:
             target, graph, blockers = self._graph(c, kind, identifier)
+            notices = suite_removal_notices(c, target, self.db.workspace_id) if kind == "suite" else []
             groups = (
                 {} if blockers else self._file_groups(c, kind, target, graph, blockers)
             )
@@ -468,7 +476,7 @@ class Maintenance:
             "kind": kind,
             "id": identifier,
             "owner_id": target.get("owner_id") or "legacy",
-            "label": target.get("name") or target.get("suite_name") or identifier,
+            "label": (target.get("description") if kind == "suite" else None) or target.get("name") or target.get("suite_name") or identifier,
             "counts": {table: len(data) for table, data in graph.items()},
             "records": {
                 table: [item["id"] for item in data] for table, data in graph.items()
@@ -477,6 +485,7 @@ class Maintenance:
             "journals": journals,
             "needles": needles,
             "blockers": blockers,
+            "notices": notices,
             "files": files,
             "graph_hash": fingerprint(graph),
             "retry": bool(pending),
@@ -492,8 +501,9 @@ class Maintenance:
                 try:
                     self._target(c, kind, identifier)
                 except KeyError:
+                    condition, params = self._identity(kind, identifier)
                     if c.execute(
-                        f"SELECT 1 FROM {KINDS[kind]} WHERE id=?", (identifier,)
+                        f"SELECT 1 FROM {KINDS[kind]} WHERE {condition}", params,
                     ).fetchone():
                         raise
                     return {"deleted": True, "already_deleted": True}
@@ -565,35 +575,33 @@ class Maintenance:
             return {"deleted": True}
 
     def _delete_rows(self, c, kind, identifier, graph):
-        ids = [record["id"] for data in graph.values() for record in data]
+        ids = [identifier, *[record["id"] for data in graph.values() for record in data]]
+        ids.extend(row["adapter_key"] for row in graph.get("adapters", []))
         query, params = in_ids("entity_id", ids)
-        if self.db.is_postgres:
-            c.execute("SET LOCAL skynet.delete_history='on'")
-        else:
-            trigger = c.execute(
-                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='attempt_common_hyperparameter_receipt_no_delete'"
-            ).fetchone()
-            c.execute(
-                "DROP TRIGGER IF EXISTS attempt_common_hyperparameter_receipt_no_delete"
-            )
+        c.execute("SET LOCAL skynet.delete_history='on'")
         c.execute("DELETE FROM events WHERE " + query, params)
-        if not self.db.is_postgres and trigger:
-            c.execute(trigger[0])
         query, params = in_ids("scope_id", ids)
         c.execute("DELETE FROM tracking_bindings WHERE " + query, params)
-        if self.db.is_postgres:
-            for table, data in graph.items():
-                query, params = in_ids("record_id", [r["id"] for r in data])
-                c.execute(
-                    "DELETE FROM metadata_payload_refs WHERE table_name=? AND " + query,
-                    (table, *params),
-                )
-            if kind == "run":
-                c.execute(
-                    "DELETE FROM metadata_payload_refs WHERE table_name='tracking_journals' AND record_id=?",
-                    (identifier,),
-                )
-        if kind == "evaluation":
+        for table, data in graph.items():
+            query, params = in_ids("record_id", [r["id"] for r in data])
+            c.execute(
+                "DELETE FROM metadata_payload_refs WHERE table_name=? AND " + query,
+                (table, *params),
+            )
+        if kind == "run":
+            c.execute(
+                "DELETE FROM metadata_payload_refs WHERE table_name='tracking_journals' AND record_id=?",
+                (identifier,),
+            )
+        if kind in {"adapter", "suite"}:
+            table = KINDS[kind]
+            suppress_defaults(c, kind, graph[table])
+            if kind == "adapter":
+                query, params = in_ids("id", [r["id"] for r in graph["adapter_validations"]])
+                c.execute("DELETE FROM adapter_validations WHERE " + query, params)
+            query, params = in_ids("id", [r["id"] for r in graph[table]])
+            c.execute(f"DELETE FROM {table} WHERE " + query, params)
+        elif kind == "evaluation":
             for table in ("artifacts", "manifests"):
                 query, params = in_ids("id", [r["id"] for r in graph.get(table, [])])
                 c.execute(f"DELETE FROM {table} WHERE " + query, params)

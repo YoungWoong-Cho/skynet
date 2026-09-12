@@ -67,3 +67,23 @@ Relocation uploads and independently reads back all bodies before replacing any
 SQL contents. Original receipt hashes remain immutable. The transaction is atomic
 and repeatable. Install the same code version on every app host before restarting
 an app; an old client cannot decode the new object references.
+
+## Registry removal
+
+Adapters and evaluation suites use the same dependency preview and confirmation
+as training runs. Adapter deletion removes every immutable version and validation
+in its lineage; suite deletion removes every version of the named suite in its
+environment. Pinned experiments, runs, evaluations, adapter defaults, and derived
+adapters block deletion and link to their own deletion preview. Other workspace
+identities remain private. Installed repositories and runtimes are not removed.
+
+Deleted built-in names are recorded in `registry_exclusions` as installation
+preferences so startup seeding does not recreate them. This contains seed names
+only, not deleted histories or manifests.
+
+All new removal controls must use `data-delete-kind` and `data-delete-id` with
+`static/maintenance.js`. Extend `Maintenance`'s dependency graph and shared API
+kind, plus `refreshAfterDeletion` for affected lists. Do not add a separate
+confirmation dialog or call a destructive endpoint directly from a row action.
+Deletion requires a fresh preview token, rechecks dependencies under the pipeline
+lock, and prevents attaching new work during an interrupted deletion.

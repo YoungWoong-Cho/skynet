@@ -15,7 +15,6 @@ from psycopg.conninfo import make_conninfo
 from skynet_app.background_owner import BackgroundOwner
 from skynet_app.database import Database
 from skynet_app.db_backend import INTEGRITY_ERRORS
-from skynet_app.postgres_migration import import_snapshot
 
 
 @pytest.fixture
@@ -173,21 +172,6 @@ def test_only_one_background_owner_and_standby_takes_over(pg):
     assert not active
 
 
-def test_postgres_import_roundtrip_and_nonempty_refusal(pg, tmp_path):
-    db, url = pg
-    source = Database(tmp_path / "source.db")
-    source.create_project("Preserved")
-    # Full import intentionally rejects a partial/mismatched source schema.
-    from skynet_app.collection import CollectionStore
-    from skynet_app.source_metadata_cache import SourceMetadataStore
-
-    CollectionStore(source)
-    SourceMetadataStore(source)
-    report = import_snapshot(source.path, url)
-    assert report["tables"]["projects"]["rows"] == 1
-    assert db.list_projects()[0]["name"] == "Preserved"
-    with pytest.raises(ValueError, match="not empty"):
-        import_snapshot(source.path, url)
 
 
 def test_no_fallback_when_postgres_unreachable(tmp_path):
@@ -312,3 +296,15 @@ def test_ssh_tcp_endpoint_requires_loopback_and_resolves_private_password(tmp_pa
     assert endpoint.forward_target == "127.0.0.1:55432"
     assert endpoint.config["password_file"] == str(tmp_path / "database-password")
     endpoint.close()
+
+
+def test_missing_configuration_does_not_create_local_database(tmp_path, monkeypatch):
+    import skynet_app.database as module
+    monkeypatch.setattr(module, 'APP_ROOT', tmp_path)
+    monkeypatch.delenv('SKYNET_DATABASE_URL', raising=False)
+    monkeypatch.delenv('SKYNET_DATA_ROOT', raising=False)
+    with pytest.raises(ValueError, match='PostgreSQL is required'):
+        Database(data_root=tmp_path)
+    assert list(tmp_path.iterdir()) == []
+    with pytest.raises(TypeError):
+        Database(tmp_path / 'removed-local-database.db')
