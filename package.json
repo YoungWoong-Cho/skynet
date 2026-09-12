@@ -2,6 +2,7 @@
   "name": "skynet-ui",
   "private": true,
   "scripts": {
+    "test:presets": "node tests/experiment_preset_ui.mjs",
     "build:hands": "esbuild frontend/hands-viewer.js --bundle --format=esm --minify --legal-comments=linked --outfile=static/hands-viewer.js",
     "test:hands": "node tests/hand_materials.mjs && node tests/hands_state_ui.mjs",
     "test:live": "node tests/live_xr_ui.mjs && node tests/live_review_ui.mjs && node tests/live_conversion_ui.mjs && node tests/recording_registry_ui.mjs && node tests/policy_exports_ui.mjs && node tests/dialogs_ui.mjs && node tests/registry_modals_ui.mjs && node tests/attempt_modal_ui.mjs && node tests/model_io_ui.mjs && node tests/training_contracts_ui.mjs && node tests/evaluation_rollouts_ui.mjs && node tests/collection_lifecycle_ui.mjs && node tests/registry_settings_ui.mjs && node tests/training_audit_ui.mjs",

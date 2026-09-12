@@ -58,31 +58,12 @@ try {
     window.hideCurrentTutorialControl=()=>{tutorialState.target.remove();showTutorialUnavailableStep(tutorialStep(),tutorialState.index);};
     window.completedTutorialFixture=()=>{tutorialState.index=tutorialTours.datasets.steps.length-1;tutorialState.target=document.createElement('button');completeTutorialGate('Archived');return advanceTutorial();};` : ''));
 
-  // ON CLUSTER is eligibility evidence, and its registered location follows the assignment.
-  w.registryFixture([{id:'prepared',revision:'1',format:'act',status:'PUBLISHED',locations:[{id:'cluster-copy',kind:'cluster',status:'AVAILABLE'}]}, {id:'unavailable',status:'STAGING'}]);
-  assert.ok([...el('data-bundle-version-picker').options].some(option=>option.value==='prepared'));
-  assert.ok(![...el('data-bundle-version-picker').options].some(option=>option.value==='unavailable'));
-  w.registryFixture([{id:'migrated',path:'/old/local/output',locations:[
-    {kind:'local',status:'REMOVED',path:'/old/local/output'},
-    {kind:'cluster',status:'AVAILABLE',path:'/cluster/verified/output'}
-  ]}]);
-  assert.match(el('data-versions-body').textContent,/\/cluster\/verified\/output/);
-  assert.doesNotMatch(el('data-versions-body').textContent,/\/old\/local/);
-  w.registryFixture([{id:'missing-copy',path:'/old/local/output',locations:[{kind:'local',status:'REMOVED',path:'/old/local/output'}]}]);
-  assert.match(el('data-versions-body').textContent,/No available copy/);
-  assert.doesNotMatch(el('data-versions-body').textContent,/\/old\/local/);
-  w.registryFixture([{id:'prepared',revision:'1',format:'act',status:'PUBLISHED',locations:[{id:'cluster-copy',kind:'cluster',status:'AVAILABLE'}]}]);
-  el('data-bundle-version-picker').value='prepared';el('data-bundle-role-picker').value='training_data';
-  el('data-bundle-mount-picker').value='../escape';el('data-bundle-assignments').value='[]';
-  w.addDataBundleAssignment();assert.deepEqual(JSON.parse(el('data-bundle-assignments').value),[]);
-  el('data-bundle-mount-picker').value='data/train';w.addDataBundleAssignment();
-  assert.equal(JSON.parse(el('data-bundle-assignments').value)[0].config.location_id,'cluster-copy');
-  let submitted;
-  w.api=async(path,options)=>{submitted=JSON.parse(options.body);return {bundle:{id:'bundle'}};};
+  // Bundle authoring has been removed from the user-facing registry.
+  assert.equal(el('data-bundle-version-picker'),null);
+  assert.equal(el('data-bundle-assignments'),null);
   w.loadDataRegistry=async()=>{};
-  el('data-bundle-name').value='fixture';el('data-bundle-version').value='1';el('data-bundle-description').value='';
-  await w.createDataBundle({preventDefault(){}});assert.equal(submitted.description,'');
-  w.registryFixture([], [{id:'archived',archived_at:'today',name:'Example'}]);
+  w.activateTab('datasets');el('data-show-archived').checked=true;
+  w.registryFixture([], [{id:'archived',category:'dataset',archived_at:'today',name:'Example'}]);
   assert.ok(el('data-resources-body').querySelector('[data-resource-action="restore"]'));
   assert.equal(el('data-resources-body').querySelector('[data-resource-action="version"]'),null);
   // Each integration has one visible action; validation happens in Connect.
@@ -124,8 +105,8 @@ try {
   assert.match(el('toast').textContent,/W&B connection needs attention/);
   assert.match(el('settings-error').textContent,/Unrelated configuration issue/);
   assert.equal(el('settings-error').hidden,false);
-  const scopedDialog=w.document.createElement('dialog');scopedDialog.dataset.panelDialog='fixture';
-  scopedDialog.innerHTML='<div class="panel-heading">Fixture</div>';w.document.body.append(scopedDialog);
+  const scopedDialog=w.SkynetDialog.create({title:'Fixture',content:w.document.createElement('div')});
+  scopedDialog.dataset.panelDialog='fixture';w.document.body.append(scopedDialog);
   w.SkynetDialog.open(scopedDialog);
   w.showToast('Dialog action failed',true,{scope:'fixture:dialog-action'});
   w.showNotice(scopedDialog.querySelector('.dialog-notice'),'Other dialog issue',{scope:'fixture:other'});
@@ -244,5 +225,5 @@ try {
   assert.equal(w.beginTutorialRecovery(w.tutorialResultState().record),true);
   assert.equal(w.tutorialResultState().gateComplete,false,'Recovery always requires a fresh exact Read even when an older Read completed');
   w.resetTutorialAttempt();w.Date.now=originalNow;w.document.body.classList.remove('has-active-tutorial');
-  console.log('Registry/Settings regressions: mounts, prepared copies, optional fields, restore, Connect/Disconnect validation and status, and tutorial recovery passed.');
+  console.log('Registry/Settings regressions: retired bundle controls, restore, Connect/Disconnect validation, shared modal alerts and tutorial confirmations/recovery passed.');
 } catch(error) {console.error(error);process.exitCode=1;} finally {for(const observer of observers)observer.disconnect();await flush();w.close();}

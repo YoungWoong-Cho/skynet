@@ -52,7 +52,6 @@
     detailGeneration = 0,
     refreshPromise = null;
   const expandedResults = new Set();
-  let datasetDetailsOpen = false;
   const terminal = (job) =>
     ["READY", "FAILED", "DELETE_FAILED"].includes(job.state);
   const recipe = (id) => snapshot?.policies.find((p) => p.id === id);
@@ -320,6 +319,17 @@
       ? `<dl class="dataset-result-settings">${pairs.map(([label, value]) => `<dt>${esc(label)}</dt><dd>${esc(value)}</dd>`).join("")}</dl>`
       : '<p class="secondary">No conversion settings recorded.</p>';
   }
+  function datasetMetadata() {
+    const resource = selectedResource;
+    const attempts = (snapshot?.exports || []).filter(
+      (job) => job.resource_id === resource.id,
+    );
+    return `<div class="key-value-grid" data-dataset-metadata>
+      <div class="key-value"><span>Type</span><strong>${esc(dataResourceTypeLabel(resource))}</strong></div>
+      <div class="key-value"><span>Source</span><strong>${esc(resource.provider || "—")}</strong></div>
+      <div class="key-value"><span>Conversion attempts</span><strong>${attempts.length}</strong></div>
+    </div>${resource.metadata?.test_fixture ? '<p class="secondary">Test fixture</p>' : ""}`;
+  }
   function resultRow({
     id,
     versionId,
@@ -362,6 +372,7 @@
       ${presets}<td>${esc(formatDate(createdAt))}</td>
       <td class="row-actions">${primary.join("")}${source}<button type="button" data-dataset-result-toggle="${esc(id)}" aria-expanded="${expanded}" aria-controls="${esc(detailId)}">Details</button></td>
     </tr><tr id="${esc(detailId)}" class="dataset-result-details"${expanded ? "" : " hidden"}><td colspan="${dataset ? 5 : 4}" class="wrap-cell">
+      ${datasetMetadata()}
       <div class="dataset-result-metadata"><section><h4>Storage</h4>${storage}</section><section><h4>Conversion settings</h4>${settings}</section></div>
       ${secondary.length ? `<div class="form-actions">${secondary.join("")}</div>` : ""}
     </td></tr>`;
@@ -549,10 +560,6 @@
         rows.push(sourceVersionRow(version, r.category === "dataset"));
     }
     const focusedResult = document.activeElement?.dataset?.datasetResultToggle;
-    const metadataDisclosure = el("prepared-dataset-content").querySelector(
-      "[data-dataset-metadata]",
-    );
-    if (metadataDisclosure) datasetDetailsOpen = metadataDisclosure.open;
     const title = r.metadata?.display_name || r.name;
     const description =
       r.description?.trim() && r.description.trim() !== title.trim()
@@ -562,10 +569,7 @@
     el("prepared-dataset-content").innerHTML =
       `${description}${activityError ? `<button type="button" class="button button-outline" data-prepared-load-retry data-prepared-resource="${esc(r.id)}">Try again</button>` : ""}
       <div class="table-scroll identity-table"><table data-dataset-results><thead><tr>${["Format", "Episodes", ...(r.category === "dataset" ? ["Experiments presets"] : []), "Created", "Actions"].map((label) => `<th scope="col">${label}</th>`).join("")}</tr></thead><tbody>${rows.join("") || `<tr><td colspan="${r.category === "dataset" ? 5 : 4}">No results yet.</td></tr>`}</tbody></table></div>
-      <details class="collection-disclosure" data-dataset-metadata${datasetDetailsOpen ? " open" : ""}><summary>${r.category === "file" ? "File set details" : "Dataset details"}</summary>
-        <div class="key-value-grid"><div class="key-value"><span>Type</span><strong>${esc(dataResourceTypeLabel(r))}</strong></div><div class="key-value"><span>Source</span><strong>${esc(r.provider || "—")}</strong></div><div class="key-value"><span>Conversion attempts</span><strong>${jobs.length}</strong></div></div>
-        ${r.metadata?.test_fixture ? '<p class="secondary">Test fixture</p>' : ""}
-      </details>`;
+      ${rows.length ? "" : datasetMetadata()}`;
     el("prepared-dataset-actions").innerHTML =
       `<button type="button" class="button button-outline" data-data-history="${esc(r.id)}">Files and history</button>`;
     if (focusedResult) {
@@ -584,7 +588,6 @@
     const retainDetails = detail.open && selectedResource?.id === id;
     if (!retainDetails) {
       expandedResults.clear();
-      datasetDetailsOpen = false;
       selectedResource = { id };
       el("prepared-dataset-title").textContent = "Dataset";
       el("prepared-dataset-actions").replaceChildren();

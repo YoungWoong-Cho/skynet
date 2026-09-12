@@ -1,0 +1,615 @@
+{
+  "revision": "9c98a3aaf02d05c6f9999a5a0a7a42090555ddf3",
+  "policies": [
+    {
+      "policy": "A1",
+      "slug": "xpolicylab-a1-native",
+      "train_sha256": "ae0edf89e306b234726fa5b0ab24c07d2de5cef77b4234e296f452a480c41b6a",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "A1 native training config, LeRobot data and pretrained checkpoint; A1_TRAIN_CONFIG and LEROBOT_DATA_PATH.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "Abot_M0",
+      "slug": "xpolicylab-abot-m0-native",
+      "train_sha256": "a34dee5fc30b0b0933848b1e13d7525c3146c3f9d5b4bb079072532dd2e71230",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Native ABot data configuration and base model; launcher delegates to abot_m0/train.sh.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "ACT",
+      "slug": "xpolicylab-act-native",
+      "train_sha256": "9d38e4f1696926fc87facdb3d42bd1ac5e97b8b9339a23446b9ff40833668857",
+      "minimum_gpus": 1,
+      "maximum_gpus": 1,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Native RGB ACT recipe; original HDF5 layout and env_cfg robot mapping. One process, 6000 epochs, batch 16, chunk 50.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "AHA_WAM",
+      "slug": "xpolicylab-aha-wam-native",
+      "train_sha256": "f327461f22bd792467ccfc8c7d395081b2b18c069a73326daab9d7e0629112a9",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint"
+      ],
+      "notes": "Joint actions; AHA_WAM_TRAIN_DATASET_DIR and DIFFSYNTH_MODEL_BASE_PATH, with processed statistics and text cache.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "Being_H05",
+      "slug": "xpolicylab-being-h05-native",
+      "train_sha256": "74868f94c6320ba445756b4720b76bf2228d1271b9e8b62f6a621306dbdd33c3",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint"
+      ],
+      "notes": "Joint actions, native prepared data and pretrained model; requires a Being-H conda runtime.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "Dexbotic_DM0",
+      "slug": "xpolicylab-dexbotic-dm0-native",
+      "train_sha256": "4afe67a15ee1e5a9d8498191c364aafccf04a116c49ee567032bdc57486e8c75",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Generated data registration module and DM0_BASE_MODEL. Global batch must be divisible by GPUs times per-device batch.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "DP",
+      "slug": "xpolicylab-dp-native",
+      "train_sha256": "5afe8861724fd9bedf86987ff1d4f3d8f6f60ceff5a56f2bb786b383f83030df",
+      "minimum_gpus": 1,
+      "maximum_gpus": 1,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Native RGB Diffusion Policy recipe; original Zarr layout. Horizon 8, observation history 3, action steps 6, 600 epochs, batch 128, inference 100. Requires native W&B setup.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "DreamZero",
+      "slug": "xpolicylab-dreamzero-native",
+      "train_sha256": "90333519563dac541aef2d26893d0e3ac67bb5db1a179c24ef7afb3eeecf40d4",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "LeRobot v3 data, DreamZero/AgiBot/Wan weights and tokenizer. Original launcher performs its own preflight.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "EventVLA",
+      "slug": "xpolicylab-eventvla-native",
+      "train_sha256": "982679f48bf1987c99b33bb7fe252be143ae1ba2db2fe3941adb4219f3f7c27c",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "eventvla",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "EventVLA memory dataset and BASE_VLM. Skynet adapts the original launcher's fixed GPU count, network interface and port to the allocation; model/training arguments are preserved.",
+      "infrastructure_patches": [
+        {
+          "path": "source_eventvla/examples/RoboTwin-Mem/train_files/run_eventvla_train.sh",
+          "sha256": "277685901622233ffb0583effc52317110cf64e714a0c6c13be74498a38332d1",
+          "replacements": [
+            [
+              "export NCCL_SOCKET_IFNAME=bond0",
+              "# Network interface inherited from Skynet's single-node environment"
+            ],
+            [
+              "export NCCL_IB_HCA=mlx5_2,mlx5_3",
+              "# IB configuration inherited from the selected cluster runtime"
+            ],
+            [
+              "--main_process_port 38567",
+              "--main_process_port \"${MASTER_PORT}\""
+            ],
+            [
+              "--num_processes 8",
+              "--num_processes \"${SKYNET_NATIVE_GPU_COUNT}\""
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "policy": "FastWAM",
+      "slug": "xpolicylab-fastwam-native",
+      "train_sha256": "6e453aabf08e7f6cf18ec8ae2de7fcc2c9e3de98211b93e1c4db758ab36c0f0c",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Prepared LeRobot data, statistics, text cache and ActionDiT pretrained weights.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "G05",
+      "slug": "xpolicylab-g05-native",
+      "train_sha256": "eb99e53ae6e9a4cc062a5102105e69f7f2a1f9601f16d0564b38068f5fcb6c2c",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint"
+      ],
+      "notes": "Joint actions and native G05 data/model configuration.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "GalaxeaVLA",
+      "slug": "xpolicylab-galaxeavla-native",
+      "train_sha256": "9d93eebe23a1e277dafe7f87fdc59fd90b5136b4c7331e2a82e316d14d3bf044",
+      "minimum_gpus": 1,
+      "maximum_gpus": 1,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint"
+      ],
+      "notes": "Joint actions, upstream Galaxea source and its Python environment; native dataset language metadata is required.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "GigaWorldPolicy",
+      "slug": "xpolicylab-gigaworldpolicy-native",
+      "train_sha256": "cd7924d56ec17c46aa93ab6e831cd071b7a7446d1622c7edb730e31708790073",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "LeRobot data, model statistics and GIGAWORLD_PRETRAINED_PATH or WAN22_DIFFUSERS_PATH.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "GO1",
+      "slug": "xpolicylab-go1-native",
+      "train_sha256": "bd951b8a1608357e32e865fc64bf15e9fa8d00cfab1da1c0d71992613fb2eef1",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Native GO1 processed data and model configuration; source checkpoints are isolated per run.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "GR00T_N17",
+      "slug": "xpolicylab-gr00t-n17-native",
+      "train_sha256": "32ba4730786ad0f41da3acc9456096bc47491aa224ad2d2bc20417ff773d35f4",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "GR00T_LEROBOT_HOME, embodiment modality config, GR00T-N1.7 and Cosmos weights; gr00t_n17/.venv must use the selected installed runtime.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "H_RDT",
+      "slug": "xpolicylab-h-rdt-native",
+      "train_sha256": "3cdc2db8e2b19cfa3cceab6b76235fa4678de44578bcbe13f30e35145b385d33",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "HRDT_SOURCE_ROOT must contain the native RoboDojo training data/source. Skynet replaces the original fixed 8-process launch with the allocated GPU count.",
+      "infrastructure_patches": [
+        {
+          "path": "train.sh",
+          "sha256": "3cdc2db8e2b19cfa3cceab6b76235fa4678de44578bcbe13f30e35145b385d33",
+          "replacements": [
+            [
+              "num_processes=8",
+              "num_processes=\"${SKYNET_NATIVE_GPU_COUNT}\""
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "policy": "Hy_Embodied_05_VLA",
+      "slug": "xpolicylab-hy-embodied-05-vla-native",
+      "train_sha256": "496c6a1561f631a43317884b44b2573fe7b0dd573156d8c093c1c4bd739c9c77",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "hy-vla",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "External Hy-Embodied-0.5-VLA source is not vendored at this commit; HDF5_DIR, NORM_PATH and PRETRAIN are required.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "InternVLA_A1",
+      "slug": "xpolicylab-internvla-a1-native",
+      "train_sha256": "b27f33ef2206fe5a3e69d7e3cdffa3f531b4e15e45f55332248eb8b73e0987ca",
+      "minimum_gpus": 2,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Native prepared LeRobot data, three pretrained component weights and a conda Runtime. Its distributed launcher requires at least two GPUs.",
+      "infrastructure_patches": [
+        {
+          "path": "internvla_a1/launch/internvla_a1_3b_finetune.sh",
+          "sha256": "44b576b2c3ff23ac735b877cdaefb7b0bd7bd83eb644d2db725ae580fbda1203",
+          "replacements": [
+            [
+              "CONDA_ENV=internvla_a1",
+              "CONDA_ENV=\"${CONDA_PREFIX:?Select the installed InternVLA conda Runtime}\""
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "policy": "LDA_1B",
+      "slug": "xpolicylab-lda-1b-native",
+      "train_sha256": "14631c1a9c1f7f48d2dc22ecceb01e2b4e6cda2b132788cc04d5b328ad9ab1b9",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Native LDA source/config, dataset and pretrained weights; LDA_NUM_PROCESSES is set from the allocation.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "LingBot_VA",
+      "slug": "xpolicylab-lingbot-va-native",
+      "train_sha256": "74e2276a317bbb4ac279ff81b1699a873759bf28e551ac54fe05cd784c8d5162",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Native LeRobot data, action statistics and pretrained LingBot-VA weights.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "LingBot_VLA",
+      "slug": "xpolicylab-lingbot-vla-native",
+      "train_sha256": "b5722bb62d24ff81bde155ef75c5b86ee3ec0410dd486dd070910e3f0b18f9b7",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Native LingBot-VLA dataset configuration and pretrained model.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "Mem_0",
+      "slug": "xpolicylab-mem-0-native",
+      "train_sha256": "2c306161b8655db93ed71e377e6b0e98e927b538b8142448ff000fa26acefad5",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Separate execution/planning stages. Execution is the default; planning/both require the additional LLaMA-Factory runtime.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "OLA_SEM",
+      "slug": "xpolicylab-ola-sem-native",
+      "train_sha256": "e156c84f074427c7d049e50c6c67d8d392a13219aac472fede6957fafeca9aeb",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint"
+      ],
+      "notes": "Original launcher accepts only RoboTwin, aloha_agilex and joint actions.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "OpenVLA_OFT",
+      "slug": "xpolicylab-openvla-oft-native",
+      "train_sha256": "11512c152ccf59eb9b042a1c1025a08bacd3bed8e69f192a3219820af122d359",
+      "minimum_gpus": 1,
+      "maximum_gpus": 1,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Native OpenVLA-OFT converted data and pretrained model; single GPU until its nested launcher is verified for distributed execution.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "OpenWAM",
+      "slug": "xpolicylab-openwam-native",
+      "train_sha256": "655986301bd9fb22fd8972ce2e3e06a59bd7524f6f03a33b23c3a10f391ac908",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "ee"
+      ],
+      "notes": "End-effector actions and native OpenWAM dataset/model configuration.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "Pi_0",
+      "slug": "xpolicylab-pi-0-native",
+      "train_sha256": "5d675d1e0169fd59a6931a8f4d3f0d48f16eb1b36d09693a3a21a9c46a5a373a",
+      "minimum_gpus": 1,
+      "maximum_gpus": 1,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Native OpenPI dataset config and pi0 weights. This adapter conservatively exposes one GPU.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "Pi_05",
+      "slug": "xpolicylab-pi-05-native",
+      "train_sha256": "20ff3813c3165e4b0dc0b340837cc14aa3497034da2ab3299bb5bb012a94df12",
+      "minimum_gpus": 1,
+      "maximum_gpus": 1,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Native OpenPI dataset config and pi0.5 weights. This adapter conservatively exposes one GPU.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "Pi_0_Fast",
+      "slug": "xpolicylab-pi-0-fast-native",
+      "train_sha256": "a5c006922b7c92138854a32ee75dcbf28d28f21059325174f8a20970c0ca4b47",
+      "minimum_gpus": 1,
+      "maximum_gpus": 1,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Native OpenPI dataset config and pi0-fast weights. This adapter conservatively exposes one GPU.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "RDT_1B",
+      "slug": "xpolicylab-rdt-1b-native",
+      "train_sha256": "bb90a1edb5b74050f77826bd288cbc3ce42479f23d64c2da5c7e11a4e0b85648",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Native prepared HDF5 data, encoders and RDT pretrained weights.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "RISE",
+      "slug": "xpolicylab-rise-native",
+      "train_sha256": "4d4749739210cb12e866edc4960ed8212af1b34306bc99548443bf0e148705e9",
+      "minimum_gpus": 1,
+      "maximum_gpus": 1,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Point clouds and native RISE data. The advantage stage writes annotations; inputs are copied into the run before execution.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "SmolVLA",
+      "slug": "xpolicylab-smolvla-native",
+      "train_sha256": "16911868c1f935e1ad82f14973d30d0e3d4a91148e1975c5ea725ffba17a152e",
+      "minimum_gpus": 1,
+      "maximum_gpus": 1,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Original launcher fixes 14 state dimensions and three 256x256 RGB views. Requires LeRobot v0.4.4 and a conda runtime; not compatible with Shadow 28-joint data as-is.",
+      "infrastructure_patches": [
+        {
+          "path": "train.sh",
+          "sha256": "16911868c1f935e1ad82f14973d30d0e3d4a91148e1975c5ea725ffba17a152e",
+          "replacements": [
+            [
+              "--policy.path=lerobot/smolvla_base",
+              "--policy.path=lerobot/smolvla_base --policy.push_to_hub=false"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "policy": "Spirit_v15",
+      "slug": "xpolicylab-spirit-v15-native",
+      "train_sha256": "bba5a29086c68dc2c257250db9b8746d9fc84155a239adb8e9d55fcb716a2e84",
+      "minimum_gpus": 1,
+      "maximum_gpus": 1,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Processed dataset meta/task_info.json and SPIRIT_PRETRAINED_PATH.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "starVLA",
+      "slug": "xpolicylab-starvla-native",
+      "train_sha256": "598d9ea027d0ac8ff71557129d137f2bd268e867ab2eef97330e8766ad447914",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Native dataset meta/modality.json, framework config and pretrained VLM; generates its own training YAML.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "TinyVLA",
+      "slug": "xpolicylab-tinyvla-native",
+      "train_sha256": "5482f5a8e055bccf73c8b84e4289c20f3f26e0dd41cc4b420052537cc0a6dc64",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Prepared HDF5 data plus pretrained_vlm/config.json and model weights under the native checkpoint layout. Missing weights must fail before its interactive download prompt.",
+      "infrastructure_patches": [
+        {
+          "path": "train.sh",
+          "sha256": "5482f5a8e055bccf73c8b84e4289c20f3f26e0dd41cc4b420052537cc0a6dc64",
+          "replacements": [
+            [
+              "--master_port 29600",
+              "--master_port \"${MASTER_PORT}\""
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "policy": "X_VLA",
+      "slug": "xpolicylab-x-vla-native",
+      "train_sha256": "266f169452a420ea6e796e77d32b975f7187c0a11f213a4279bdf22c162f4967",
+      "minimum_gpus": 1,
+      "maximum_gpus": 1,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "XVLA_META_PATH and XVLA_MODEL_PATH. One GPU and an isolated Accelerate config avoid inheriting a different process count.",
+      "infrastructure_patches": [
+        {
+          "path": "train.sh",
+          "sha256": "266f169452a420ea6e796e77d32b975f7187c0a11f213a4279bdf22c162f4967",
+          "replacements": [
+            [
+              "accelerate launch \\\n",
+              "accelerate launch --num_processes 1 --num_machines 1 --main_process_port \"${MASTER_PORT}\" \\\n"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "policy": "X_WAM",
+      "slug": "xpolicylab-x-wam-native",
+      "train_sha256": "66e5d173b53b0a46bde1cd7244758a45bf9cd3f108f3c1284f43fafc97a0f9c9",
+      "minimum_gpus": 1,
+      "maximum_gpus": 8,
+      "entry_kind": "standard",
+      "action_types": [
+        "ee"
+      ],
+      "notes": "End-effector actions, native HDF5 data and pretrained X-WAM weights.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "Xiaomi_Robotics_0",
+      "slug": "xpolicylab-xiaomi-robotics-0-native",
+      "train_sha256": "e2f6fa2be0445e329b98434f2e8ce34061b79a33d7576c9c14ebfbb4681394e2",
+      "minimum_gpus": 1,
+      "maximum_gpus": 1,
+      "entry_kind": "standard",
+      "action_types": [
+        "joint",
+        "ee"
+      ],
+      "notes": "Generated native data config, JSON data and pretrained Xiaomi Robotics weights.",
+      "infrastructure_patches": []
+    },
+    {
+      "policy": "Xiaomi_Robotics_1",
+      "slug": "xpolicylab-xiaomi-robotics-1-native",
+      "train_sha256": "8708eb060d0805578043b4dee769610c551b57c9dc7d7da0ce339b240b978878",
+      "minimum_gpus": 1,
+      "maximum_gpus": 1,
+      "entry_kind": "standard",
+      "action_types": [
+        "ee"
+      ],
+      "notes": "End-effector actions, native data/config and pretrained weights; additional Hydra arguments are supported by upstream.",
+      "infrastructure_patches": []
+    }
+  ],
+  "without_training_entrypoint": [
+    "Dexora_1B",
+    "InternVLA_A1_5",
+    "Meituan_Robotics_0",
+    "MolmoAct2",
+    "OpenDM",
+    "Spatial_Forcing"
+  ]
+}

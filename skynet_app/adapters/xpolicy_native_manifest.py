@@ -1,0 +1,102 @@
+"""Pinned upstream XPolicyLab launchers, separate from recorded-policy bridges."""
+
+import json
+from pathlib import Path
+
+from skynet_app.dataset_formats import XPL_COMMIT, XPL_REPOSITORY
+from skynet_app.training_contracts import DatasetRequirement
+
+
+def catalog():
+    return json.loads(Path(__file__).with_name("xpolicy_native_catalog.json").read_text())
+
+
+def manifests():
+    from . import (
+        AdapterCapabilities, AdapterCheckpointDefaults, AdapterDefaults, AdapterHyperparameterDefaults,
+        AdapterInputField, AdapterManifest, AdapterPrerequisite,
+        AdapterResourceDefaults, AdapterRuntimePolicy, CommandTemplate,
+        DataBundleInputBinding,
+    )
+
+    root = Path(__file__).parent
+    records = catalog()
+    if records["revision"] != XPL_COMMIT:
+        raise ValueError("XPolicyLab launcher catalog must match the pinned source revision")
+    capsules = {
+        "adapter-support/xpolicy_native.py": (root / "xpolicy_native.py").read_text(),
+        "adapter-support/xpolicy_native_catalog.json": (root / "xpolicy_native_catalog.json").read_text(),
+        "adapter-support/artifacts.py": (root.parents[1] / "ops/datasets/artifacts.py").read_text(),
+    }
+    result = []
+    for record in records["policies"]:
+        name, slug = record["policy"], record["slug"]
+        data_format = f"xpolicylab-native-{name.lower()}/v1"
+        fields = [AdapterInputField(
+            path="native.config." + key, label=label, kind="string", required=True,
+            data_binding=DataBundleInputBinding(
+                role="training_data", formats=[data_format],
+                contracts=["skynet.xpolicylab-native/v1"], value_path=value,
+            ),
+            help="Policy-specific native data and configuration, prepared using the pinned XPolicyLab recipe.",
+        ) for key, label, value in [
+            ("dataset_path", "Native training data", "location.path"),
+            ("dataset_manifest_sha256", "Dataset fingerprint", "version.manifest_sha256"),
+        ]]
+        # EventVLA/Hy-VLA have no seed argument in their upstream shell API.
+        seed_supported = record["entry_kind"] == "standard"
+        argv = [
+            "python", "{{tokens.run_dir}}/adapter-support/xpolicy_native.py",
+            "--repository", "{{tokens.source_dir}}", "--revision", XPL_COMMIT,
+            "--policy", name, "--dataset", "{{native.config.dataset_path}}",
+            "--manifest-sha", "{{native.config.dataset_manifest_sha256}}",
+            "--output", "{{tokens.run_dir}}/artifacts",
+            "--gpu-count", "{{computed.gpu_count}}",
+        ]
+        if seed_supported:
+            argv += ["--seed", "{{train.seed}}"]
+        result.append(AdapterManifest(
+            slug=slug, display_name=f"XPolicyLab · {name} · Native",
+            description=f"Original policy/{name}/train.sh at {XPL_COMMIT[:12]}. {record['notes']}",
+            default_repository=XPL_REPOSITORY,
+            # Do not claim the whole repository: choosing a policy must be explicit.
+            repository_patterns=[],
+            runtime=AdapterRuntimePolicy(allowed_backends={"existing", "conda"}, recommended_backend="existing"),
+            capabilities=AdapterCapabilities(
+                name=slug, runtime_backends={"existing", "conda"},
+                minimum_gpus=record["minimum_gpus"],
+                recommended_gpus=record["minimum_gpus"],
+                maximum_gpus=record["maximum_gpus"],
+                supports_multi_gpu_single_node=record["maximum_gpus"] > 1,
+                supports_resume=False,
+            ),
+            defaults=AdapterDefaults(
+                resources=AdapterResourceDefaults(gpu_count=record["minimum_gpus"], gpu_mode="explicit"),
+                hyperparameters=AdapterHyperparameterDefaults(seed=42 if seed_supported else None),
+                checkpoint=AdapterCheckpointDefaults(auto_resume=False, max_attempts=1),
+            ),
+            prerequisites=[
+                AdapterPrerequisite(id="native-inputs", kind="asset", name=f"{name} native training inputs",
+                    description=record["notes"], source_repository=f"{XPL_REPOSITORY}/tree/{XPL_COMMIT}/policy/{name}"),
+                AdapterPrerequisite(id="native-runtime", kind="framework", name=f"{name} installed runtime",
+                    description="Install this policy's own dependencies and required pretrained weights before submission. Source inspection and launcher tests do not establish GPU training compatibility."),
+            ],
+            train=CommandTemplate(
+                argv=argv, input_fields=fields, capsule_files=capsules,
+                strict_native_config=True, strict_canonical_inputs=True,
+                supported_canonical_fields=["train.seed"] if seed_supported else [],
+                data_requirements=DatasetRequirement(
+                    description=f"{name} native prepared inputs ({data_format}). Skynet ACT/DP/EgoVerse exports are not this format.",
+                    observations=["policy_specific"], action_representation="policy_specific",
+                ),
+                # Native layouts differ; no guessed checkpoint or resume contract.
+                checkpoint_globs=[],
+            ),
+            evaluations=[],
+            warnings=[
+                "Requires this policy's native prepared dataset, weights and Runtime; current Shadow conversion outputs are not automatically compatible.",
+                "Hyperparameters come from the upstream recipe and registered native configuration. Automatic resume and simulator evaluation are not implemented for this native adapter.",
+                "GPU training has not been validated for this adapter. Native logs and outputs are retained under the run's artifacts/native-workspace.",
+            ],
+        ))
+    return result

@@ -2,6 +2,8 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { loadUrdfModel, disposeObject as dispose } from "./robot-visuals.js";
 
+import { fingerJointBindings, fingerJointValues } from "./hand-playback.js";
+
 export class HandsViewer {
   constructor(container) {
     this.container = container;
@@ -50,6 +52,8 @@ export class HandsViewer {
   }
   async load(url, metadata) {
     const generation = ++this.generation;
+    this.playbackBindings = null;
+    this.playbackRestPose = null;
     if (this.robot) {
       this.scene.remove(this.robot);
       dispose(this.robot);
@@ -101,8 +105,31 @@ export class HandsViewer {
     this.robot.setJointValues(values);
     this.render();
   }
+  configurePlayback(options) {
+    if (this.playbackRestPose)
+      this.robot.setJointValues(this.playbackRestPose);
+    this.playbackBindings = null;
+    this.playbackRestPose = null;
+    this.playbackBindings = fingerJointBindings(this.robot, options);
+    this.playbackRestPose = Object.fromEntries(
+      this.playbackBindings.map(({ name }) => [
+        name,
+        [...this.robot.joints[name].jointValue],
+      ]),
+    );
+  }
+  setFingerPose(pose) {
+    if (!this.robot) return false;
+    const values = fingerJointValues(this.playbackBindings, pose);
+    this.robot.visible = true;
+    this.robot.setJointValues(values || this.playbackRestPose || {});
+    this.render();
+    return Boolean(values);
+  }
   clear() {
     ++this.generation;
+    this.playbackBindings = null;
+    this.playbackRestPose = null;
     if (this.robot) {
       this.scene.remove(this.robot);
       dispose(this.robot);

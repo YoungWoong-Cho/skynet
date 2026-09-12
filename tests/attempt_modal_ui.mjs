@@ -40,6 +40,11 @@ try{
  assert.equal(w.trainingAdapterLabel({}), 'Not recorded');
  assert.equal(w.trainingAdapterLabel({adapter_name:'legacy'}), 'legacy');
  assert.equal(el('attempts-body').rows.length,1,'training detail excludes evaluation attempts');
+ assert.ok(el('run-detail-tracking').compareDocumentPosition(el('run-checkpoints')) & w.Node.DOCUMENT_POSITION_FOLLOWING, 'tracking appears above checkpoints');
+ assert.equal(el('run-checkpoints').className, el('run-attempts').className, 'checkpoints and attempts share one table section');
+ assert.ok(el('run-detail-actions').compareDocumentPosition(el('attempts-body')) & w.Node.DOCUMENT_POSITION_FOLLOWING, 'run actions appear above the attempts table');
+ assert.equal(el('attempts-body').closest('.table-frame'), null, 'attempts have no extra table frame');
+
  assert.doesNotMatch(el('attempts-body').textContent,/456/);
  assert.equal(w.runAttemptCount(payload.run),1,'attempt count reflects training only');
  assert.equal(w.runAttemptRecords({attempts:[{id:'legacy'}]}).length,1,'legacy training attempts remain visible');
@@ -90,12 +95,12 @@ try{
  const historyLaunch=el('runs-body').querySelector('[data-run-action="view"]');
  historyLaunch.focus();historyLaunch.click();await flush();
  const historyDialog=el('run-detail-dialog');
- assert.equal(historyDialog.open,true,'View attempts opens the shared dialog while loading');
+ assert.equal(historyDialog.open,true,'View opens the shared dialog while loading');
  assert.equal(historyDialog.classList.contains('app-dialog'),true);
  assert.equal(historyLaunch.getAttribute('aria-haspopup'),'dialog');
  assert.equal(historyLaunch.getAttribute('aria-controls'),historyDialog.id);
  assert.equal(historyLaunch.hasAttribute('aria-expanded'),false);
- assert.equal(historyLaunch.textContent,'View attempts');
+ assert.equal(historyLaunch.textContent,'View');
  assert.match(el('attempts-body').textContent,/Loading attempts/);
  assert.equal(el('run-detail').closest('dialog'),historyDialog,'run details stay inside the shared modal');
  assert.equal(el('runs-body').querySelector('.row-disclosure-companion'),null,'no inline detail row remains');
@@ -121,7 +126,7 @@ try{
  assert.equal(w.runModalContext().id,null);
  assert.equal(w.runModalContext().poll,null,'closing the run dialog stops its polling');
  await new Promise(resolve=>w.requestAnimationFrame(resolve));
- assert.equal(w.document.activeElement,historyLaunch,'closing restores focus to View attempts');
+ assert.equal(w.document.activeElement,historyLaunch,'closing restores focus to View');
  // A response arriving after dismissal must not reopen either dialog.
  historyLaunch.click();await flush();
  assert.equal(historyDialog.open,true);

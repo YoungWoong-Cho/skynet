@@ -244,14 +244,18 @@
       const request = (this.playRequest = (this.playRequest || 0) + 1);
       const frames = this.timeline();
       if (
-        frames.length &&
-        this.frameIndex(this.currentTime()) === frames.length - 1
+        this.video.ended ||
+        (frames.length &&
+          this.frameIndex(this.currentTime()) === frames.length - 1)
       )
         this.seekFrame(0);
       this.clockStart = performance.now();
       this.clockOffset = this.currentTime();
       this.playing = true;
-      if (this.video.readyState >= 2) {
+      // Seeking back from the end can temporarily leave only metadata loaded.
+      // play() waits for the seek/buffer; switching to the fallback clock here
+      // would leave the video paused once its frames become available again.
+      if (this.video.readyState >= 1) {
         try {
           await this.video.play();
         } catch (error) {
@@ -340,6 +344,8 @@
       this.canvas.width = this.canvas.width;
       this.data = null;
       this.hand = null;
+      this.handPoseData = null;
+      this.handPoseLayer = "actual";
       this.view = "all";
       this.legend.textContent = "";
       this.aside.replaceChildren(
@@ -439,7 +445,11 @@
           choice.id === "interactive" &&
           !this.data?.scene_objects?.length &&
           !this.data?.frames?.some(
-            (frame) => frame.actual || frame.demonstration,
+            (frame) =>
+              frame.actual ||
+              frame.prediction ||
+              frame.demonstration ||
+              Object.keys(frame.hand_poses || {}).length,
           );
         button.onclick = async () => {
           this.view = choice.id;
@@ -504,8 +514,23 @@
           if (input.disabled)
             wrapper.title =
               key === "scene"
-                ? "Scene geometry was not saved for this episode."
+                ? this.data?.frames?.some(
+                    (frame) => Object.keys(frame.objects || {}).length,
+                  )
+                  ? "Object positions and rotations are saved, but their shapes and sizes were not saved."
+                  : "Scene geometry was not saved for this episode."
                 : "Joint poses or hand geometry were not saved for this episode.";
+          if (!input.disabled && key === "hand") {
+            const missing = Object.keys(labels).filter(
+              (layer) =>
+                this.data.frames.some((frame) => frame[layer]) &&
+                !this.data.frames.some((frame) => frame.hand_poses?.[layer]),
+            );
+            if (missing.length)
+              wrapper.title =
+                missing.map((layer) => labels[layer]).join(" and ") +
+                " have saved keypoints but no joint poses for a hand model.";
+          }
           input.onchange = () => {
             this.geometry[key] = input.checked;
             this.draw();
@@ -515,7 +540,9 @@
         }
       for (const [key, label] of Object.entries(labels)) {
         const available = Boolean(
-          this.data?.frames?.some((frame) => frame[key]),
+          this.data?.frames?.some(
+            (frame) => frame[key] || frame.hand_poses?.[key],
+          ),
         );
         const wrapper = node("label", null, "check-field");
         const input = node("input");
@@ -575,6 +602,19 @@
         const viewport = node("div", null, "episode-hand-viewport");
         const link = node("a", "View in Hands", "text-button");
         link.href = `/?hand=${encodeURIComponent(hand.key)}&side=${side}#hands`;
+        this.handSide = side;
+        const poseField = node("label", null, "field");
+        this.handPoseSelect = node("select");
+        this.handPoseSelect.setAttribute("aria-label", "Hand pose");
+        this.handPoseSelect.onchange = () => {
+          this.handPoseLayer = this.handPoseSelect.value;
+          this.lastHandPose = Symbol();
+          this.draw();
+        };
+        poseField.append(node("span", "Pose"), this.handPoseSelect);
+        poseField.hidden = this.collection;
+        this.handPoseStatus = node("p", null, "secondary");
+        this.handPoseStatus.setAttribute("role", "status");
         this.aside.replaceChildren(
           node("h4", hand.name),
           node(
@@ -582,12 +622,17 @@
             `${model.mesh_count} mesh assets · ${model.joints.filter((j) => !j.mimic).length} adjustable joints`,
             "secondary",
           ),
+          poseField,
           viewport,
+          this.handPoseStatus,
           link,
         );
         const viewer = (this.handViewer = new HandsViewer(viewport));
         await viewer.load(model.urdf_url, model);
-        if (generation === this.generation) viewer.render();
+        if (generation === this.generation) {
+          this.handViewerReady = true;
+          this.draw();
+        }
       } catch (error) {
         if (generation === this.generation)
           this.aside.replaceChildren(
@@ -595,6 +640,54 @@
             node("p", error.message, "secondary"),
           );
       }
+    }
+
+    updateHandPose(frame) {
+      if (!this.handViewerReady || !this.data) return;
+      if (this.handPoseData !== this.data) {
+        this.handPoseData = this.data;
+        this.lastHandPose = Symbol();
+        const available = ["actual", "prediction", "demonstration"].filter(
+          (key) => this.data.frames?.some((sample) => sample.hand_poses?.[key]),
+        );
+        if (!available.includes(this.handPoseLayer))
+          this.handPoseLayer = available[0] || "actual";
+        this.handPoseSelect.replaceChildren();
+        for (const key of ["actual", "prediction", "demonstration"]) {
+          const option = node("option", key[0].toUpperCase() + key.slice(1));
+          option.value = key;
+          option.disabled = !available.includes(key);
+          this.handPoseSelect.append(option);
+        }
+        this.handPoseSelect.value = this.handPoseLayer;
+        this.handPoseSelect.disabled = available.length < 2;
+        this.handPlaybackError = null;
+        try {
+          if (!available.length)
+            throw new Error("No saved joint poses for this episode.");
+          const palm = this.hand.floating_hand?.palm
+            ?.replaceAll("{side}", this.handSide)
+            .replaceAll("{s}", this.handSide[0]);
+          this.handViewer.configurePlayback({
+            palm,
+            jointNames: this.data.joint_names || [],
+            robot: this.data.robot,
+            side: this.handSide,
+          });
+        } catch (error) {
+          this.handPlaybackError = error.message;
+        }
+        this.handPoseSelect.parentElement.hidden =
+          this.collection || Boolean(this.handPlaybackError);
+      }
+      const pose = this.handPlaybackError
+        ? null
+        : frame?.hand_poses?.[this.handPoseLayer];
+      if (pose === this.lastHandPose) return;
+      this.lastHandPose = pose;
+      const applied = this.handViewer.setFingerPose(pose);
+      this.handPoseStatus.textContent = applied ? "" : "Default pose";
+      this.handPoseStatus.hidden = applied;
     }
 
     draw() {
@@ -636,6 +729,7 @@
         else hi = mid - 1;
       }
       const frame = frames[lo];
+      this.updateHandPose(frame);
       this.sceneHelp.hidden = this.view !== "interactive";
       this.canvas.hidden = this.view === "interactive";
       this.sceneHost.hidden = this.view !== "interactive";
@@ -699,6 +793,9 @@
       this.video.pause();
       this.handViewer?.dispose();
       this.handViewer = null;
+      this.handViewerReady = false;
+      this.handPoseData = null;
+      this.lastHandPose = Symbol();
       if (this.frameCallback !== undefined)
         this.video.cancelVideoFrameCallback?.(this.frameCallback);
       ++this.generation;

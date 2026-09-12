@@ -39,7 +39,7 @@ const script=w.document.createElement("script");
 script.src=w.document.querySelector('script[data-workspace-src*="hands-ui"]').dataset.workspaceSrc;
 Object.defineProperty(w.document,'currentScript',{value:script});
 w.eval(await readFile(new URL('../static/dialogs.js',import.meta.url),'utf8'));
-w.eval((await readFile(new URL('../static/hands-ui.js',import.meta.url),'utf8')).replace('await import("/static/hands-viewer.js" + version)','({ HandsViewer: window.TestHandsViewer })'));
+w.eval((await readFile(new URL('../static/hands-ui.js',import.meta.url),'utf8')).replace(/await import\([\s\S]*?\n\s*\)/,'({ HandsViewer: window.TestHandsViewer })'));
 const changeAngle=(value,type='change')=>{el('hand-value').value=value;el('hand-value').dispatchEvent(new w.Event(type,{bubbles:true}));};
 const submit=async()=>{el('hand-pose-form').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await flush();};
 try {

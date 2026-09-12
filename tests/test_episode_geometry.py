@@ -60,6 +60,12 @@ class GeometryTest(unittest.TestCase):
             self.assertNotIn('demonstration',trace.frames[1])
             trace.finish(2)
             saved = json.loads(trace.path.read_text())
+            for layer in ('actual', 'prediction', 'demonstration'):
+                pose = saved['frames'][0]['hand_poses'][layer]
+                np.testing.assert_allclose(saved['frames'][0][layer], model.points(pose['joints'], pose['root']))
+            self.assertNotIn('demonstration', saved['frames'][1]['hand_poses'])
+            self.assertTrue(saved['kinematics_urdf'])
+            self.assertEqual(saved['joint_names'], capture['action_joint_names'])
             self.assertEqual(saved['duration'],.2)
             self.assertFalse(trace.path.with_suffix('.tmp').exists())
 

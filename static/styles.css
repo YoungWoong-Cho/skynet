@@ -1912,11 +1912,6 @@ tbody > .row-disclosure-row > .row-disclosure-cell > .row-disclosure,
 #attempts-body tr[data-attempt-row].is-active td {
   background: var(--green-soft);
 }
-#run-detail .run-attempts-table-scroll {
-  height: auto;
-  max-height: none;
-  overflow-x: auto;
-}
 #run-attempt-detail {
   border-top: 0;
 }
@@ -2952,25 +2947,78 @@ footer {
   gap: 7px;
 }
 .app-dialog {
-  width: min(940px, calc(100vw - 32px));
+  width: min(1120px, calc(100vw - 32px));
   max-height: calc(100dvh - 48px);
-  padding: 15px;
+  padding: 0;
   border: 1px solid var(--line);
   border-radius: 3px;
   background: var(--surface);
   color: var(--ink);
+  overflow: hidden;
+}
+.app-dialog > .dialog-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  width: 100%;
+  min-width: 0;
+  max-height: inherit;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: var(--surface);
+}
+.dialog-shell > .dialog-heading {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0;
+  padding: 16px;
+  border-bottom: 1px solid var(--line);
+}
+.dialog-heading-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.dialog-shell > .dialog-heading .panel-heading-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.dialog-shell > .dialog-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
   overflow: auto;
+  padding: 16px;
+}
+.dialog-shell > .dialog-notice {
+  margin: 12px 16px 0;
+}
+.dialog-table-section {
+  margin: 20px 0 0;
+  padding: 0;
+}
+.dialog-table-section > .table-scroll {
+  max-height: none;
+}
+.dialog-table-section > h3 {
+  margin: 0 0 8px;
+}
+.dialog-table-section > .form-actions {
+  margin: 0 0 12px;
 }
 .app-dialog::backdrop {
   background: rgba(20, 28, 22, 0.65);
 }
-.app-dialog h3 {
+.app-dialog:not(.app-dialog-page-form) h3 {
   margin: 0;
 }
-.app-dialog .panel-heading {
+.app-dialog:not(.app-dialog-page-form) .panel-heading {
   align-items: flex-start;
 }
-.app-dialog .panel-heading p {
+.app-dialog:not(.app-dialog-page-form) .panel-heading p {
   color: var(--muted);
   font: 9px/1.5 var(--mono);
   margin: 6px 0 0;
@@ -2987,7 +3035,7 @@ footer {
     display: block;
     margin: 6px 0 0 16px;
   }
-  .app-dialog .panel-heading {
+  .app-dialog:not(.app-dialog-page-form) .panel-heading {
     flex-wrap: wrap;
   }
 }
@@ -3332,21 +3380,22 @@ footer {
   margin-bottom: 8px;
 }
 
-/* Shared dialog forms use the review surface and the application's form controls. */
+/* Dialog-only forms use a compact layout. Reused page forms keep the same
+   grid, field spans and spacing as their page, including its breakpoints. */
 .app-dialog-compact {
   width: min(540px, calc(100vw - 32px));
 }
-.app-dialog .form-grid {
+.app-dialog:not(.app-dialog-page-form) .form-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
-.app-dialog .field > input,
-.app-dialog .field > select {
+.app-dialog:not(.app-dialog-page-form) .field > input,
+.app-dialog:not(.app-dialog-page-form) .field > select {
   width: 100%;
 }
-.app-dialog .collection-disclosure {
+.app-dialog:not(.app-dialog-page-form) .collection-disclosure {
   margin: 14px 0;
 }
-.app-dialog .collection-disclosure > :not(summary) {
+.app-dialog:not(.app-dialog-page-form) .collection-disclosure > :not(summary) {
   margin: 12px 0;
 }
 .app-dialog .dialog-message {
@@ -3360,19 +3409,16 @@ footer {
   margin-top: 12px;
 }
 @media (max-width: 600px) {
-  .app-dialog .form-grid {
+  .app-dialog:not(.app-dialog-page-form) .form-grid {
     grid-template-columns: 1fr;
   }
 }
 
-.app-dialog .form-grid > :is(.span-2, .span-3, .span-4) {
+.app-dialog:not(.app-dialog-page-form) .form-grid > :is(.span-2, .span-3, .span-4) {
   grid-column: 1 / -1;
 }
-.app-dialog textarea {
+.app-dialog:not(.app-dialog-page-form) textarea {
   width: 100%;
-}
-.app-dialog .dialog-body {
-  padding: 0;
 }
 .app-dialog .dialog-notice {
   margin-bottom: 14px;
@@ -3380,6 +3426,19 @@ footer {
 
 .app-dialog .dialog-body > .form-actions {
   margin-top: 14px;
+}
+
+/* The preset editor reuses Submit's form in the common dialog shell. */
+#experiment-preset-dialog #experiment-composer {
+  display: block;
+}
+#experiment-preset-dialog #experiment-form {
+  margin: 0;
+  border: 0;
+}
+#experiment-preset-dialog #experiment-form > .panel-heading,
+#experiment-preset-dialog .preview-panel {
+  display: none;
 }
 
 /* Shared readable table/detail geometry. Overflow belongs to the data table;
@@ -3749,23 +3808,6 @@ table:has(> tbody#data-bundles-body) :is(th, td):nth-child(5) {
 #data-resource-create-details .row-actions {
   gap: 0.65rem;
   flex-wrap: wrap;
-}
-#data-inspection-dialog {
-  width: min(1120px, 95vw);
-}
-#data-inspection-dialog .dialog-body {
-  overflow: auto;
-  max-height: 75vh;
-}
-#evaluation-detail-dialog,
-#experiment-detail-dialog {
-  width: min(1120px, 95vw);
-}
-#evaluation-detail-dialog > aside,
-#experiment-detail-dialog > aside {
-  margin: 0;
-  max-height: 85vh;
-  overflow: auto;
 }
 .episode-viewer-scene {
   min-height: 360px;

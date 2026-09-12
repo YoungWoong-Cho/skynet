@@ -192,19 +192,18 @@ def test_old_pinned_manifests_do_not_gain_new_contract_fields():
     assert canonical_adapter_manifest(AdapterManifest.model_validate(raw)) == raw
 
 
-def test_all_current_training_adapters_accept_multiple_gpu_allocations():
+def test_training_adapters_respect_their_declared_gpu_capabilities():
     for manifest in builtin_adapter_manifests():
-        assert manifest.capabilities.supports_multi_gpu_single_node, manifest.slug
-        assert manifest.capabilities.maximum_gpus >= 2, manifest.slug
         spec = make_spec()
         spec.source.adapter = manifest.slug
-        spec.resources.gpu.count = 2
+        count = max(manifest.capabilities.minimum_gpus, min(2, manifest.capabilities.maximum_gpus))
+        spec.resources.gpu.count = count
         spec.native.argv = []
         plan = ManifestAdapter(manifest).resolve(spec)
         assert not any("one GPU" in issue or "1-1 GPUs" in issue for issue in plan.blockers), manifest.slug
-        if manifest.slug.startswith("xpolicylab-"):
+        if manifest.slug in {"xpolicylab-act", "xpolicylab-dp"}:
             flag = plan.argv.index("--gpu-count")
-            assert plan.argv[flag + 1] == "2"
+            assert plan.argv[flag + 1] == str(count)
             assert "adapter-support/training_parallel.py" in plan.capsule_files
 
 

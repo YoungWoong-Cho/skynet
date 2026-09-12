@@ -38,6 +38,8 @@ const elements = {
   experimentsError: document.querySelector("#experiments-error"),
   refreshExperiments: document.querySelector("#refresh-experiments"),
   experimentForm: document.querySelector("#experiment-form"),
+  newExperimentPreset: document.querySelector("#new-experiment-preset"),
+  experimentPresetDialog: document.querySelector("#experiment-preset-dialog"),
   experimentName: document.querySelector("#experiment-name"),
   experimentAdapter: document.querySelector("#experiment-adapter"),
   experimentSource: document.querySelector("#experiment-source"),
@@ -7020,6 +7022,7 @@ function renderSelectedExperimentScript() {
 }
 
 function updateExperimentSubmitState() {
+  const presetMode = elements.experimentPresetDialog.open;
   const batchValidation = updateBatchCompatibility();
   const ready =
     !experimentBusy &&
@@ -7047,11 +7050,21 @@ function updateExperimentSubmitState() {
     elements.experimentRevisionIntent.textContent =
       "Submitted specifications are immutable. Changes create a new experiment revision.";
   }
+  if (presetMode)
+    elements.saveExperimentButton.textContent = experimentBusy
+      ? "Creating…"
+      : "Create preset";
+  elements.saveExperimentButton.type = presetMode ? "submit" : "button";
+  elements.saveExperimentButton.classList.toggle("button-accent", presetMode);
+  elements.saveExperimentButton.classList.toggle("button-quiet", !presetMode);
+  elements.submitExperimentButton.hidden = presetMode;
+  elements.experimentPreviewButton.hidden = presetMode;
   elements.experimentPreviewButton.disabled =
     experimentBusy || !batchValidation.valid;
   elements.saveExperimentButton.disabled =
     experimentBusy || !batchValidation.valid;
-  elements.submitExperimentButton.disabled = !ready;
+  elements.submitExperimentButton.disabled = presetMode || !ready;
+  elements.newExperimentPreset.disabled = experimentBusy;
   const batchBlockedTitle = batchValidation.errors[0] || "";
   elements.experimentPreviewButton.title = batchBlockedTitle;
   elements.saveExperimentButton.title = batchBlockedTitle;
@@ -7064,6 +7077,43 @@ function updateExperimentSubmitState() {
 
 function setExperimentBusy(busy) {
   experimentBusy = busy;
+  elements.experimentPresetDialog.dataset.blockClose = String(busy);
+  elements.experimentPresetDialog.querySelector(
+    "[data-dialog-close]",
+  ).disabled = busy;
+  updateExperimentSubmitState();
+}
+
+// The preset dialog and Submit share one editor, including its runtime/data
+// validation and unsaved inputs. Move the live nodes; never clone form controls.
+let presetEditorHomes = [];
+function openExperimentPreset() {
+  if (experimentBusy || elements.experimentPresetDialog.open) return;
+  const destination = document.getElementById("experiment-preset-editor");
+  presetEditorHomes = [
+    elements.experimentsError,
+    document.getElementById("experiment-composer"),
+  ].map((node) => {
+    const home = document.createComment("experiment editor home");
+    node.before(home);
+    destination.append(node);
+    return { node, home };
+  });
+  elements.experimentName.value = "";
+  invalidateExperimentPreview();
+  clearNotice(elements.experimentsError);
+  SkynetDialog.open(elements.experimentPresetDialog, {
+    launcher: elements.newExperimentPreset,
+  });
+  updateExperimentSubmitState();
+  renderTrackingNamePreview();
+  elements.experimentName.focus({ preventScroll: true });
+}
+
+function restoreExperimentEditor() {
+  if (elements.experimentPresetDialog.open) return;
+  for (const { node, home } of presetEditorHomes) home.replaceWith(node);
+  presetEditorHomes = [];
   updateExperimentSubmitState();
 }
 
@@ -7633,6 +7683,9 @@ function variantRunDisplayState(run) {
 }
 
 async function createExperiment(shouldSubmit) {
+  if (experimentBusy) return;
+  const presetMode = elements.experimentPresetDialog.open;
+  if (presetMode) shouldSubmit = false;
   if (!validateExperiment()) return;
   if (shouldSubmit && !experimentPreviewIsCurrent()) {
     showToast("Preview the current configuration before submitting.", true);
@@ -7640,6 +7693,14 @@ async function createExperiment(shouldSubmit) {
   }
   const payload = experimentPayload();
   const existingExperiment = matchingExperimentForPayload(payload);
+  if (presetMode && existingExperiment) {
+    showToast(
+      "A preset with this name already exists for this project. Choose a different name.",
+      true,
+    );
+    elements.experimentName.focus();
+    return;
+  }
   const existingId =
     existingExperiment?.id || existingExperiment?.experiment_id;
   const latestRevision = Number(existingExperiment?.latest_revision_number);
@@ -7655,6 +7716,7 @@ async function createExperiment(shouldSubmit) {
     if (!(await askUserDialog(confirmation))) return;
   }
   setExperimentBusy(true);
+  let saved = false;
   try {
     const result = existingId
       ? await api(
@@ -7707,9 +7769,20 @@ async function createExperiment(shouldSubmit) {
         submitted.experiment?.latest_revision?.revision_number;
       // Report transport failures after opening the resulting run, without claiming success.
     } else {
-      showToast(`Experiment ${id || payload.name} saved as a draft.`);
+      showToast(
+        presetMode
+          ? `Preset "${payload.name}" created.`
+          : `Experiment ${id || payload.name} saved as a draft.`,
+      );
     }
+    saved = true;
     invalidateExperimentPreview();
+    if (presetMode) {
+      const search = document.getElementById("experiment-search");
+      search.value = "";
+      delete search.dataset.datasetId;
+      delete search.dataset.presetIds;
+    }
     await loadExperiments(true);
     if (shouldSubmit) {
       await openSubmittedTrainingRun({
@@ -7726,6 +7799,8 @@ async function createExperiment(shouldSubmit) {
     );
   } finally {
     setExperimentBusy(false);
+    if (presetMode && saved)
+      SkynetDialog.close(elements.experimentPresetDialog);
   }
 }
 
@@ -8554,7 +8629,7 @@ function renderExperiments() {
       9,
       query
         ? "No experiment presets match the filter."
-        : "No presets yet. Choose Create draft in the Submit tab.",
+        : "No presets yet. Choose New to create one.",
     );
     return;
   }
@@ -9128,7 +9203,7 @@ function runRowDescriptor(run) {
       {
         className: "row-actions",
         preserve: active,
-        html: `<button type="button" data-run-action="view" data-id="${escapeHtml(id)}" aria-controls="run-detail" aria-expanded="false">View attempts</button>${["CREATED", "SUBMITTING", "SUBMITTED", "PENDING", "PENDING_SLURM", "QUEUED", "CONFIGURING", "RUNNING", "CANCELLING", "RESUMING", "RETRYING", "RETRY_PENDING", "REQUEUED"].includes(state) ? cancellationActionButton("run", id, run.manual_actions || { cancel: { enabled: state !== "CANCELLING" } }, { label: "Cancel", className: "" }) : `<button type="button" data-delete-kind="run" data-delete-id="${escapeHtml(id)}">Delete</button>`}`,
+        html: `<button type="button" data-run-action="view" data-id="${escapeHtml(id)}" aria-controls="run-detail" aria-expanded="false">View</button>${["CREATED", "SUBMITTING", "SUBMITTED", "PENDING", "PENDING_SLURM", "QUEUED", "CONFIGURING", "RUNNING", "CANCELLING", "RESUMING", "RETRYING", "RETRY_PENDING", "REQUEUED"].includes(state) ? cancellationActionButton("run", id, run.manual_actions || { cancel: { enabled: state !== "CANCELLING" } }, { label: "Cancel", className: "" }) : `<button type="button" data-delete-kind="run" data-delete-id="${escapeHtml(id)}">Delete</button>`}`,
       },
     ],
   };
@@ -16399,7 +16474,7 @@ const interactiveTutorialTours = {
         waitForTarget: true,
         title: "Read one real run",
         instruction:
-          "Click View attempts on a returned row. Advancement requires the matching run-detail GET and returned ID to match that selected row.",
+          "Click View on a returned row. Advancement requires the matching run-detail GET and returned ID to match that selected row.",
         request: {
           method: "GET",
           path: ({ bindings }) =>
@@ -19601,9 +19676,14 @@ elements.refreshExperiments.addEventListener("click", () =>
   loadExperiments(true),
 );
 elements.experimentPreviewButton.addEventListener("click", previewExperiment);
-elements.saveExperimentButton.addEventListener("click", () =>
-  createExperiment(false),
+elements.newExperimentPreset.addEventListener("click", openExperimentPreset);
+elements.experimentPresetDialog.addEventListener(
+  "close",
+  restoreExperimentEditor,
 );
+elements.saveExperimentButton.addEventListener("click", () => {
+  if (!elements.experimentPresetDialog.open) createExperiment(false);
+});
 elements.experimentForm.addEventListener("submit", (event) => {
   event.preventDefault();
   createExperiment(true);

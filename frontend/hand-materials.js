@@ -14,11 +14,27 @@ export function applyUrdfMaterials(robot, source) {
   robot.traverse((visual) => {
     if (!visual.isURDFVisual) return;
     const declaration = visual.urdfNode.querySelector("material");
-    if (!declaration) return;
     const color =
-      declaration.querySelector("color") ||
-      named.get(declaration.getAttribute("name"))?.querySelector("color");
-    if (!color) return;
+      declaration?.querySelector("color") ||
+      named.get(declaration?.getAttribute("name"))?.querySelector("color");
+    if (!color) {
+      // Without a URDF alpha override, keep imported shading but make fully
+      // invisible CAD materials visible. Shadow PST fingertip DAE files have
+      // zero opacity despite representing the solid exterior of the hand.
+      visual.traverse((node) => {
+        if (!node.isMesh) return;
+        const materials = [node.material].flat().map((material) => {
+          if (material.opacity !== 0) return material;
+          const visible = material.clone();
+          visible.opacity = 1;
+          visible.transparent = false;
+          retired.add(material);
+          return visible;
+        });
+        node.material = Array.isArray(node.material) ? materials : materials[0];
+      });
+      return;
+    }
     const rgba = color.getAttribute("rgba").trim().split(/\s+/).map(Number);
     if (
       rgba.length !== 4 ||

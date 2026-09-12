@@ -284,7 +284,7 @@ try {
   const history = el('prepared-dataset-dialog').querySelector('[data-data-history]');
   assert.equal(history.dataset.dataHistory, 'dataset', 'Files and history stays scoped to this dataset');
   assert.ok(history.compareDocumentPosition(content.querySelector('[data-dataset-results]')) & w.Node.DOCUMENT_POSITION_FOLLOWING, 'Dataset-wide history appears above the result table');
-  assert.deepEqual([...content.querySelectorAll('[data-dataset-metadata] .key-value span')].map(n => n.textContent), ['Type', 'Source', 'Conversion attempts']);
+  assert.deepEqual([...content.querySelector('[data-dataset-metadata]').querySelectorAll('.key-value span')].map(n => n.textContent), ['Type', 'Source', 'Conversion attempts']);
   options.exports[0].source_version_id = "source-two";
   await w.openPolicyExport("new");
   assert.equal(el("preparation-validation").value, "20");
@@ -469,12 +469,12 @@ try {
   toggle.focus();toggle.click();await flush();
   assert.equal(el(detailId).hidden,false);
   assert.equal(toggle.getAttribute('aria-expanded'),'true');
-  const meta=el('prepared-dataset-content').querySelector('[data-dataset-metadata]');
-  assert.equal(meta.open,false,'Dataset metadata starts collapsed');
-  meta.open=true;
+  const meta=el(detailId).querySelector('[data-dataset-metadata]');
+  assert.ok(meta, 'Dataset metadata is in the same expanded result Details');
+  assert.equal(el('prepared-dataset-content').querySelector('details[data-dataset-metadata]'), null, 'No duplicate Dataset details accordion');
   await w.openPreparedDataset('dataset');
   assert.equal(el(detailId).hidden,false,'Refreshing preserves the expanded result');
-  assert.equal(el('prepared-dataset-content').querySelector('[data-dataset-metadata]').open,true,'Refreshing preserves dataset details');
+  assert.ok(el(detailId).querySelector('[data-dataset-metadata]'), 'Refreshing keeps metadata inside result Details');
   assert.equal(w.document.activeElement.dataset.datasetResultToggle,'job-published-dp','Refreshing preserves the Details button focus');
   const newToggle=el('prepared-dataset-content').querySelector('[data-dataset-result-toggle="job-published-dp"]');
   newToggle.click();assert.equal(el(detailId).hidden,true,'Details can be collapsed again');
@@ -505,7 +505,7 @@ try {
   el('prepared-dataset-detail').hidden = true;
   await w.openPreparedDataset(resource.id);
   assert.equal(el('prepared-dataset-detail').hidden, false);
-  assert.equal(el('prepared-dataset-dialog').querySelector('[data-result-close]').textContent.trim(), 'Close');
+  assert.equal(el('prepared-dataset-dialog').querySelector('[data-dialog-close]').textContent.trim(), 'Close');
   console.log('Dataset registration, source selection, recovery, shared deletion entry points and direct data use passed.');
 
 } finally {

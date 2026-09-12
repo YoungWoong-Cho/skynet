@@ -408,41 +408,39 @@
               id="hand-export-dialog"
               class="app-dialog"
               aria-labelledby="hand-export-title"
+              data-dialog-title="Export hand pose"
+              data-dialog-title-id="hand-export-title"
+              data-dialog-close-id="hand-export-close"
             >
-              <div class="panel-heading">
-                <h3 id="hand-export-title">Export hand pose</h3>
-                <button
-                  id="hand-export-close"
-                  data-dialog-close=""
-                  class="button button-outline"
-                  type="button"
-                >
-                  Close
-                </button>
-              </div>
-              <p>
-                Save the joint values with this model’s exact source version.
-                Angles use radians; sliding joints use meters.
-              </p>
-              <label for="hand-export-json">Pose JSON</label
-              ><textarea id="hand-export-json" rows="14" readonly=""></textarea>
-              <div class="form-actions">
-                <button
-                  id="hand-export-copy"
-                  class="button button-outline"
-                  type="button"
-                >
-                  Copy JSON</button
-                ><a
-                  id="hand-export-download"
-                  class="button button-accent"
-                  download=""
-                  >Download JSON</a
-                >
-              </div>
-              <p id="hand-export-message" role="status">
-                If your browser restricts file downloads, use Copy JSON.
-              </p>
+              <section data-dialog-panel="">
+                <p>
+                  Save the joint values with this model’s exact source version.
+                  Angles use radians; sliding joints use meters.
+                </p>
+                <label for="hand-export-json">Pose JSON</label
+                ><textarea
+                  id="hand-export-json"
+                  rows="14"
+                  readonly=""
+                ></textarea>
+                <div class="form-actions">
+                  <button
+                    id="hand-export-copy"
+                    class="button button-outline"
+                    type="button"
+                  >
+                    Copy JSON</button
+                  ><a
+                    id="hand-export-download"
+                    class="button button-accent"
+                    download=""
+                    >Download JSON</a
+                  >
+                </div>
+                <p id="hand-export-message" role="status">
+                  If your browser restricts file downloads, use Copy JSON.
+                </p>
+              </section>
             </dialog>
             <div class="hand-layout">
               <section class="panel table-panel">
@@ -750,6 +748,15 @@
                     /><span id="experiment-count" class="quiet-label"
                       >Not loaded</span
                     >
+                    <button
+                      id="new-experiment-preset"
+                      class="button button-accent"
+                      type="button"
+                      aria-haspopup="dialog"
+                      aria-controls="experiment-preset-dialog"
+                    >
+                      New
+                    </button>
                   </div>
                 </div>
                 <div class="table-scroll identity-table">
@@ -775,54 +782,56 @@
                   </table>
                 </div>
                 <dialog
+                  id="experiment-preset-dialog"
+                  class="app-dialog app-dialog-page-form"
+                  data-panel-dialog=""
+                  data-dialog-title="New experiment preset"
+                >
+                  <section data-dialog-panel="">
+                    <div id="experiment-preset-editor"></div>
+                  </section>
+                </dialog>
+                <dialog
                   id="experiment-detail-dialog"
                   class="app-dialog"
                   data-panel-dialog=""
                   aria-labelledby="experiment-detail-title"
+                  data-dialog-title="Variants"
+                  data-dialog-title-id="experiment-detail-title"
+                  data-dialog-close-id="close-experiment-detail"
                 >
                   <section
                     id="experiment-detail"
                     class="row-disclosure inline-drawer dialog-form"
                     hidden=""
+                    data-dialog-panel=""
                   >
-                    <div class="panel-heading row-disclosure-heading">
-                      <div>
-                        <h2 id="experiment-detail-title">Variants</h2>
-                      </div>
-                      <div class="panel-heading-actions">
-                        <span
-                          id="experiment-detail-meta"
-                          class="quiet-label"
-                        ></span>
-                        <button
-                          id="close-experiment-detail"
-                          class="text-button disclosure-close"
-                          type="button"
-                        >
-                          Close
-                        </button>
-                      </div>
-                    </div>
+                    <template data-dialog-actions="">
+                      <span
+                        id="experiment-detail-meta"
+                        class="quiet-label"
+                      ></span>
+                    </template>
+
                     <div
                       id="experiment-detail-tracking"
                       class="tracking-detail-strip"
                       hidden=""
                     ></div>
-                    <div class="row-disclosure-body">
-                      <div class="table-scroll identity-table">
-                        <table>
-                          <thead>
-                            <tr>
-                              <th>Variant</th>
-                              <th>Parameters</th>
-                              <th>Runs</th>
-                              <th>Latest run state</th>
-                              <th>Result</th>
-                            </tr>
-                          </thead>
-                          <tbody id="variants-body"></tbody>
-                        </table>
-                      </div>
+
+                    <div class="table-scroll identity-table">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Variant</th>
+                            <th>Parameters</th>
+                            <th>Runs</th>
+                            <th>Latest run state</th>
+                            <th>Result</th>
+                          </tr>
+                        </thead>
+                        <tbody id="variants-body"></tbody>
+                      </table>
                     </div>
                   </section>
                 </dialog>
@@ -841,7 +850,10 @@
                 hidden=""
               ></div>
 
-              <div class="workspace-grid workspace-grid-composer">
+              <div
+                id="experiment-composer"
+                class="workspace-grid workspace-grid-composer"
+              >
                 <form id="experiment-form" class="panel table-panel dense-form">
                   <div class="panel-heading">
                     <div>
@@ -1666,197 +1678,186 @@ trainer.deterministic=true"
                   class="app-dialog"
                   data-panel-dialog=""
                   aria-labelledby="adapter-editor-title"
+                  data-dialog-title="Adapter"
+                  data-dialog-title-id="adapter-editor-title"
+                  data-dialog-close-id="close-adapter-editor"
                 >
                   <form
                     id="adapter-editor"
                     class="dense-form adapter-editor dialog-form"
                     hidden=""
+                    data-dialog-panel=""
                   >
-                    <div class="panel-heading">
-                      <div>
-                        <span id="adapter-editor-mode" class="quiet-label"
-                          >create</span
-                        >
-                        <h3 id="adapter-editor-title">Adapter</h3>
-                      </div>
-                      <div class="panel-heading-actions">
-                        <span
-                          id="adapter-editor-status"
-                          class="quiet-label"
-                        ></span>
-                        <button
-                          id="close-adapter-editor"
-                          class="button button-outline"
-                          type="button"
-                        >
-                          Close
-                        </button>
-                      </div>
-                    </div>
-                    <div class="dialog-body">
-                      <fieldset class="form-section">
-                        <legend>Identity</legend>
-                        <div class="form-grid">
-                          <div class="field span-2">
-                            <label for="adapter-editor-slug">Adapter key</label>
-                            <input
-                              id="adapter-editor-slug"
-                              pattern="[A-Za-z0-9][A-Za-z0-9_.-]*"
-                              maxlength="96"
-                              required=""
-                            />
-                            <small
-                              >Immutable after creation; database IDs are
-                              treated as opaque.</small
-                            >
-                          </div>
-                          <div class="field span-2">
-                            <label for="adapter-editor-name"
-                              >Display name</label
-                            >
-                            <input
-                              id="adapter-editor-name"
-                              maxlength="128"
-                              required=""
-                            />
-                          </div>
-                        </div>
-                      </fieldset>
-
-                      <section
-                        id="adapter-model-io"
-                        class="form-section"
-                        aria-label="Inputs and outputs"
-                      ></section>
-                      <fieldset class="form-section">
-                        <legend>Manifest</legend>
-                        <div class="form-grid">
-                          <div class="field span-4">
-                            <label for="adapter-manifest">JSON manifest</label>
-                            <textarea
-                              id="adapter-manifest"
-                              class="manifest-editor"
-                              rows="22"
-                              spellcheck="false"
-                              required=""
-                            ></textarea>
-                            <small
-                              >Editing an existing adapter creates a new
-                              immutable version; prior experiments retain their
-                              snapshot.</small
-                            >
-                          </div>
-                          <div class="field span-4">
-                            <label for="adapter-description"
-                              >Registry description</label
-                            >
-                            <input
-                              id="adapter-description"
-                              maxlength="240"
-                              placeholder="Purpose and compatibility notes for this adapter"
-                            />
-                          </div>
-                          <div class="field span-4">
-                            <label for="adapter-change-note"
-                              >Version change note</label
-                            >
-                            <input
-                              id="adapter-change-note"
-                              maxlength="240"
-                              placeholder="Why this immutable version was created"
-                            />
-                            <small
-                              >Stored with the version and shown in its
-                              history.</small
-                            >
-                          </div>
-                        </div>
-                      </fieldset>
-
-                      <fieldset class="form-section">
-                        <legend>Validate against repository</legend>
-                        <div class="form-grid">
-                          <div class="field span-2">
-                            <label for="adapter-validation-repository"
-                              >Repository URL</label
-                            >
-                            <input
-                              id="adapter-validation-repository"
-                              type="url"
-                              placeholder="https://github.com/organization/repository"
-                            />
-                          </div>
-                          <div class="field span-2">
-                            <label for="adapter-validation-revision"
-                              >Branch, tag, or commit SHA</label
-                            >
-                            <input
-                              id="adapter-validation-revision"
-                              placeholder="main or exact SHA"
-                            />
-                          </div>
-                          <small class="span-4"
-                            >Draft edits are validated without saving. Read-only
-                            versions also retain a saved validation
-                            record.</small
-                          >
-                          <pre
-                            id="adapter-validation-report"
-                            class="validation-report span-4"
-                            hidden=""
-                          ></pre>
-                        </div>
-                      </fieldset>
-
-                      <div class="form-actions">
-                        <button
-                          id="edit-adapter"
-                          class="button button-outline"
-                          type="button"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          id="validate-adapter"
-                          class="button button-outline"
-                          type="button"
-                        >
-                          Validate
-                        </button>
-                        <button
-                          id="save-adapter"
-                          class="button button-accent"
-                          type="submit"
-                        >
-                          Save adapter
-                        </button>
-                      </div>
-
-                      <section
-                        id="adapter-version-section"
-                        class="adapter-version-section"
-                        hidden=""
+                    <template data-dialog-actions="">
+                      <span
+                        id="adapter-editor-status"
+                        class="quiet-label"
+                      ></span> </template
+                    ><template data-dialog-heading="">
+                      <span id="adapter-editor-mode" class="quiet-label"
+                        >create</span
                       >
-                        <div class="panel-heading">
-                          <div>
-                            <h3>Versions</h3>
-                          </div>
+                    </template>
+
+                    <fieldset class="form-section">
+                      <legend>Identity</legend>
+                      <div class="form-grid">
+                        <div class="field span-2">
+                          <label for="adapter-editor-slug">Adapter key</label>
+                          <input
+                            id="adapter-editor-slug"
+                            pattern="[A-Za-z0-9][A-Za-z0-9_.-]*"
+                            maxlength="96"
+                            required=""
+                          />
+                          <small
+                            >Immutable after creation; database IDs are treated
+                            as opaque.</small
+                          >
                         </div>
-                        <div class="table-scroll identity-table">
-                          <table>
-                            <thead>
-                              <tr>
-                                <th>Version</th>
-                                <th>Manifest hash</th>
-                                <th>Change note</th>
-                                <th>Created</th>
-                              </tr>
-                            </thead>
-                            <tbody id="adapter-versions-body"></tbody>
-                          </table>
+                        <div class="field span-2">
+                          <label for="adapter-editor-name">Display name</label>
+                          <input
+                            id="adapter-editor-name"
+                            maxlength="128"
+                            required=""
+                          />
                         </div>
-                      </section>
+                      </div>
+                    </fieldset>
+
+                    <section
+                      id="adapter-model-io"
+                      class="form-section"
+                      aria-label="Inputs and outputs"
+                    ></section>
+                    <fieldset class="form-section">
+                      <legend>Manifest</legend>
+                      <div class="form-grid">
+                        <div class="field span-4">
+                          <label for="adapter-manifest">JSON manifest</label>
+                          <textarea
+                            id="adapter-manifest"
+                            class="manifest-editor"
+                            rows="22"
+                            spellcheck="false"
+                            required=""
+                          ></textarea>
+                          <small
+                            >Editing an existing adapter creates a new immutable
+                            version; prior experiments retain their
+                            snapshot.</small
+                          >
+                        </div>
+                        <div class="field span-4">
+                          <label for="adapter-description"
+                            >Registry description</label
+                          >
+                          <input
+                            id="adapter-description"
+                            maxlength="240"
+                            placeholder="Purpose and compatibility notes for this adapter"
+                          />
+                        </div>
+                        <div class="field span-4">
+                          <label for="adapter-change-note"
+                            >Version change note</label
+                          >
+                          <input
+                            id="adapter-change-note"
+                            maxlength="240"
+                            placeholder="Why this immutable version was created"
+                          />
+                          <small
+                            >Stored with the version and shown in its
+                            history.</small
+                          >
+                        </div>
+                      </div>
+                    </fieldset>
+
+                    <fieldset class="form-section">
+                      <legend>Validate against repository</legend>
+                      <div class="form-grid">
+                        <div class="field span-2">
+                          <label for="adapter-validation-repository"
+                            >Repository URL</label
+                          >
+                          <input
+                            id="adapter-validation-repository"
+                            type="url"
+                            placeholder="https://github.com/organization/repository"
+                          />
+                        </div>
+                        <div class="field span-2">
+                          <label for="adapter-validation-revision"
+                            >Branch, tag, or commit SHA</label
+                          >
+                          <input
+                            id="adapter-validation-revision"
+                            placeholder="main or exact SHA"
+                          />
+                        </div>
+                        <small class="span-4"
+                          >Draft edits are validated without saving. Read-only
+                          versions also retain a saved validation record.</small
+                        >
+                        <pre
+                          id="adapter-validation-report"
+                          class="validation-report span-4"
+                          hidden=""
+                        ></pre>
+                      </div>
+                    </fieldset>
+
+                    <div class="form-actions">
+                      <button
+                        id="edit-adapter"
+                        class="button button-outline"
+                        type="button"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        id="validate-adapter"
+                        class="button button-outline"
+                        type="button"
+                      >
+                        Validate
+                      </button>
+                      <button
+                        id="save-adapter"
+                        class="button button-accent"
+                        type="submit"
+                      >
+                        Save adapter
+                      </button>
                     </div>
+
+                    <section
+                      id="adapter-version-section"
+                      class="adapter-version-section"
+                      hidden=""
+                    >
+                      <div class="panel-heading">
+                        <div>
+                          <h3>Versions</h3>
+                        </div>
+                      </div>
+                      <div class="table-scroll identity-table">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Version</th>
+                              <th>Manifest hash</th>
+                              <th>Change note</th>
+                              <th>Created</th>
+                            </tr>
+                          </thead>
+                          <tbody id="adapter-versions-body"></tbody>
+                        </table>
+                      </div>
+                    </section>
                   </form>
                 </dialog>
               </section>
@@ -2309,18 +2310,14 @@ trainer.deterministic=true"
               class="app-dialog"
               data-panel-dialog=""
               aria-labelledby="evaluation-suite-detail-title"
+              data-dialog-title="Evaluation suite"
+              data-dialog-title-id="evaluation-suite-detail-title"
             >
-              <section id="evaluation-suite-detail" hidden="">
-                <div class="panel-heading">
-                  <h3 id="evaluation-suite-detail-title">Evaluation suite</h3>
-                  <button
-                    type="button"
-                    class="button button-outline"
-                    data-dialog-close=""
-                  >
-                    Close
-                  </button>
-                </div>
+              <section
+                id="evaluation-suite-detail"
+                hidden=""
+                data-dialog-panel=""
+              >
                 <div
                   id="evaluation-suite-detail-meta"
                   class="key-value-grid"
@@ -2404,43 +2401,53 @@ trainer.deterministic=true"
                   class="app-dialog"
                   data-panel-dialog=""
                   aria-labelledby="evaluation-detail-title"
-                  data-result-dialog=""
-                  data-result-panel="evaluation-detail"
-                  data-result-title="evaluation-detail-title"
-                  data-result-actions="evaluation-detail-actions"
-                  data-result-close="close-evaluation-detail"
-                  data-result-label="Evaluation"
+                  data-dialog-title="Evaluation"
+                  data-dialog-title-id="evaluation-detail-title"
+                  data-dialog-close-id="close-evaluation-detail"
+                  data-dialog-actions-id="evaluation-detail-actions"
                 >
-                  <div id="evaluation-detail-meta" class="key-value-grid"></div>
-                  <section id="evaluation-rollouts" class="evaluation-rollouts">
-                    <h3>Episode results</h3>
-                    <span
-                      id="evaluation-rollout-count"
-                      class="quiet-label"
-                    ></span>
-                    <p
-                      id="evaluation-detail-error"
-                      class="field-validation is-invalid"
-                      hidden=""
-                    ></p>
-                    <div class="table-scroll identity-table">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>Episode</th>
-                            <th>State</th>
-                            <th>Seed</th>
-                            <th>Result</th>
-                            <th></th>
-                          </tr>
-                        </thead>
-                        <tbody id="evaluation-rollouts-body">
-                          <tr>
-                            <td colspan="5">Loading rollouts…</td>
-                          </tr>
-                        </tbody>
-                      </table>
-                    </div>
+                  <section
+                    id="evaluation-detail"
+                    class="row-disclosure inline-drawer dialog-form"
+                    data-dialog-panel=""
+                  >
+                    <div
+                      id="evaluation-detail-meta"
+                      class="key-value-grid"
+                    ></div>
+                    <section
+                      id="evaluation-rollouts"
+                      class="evaluation-rollouts"
+                    >
+                      <h3>Episode results</h3>
+                      <span
+                        id="evaluation-rollout-count"
+                        class="quiet-label"
+                      ></span>
+                      <p
+                        id="evaluation-detail-error"
+                        class="field-validation is-invalid"
+                        hidden=""
+                      ></p>
+                      <div class="table-scroll identity-table">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Episode</th>
+                              <th>State</th>
+                              <th>Seed</th>
+                              <th>Result</th>
+                              <th></th>
+                            </tr>
+                          </thead>
+                          <tbody id="evaluation-rollouts-body">
+                            <tr>
+                              <td colspan="5">Loading rollouts…</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </section>
                   </section>
                 </dialog>
               </section>
@@ -3766,115 +3773,114 @@ Select a session.</pre
                 id="live-review-dialog"
                 class="app-dialog"
                 aria-labelledby="live-review-title"
+                data-dialog-title="Review recordings"
+                data-dialog-title-id="live-review-title"
+                data-dialog-close-id="live-review-close"
               >
-                <div class="panel-heading">
-                  <div>
-                    <h3 id="live-review-title">Review recordings</h3>
+                <section data-dialog-panel="">
+                  <div class="field">
+                    <label for="live-review-recording">Recording</label
+                    ><select id="live-review-recording"></select>
                   </div>
+                  <p id="live-review-status" role="status">
+                    Loading recording…
+                  </p>
                   <button
-                    id="live-review-close"
-                    data-dialog-close=""
+                    id="live-review-retry"
                     class="button button-outline"
                     type="button"
-                  >
-                    Close
-                  </button>
-                </div>
-                <div class="field">
-                  <label for="live-review-recording">Recording</label
-                  ><select id="live-review-recording"></select>
-                </div>
-                <p id="live-review-status" role="status">Loading recording…</p>
-                <button
-                  id="live-review-retry"
-                  class="button button-outline"
-                  type="button"
-                  hidden=""
-                >
-                  Retry download
-                </button>
-                <div id="live-review-content" hidden="">
-                  <div class="field">
-                    <label for="live-review-episode">Demonstration</label
-                    ><select id="live-review-episode"></select>
-                  </div>
-                  <div id="live-episode-viewer"></div>
-                  <video
-                    id="live-review-video"
-                    controls=""
-                    playsinline=""
-                    preload="metadata"
                     hidden=""
-                    aria-label="Recorded demonstration video"
-                  ></video>
-                  <p
-                    id="live-review-video-status"
-                    class="secondary"
-                    role="status"
-                  ></p>
-                  <div class="live-review-downloads">
-                    <button
-                      id="live-review-video-retry"
-                      class="button button-outline"
-                      type="button"
+                  >
+                    Retry download
+                  </button>
+                  <div id="live-review-content" hidden="">
+                    <div class="field">
+                      <label for="live-review-episode">Demonstration</label
+                      ><select id="live-review-episode"></select>
+                    </div>
+                    <div id="live-episode-viewer"></div>
+                    <video
+                      id="live-review-video"
+                      controls=""
+                      playsinline=""
+                      preload="metadata"
                       hidden=""
-                    >
-                      Prepare video</button
-                    ><button
-                      id="live-review-video-cancel"
-                      class="button button-outline"
-                      type="button"
-                      hidden=""
-                    >
-                      Cancel queued video</button
-                    ><a
-                      id="live-review-video-download"
-                      class="text-button"
-                      download=""
-                      hidden=""
-                      >Download video</a
-                    >
-                  </div>
-                  <details id="live-review-data">
-                    <summary>Recorded values</summary>
+                      aria-label="Recorded demonstration video"
+                    ></video>
+                    <p
+                      id="live-review-video-status"
+                      class="secondary"
+                      role="status"
+                    ></p>
                     <div class="live-review-downloads">
-                      <a
-                        id="live-review-original"
-                        class="text-button"
-                        download=""
-                        >Download original (.pkl)</a
+                      <button
+                        id="live-review-video-retry"
+                        class="button button-outline"
+                        type="button"
+                        hidden=""
+                      >
+                        Prepare video</button
+                      ><button
+                        id="live-review-video-cancel"
+                        class="button button-outline"
+                        type="button"
+                        hidden=""
+                      >
+                        Cancel queued video</button
                       ><a
-                        id="live-review-summary"
+                        id="live-review-video-download"
                         class="text-button"
                         download=""
-                        >Download summary</a
-                      ><a id="live-review-json" class="text-button" download=""
-                        >Download preview values</a
+                        hidden=""
+                        >Download video</a
                       >
                     </div>
+                    <details id="live-review-data">
+                      <summary>Recorded values</summary>
+                      <div class="live-review-downloads">
+                        <a
+                          id="live-review-original"
+                          class="text-button"
+                          download=""
+                          >Download original (.pkl)</a
+                        ><a
+                          id="live-review-summary"
+                          class="text-button"
+                          download=""
+                          >Download summary</a
+                        ><a
+                          id="live-review-json"
+                          class="text-button"
+                          download=""
+                          >Download preview values</a
+                        >
+                      </div>
 
-                    <div class="field">
-                      <label for="live-review-field">Recorded value</label
-                      ><select id="live-review-field"></select>
-                    </div>
-                    <p id="live-review-value-note" class="secondary"></p>
-                    <div class="table-scroll live-review-values identity-table">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>Component</th>
-                            <th>Saved value</th>
-                          </tr>
-                        </thead>
-                        <tbody id="live-review-values"></tbody>
-                      </table>
-                    </div>
-                    <details>
-                      <summary>Full scene state at this frame</summary>
-                      <pre id="live-review-state"></pre>
+                      <div class="field">
+                        <label for="live-review-field">Recorded value</label
+                        ><select id="live-review-field"></select>
+                      </div>
+                      <p id="live-review-value-note" class="secondary"></p>
+                      <div
+                        class="table-scroll live-review-values identity-table"
+                      >
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Component</th>
+                              <th>Saved value</th>
+                            </tr>
+                          </thead>
+                          <tbody id="live-review-values"></tbody>
+                        </table>
+                      </div>
+                      <details>
+                        <summary>Full scene state at this frame</summary>
+                        <pre id="live-review-state"></pre>
+                      </details>
                     </details>
-                  </details>
-                </div>
+                  </div>
+                </section>
               </dialog>
             </section>
             <section
@@ -3969,89 +3975,79 @@ Select a session.</pre
                   class="app-dialog"
                   data-panel-dialog=""
                   aria-labelledby="data-resource-form-title"
+                  data-dialog-title="Register dataset or files"
+                  data-dialog-title-id="data-resource-form-title"
+                  data-dialog-close-id="close-data-resource-form"
                 >
-                  <form id="data-resource-form" class="dialog-form" hidden="">
-                    <div class="panel-heading">
-                      <div>
-                        <h3 id="data-resource-form-title">
-                          Register dataset or files
-                        </h3>
+                  <form
+                    id="data-resource-form"
+                    class="dialog-form"
+                    hidden=""
+                    data-dialog-panel=""
+                  >
+                    <input id="data-resource-id" type="hidden" />
+                    <div class="form-grid">
+                      <div class="field">
+                        <label for="data-resource-provider">Provider</label>
+                        <input
+                          id="data-resource-provider"
+                          value="huggingface"
+                          list="data-provider-options"
+                          required=""
+                        />
+                        <datalist id="data-provider-options">
+                          <option value="huggingface"></option>
+                          <option value="s3"></option>
+                          <option value="local"></option>
+                          <option value="http"></option>
+                        </datalist>
                       </div>
-                      <div class="panel-heading-actions">
-                        <button
-                          id="close-data-resource-form"
-                          class="button button-outline"
-                          type="button"
+                      <div class="field">
+                        <label for="data-resource-namespace">Namespace</label>
+                        <input
+                          id="data-resource-namespace"
+                          placeholder="organization or owner"
+                          required=""
+                        />
+                      </div>
+                      <div class="field">
+                        <label for="data-resource-name">Name</label>
+                        <input
+                          id="data-resource-name"
+                          placeholder="dataset name"
+                          required=""
+                        />
+                      </div>
+                      <div class="field">
+                        <label for="data-resource-kind">Type</label>
+                        <input
+                          id="data-resource-category"
+                          type="hidden"
+                          value="dataset"
+                        />
+                        <select id="data-resource-kind" required="">
+                          <option value="">Loading types…</option>
+                        </select>
+                      </div>
+                      <div class="field span-4">
+                        <label for="data-resource-description"
+                          >Description</label
                         >
-                          Close
-                        </button>
+                        <input
+                          id="data-resource-description"
+                          maxlength="500"
+                          placeholder="Purpose, license, or compatibility notes"
+                        />
                       </div>
                     </div>
-                    <div class="dialog-body">
-                      <input id="data-resource-id" type="hidden" />
-                      <div class="form-grid">
-                        <div class="field">
-                          <label for="data-resource-provider">Provider</label>
-                          <input
-                            id="data-resource-provider"
-                            value="huggingface"
-                            list="data-provider-options"
-                            required=""
-                          />
-                          <datalist id="data-provider-options">
-                            <option value="huggingface"></option>
-                            <option value="s3"></option>
-                            <option value="local"></option>
-                            <option value="http"></option>
-                          </datalist>
-                        </div>
-                        <div class="field">
-                          <label for="data-resource-namespace">Namespace</label>
-                          <input
-                            id="data-resource-namespace"
-                            placeholder="organization or owner"
-                            required=""
-                          />
-                        </div>
-                        <div class="field">
-                          <label for="data-resource-name">Name</label>
-                          <input
-                            id="data-resource-name"
-                            placeholder="dataset name"
-                            required=""
-                          />
-                        </div>
-                        <div class="field">
-                          <label for="data-resource-kind">Type</label>
-                          <input
-                            id="data-resource-category"
-                            type="hidden"
-                            value="dataset"
-                          />
-                          <select id="data-resource-kind" required="">
-                            <option value="">Loading types…</option>
-                          </select>
-                        </div>
-                        <div class="field span-4">
-                          <label for="data-resource-description"
-                            >Description</label
-                          >
-                          <input
-                            id="data-resource-description"
-                            maxlength="500"
-                            placeholder="Purpose, license, or compatibility notes"
-                          />
-                        </div>
-                      </div>
-                      <div class="form-actions">
-                        <button
-                          id="create-data-resource"
-                          class="button button-accent"
-                          type="submit"
-                        >
-                          Register
-                        </button>
-                      </div>
+                    <div class="form-actions">
+                      <button
+                        id="create-data-resource"
+                        class="button button-accent"
+                        type="submit"
+                      >
+                        Register
+                      </button>
                     </div>
                   </form>
                 </dialog>
@@ -4060,100 +4056,95 @@ Select a session.</pre
                   class="app-dialog"
                   data-panel-dialog=""
                   aria-labelledby="data-version-resource-label"
+                  data-dialog-title="Add files"
+                  data-dialog-title-id="data-version-resource-label"
+                  data-dialog-close-id="close-data-version-form"
                 >
-                  <form id="data-version-form" class="dialog-form" hidden="">
-                    <div class="panel-heading">
-                      <div>
-                        <h3 id="data-version-resource-label">Add files</h3>
-                        <p class="registry-section-help">
-                          A version identifies one exact, unchanged set of
-                          files. Imports normally publish it automatically; use
-                          this form for a manual publication.
-                        </p>
+                  <form
+                    id="data-version-form"
+                    class="dialog-form"
+                    hidden=""
+                    data-dialog-panel=""
+                  >
+                    <template data-dialog-heading="">
+                      <p class="registry-section-help">
+                        A version identifies one exact, unchanged set of files.
+                        Imports normally publish it automatically; use this form
+                        for a manual publication.
+                      </p>
+                    </template>
+
+                    <input id="data-version-resource-id" type="hidden" />
+                    <div class="form-grid">
+                      <div class="field">
+                        <label for="data-version-revision"
+                          >Upstream revision</label
+                        ><input
+                          id="data-version-revision"
+                          placeholder="Full commit or provider revision"
+                          required=""
+                        />
                       </div>
-                      <div class="panel-heading-actions">
-                        <button
-                          id="close-data-version-form"
-                          class="button button-outline"
-                          type="button"
-                        >
-                          Close
-                        </button>
+                      <div class="field">
+                        <label for="data-version-format">Format</label
+                        ><input
+                          id="data-version-format"
+                          placeholder="lerobot-v3, hdf5, usd-assets"
+                          required=""
+                        />
+                      </div>
+                      <div class="field span-2">
+                        <label for="data-version-path">Cluster path</label
+                        ><input
+                          id="data-version-path"
+                          placeholder="/coc/flash7/ycho420/datasets/resources/..."
+                          required=""
+                        />
+                      </div>
+                      <div class="field span-2">
+                        <label for="data-version-source-uri">Source URI</label
+                        ><input
+                          id="data-version-source-uri"
+                          placeholder="hf://namespace/name or s3://bucket/key"
+                        />
+                      </div>
+                      <div class="field span-2">
+                        <label for="data-version-manifest"
+                          >Manifest SHA-256</label
+                        ><input
+                          id="data-version-manifest"
+                          minlength="64"
+                          maxlength="64"
+                          pattern="[A-Fa-f0-9]{64}"
+                          required=""
+                        />
+                      </div>
+                      <div class="field">
+                        <label for="data-version-status">Status</label
+                        ><select id="data-version-status">
+                          <option value="READY">Ready</option>
+                          <option value="STAGING">Staging</option>
+                          <option value="UNAVAILABLE">Unavailable</option>
+                        </select>
+                      </div>
+                      <div class="field">
+                        <label for="data-version-size">Size / bytes</label
+                        ><input
+                          id="data-version-size"
+                          type="number"
+                          min="0"
+                          placeholder="Optional"
+                        />
                       </div>
                     </div>
-                    <div class="dialog-body">
-                      <input id="data-version-resource-id" type="hidden" />
-                      <div class="form-grid">
-                        <div class="field">
-                          <label for="data-version-revision"
-                            >Upstream revision</label
-                          ><input
-                            id="data-version-revision"
-                            placeholder="Full commit or provider revision"
-                            required=""
-                          />
-                        </div>
-                        <div class="field">
-                          <label for="data-version-format">Format</label
-                          ><input
-                            id="data-version-format"
-                            placeholder="lerobot-v3, hdf5, usd-assets"
-                            required=""
-                          />
-                        </div>
-                        <div class="field span-2">
-                          <label for="data-version-path">Cluster path</label
-                          ><input
-                            id="data-version-path"
-                            placeholder="/coc/flash7/ycho420/datasets/resources/..."
-                            required=""
-                          />
-                        </div>
-                        <div class="field span-2">
-                          <label for="data-version-source-uri">Source URI</label
-                          ><input
-                            id="data-version-source-uri"
-                            placeholder="hf://namespace/name or s3://bucket/key"
-                          />
-                        </div>
-                        <div class="field span-2">
-                          <label for="data-version-manifest"
-                            >Manifest SHA-256</label
-                          ><input
-                            id="data-version-manifest"
-                            minlength="64"
-                            maxlength="64"
-                            pattern="[A-Fa-f0-9]{64}"
-                            required=""
-                          />
-                        </div>
-                        <div class="field">
-                          <label for="data-version-status">Status</label
-                          ><select id="data-version-status">
-                            <option value="READY">Ready</option>
-                            <option value="STAGING">Staging</option>
-                            <option value="UNAVAILABLE">Unavailable</option>
-                          </select>
-                        </div>
-                        <div class="field">
-                          <label for="data-version-size">Size / bytes</label
-                          ><input
-                            id="data-version-size"
-                            type="number"
-                            min="0"
-                            placeholder="Optional"
-                          />
-                        </div>
-                      </div>
-                      <div class="form-actions">
-                        <button
-                          id="create-data-version"
-                          class="button button-accent"
-                          type="submit"
-                        >
-                          Create immutable version
-                        </button>
-                      </div>
+                    <div class="form-actions">
+                      <button
+                        id="create-data-version"
+                        class="button button-accent"
+                        type="submit"
+                      >
+                        Create immutable version
+                      </button>
                     </div>
                   </form>
                 </dialog>
@@ -4162,144 +4153,134 @@ Select a session.</pre
                   class="app-dialog"
                   data-panel-dialog=""
                   aria-labelledby="data-import-resource-label"
+                  data-dialog-title="Import from Hugging Face"
+                  data-dialog-title-id="data-import-resource-label"
+                  data-dialog-close-id="close-data-import-form"
                 >
-                  <form id="data-import-form" class="dialog-form" hidden="">
-                    <div class="panel-heading">
-                      <div>
-                        <h3 id="data-import-resource-label">
-                          Import from Hugging Face
-                        </h3>
-                        <p class="registry-section-help">
-                          Import a dataset directory from an exact repository
-                          commit.
-                        </p>
-                      </div>
-                      <div class="panel-heading-actions">
-                        <button
-                          id="close-data-import-form"
-                          class="button button-outline"
-                          type="button"
+                  <form
+                    id="data-import-form"
+                    class="dialog-form"
+                    hidden=""
+                    data-dialog-panel=""
+                  >
+                    <template data-dialog-heading="">
+                      <p class="registry-section-help">
+                        Import a dataset directory from an exact repository
+                        commit.
+                      </p>
+                    </template>
+
+                    <input id="data-import-resource-id" type="hidden" />
+                    <div class="form-grid">
+                      <div class="field span-2">
+                        <label for="data-import-revision"
+                          >Exact Hugging Face revision</label
+                        ><input
+                          id="data-import-revision"
+                          minlength="40"
+                          maxlength="40"
+                          pattern="[A-Fa-f0-9]{40}"
+                          placeholder="40-character commit SHA"
+                          required=""
+                        /><small
+                          >Mutable names such as main are rejected.</small
                         >
-                          Close
-                        </button>
+                      </div>
+                      <div class="field span-2">
+                        <label for="data-import-subset">Dataset directory</label
+                        ><input
+                          id="data-import-subset"
+                          placeholder="Repository-relative directory"
+                          required=""
+                        /><small
+                          >Enter the directory only; do not add /**.</small
+                        >
+                      </div>
+                      <div class="field">
+                        <label for="data-import-format">Format</label
+                        ><input
+                          id="data-import-format"
+                          list="data-format-suggestions"
+                          placeholder="Declared format identifier"
+                          required=""
+                        /><small
+                          >Must exactly match the format declared by the
+                          consuming adapter.</small
+                        >
+                      </div>
+                      <div class="field">
+                        <label for="data-import-role">Bundle role</label
+                        ><input
+                          id="data-import-role"
+                          list="data-role-suggestions"
+                          placeholder="Bundle assignment role"
+                          required=""
+                        />
+                      </div>
+
+                      <div class="field">
+                        <label for="data-import-gateway">SSH gateway</label
+                        ><select id="data-import-gateway">
+                          <option value="auto">Auto: sky1, then sky2</option>
+                          <option value="sky1">sky1</option>
+                          <option value="sky2">sky2</option>
+                        </select>
+                      </div>
+                      <div class="field">
+                        <label for="data-import-queue">Slurm queue</label
+                        ><select id="data-import-queue">
+                          <option value="overcap">overcap (preemptible)</option>
+                          <option value="normal">rl2-lab</option>
+                        </select>
                       </div>
                     </div>
-                    <div class="dialog-body">
-                      <input id="data-import-resource-id" type="hidden" />
-                      <div class="form-grid">
-                        <div class="field span-2">
-                          <label for="data-import-revision"
-                            >Exact Hugging Face revision</label
-                          ><input
-                            id="data-import-revision"
-                            minlength="40"
-                            maxlength="40"
-                            pattern="[A-Fa-f0-9]{40}"
-                            placeholder="40-character commit SHA"
-                            required=""
-                          /><small
-                            >Mutable names such as main are rejected.</small
-                          >
-                        </div>
-                        <div class="field span-2">
-                          <label for="data-import-subset"
-                            >Dataset directory</label
-                          ><input
-                            id="data-import-subset"
-                            placeholder="Repository-relative directory"
-                            required=""
-                          /><small
-                            >Enter the directory only; do not add /**.</small
-                          >
-                        </div>
-                        <div class="field">
-                          <label for="data-import-format">Format</label
-                          ><input
-                            id="data-import-format"
-                            list="data-format-suggestions"
-                            placeholder="Declared format identifier"
-                            required=""
-                          /><small
-                            >Must exactly match the format declared by the
-                            consuming adapter.</small
-                          >
-                        </div>
-                        <div class="field">
-                          <label for="data-import-role">Bundle role</label
-                          ><input
-                            id="data-import-role"
-                            list="data-role-suggestions"
-                            placeholder="Bundle assignment role"
-                            required=""
-                          />
-                        </div>
-
-                        <div class="field">
-                          <label for="data-import-gateway">SSH gateway</label
-                          ><select id="data-import-gateway">
-                            <option value="auto">Auto: sky1, then sky2</option>
-                            <option value="sky1">sky1</option>
-                            <option value="sky2">sky2</option>
-                          </select>
-                        </div>
-                        <div class="field">
-                          <label for="data-import-queue">Slurm queue</label
-                          ><select id="data-import-queue">
-                            <option value="overcap">
-                              overcap (preemptible)
-                            </option>
-                            <option value="normal">rl2-lab</option>
-                          </select>
-                        </div>
+                    <div class="form-grid">
+                      <div class="field">
+                        <label for="data-import-cpus">CPUs</label
+                        ><input
+                          id="data-import-cpus"
+                          type="number"
+                          min="1"
+                          max="64"
+                          value="8"
+                          required=""
+                        />
                       </div>
-                      <div class="form-grid">
-                        <div class="field">
-                          <label for="data-import-cpus">CPUs</label
-                          ><input
-                            id="data-import-cpus"
-                            type="number"
-                            min="1"
-                            max="64"
-                            value="8"
-                            required=""
-                          />
-                        </div>
-                        <div class="field">
-                          <label for="data-import-memory">Memory / GB</label
-                          ><input
-                            id="data-import-memory"
-                            type="number"
-                            min="1"
-                            max="512"
-                            value="32"
-                            required=""
-                          />
-                        </div>
-                        <div class="field">
-                          <label for="data-import-time">Time limit</label
-                          ><input
-                            id="data-import-time"
-                            value="04:00:00"
-                            required=""
-                          /><small
-                            >Slurm duration, from 1 minute to 24 hours.</small
-                          >
-                        </div>
+                      <div class="field">
+                        <label for="data-import-memory">Memory / GB</label
+                        ><input
+                          id="data-import-memory"
+                          type="number"
+                          min="1"
+                          max="512"
+                          value="32"
+                          required=""
+                        />
                       </div>
-                      <p
-                        id="data-import-budget"
-                        class="registry-section-help"
-                        aria-live="polite"
-                      ></p>
-                      <div class="form-actions">
-                        <button
-                          id="submit-data-import"
-                          class="button button-accent"
-                          type="submit"
+                      <div class="field">
+                        <label for="data-import-time">Time limit</label
+                        ><input
+                          id="data-import-time"
+                          value="04:00:00"
+                          required=""
+                        /><small
+                          >Slurm duration, from 1 minute to 24 hours.</small
                         >
-                          Submit import job
-                        </button>
                       </div>
+                    </div>
+                    <p
+                      id="data-import-budget"
+                      class="registry-section-help"
+                      aria-live="polite"
+                    ></p>
+                    <div class="form-actions">
+                      <button
+                        id="submit-data-import"
+                        class="button button-accent"
+                        type="submit"
+                      >
+                        Submit import job
+                      </button>
                     </div>
                   </form>
                 </dialog>
@@ -4733,108 +4714,103 @@ Select a session.</pre
           aria-labelledby="tutorial-title"
           aria-describedby="tutorial-instruction"
           tabindex="-1"
+          data-dialog-title=""
+          data-dialog-title-id="tutorial-title"
+          data-dialog-close-id="tutorial-exit"
         >
-          <div class="panel-heading">
-            <div>
-              <h3 id="tutorial-title"></h3>
+          <section data-dialog-panel="">
+            <template data-dialog-heading="">
               <p id="tutorial-page" class="tutorial-page-label"></p>
-            </div>
-            <button
-              id="tutorial-exit"
-              class="button button-outline"
-              type="button"
-              aria-label="Exit tutorial"
-            >
-              Exit
-            </button>
-          </div>
-          <p
-            id="tutorial-progress"
-            class="tutorial-progress"
-            role="status"
-            aria-live="polite"
-          ></p>
+            </template>
 
-          <p id="tutorial-instruction" class="tutorial-instruction"></p>
-          <div class="tutorial-session-meta">
-            <span id="tutorial-token"></span>
-            <span
-              id="tutorial-gate-status"
+            <p
+              id="tutorial-progress"
+              class="tutorial-progress"
               role="status"
               aria-live="polite"
-            ></span>
-          </div>
-          <button
-            id="tutorial-use-value"
-            class="button button-outline tutorial-use-value"
-            type="button"
-            hidden=""
-          >
-            Use tutorial value
-          </button>
-          <div
-            id="tutorial-confirm-panel"
-            class="tutorial-confirm-panel"
-            hidden=""
-          >
-            <p id="tutorial-confirm-summary"></p>
-            <label for="tutorial-confirm-input"
-              >Type <code id="tutorial-confirm-phrase"></code>, then click the
-              highlighted control again.</label
-            >
-            <input
-              id="tutorial-confirm-input"
-              autocomplete="off"
-              spellcheck="false"
-            />
-          </div>
-          <p
-            id="tutorial-error"
-            class="tutorial-error"
-            role="alert"
-            hidden=""
-          ></p>
-          <div
-            id="tutorial-records"
-            class="tutorial-records"
-            aria-live="polite"
-          ></div>
-          <div
-            id="tutorial-resume-panel"
-            class="tutorial-resume-panel"
-            hidden=""
-          >
+            ></p>
+
+            <p id="tutorial-instruction" class="tutorial-instruction"></p>
+            <div class="tutorial-session-meta">
+              <span id="tutorial-token"></span>
+              <span
+                id="tutorial-gate-status"
+                role="status"
+                aria-live="polite"
+              ></span>
+            </div>
             <button
-              id="tutorial-resume"
-              class="button button-accent"
+              id="tutorial-use-value"
+              class="button button-outline tutorial-use-value"
               type="button"
+              hidden=""
             >
-              Resume
+              Use tutorial value
             </button>
-            <button
-              id="tutorial-restart"
-              class="button button-outline"
-              type="button"
+            <div
+              id="tutorial-confirm-panel"
+              class="tutorial-confirm-panel"
+              hidden=""
             >
-              Restart tutorial
-            </button>
-          </div>
-          <div class="tutorial-actions">
-            <button
-              id="tutorial-back"
-              class="button button-outline"
-              type="button"
+              <p id="tutorial-confirm-summary"></p>
+              <label for="tutorial-confirm-input"
+                >Type <code id="tutorial-confirm-phrase"></code>, then click the
+                highlighted control again.</label
+              >
+              <input
+                id="tutorial-confirm-input"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
+            <p
+              id="tutorial-error"
+              class="tutorial-error"
+              role="alert"
+              hidden=""
+            ></p>
+            <div
+              id="tutorial-records"
+              class="tutorial-records"
+              aria-live="polite"
+            ></div>
+            <div
+              id="tutorial-resume-panel"
+              class="tutorial-resume-panel"
+              hidden=""
             >
-              Back
-            </button>
-            <button
-              id="tutorial-next"
-              class="button button-accent"
-              type="button"
-            >
-              Next
-            </button>
-          </div>
+              <button
+                id="tutorial-resume"
+                class="button button-accent"
+                type="button"
+              >
+                Resume
+              </button>
+              <button
+                id="tutorial-restart"
+                class="button button-outline"
+                type="button"
+              >
+                Restart tutorial
+              </button>
+            </div>
+            <div class="tutorial-actions">
+              <button
+                id="tutorial-back"
+                class="button button-outline"
+                type="button"
+              >
+                Back
+              </button>
+              <button
+                id="tutorial-next"
+                class="button button-accent"
+                type="button"
+              >
+                Next
+              </button>
+            </div>
+          </section>
         </section>
       </div>
 
@@ -4855,182 +4831,166 @@ Select a session.</pre
         id="policy-export-dialog"
         class="app-dialog"
         aria-labelledby="policy-export-title"
+        data-dialog-title="Convert to a dataset"
+        data-dialog-title-id="policy-export-title"
+        data-dialog-close-id="close-policy-export"
       >
-        <div class="panel-heading">
-          <div>
-            <h3 id="policy-export-title">Convert to a dataset</h3>
+        <section data-dialog-panel="">
+          <template data-dialog-heading="">
             <p>Creates training data in Datasets for use in an experiment.</p>
-          </div>
-          <button
-            id="close-policy-export"
-            data-dialog-close=""
-            type="button"
-            class="button button-outline"
-          >
-            Close
-          </button>
-        </div>
-        <form id="policy-export-form" class="dialog-form">
-          <div class="dialog-body">
-            <div class="form-grid">
-              <div class="field">
-                <label for="policy-export-name">Dataset name</label
-                ><input
-                  id="policy-export-name"
-                  maxlength="100"
-                  required=""
-                  aria-describedby="policy-export-name-help"
-                /><small id="policy-export-name-help"></small>
+          </template>
+
+          <form id="policy-export-form" class="dialog-form">
+            <div class="dialog-body">
+              <div class="form-grid">
+                <div class="field">
+                  <label for="policy-export-name">Dataset name</label
+                  ><input
+                    id="policy-export-name"
+                    maxlength="100"
+                    required=""
+                    aria-describedby="policy-export-name-help"
+                  /><small id="policy-export-name-help"></small>
+                </div>
+                <div class="field">
+                  <label for="policy-export-format">Policy</label
+                  ><select id="policy-export-format" required=""></select
+                  ><small id="policy-export-format-help" hidden=""></small>
+                </div>
+                <div class="field">
+                  <label for="preparation-validation"
+                    >Validation episodes (%)</label
+                  ><input
+                    id="preparation-validation"
+                    type="number"
+                    min="0"
+                    max="50"
+                    value="20"
+                    required=""
+                  />
+                </div>
+                <div class="field">
+                  <label for="preparation-seed">Split seed</label
+                  ><input
+                    id="preparation-seed"
+                    type="number"
+                    min="0"
+                    max="2147483647"
+                    value="42"
+                    required=""
+                  />
+                </div>
               </div>
-              <div class="field">
-                <label for="policy-export-format">Policy</label
-                ><select id="policy-export-format" required=""></select
-                ><small id="policy-export-format-help" hidden=""></small>
-              </div>
-              <div class="field">
-                <label for="preparation-validation"
-                  >Validation episodes (%)</label
-                ><input
-                  id="preparation-validation"
-                  type="number"
-                  min="0"
-                  max="50"
-                  value="20"
-                  required=""
-                />
-              </div>
-              <div class="field">
-                <label for="preparation-seed">Split seed</label
-                ><input
-                  id="preparation-seed"
-                  type="number"
-                  min="0"
-                  max="2147483647"
-                  value="42"
-                  required=""
-                />
+              <p
+                id="policy-export-compatibility"
+                role="status"
+                class="inline-alert"
+                hidden=""
+              ></p>
+              <p
+                id="policy-export-error"
+                role="alert"
+                class="inline-alert"
+                hidden=""
+              ></p>
+              <div class="form-actions">
+                <button
+                  id="create-policy-export"
+                  type="submit"
+                  class="button button-accent"
+                >
+                  Convert
+                </button>
               </div>
             </div>
-            <p
-              id="policy-export-compatibility"
-              role="status"
-              class="inline-alert"
-              hidden=""
-            ></p>
-            <p
-              id="policy-export-error"
-              role="alert"
-              class="inline-alert"
-              hidden=""
-            ></p>
-            <div class="form-actions">
-              <button
-                id="create-policy-export"
-                type="submit"
-                class="button button-accent"
-              >
-                Convert
-              </button>
-            </div>
-          </div>
-        </form>
+          </form>
+        </section>
       </dialog>
       <dialog
         id="data-import-detail-dialog"
         class="app-dialog"
         aria-labelledby="data-import-detail-title"
+        data-dialog-title="Import job details"
+        data-dialog-title-id="data-import-detail-title"
       >
-        <div class="panel-heading">
-          <div>
-            <h3 id="data-import-detail-title">Import job details</h3>
+        <section data-dialog-panel="">
+          <template data-dialog-heading="">
             <p id="data-import-detail-context"></p>
-          </div>
-          <button
-            type="button"
-            data-dialog-close=""
-            class="button button-outline"
-          >
-            Close
-          </button>
-        </div>
-        <div id="data-import-detail-content"></div>
+          </template>
+
+          <div id="data-import-detail-content"></div>
+        </section>
       </dialog>
       <dialog
         id="prepared-dataset-dialog"
         class="app-dialog"
         aria-labelledby="prepared-dataset-title"
         data-panel-dialog=""
-        data-result-dialog=""
-        data-result-panel="prepared-dataset-detail"
-        data-result-title="prepared-dataset-title"
-        data-result-actions="prepared-dataset-actions"
-        data-result-close="close-prepared-dataset"
-        data-result-label="Dataset"
+        data-dialog-title="Dataset"
+        data-dialog-title-id="prepared-dataset-title"
+        data-dialog-close-id="close-prepared-dataset"
+        data-dialog-actions-id="prepared-dataset-actions"
       >
-        <p id="prepared-dataset-context" class="secondary"></p>
-        <p
-          id="prepared-dataset-error"
-          class="inline-alert"
-          role="alert"
-          hidden=""
-        ></p>
-        <div id="prepared-dataset-content"></div>
+        <section
+          id="prepared-dataset-detail"
+          class="row-disclosure inline-drawer dialog-form"
+          data-dialog-panel=""
+        >
+          <p id="prepared-dataset-context" class="secondary"></p>
+          <p
+            id="prepared-dataset-error"
+            class="inline-alert"
+            role="alert"
+            hidden=""
+          ></p>
+          <div id="prepared-dataset-content"></div>
+        </section>
       </dialog>
       <dialog
         id="run-detail-dialog"
         class="app-dialog"
         data-panel-dialog=""
         aria-labelledby="run-detail-title"
+        data-dialog-title="Training run"
+        data-dialog-title-id="run-detail-title"
+        data-dialog-close-id="close-run-detail"
       >
-        <section id="run-detail" hidden="">
-          <div class="panel-heading">
-            <h3 id="run-detail-title">Training run</h3>
-            <button
-              id="close-run-detail"
-              class="button button-outline"
-              type="button"
-            >
-              Close
-            </button>
-          </div>
-          <div class="dialog-body">
-            <div id="run-detail-meta" class="key-value-grid"></div>
-            <section id="run-checkpoints" class="form-section">
-              <h3>Checkpoints</h3>
-              <div
-                id="run-checkpoint-list"
-                class="table-scroll identity-table"
-              ></div>
-            </section>
+        <section id="run-detail" hidden="" data-dialog-panel="">
+          <div id="run-detail-meta" class="key-value-grid"></div>
+          <div
+            id="run-detail-tracking"
+            class="tracking-detail-strip"
+            hidden=""
+          ></div>
+          <section id="run-checkpoints" class="dialog-table-section">
+            <h3>Checkpoints</h3>
             <div
-              id="run-detail-tracking"
-              class="tracking-detail-strip"
-              hidden=""
+              id="run-checkpoint-list"
+              class="table-scroll identity-table"
             ></div>
+          </section>
+
+          <section class="dialog-table-section" id="run-attempts">
             <h3>Attempts</h3>
-            <div class="table-frame">
-              <div
-                class="table-scroll run-attempts-table-scroll identity-table"
-              >
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Attempt</th>
-                      <th>State</th>
-                      <th>Slurm job</th>
-                      <th>Execution</th>
-                      <th>Started</th>
-                      <th>Ended</th>
-                      <th>Error</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody id="attempts-body"></tbody>
-                </table>
-              </div>
-            </div>
             <div id="run-detail-actions" class="form-actions"></div>
-          </div>
+            <div class="table-scroll run-attempts-table-scroll identity-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Attempt</th>
+                    <th>State</th>
+                    <th>Slurm job</th>
+                    <th>Execution</th>
+                    <th>Started</th>
+                    <th>Ended</th>
+                    <th>Error</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="attempts-body"></tbody>
+              </table>
+            </div>
+          </section>
         </section>
       </dialog>
       <dialog
@@ -5038,82 +4998,58 @@ Select a session.</pre
         class="app-dialog"
         data-panel-dialog=""
         aria-labelledby="run-attempt-detail-title"
+        data-dialog-title="Attempt"
+        data-dialog-title-id="run-attempt-detail-title"
       >
-        <section id="run-attempt-detail" hidden="">
-          <div class="panel-heading">
-            <div>
-              <h3 id="run-attempt-detail-title">Attempt</h3>
-            </div>
-            <button
-              type="button"
-              class="button button-outline"
-              data-dialog-close=""
-            >
-              Close
-            </button>
-          </div>
-          <div class="dialog-body">
-            <div id="run-attempt-detail-meta" class="key-value-grid"></div>
-            <div
-              id="run-attempt-detail-tracking"
-              class="tracking-detail-strip"
-              hidden=""
-            ></div>
-            <section
-              class="attempt-hyperparameters"
-              aria-labelledby="run-attempt-hyperparameters-title"
-            >
-              <h3 id="run-attempt-hyperparameters-title">
-                Common hyperparameters
-              </h3>
-              <div
-                id="run-attempt-hyperparameters"
-                class="key-value-grid"
-              ></div>
+        <section id="run-attempt-detail" hidden="" data-dialog-panel="">
+          <div id="run-attempt-detail-meta" class="key-value-grid"></div>
+          <div
+            id="run-attempt-detail-tracking"
+            class="tracking-detail-strip"
+            hidden=""
+          ></div>
+          <section
+            class="attempt-hyperparameters"
+            aria-labelledby="run-attempt-hyperparameters-title"
+          >
+            <h3 id="run-attempt-hyperparameters-title">
+              Common hyperparameters
+            </h3>
+            <div id="run-attempt-hyperparameters" class="key-value-grid"></div>
+          </section>
+          <section
+            id="run-attempt-model-io"
+            class="attempt-hyperparameters"
+            aria-label="Inputs and outputs"
+          ></section>
+          <section
+            id="run-attempt-adapter-section"
+            class="attempt-hyperparameters"
+            aria-labelledby="run-attempt-adapter-title"
+            hidden=""
+          >
+            <h3 id="run-attempt-adapter-title">Adapter configuration</h3>
+            <div id="run-attempt-adapter-settings" class="key-value-grid"></div>
+          </section>
+          <div class="attempt-log-grid">
+            <section>
+              <div class="log-heading">
+                <h3>stdout</h3>
+                <span id="run-attempt-stdout-status" class="quiet-label"></span>
+              </div>
+              <pre
+                class="log-view"
+              ><code id="run-attempt-stdout-log">Select an attempt to load stdout.</code></pre>
             </section>
-            <section
-              id="run-attempt-model-io"
-              class="attempt-hyperparameters"
-              aria-label="Inputs and outputs"
-            ></section>
-            <section
-              id="run-attempt-adapter-section"
-              class="attempt-hyperparameters"
-              aria-labelledby="run-attempt-adapter-title"
-              hidden=""
-            >
-              <h3 id="run-attempt-adapter-title">Adapter configuration</h3>
-              <div
-                id="run-attempt-adapter-settings"
-                class="key-value-grid"
-              ></div>
+            <section>
+              <div class="log-heading">
+                <h3>stderr</h3>
+                <span id="run-attempt-stderr-status" class="quiet-label"></span>
+              </div>
+              <pre
+                class="log-view"
+              ><code id="run-attempt-stderr-log">Select an attempt to load stderr.</code></pre>
             </section>
-            <div class="attempt-log-grid">
-              <section>
-                <div class="log-heading">
-                  <h3>stdout</h3>
-                  <span
-                    id="run-attempt-stdout-status"
-                    class="quiet-label"
-                  ></span>
-                </div>
-                <pre
-                  class="log-view"
-                ><code id="run-attempt-stdout-log">Select an attempt to load stdout.</code></pre>
-              </section>
-              <section>
-                <div class="log-heading">
-                  <h3>stderr</h3>
-                  <span
-                    id="run-attempt-stderr-status"
-                    class="quiet-label"
-                  ></span>
-                </div>
-                <pre
-                  class="log-view"
-                ><code id="run-attempt-stderr-log">Select an attempt to load stderr.</code></pre>
-              </section>
-            </div>
           </div>
         </section>
       </dialog>
@@ -5122,70 +5058,54 @@ Select a session.</pre
         class="app-dialog"
         data-panel-dialog=""
         aria-labelledby="evaluation-rollout-title"
+        data-dialog-title="Rollout"
+        data-dialog-title-id="evaluation-rollout-title"
       >
-        <section id="evaluation-rollout-detail">
-          <div class="panel-heading">
-            <h3 id="evaluation-rollout-title">Rollout</h3>
-            <button
-              type="button"
-              class="button button-outline"
-              data-dialog-close=""
-            >
-              Close
-            </button>
-          </div>
-          <div class="dialog-body">
-            <p id="evaluation-rollout-empty" class="secondary"></p>
-            <div id="rollout-episode-viewer"></div>
-            <video
-              id="evaluation-rollout-video"
-              controls=""
-              preload="metadata"
-              playsinline=""
-              hidden=""
-            ></video>
-            <h3>Canonical results</h3>
-            <div
-              class="table-scroll identity-table"
-              id="evaluation-result-summary"
-            ></div>
-            <details>
-              <summary>Full result record / JSON</summary>
+        <section id="evaluation-rollout-detail" data-dialog-panel="">
+          <p id="evaluation-rollout-empty" class="secondary"></p>
+          <div id="rollout-episode-viewer"></div>
+          <video
+            id="evaluation-rollout-video"
+            controls=""
+            preload="metadata"
+            playsinline=""
+            hidden=""
+          ></video>
+          <h3>Canonical results</h3>
+          <div
+            class="table-scroll identity-table"
+            id="evaluation-result-summary"
+          ></div>
+          <details>
+            <summary>Full result record / JSON</summary>
+            <pre
+              class="result-view"
+            ><code id="evaluation-result-json"></code></pre>
+          </details>
+          <h3>Slurm attempt</h3>
+          <div
+            class="table-scroll identity-table"
+            id="evaluation-attempt-meta"
+          ></div>
+          <div class="attempt-log-grid">
+            <section>
+              <div class="log-heading">
+                <h3>stdout</h3>
+                <span id="evaluation-stdout-status" class="quiet-label"></span>
+              </div>
               <pre
-                class="result-view"
-              ><code id="evaluation-result-json"></code></pre>
-            </details>
-            <h3>Slurm attempt</h3>
-            <div
-              class="table-scroll identity-table"
-              id="evaluation-attempt-meta"
-            ></div>
-            <div class="attempt-log-grid">
-              <section>
-                <div class="log-heading">
-                  <h3>stdout</h3>
-                  <span
-                    id="evaluation-stdout-status"
-                    class="quiet-label"
-                  ></span>
-                </div>
-                <pre
-                  class="log-view"
-                ><code id="evaluation-stdout-log">Loading stdout…</code></pre>
-              </section>
-              <section>
-                <div class="log-heading">
-                  <h3>stderr</h3>
-                  <span
-                    id="evaluation-stderr-status"
-                    class="quiet-label"
-                  ></span>
-                </div>
-                <pre
-                  class="log-view"
-                ><code id="evaluation-stderr-log">Loading stderr…</code></pre>
-              </section>
-            </div>
+                class="log-view"
+              ><code id="evaluation-stdout-log">Loading stdout…</code></pre>
+            </section>
+            <section>
+              <div class="log-heading">
+                <h3>stderr</h3>
+                <span id="evaluation-stderr-status" class="quiet-label"></span>
+              </div>
+              <pre
+                class="log-view"
+              ><code id="evaluation-stderr-log">Loading stderr…</code></pre>
+            </section>
           </div>
         </section>
       </dialog>
@@ -5193,34 +5113,27 @@ Select a session.</pre
         id="maintenance-dialog"
         class="app-dialog"
         aria-labelledby="maintenance-title"
+        data-dialog-title="Delete history"
+        data-dialog-title-id="maintenance-title"
       >
-        <div class="panel-heading">
-          <h3 id="maintenance-title">Delete history</h3>
-          <button
-            type="button"
-            data-dialog-close=""
-            class="button button-outline"
-          >
-            Close
-          </button>
-        </div>
-        <div class="dialog-body">
+        <section data-dialog-panel="">
           <p id="maintenance-message" role="status" aria-live="polite"></p>
           <div
             id="maintenance-content"
             class="table-scroll identity-table"
           ></div>
-        </div>
-        <div class="form-actions">
-          <button
-            id="maintenance-confirm"
-            class="button button-danger"
-            type="button"
-            disabled=""
-          >
-            Delete
-          </button>
-        </div>
+
+          <div class="form-actions">
+            <button
+              id="maintenance-confirm"
+              class="button button-danger"
+              type="button"
+              disabled=""
+            >
+              Delete
+            </button>
+          </div>
+        </section>
       </dialog>
     </div>
 
@@ -5229,18 +5142,10 @@ Select a session.</pre
       class="app-dialog"
       data-panel-dialog=""
       aria-labelledby="data-inspection-title"
+      data-dialog-title="Dataset files and history"
+      data-dialog-title-id="data-inspection-title"
     >
-      <div class="panel-heading">
-        <h3 id="data-inspection-title">Dataset files and history</h3>
-        <button
-          type="button"
-          class="button button-outline"
-          data-dialog-close=""
-        >
-          Close
-        </button>
-      </div>
-      <div class="dialog-body">
+      <section data-dialog-panel="">
         <section class="panel table-panel registry-section">
           <div class="panel-heading">
             <div>
@@ -5343,109 +5248,93 @@ Select a session.</pre
             class="app-dialog"
             data-panel-dialog=""
             aria-labelledby="data-derivation-form-title"
+            data-dialog-title="Record a derivation"
+            data-dialog-title-id="data-derivation-form-title"
+            data-dialog-close-id="close-data-derivation-form"
           >
-            <form id="data-derivation-form" class="dialog-form" hidden="">
-              <div class="panel-heading">
-                <div>
-                  <h3 id="data-derivation-form-title">Record a derivation</h3>
+            <form
+              id="data-derivation-form"
+              class="dialog-form"
+              hidden=""
+              data-dialog-panel=""
+            >
+              <div class="form-grid">
+                <div class="field span-2">
+                  <label for="data-derivation-output">Output version</label
+                  ><select id="data-derivation-output" required="" disabled="">
+                    <option value="">No versions loaded</option>
+                  </select>
                 </div>
-                <div class="panel-heading-actions">
-                  <button
-                    id="close-data-derivation-form"
-                    class="button button-outline"
-                    type="button"
-                  >
-                    Close
-                  </button>
+                <div class="field span-2">
+                  <label for="data-derivation-inputs">Inputs / JSON</label
+                  ><textarea
+                    id="data-derivation-inputs"
+                    rows="4"
+                    required=""
+                    placeholder='[{"version_id":"...","role":"source","position":0}]'
+                  ></textarea>
+                </div>
+                <div class="field span-2">
+                  <label for="data-converter-repository"
+                    >Converter repository</label
+                  ><input
+                    id="data-converter-repository"
+                    placeholder="Repository URL or canonical local source"
+                    required=""
+                  />
+                </div>
+                <div class="field span-2">
+                  <label for="data-converter-commit">Converter commit</label
+                  ><input
+                    id="data-converter-commit"
+                    placeholder="Exact commit SHA"
+                    required=""
+                  />
+                </div>
+                <div class="field span-2">
+                  <label for="data-runtime-lock-sha">Runtime lock SHA-256</label
+                  ><input
+                    id="data-runtime-lock-sha"
+                    maxlength="64"
+                    pattern="[A-Fa-f0-9]{64}"
+                    placeholder="Optional"
+                  />
+                </div>
+                <div class="field span-2">
+                  <label for="data-converter-config"
+                    >Converter config / JSON</label
+                  ><textarea id="data-converter-config" rows="4">{}</textarea>
                 </div>
               </div>
-              <div class="dialog-body">
-                <div class="form-grid">
-                  <div class="field span-2">
-                    <label for="data-derivation-output">Output version</label
-                    ><select
-                      id="data-derivation-output"
-                      required=""
-                      disabled=""
-                    >
-                      <option value="">No versions loaded</option>
-                    </select>
-                  </div>
-                  <div class="field span-2">
-                    <label for="data-derivation-inputs">Inputs / JSON</label
-                    ><textarea
-                      id="data-derivation-inputs"
-                      rows="4"
-                      required=""
-                      placeholder='[{"version_id":"...","role":"source","position":0}]'
-                    ></textarea>
-                  </div>
-                  <div class="field span-2">
-                    <label for="data-converter-repository"
-                      >Converter repository</label
-                    ><input
-                      id="data-converter-repository"
-                      placeholder="Repository URL or canonical local source"
-                      required=""
-                    />
-                  </div>
-                  <div class="field span-2">
-                    <label for="data-converter-commit">Converter commit</label
-                    ><input
-                      id="data-converter-commit"
-                      placeholder="Exact commit SHA"
-                      required=""
-                    />
-                  </div>
-                  <div class="field span-2">
-                    <label for="data-runtime-lock-sha"
-                      >Runtime lock SHA-256</label
-                    ><input
-                      id="data-runtime-lock-sha"
-                      maxlength="64"
-                      pattern="[A-Fa-f0-9]{64}"
-                      placeholder="Optional"
-                    />
-                  </div>
-                  <div class="field span-2">
-                    <label for="data-converter-config"
-                      >Converter config / JSON</label
-                    ><textarea id="data-converter-config" rows="4">{}</textarea>
-                  </div>
-                </div>
-                <div class="form-actions">
-                  <button
-                    id="create-data-derivation"
-                    class="button button-accent"
-                    type="submit"
-                  >
-                    Record lineage
-                  </button>
-                </div>
+              <div class="form-actions">
+                <button
+                  id="create-data-derivation"
+                  class="button button-accent"
+                  type="submit"
+                >
+                  Record lineage
+                </button>
               </div>
             </form>
           </dialog>
         </section>
-      </div>
+      </section>
     </dialog>
 
-    <template id="result-dialog-layout"
-      ><section class="row-disclosure inline-drawer dialog-form">
-        <div class="panel-heading row-disclosure-heading">
-          <div><h2 data-result-title=""></h2></div>
-          <div class="panel-heading-actions">
-            <div data-result-actions="" class="page-actions"></div>
-            <button
-              data-result-close=""
-              data-dialog-close=""
-              type="button"
-              class="text-button disclosure-close"
-            >
-              Close
-            </button>
-          </div>
+    <template id="app-dialog-layout">
+      <div class="panel-heading dialog-heading">
+        <div class="dialog-heading-text">
+          <h3 data-dialog-title></h3>
+          <div data-dialog-heading-slot></div>
         </div>
-        <div class="row-disclosure-body" data-result-body=""></div></section
-    ></template>
+        <div class="panel-heading-actions">
+          <div data-dialog-actions-slot class="page-actions"></div>
+          <button data-dialog-close type="button" class="button button-outline">
+            Close
+          </button>
+        </div>
+      </div>
+      <div class="dialog-body" data-dialog-body></div>
+    </template>
   </body>
 </html>

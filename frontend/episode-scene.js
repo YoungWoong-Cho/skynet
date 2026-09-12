@@ -166,7 +166,7 @@ export class EpisodeScene {
     for (const [key, robot] of Object.entries(this.robots)) {
       const pose = frame?.hand_poses?.[key];
       robot.visible = Boolean(
-        geometry.hand && pose && (key === "actual" || enabled.has(key)),
+        geometry.hand && pose && ((keepHand && key === "actual") || enabled.has(key)),
       );
       if (pose) {
         robot.position.fromArray(pose.root);

@@ -116,8 +116,8 @@ def manifest():
         argv.extend(["--" + flag, "{{" + path + "}}"])
     return AdapterManifest(
         slug="xpolicylab-act",
-        display_name="XPolicyLab · ACT",
-        description="Action Chunking Transformer with RGB and joint observations.",
+        display_name="XPolicyLab · ACT · Skynet recordings",
+        description="Original XPolicyLab ACT model with Skynet's RGB/joint dataset loader, normalization, training loop and distributed execution. Core ACT defaults match the pinned native recipe; this is not the upstream train.sh launcher.",
         default_repository=XPL_REPOSITORY,
         repository_patterns=[XPL_REPOSITORY],
         capabilities=AdapterCapabilities(

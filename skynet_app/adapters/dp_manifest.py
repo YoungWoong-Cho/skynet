@@ -243,8 +243,8 @@ def manifest():
         argv += ["--" + flag, "{{" + path + "}}"]
     return AdapterManifest(
         slug="xpolicylab-dp",
-        display_name="XPolicyLab · Diffusion Policy",
-        description="State or RGB-conditioned diffusion policy with explicit data and training settings.",
+        display_name="XPolicyLab · Diffusion Policy · Skynet recordings",
+        description="Skynet state/RGB training presets using XPolicyLab's diffusion components, with a custom future-action window, data loader, training loop and EMA. These presets differ from XPolicyLab's native RGB DP recipe; use the Native adapter for that recipe.",
         default_repository=XPL_REPOSITORY,
         repository_patterns=[XPL_REPOSITORY],
         runtime=AdapterRuntimePolicy(
