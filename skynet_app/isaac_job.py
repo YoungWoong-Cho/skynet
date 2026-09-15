@@ -40,6 +40,21 @@ def compile_isaac_job(profile, root, name, argv, checks=(), after=()):
             f"#SBATCH --error={root}/stderr.log",
             "set -euo pipefail",
             "umask 077",
+            *isaac_environment(profile, root),
+            *checks,
+            shlex.join(argv),
+            *after,
+            "",
+        ]
+    )
+
+
+def isaac_environment(profile, root):
+    """Shared bootstrap for pinned simulator jobs and observation workers."""
+    runtime, repo = profile["runtime"], profile["repository"]
+    for path in (root, runtime, repo):
+        validate_remote_path(path)
+    return [
             f"export TMPDIR={shlex.quote(root + '/tmp')}",
             'mkdir -p "$TMPDIR"',
             "export OMNI_KIT_ACCEPT_EULA=YES",
@@ -48,9 +63,4 @@ def compile_isaac_job(profile, root, name, argv, checks=(), after=()):
             f"export PYTHONPATH={shlex.quote(repo + '/source/dexverse')}:${{PYTHONPATH:-}}",
             f"export PATH={shlex.quote(runtime + '/bin')}:$PATH",
             f"cd {shlex.quote(repo)}",
-            *checks,
-            shlex.join(argv),
-            *after,
-            "",
-        ]
-    )
+    ]

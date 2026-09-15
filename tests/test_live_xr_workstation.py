@@ -27,8 +27,7 @@ def service(tmp_path, monkeypatch, prepared_hand_store):
         "hands/anatomy.py",
         "wrist.py",
         "retargeting_runtime.py",
-        "images.py",
-        "render_images.py",
+        "recording_metadata.py",
     ):
         (tmp_path / "ops/xr" / name).write_text((source / "ops/xr" / name).read_text())
     (tmp_path / "config/live_xr.json").write_text(
@@ -188,10 +187,11 @@ def test_workstation_gpu_lock_conflict_is_explicit(service, monkeypatch):
         client._remote_path("/home/test/skynet-xr/../../other.pkl")
 
 
-def test_image_capture_stop_requests_graceful_shutdown_and_rendering(
+def test_existing_frozen_image_session_can_still_stop_gracefully(
     service, monkeypatch
 ):
-    job = service.create(True, image_capture=True)
+    job = service.create(True)
+    service.update(job["id"], profile=dict(job["profile"], image_capture=True))
     service.update(
         job["id"], state="COLLECTING", job_id="skynet-live-" + job["id"] + ".service"
     )

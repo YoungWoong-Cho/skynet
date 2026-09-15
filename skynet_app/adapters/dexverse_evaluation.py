@@ -217,11 +217,16 @@ def main():
             cfg.commands.object_pose.resampling_time_range = (1.0e9, 1.0e9)
         cfg.observations.policy.concatenate_terms = False
         recipe = camera_recipe(cfg)
+        from policy_contract import observation_camera_recipe_matches
+        frozen_cameras = capture.get("observation_camera_recipes")
+        matching_cameras = (
+            observation_camera_recipe_matches(frozen_cameras, recipe) if frozen_cameras else
+            training_image_request(recipe)["recipe_sha256"] == capture.get("image_recipe_sha256")
+        )
         if (
             task == capture["task"]
             and os.environ["SKYNET_POLICY_IMAGES"] == "1"
-            and training_image_request(recipe)["recipe_sha256"]
-            != capture.get("image_recipe_sha256")
+            and not matching_cameras
         ):
             raise ValueError("Evaluation cameras differ from recorded training images")
         configure_cameras(cfg)

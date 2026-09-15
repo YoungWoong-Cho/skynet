@@ -27,6 +27,8 @@ from .cluster_runtime import ClusterClient, ClusterError, WORK_ROOT
 from .cluster_config import CLUSTER
 from .cluster_upload import upload_capture
 from .policy_exports_cluster import ClusterPolicyPreparation
+from .observation_contracts import resolve_recipe_requirements
+from .observation_preparation import ObservationPreparation
 
 FORMATS = list(RECIPES.values())
 
@@ -76,6 +78,7 @@ class PolicyExportService(ClusterPolicyPreparation):
         self.database = self.live.database
         self.root = Path(root or self.live.root / "data/policy-exports")
         self.cluster = cluster or ClusterClient()
+        self.observations = ObservationPreparation(self)
         self.lock = self.database.operation_lock("dataset-preparation")
         self.executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="dataset-preparation"
@@ -133,6 +136,11 @@ class PolicyExportService(ClusterPolicyPreparation):
 
     def _monitor(self):
         while not self.monitor_stop.wait(self.monitor_interval):
+            try:
+                self.observations.tick()
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception("Observation monitor could not refresh cluster work")
             for job in self.list():
                 if job["state"] not in {"READY", "FAILED", "DELETE_FAILED"}:
                     self.dispatch(job["id"])
@@ -473,7 +481,7 @@ class PolicyExportService(ClusterPolicyPreparation):
             sources.extend(
                 self.sources(
                     sessions[selection["session_id"]], selection.get("indices"),
-                    require_images="rgb" in RECIPES[format]["observations"]
+                    require_images=False
                 )
             )
         if (
@@ -489,6 +497,8 @@ class PolicyExportService(ClusterPolicyPreparation):
             if len(sources) < 2:
                 raise ValueError("The original ACT loader needs two episodes for its 80/20 split. Use ACT · Skynet recordings for single-episode training.")
             validation_percent, seed = 20, 42
+        observation_contract = resolve_recipe_requirements(RECIPES[format])
+        observation_files = self.observations.frozen_files() if observation_contract["streams"] else {}
         split = self.split(sources, validation_percent, seed)
         if not split["validation"]:
             split["mode"] = "training_only"
@@ -516,6 +526,9 @@ class PolicyExportService(ClusterPolicyPreparation):
             ),
             "scene_geometry.py": (Path(__file__).parent / "adapters/scene_geometry.py").read_text(),
             "images.py": (self.live.root / "ops/xr/images.py").read_text(),
+            "recording_metadata.py": (self.live.root / "ops/xr/recording_metadata.py").read_text(),
+            "observation_contracts.py": Path(__file__).with_name("observation_contracts.py").read_text(),
+            "observation_artifacts.py": (self.live.root / "skynet_app/adapters/observation_artifacts.py").read_text(),
             **{
                 name: (self.live.root / "skynet_app/adapters" / source).read_text()
                 for name, source in {
@@ -543,7 +556,7 @@ class PolicyExportService(ClusterPolicyPreparation):
             frozen_files["conversion-dependencies.json"] = canonical_json(RECIPES[format]["conversion_dependencies"])
         converter_sha = fingerprint([frozen_files, provenance, runtime_lock])
         identity = fingerprint(
-            [sources, format, split, converter_sha, RECIPES[format]["contract"]]
+            [sources, format, split, converter_sha, RECIPES[format]["contract"], observation_contract, fingerprint(observation_files)]
         )
         with self.lock:
             if self.stopping:
@@ -601,7 +614,13 @@ class PolicyExportService(ClusterPolicyPreparation):
             shutil.copytree(source_root / "xpolicylab", frozen / "xpolicylab")
             for filename, content in frozen_files.items():
                 (frozen / filename).write_text(content)
+            observation_dir = directory / "observation-worker"
+            observation_dir.mkdir()
+            for filename, content in observation_files.items():
+                (observation_dir / filename).write_text(content)
             job = dict(
+                observation_contract=observation_contract,
+                observation_worker_sha256=fingerprint(observation_files),
                 id=identifier,
                 session_id=selections[0]["session_id"],
                 selections=selections,
@@ -621,7 +640,7 @@ class PolicyExportService(ClusterPolicyPreparation):
                 converter_sha256=converter_sha,
                 state="QUEUED",
                 stage="QUEUED",
-                detail="Waiting in Skynet’s preparation queue; CPU job has not been submitted to sky2",
+                detail="Checking required observations before dataset conversion",
                 created_at=utc_now(),
                 updated_at=utc_now(),
             )
@@ -654,6 +673,7 @@ class PolicyExportService(ClusterPolicyPreparation):
                 return job
             if job["state"] == "READY" and job.get("remote_archive"):
                 return job
+            self.observations.store.retry(identifier)
             job = self.update(
                 identifier,
                 state="QUEUED",
@@ -693,24 +713,26 @@ class PolicyExportService(ClusterPolicyPreparation):
             (v for v in resource["versions"] if v["revision"] == manifest_sha), None
         )
         if version is None:
-            version = self.database.create_data_resource_version(
-                resource["id"],
-                revision=manifest_sha,
-                format=manifest["format"],
-                path=remote_path or str(self.root / job["id"] / "output"),
-                manifest_sha256=manifest_sha,
-                status="ON_CLUSTER" if remote_path else "LOCAL",
-                size_bytes=sum(f["size_bytes"] for f in manifest["files"].values()),
-                source_uri="collection:" + job["source_revision"],
-                metadata={
-                    **manifest,
-                    "storage_location": "cluster" if remote_path else "local",
-                    "export_id": job["id"],
-                    "source_version_id": job["source_version_id"],
-                    "representation": job["format"],
-                    "display_name": job["name"],
-                },
-            )
+            with self.database.transaction() as connection:
+                version = self.database._insert_data_resource_version(
+                    connection, resource["id"],
+                    revision=manifest_sha,
+                    format=manifest["format"],
+                    path=remote_path or str(self.root / job["id"] / "output"),
+                    manifest_sha256=manifest_sha,
+                    status="ON_CLUSTER" if remote_path else "LOCAL",
+                    size_bytes=sum(f["size_bytes"] for f in manifest["files"].values()),
+                    source_uri="collection:" + job["source_revision"],
+                    metadata={
+                        **manifest,
+                        "storage_location": "cluster" if remote_path else "local",
+                        "export_id": job["id"],
+                        "source_version_id": job["source_version_id"],
+                        "representation": job["format"],
+                        "display_name": job["name"],
+                    },
+                )
+                self.observations.store.bind_version(connection, job["id"], version["id"])
         if not self.database.get_data_resource_version(version["id"]).get(
             "derivation_id"
         ):

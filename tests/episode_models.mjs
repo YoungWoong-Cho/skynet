@@ -223,6 +223,16 @@ both.robots.actual.traverse((node) => {
   if (node.isMesh) bothCount++;
 });
 assert.equal(bothCount, 52, "both hands receive their own meshes");
+// A recorded visual is loaded once with its saved link names; current catalog is unused.
+const recordedVisual=makeScene();
+const frozenUrls=[];
+globalThis.fetch=async url=>{frozenUrls.push(url);return new Response(visual);};
+await recordedVisual.load({kind:"collection",robot:"test_right",joint_names:["bend"],kinematics_urdf:tree,
+  hand_visual_url:"/recording/hand/simulation.urdf",frames:[frame]},null);
+assert.deepEqual(frozenUrls,["/recording/hand/simulation.urdf"]);
+assert.ok(recordedVisual.robots.actual);
+recordedVisual.update(frame,[],new Set(),true,{hand:true,scene:false});
+assert.equal(recordedVisual.robots.actual.visible,true);
 dom.window.close();
 console.log(
   "Actual, Prediction and Demonstration meshes retain separate poses and obey shared/layer toggles.",

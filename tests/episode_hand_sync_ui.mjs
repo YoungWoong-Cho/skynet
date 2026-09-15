@@ -44,10 +44,10 @@ try{
  assert.equal(viewer.handPoseSelect.parentElement.hidden,true,'hide the pose selector when only a static model is available');
  assert.equal(viewer.handPoseStatus.textContent,'Default pose');
  data={...data,frames:[{time:0,hand_poses:{actual:actual0}},{time:1,hand_poses:{actual:actual1}}]};
- viewer.load('/recording',{collection:true});await flush();finishLoad(true);await flush();
- assert.equal(viewer.handPoseSelect.parentElement.hidden,true,'collection has one pose and no unnecessary selector');
+ viewer.load('/recording');await flush();finishLoad(true);await flush();
+ assert.equal(viewer.handPoseSelect.disabled,true,'A recorded evaluation with one pose has no alternative hand layer');
  viewer.view='interactive';viewer.next.click();assert.equal(models.at(-1).poses.at(-1),actual1);
- viewer.load('/late',{collection:true});await flush();const late=models.at(-1);viewer.close();finishLoad(true);await flush();
+ viewer.load('/late');await flush();const late=models.at(-1);viewer.close();finishLoad(true);await flush();
  assert.equal(late.disposed,true);assert.equal(late.poses.length,0,'late completion cannot animate a closed viewer');
  console.log('Sidebar hand sync: decoded frames, late loading, layer selection, expiry, scrubbing, step controls, recordings and cleanup passed.');
 }finally{w.SkynetEpisodeViewer.close('host');w.close();}

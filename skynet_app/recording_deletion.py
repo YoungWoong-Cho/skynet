@@ -22,6 +22,12 @@ def mentions(value, identifier):
     )
 
 
+def canonical_source_id(row):
+    # Stable only inside deletion previews; the table itself uses a composite PK.
+    from .database import canonical_json
+    return canonical_json([row["artifact_key"], row["session_id"], row["recording_path"]])
+
+
 class RecordingMaintenance(Maintenance):
     def __init__(self, database, live, reviews, videos, previews, *, conversion_root=None):
         super().__init__(database, live.archive.cluster)
@@ -50,7 +56,7 @@ class RecordingMaintenance(Maintenance):
             owner_id=self.db.workspace_id or "legacy",
         )
 
-    def _graph(self, c, kind, identifier, *, pending_target=None):
+    def _graph(self, c, kind, identifier, *, pending_target=None, selected_path=None):
         target = self._target(c, kind, identifier)
         job = json.loads(target["payload_json"])
         graph = {"live_xr_sessions": [target], "live_conversions": []}
@@ -83,7 +89,7 @@ class RecordingMaintenance(Maintenance):
                 "recording",
                 identifier,
                 target["name"],
-                "Stop the collection session and wait for image processing to finish",
+                "Stop the collection session and wait for processing to finish",
             )
         archive = job.get("archive") or {}
         if archive.get("state") != "READY" or not archive.get("source_removed"):
@@ -188,7 +194,124 @@ class RecordingMaintenance(Maintenance):
                         label if visible else "Another workspace's item",
                         "Delete this dependent item first",
                     )
+        self._observation_graph(c, job, selected_path, graph, blockers)
         return target, graph, blockers
+
+    def _observation_graph(self, c, job, selected_path, graph, blockers):
+        """Plan observation ownership before any remote bytes can be removed."""
+        sources = rows(c, "observation_sources")
+        selected = [row for row in sources if row["session_id"] == job["id"]
+                    and (selected_path is None or row["recording_path"] == selected_path)]
+        if not selected:
+            return
+        affected = {row["artifact_key"] for row in selected}
+        detached = {(row["artifact_key"], row["session_id"], row["recording_path"]) for row in selected}
+        shared = {row["artifact_key"] for row in sources
+                  if (row["artifact_key"], row["session_id"], row["recording_path"]) not in detached}
+        candidates = affected - shared
+        artifacts = {row["artifact_key"]: row for row in rows(c, "observation_artifacts")}
+        inputs = rows(c, "observation_artifact_inputs")
+        consumers = [("dataset version", row["version_id"], row["artifact_key"])
+                     for row in rows(c, "observation_version_inputs")]
+        consumers += [("dataset preparation", row["job_id"], row["artifact_key"])
+                      for row in rows(c, "observation_job_inputs")]
+        producers = {row["id"]: row for row in rows(c, "observation_producers")}
+        def block(identifier, label, reason):
+            entry = dict(kind="observation", id=identifier, label=label, reason=reason)
+            if entry not in blockers:
+                blockers.append(entry)
+        for key in sorted(affected):
+            producer = producers.get(artifacts[key].get("producer_id"))
+            if producer and producer["state"] not in {"READY", "FAILED"}:
+                block(producer["id"], "Observation preparation",
+                      "Wait for the shared observation producer to finish before deleting its recording")
+        for kind, identifier, key in consumers:
+            if key in candidates:
+                block(identifier, "Shared " + kind,
+                      "Delete this observation consumer before deleting its only source recording")
+        for edge in inputs:
+            if edge["input_key"] in candidates and edge["artifact_key"] not in candidates:
+                block(edge["artifact_key"], "Derived observations",
+                      "A retained observation uses this recording; remove that dependency first")
+        # Shared artifacts retain their bytes and other source aliases. Only the
+        # selected source edges are detached after the recording is safely removed.
+        graph["observation_sources"] = [dict(row, id=canonical_source_id(row))
+                                         for row in sorted(selected, key=canonical_source_id)]
+        if candidates:
+            remaining, ordered = set(candidates), []
+            while remaining:
+                dependencies = {edge["input_key"] for edge in inputs if edge["artifact_key"] in remaining}
+                leaves = sorted(remaining - dependencies)
+                if not leaves:
+                    raise ValueError("Observation dependency cycle prevents safe deletion")
+                for key in leaves:
+                    item = dict(artifacts[key], id=key)
+                    item["inputs"] = sorted(edge["input_key"] for edge in inputs if edge["artifact_key"] == key)
+                    ordered.append(item)
+                remaining.difference_update(leaves)
+            graph["observation_artifacts"] = ordered
+            removable_producers = []
+            for producer in producers.values():
+                if producer["state"] not in {"READY", "FAILED"}:
+                    continue
+                owned = {key for key, artifact in artifacts.items() if artifact.get("producer_id") == producer["id"]}
+                # Retried failures may no longer own the artifact FK; keep their
+                # original request keys in the lifetime check too.
+                payload = json.loads(producer["payload_json"])
+                requested = {node["artifact_key"] for node in payload.get("request", {}).get("requests", [])}
+                related = owned | (requested & artifacts.keys())
+                if related & candidates and related <= candidates:
+                    removable_producers.append(producer)
+            if removable_producers:
+                graph["observation_producers"] = sorted(removable_producers, key=lambda row: row["id"])
+
+    @staticmethod
+    def _observation_producer_path(producer):
+        identifier = producer["id"]
+        if str(UUID(identifier)) != identifier:
+            raise ValueError("Invalid observation producer ID")
+        root = f"{WORK_ROOT}/jobs/runs/{identifier}"
+        payload = json.loads(producer["payload_json"])
+        remote = payload.get("root")
+        if remote is not None and remote != root + "/observations/" + producer["attempt_token"]:
+            raise ValueError("Observation producer storage differs from its immutable attempt")
+        return root
+
+    @staticmethod
+    def _observation_path(artifact):
+        spec = json.loads(artifact["spec_json"])
+        source = spec.get("source_sha256", "")
+        key = artifact["artifact_key"]
+        if not re.fullmatch(r"[a-f0-9]{64}", source) or not re.fullmatch(r"[a-f0-9]{64}", key):
+            raise ValueError("Invalid observation storage identity")
+        # The manifest specification, rather than a mutable stored path, owns bytes.
+        import hashlib
+        from .database import canonical_json
+        if hashlib.sha256(canonical_json(spec).encode()).hexdigest() != key:
+            raise ValueError("Observation recipe differs from its storage identity")
+        expected = f"{WORK_ROOT}/datasets/observations/{source}/{key}"
+        if artifact.get("path") is not None and artifact["path"] != expected:
+            raise ValueError("Observation storage differs from its immutable identity")
+        return expected
+
+    @classmethod
+    def _observation_lock_path(cls, artifact):
+        path = cls._observation_path(artifact)
+        parent, name = path.rsplit("/", 1)
+        return parent + "/." + name + ".publish.lock"
+
+    @staticmethod
+    def _delete_observations(c, graph):
+        for source in graph.get("observation_sources", []):
+            c.execute("DELETE FROM observation_sources WHERE artifact_key=? AND session_id=? AND recording_path=?",
+                      (source["artifact_key"], source["session_id"], source["recording_path"]))
+        for artifact in graph.get("observation_artifacts", []):
+            # The graph is ordered outputs first so input FKs keep guarding cleanup.
+            c.execute("DELETE FROM observation_artifacts WHERE artifact_key=?", (artifact["artifact_key"],))
+        for producer in graph.get("observation_producers", []):
+            # FK ownership and the terminal state remain final database guards.
+            c.execute("DELETE FROM observation_producers WHERE id=? AND state IN ('READY','FAILED') AND NOT EXISTS (SELECT 1 FROM observation_artifacts WHERE producer_id=?)",
+                      (producer["id"], producer["id"]))
 
     def _references(self, c, graph=None):
         result = super()._references(c, graph)
@@ -201,6 +324,15 @@ class RecordingMaintenance(Maintenance):
                     (p, "live_conversions", record["id"])
                     for p in paths_in(json.loads(record["payload_json"]))
                 )
+        excluded_observations = {row["artifact_key"] for row in (graph or {}).get("observation_artifacts", [])}
+        for row in rows(c, "observation_artifacts"):
+            if row["artifact_key"] not in excluded_observations:
+                result.append((self._observation_path(row), "observation_artifacts", row["artifact_key"]))
+                result.append((self._observation_lock_path(row), "observation_artifacts", row["artifact_key"]))
+        excluded_producers = {row["id"] for row in (graph or {}).get("observation_producers", [])}
+        for row in rows(c, "observation_producers"):
+            if row["id"] not in excluded_producers:
+                result.append((self._observation_producer_path(row), "observation_producers", row["id"]))
         return result
 
     def _file_groups(self, c, kind, target, graph, blockers):
@@ -267,6 +399,12 @@ class RecordingMaintenance(Maintenance):
                     )
                 )
             groups.setdefault(WORK_ROOT, []).append(remote)
+        for artifact in graph.get("observation_artifacts", []):
+            groups.setdefault(WORK_ROOT, []).extend([
+                self._observation_path(artifact), self._observation_lock_path(artifact),
+            ])
+        for producer in graph.get("observation_producers", []):
+            groups.setdefault(WORK_ROOT, []).append(self._observation_producer_path(producer))
         retained = self._references(c, graph)
         for paths in groups.values():
             for path in paths:
@@ -298,6 +436,7 @@ class RecordingMaintenance(Maintenance):
             lock.release()
 
     def _delete_rows(self, c, kind, identifier, graph):
+        self._delete_observations(c, graph)
         # The parent engine removes metadata bodies, events and the durable intent.
         query, params = in_ids("id", [r["id"] for r in graph["live_conversions"]])
         c.execute("DELETE FROM live_conversions WHERE " + query, params)

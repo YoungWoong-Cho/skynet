@@ -769,6 +769,37 @@ done
         )
         return self.run_with_fallback(command, gateway, timeout=30)
 
+    def read_optional_file(
+        self,
+        path: str,
+        gateway: str = "auto",
+        *,
+        max_bytes: int = 20_000_000,
+    ) -> tuple[str, str | None]:
+        """Return None only when successful SSH confirms the file is absent.
+
+        An explicit response header distinguishes absence from an empty file.
+        Connection errors and failed reads retain normal ClusterError semantics.
+        """
+        path = self._remote_path(path)
+        max_bytes = max(1024, min(max_bytes, 100_000_000))
+        path_q = shlex.quote(path)
+        command = (
+            f"if test -f {path_q}; then "
+            f"size=$(stat -c %s {path_q}) || exit 46; "
+            f"test \"$size\" -le {max_bytes} || {{ echo 'file exceeds read limit' >&2; exit 45; }}; "
+            "printf '%s\\n' SKYNET_FILE_PRESENT; "
+            f"cat {path_q}; "
+            "else printf '%s\\n' SKYNET_FILE_MISSING; fi"
+        )
+        host, output = self.run_with_fallback(command, gateway, timeout=30)
+        header, separator, content = output.partition("\n")
+        if separator and header == "SKYNET_FILE_PRESENT":
+            return host, content
+        if separator and header == "SKYNET_FILE_MISSING" and not content:
+            return host, None
+        raise ClusterError("Remote optional-file response is invalid")
+
     def file_size(self, path: str, gateway: str = "auto") -> tuple[str, int]:
         """Resolve a remote regular file and return its gateway and byte size."""
 

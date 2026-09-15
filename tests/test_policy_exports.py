@@ -160,7 +160,6 @@ def test_streaming_output_matches_unmodified_upstream_converter(setup, tmp_path,
 
 
 @pytest.mark.parametrize("mutation, message", [
-    ("missing_images", "no completed training images"),
     ("active", "End the collection"),
     ("path", "Invalid saved image path"),
     ("hash", "checksums are missing"),
@@ -168,14 +167,24 @@ def test_streaming_output_matches_unmodified_upstream_converter(setup, tmp_path,
 def test_rejects_ineligible_sources_before_dispatch(setup, mutation, message):
     service, session, _ = setup
     first = session["recordings"][0]
-    if mutation == "missing_images": session["recording_images"].pop(first)
     if mutation == "active": session["state"] = "RUNNING"
     if mutation == "path": session["recording_images"][first]["path"] = "../../outside.hdf5"
     if mutation == "hash": session["recording_checksums"][first] = ""
     with pytest.raises(ValueError, match=message):
         service.create(session["id"], "dp", "Test")
     assert service.list() == []
-    assert service.options()["sessions"][0]["eligible"] == (mutation == "missing_images")
+    assert not service.options()["sessions"][0]["eligible"]
+
+
+
+def test_missing_images_queue_conversion_with_declared_observations(setup):
+    service, session, _ = setup
+    session["recording_images"] = {}
+    job = service.create(session["id"], "dp", "Render when converting", target="cluster")
+    assert job["state"] == "QUEUED"
+    assert job["observation_contract"]["streams"]
+    assert all("image_path" not in source for source in job["sources"])
+    assert service.options()["sessions"][0]["eligible"]
 
 
 def test_checksum_failure_does_not_register_a_version_and_can_retry(setup):

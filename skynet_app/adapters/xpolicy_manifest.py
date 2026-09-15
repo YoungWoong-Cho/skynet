@@ -94,7 +94,7 @@ def simulation_support_files():
     }
     files.update({
         "adapter-support/" + name: (SUPPORT.parents[1] / "ops/xr" / name).read_text()
-        for name in ("images.py", "wrist.py", "render_images.py")
+        for name in ("images.py", "recording_metadata.py", "wrist.py", "render_images.py", "scene_restore.py")
     })
     files["adapter-support/trajectory.py"] = (SUPPORT.parent / "trajectory.py").read_text()
     files["adapter-support/arrays.py"] = "import pickle\nimport numpy as np\n" + inspect.getsource(ArrayUnpickler)

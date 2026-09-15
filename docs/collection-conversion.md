@@ -11,4 +11,4 @@ Use **Data → Recordings → Convert** and the current `/api/data/exports` API 
 
 This code cleanup does not delete stored recordings, datasets, cluster files, or historical database rows. Registered historical datasets retain their registry entries and verified locations. Recording-deletion checks still account for old conversion records.
 
-The former state-only HDF5 converter, automatic conversion monitor, and its browser QA fixture are no longer shipped. The old validation receipts under `docs/validation/` describe past checks, not current API availability. Current recording review and video rendering continue through their own services.
+The former state-only HDF5 converter, automatic conversion monitor, and its browser QA fixture are no longer shipped. The old validation receipts under `docs/validation/` describe past checks, not current API availability. Current recording review shows saved states and frozen assets in 3D. Camera observations are prepared through the unified Convert workflow described in [observation preparation](observation-preparation.md). Evaluation video rendering remains separate.

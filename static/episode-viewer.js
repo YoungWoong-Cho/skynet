@@ -85,8 +85,11 @@
       );
       this.sceneHelp.hidden = true;
       this.stage = node("div", null, "episode-viewer-stage");
-      this.stage.append(video, this.canvas, this.sceneHost);
-      video.controls = false;
+      if (video) {
+        this.stage.append(video);
+        video.controls = false;
+      }
+      this.stage.append(this.canvas, this.sceneHost);
       this.legend = node("p", null, "secondary");
       this.retry = node("button", "Retry preview", "button button-outline");
       this.retry.type = "button";
@@ -96,7 +99,7 @@
       this.status.setAttribute("role", "status");
       this.loop = iconButton("loop", "Loop playback", () => {
         this.looping = !this.looping;
-        this.video.loop = this.looping;
+        if (this.video) this.video.loop = this.looping;
         this.loop.setAttribute("aria-pressed", String(this.looping));
       });
       this.loop.setAttribute("aria-pressed", "false");
@@ -121,7 +124,7 @@
       });
       const finishSeek = () => {
         if (!this.scrubbing) return;
-        if (this.video.readyState >= 1) this.video.currentTime = this.clockTime;
+        if (!this.collection && this.video?.readyState >= 1) this.video.currentTime = this.clockTime;
         this.scrubbing = false;
         if (this.resumeAfterSeek) this.startPlayback();
       };
@@ -151,15 +154,16 @@
       );
       host.append(this.main, this.aside);
       this.events = {};
-      for (const event of [
+      for (const event of video ? [
         "timeupdate",
         "loadeddata",
         "seeked",
         "pause",
         "play",
         "ended",
-      ]) {
+      ] : []) {
         this.events[event] = () => {
+          if (this.collection) return;
           if (!video.requestVideoFrameCallback && !video.seeking)
             this.frameTime = video.currentTime;
           if (
@@ -214,7 +218,7 @@
     pausePlayback() {
       this.playRequest = (this.playRequest || 0) + 1;
       this.playing = false;
-      this.video.pause();
+      this.video?.pause();
       cancelAnimationFrame(this.animation);
       this.draw();
     }
@@ -223,7 +227,7 @@
       index = Math.max(0, Math.min(frames.length - 1, index));
       this.clockTime = this.frameTimeAt(frames[index]);
       this.frameTime = this.clockTime;
-      if (this.video.readyState >= 1) this.video.currentTime = this.clockTime;
+      if (!this.collection && this.video?.readyState >= 1) this.video.currentTime = this.clockTime;
       this.clockStart = performance.now();
       this.clockOffset = this.clockTime;
       this.draw();
@@ -234,7 +238,7 @@
     }
     currentTime() {
       if (this.scrubbing) return this.clockTime || 0;
-      return this.video.readyState >= 2
+      return !this.collection && this.video?.readyState >= 2
         ? this.video.currentTime || 0
         : this.clockTime || 0;
     }
@@ -244,7 +248,7 @@
       const request = (this.playRequest = (this.playRequest || 0) + 1);
       const frames = this.timeline();
       if (
-        this.video.ended ||
+        this.video?.ended ||
         (frames.length &&
           this.frameIndex(this.currentTime()) === frames.length - 1)
       )
@@ -255,7 +259,7 @@
       // Seeking back from the end can temporarily leave only metadata loaded.
       // play() waits for the seek/buffer; switching to the fallback clock here
       // would leave the video paused once its frames become available again.
-      if (this.video.readyState >= 1) {
+      if (!this.collection && this.video?.readyState >= 1) {
         try {
           await this.video.play();
         } catch (error) {
@@ -272,7 +276,7 @@
     tick() {
       cancelAnimationFrame(this.animation);
       if (!this.active || !this.playing) return;
-      if (this.video.readyState < 2) {
+      if (this.collection || !(this.video?.readyState >= 2)) {
         this.clockTime =
           this.clockOffset + (performance.now() - this.clockStart) / 1000;
         const frames = this.timeline();
@@ -290,7 +294,7 @@
         this.animation = requestAnimationFrame(() => this.tick());
     }
     watchFrames() {
-      if (!this.video.requestVideoFrameCallback) return;
+      if (!this.video?.requestVideoFrameCallback) return;
       this.frameCallback = this.video.requestVideoFrameCallback(
         (_, metadata) => {
           if (!this.active) return;
@@ -344,17 +348,19 @@
       this.playing = false;
       this.scrubbing = false;
       this.lastNotifiedFrame = null;
-      this.watchFrames();
       const generation = ++this.generation;
       this.base = base;
       this.collection = collection;
+      if (!collection) this.watchFrames();
+      if (this.video) this.video.hidden = collection;
+      this.aside.hidden = collection;
       this.episode = episode;
       this.canvas.width = this.canvas.width;
       this.data = null;
       this.hand = null;
       this.handPoseData = null;
       this.handPoseLayer = "actual";
-      this.view = "all";
+      this.view = collection ? "interactive" : "all";
       this.legend.textContent = "";
       this.aside.replaceChildren(
         node("h4", "Hand"),
@@ -421,6 +427,8 @@
       this.data = this.options.sourceNames
         ? { ...data, source_names: this.options.sourceNames }
         : data;
+      if (this.collection && data.hand_visual_available)
+        this.data = { ...this.data, hand_visual_url: this.base + "/hand/simulation.urdf" };
       this.renderControls();
       await this.loadHand(data.robot, generation);
       if (generation !== this.generation) return;
@@ -429,20 +437,55 @@
         : "Prediction: model target · Actual: observed hand · Demonstration: original recording";
       if (data.demonstration)
         this.legend.textContent += ` · Source ${data.demonstration.session_id.slice(0, 8)}, recording ${data.demonstration.source_index + 1}. Aligned by elapsed time; hidden when the recording ends.`;
-      if (this.collection) {
-        this.video.src =
-          this.base + `/viewer/views.mp4?episode=${this.episode}`;
-        this.video.load();
-      }
       this.message((data.warnings || []).join(" "));
+      if (this.collection) await this.loadScene();
       this.draw();
+    }
+
+    async loadScene() {
+      if (this.scene || !this.data) return;
+      const generation = this.generation;
+      this.sceneHost.dataset.loading = "true";
+      try {
+        const { EpisodeScene } = await import(
+          document.querySelector('meta[name="episode-scene-module"]')
+            ?.content || "./episode-scene.js" + version
+        );
+        if (generation === this.generation && this.active) {
+          this.scene = new EpisodeScene(this.sceneHost);
+          const warnings = this.scene.setObjects(this.data?.scene_objects);
+          try {
+            const loading = this.scene.load(this.data, this.hand);
+            // Geometry and keypoints are already available. Fit and draw them
+            // while the immutable hand meshes load independently.
+            this.draw();
+            await loading;
+          } catch (error) {
+            warnings.push("Hand model: " + error.message);
+          }
+          if (generation !== this.generation || !this.active) return;
+          if (warnings.length) this.message(warnings.join(" · "));
+          else if (this.data?.scene_appearance)
+            this.message(this.data.scene_appearance);
+          this.draw();
+        }
+      } catch (error) {
+        if (generation === this.generation) {
+          this.scene?.dispose();
+          this.scene = null;
+          this.message("Interactive view unavailable: " + error.message);
+        }
+      } finally {
+        if (generation === this.generation) delete this.sceneHost.dataset.loading;
+      }
     }
 
     renderControls() {
       this.tabs.replaceChildren();
+      this.tabs.hidden = this.collection;
       this.layers.replaceChildren();
       const views = this.data?.views || [];
-      const choices = [
+      const choices = this.collection ? [] : [
         { id: "all", label: views.length ? "All cameras" : "Video" },
         ...views,
         { id: "interactive", label: "Interactive" },
@@ -464,35 +507,7 @@
         button.onclick = async () => {
           this.view = choice.id;
           this.renderControls();
-          if (choice.id === "interactive" && !this.scene) {
-            const generation = this.generation;
-            try {
-              const { EpisodeScene } = await import(
-                document.querySelector('meta[name="episode-scene-module"]')
-                  ?.content || "./episode-scene.js" + version
-              );
-              if (generation === this.generation && this.active) {
-                this.scene = new EpisodeScene(this.sceneHost);
-                const warnings = this.scene.setObjects(
-                  this.data?.scene_objects,
-                );
-                try {
-                  await this.scene.load(this.data, this.hand);
-                } catch (error) {
-                  warnings.push("Hand model: " + error.message);
-                }
-                if (warnings.length) this.message(warnings.join(" · "));
-                else if (this.data?.scene_appearance)
-                  this.message(this.data.scene_appearance);
-              }
-            } catch (error) {
-              if (generation === this.generation) {
-                this.scene?.dispose();
-                this.scene = null;
-                this.message("Interactive view unavailable: " + error.message);
-              }
-            }
-          }
+          if (choice.id === "interactive") await this.loadScene();
           this.draw();
         };
         this.tabs.append(button);
@@ -517,6 +532,7 @@
             key === "scene"
               ? !this.data?.scene_objects?.length
               : !this.data?.kinematics_urdf ||
+                (this.collection && !this.data?.hand_visual_url) ||
                 !this.data?.frames?.some(
                   (frame) => Object.keys(frame.hand_poses || {}).length,
                 );
@@ -574,6 +590,11 @@
     }
 
     async loadHand(robot, generation) {
+      if (this.collection) {
+        this.hand = null;
+        this.aside.hidden = true;
+        return;
+      }
       const key = `${generation}:${robot}`;
       if (this.handRequestKey === key) return this.handRequest;
       this.handRequestKey = key;
@@ -719,7 +740,7 @@
       this.time.textContent = current
         ? `Frame ${stateIndex} of ${last?.state_index ?? last?.index ?? timeline.length - 1} · ${this.frameTimeAt(current).toFixed(3)} s`
         : "No frames";
-      this.play.disabled = !timeline.length && this.video.readyState < 2;
+      this.play.disabled = !timeline.length && !(this.video?.readyState >= 2);
       this.seek.disabled = !timeline.length;
       this.previous.disabled = !timeline.length || index === 0;
       this.next.disabled = !timeline.length || index === timeline.length - 1;
@@ -728,7 +749,7 @@
         this.options?.onFrame?.(index);
       }
       const renderedTime =
-        this.view === "interactive" || this.video.seeking || this.scrubbing
+        this.view === "interactive" || this.video?.seeking || this.scrubbing
           ? time
           : (this.frameTime ?? time);
       const frames = this.data?.frames || [];
@@ -754,7 +775,7 @@
         );
         return;
       }
-      if (this.video.readyState < 2 || this.frameTime === null) return;
+      if (!(this.video?.readyState >= 2) || this.frameTime === null) return;
       const views = this.data?.views || [];
       const selected = views.find((view) => view.id === this.view);
       const rect = selected?.rect || [
@@ -801,14 +822,14 @@
     close() {
       this.active = false;
       this.playing = false;
-      this.video.pause();
+      this.video?.pause();
       this.handViewer?.dispose();
       this.handViewer = null;
       this.handViewerReady = false;
       this.handPoseData = null;
       this.lastHandPose = Symbol();
       if (this.frameCallback !== undefined)
-        this.video.cancelVideoFrameCallback?.(this.frameCallback);
+        this.video?.cancelVideoFrameCallback?.(this.frameCallback);
       ++this.generation;
       clearTimeout(this.pollTimer);
       cancelAnimationFrame(this.animation);
@@ -823,12 +844,15 @@
       if (!viewer) {
         viewer = new EpisodeViewer(
           document.getElementById(hostId),
-          document.getElementById(videoId),
+          videoId ? document.getElementById(videoId) : null,
         );
         instances.set(hostId, viewer);
       }
       viewer.load(base, options);
       return viewer;
+    },
+    pause(hostId) {
+      instances.get(hostId)?.pausePlayback();
     },
     close(hostId) {
       instances.get(hostId)?.close();

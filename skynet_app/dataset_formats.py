@@ -5,6 +5,8 @@ and supported settings belong to the versioned adapter declarations.
 An adapter can consume a recipe by declaring its contract in a data binding.
 """
 
+from .observation_contracts import CONTRACT_SCHEMA, rgb_requirements
+
 XPL_COMMIT = "9c98a3aaf02d05c6f9999a5a0a7a42090555ddf3"
 XPL_REPOSITORY = "https://github.com/XPolicyLab/XPolicyLab"
 RECIPES = {
@@ -70,6 +72,13 @@ RECIPES = {
         description="Shared images and joints for further policy-specific conversion.",
     ),
 }
+
+# Add preparation requirements without changing existing format identifiers.
+for _identifier, _recipe in RECIPES.items():
+    _recipe["observation_requirements"] = (
+        rgb_requirements() if "rgb" in _recipe["observations"] else
+        {"schema": CONTRACT_SCHEMA, "timing": {"alignment": "pre_action_state", "stride": 1}, "streams": []}
+    )
 
 
 def catalog(database):

@@ -56,7 +56,8 @@ export class EpisodeScene {
   async load(data, hand) {
     const generation = ++this.generation;
     this.playbackBounds = episodeBounds(data.frames);
-    if (!data.kinematics_urdf || !hand) return;
+    if (!data.kinematics_urdf || (!hand && data.kind !== "collection")) return;
+    if (data.kind === "collection" && !data.hand_visual_url) return;
     // Replay the captured kinematic tree; take visual geometry from the same Hands catalog.
     const parser = new DOMParser();
     const xml = parser.parseFromString(data.kinematics_urdf, "application/xml");
@@ -71,9 +72,9 @@ export class EpisodeScene {
       ? ["left", "right"]
       : [data.robot.endsWith("_left") ? "left" : "right"];
     try {
-      for (const side of sides) {
+      for (const side of (data.kind === "collection" ? [null] : sides)) {
         const visual = await loadUrdfModel(
-          `/api/hands/${encodeURIComponent(hand.key)}/${side}/urdf`,
+          data.kind === "collection" ? data.hand_visual_url : `/api/hands/${encodeURIComponent(hand.key)}/${side}/urdf`,
         );
         if (generation !== this.generation || this.disposed) {
           disposeObject(visual);
@@ -81,7 +82,7 @@ export class EpisodeScene {
           return;
         }
         for (const [name, link] of Object.entries(visual.links)) {
-          const targetName = recordedNameCandidates(name, {
+          const targetName = data.kind === "collection" ? name : recordedNameCandidates(name, {
             robot: data.robot,
             side,
             sourceNames: data.source_names,

@@ -66,8 +66,7 @@ def service(tmp_path, monkeypatch, prepared_hand_store):
         "hands/anatomy.py",
         "wrist.py",
         "retargeting_runtime.py",
-        "images.py",
-        "render_images.py",
+        "recording_metadata.py",
     ):
         (tmp_path / "ops/xr" / name).write_text((root / "ops/xr" / name).read_text())
     service = LiveXRService(Database(tmp_path / "db.store"), Cluster(), root=tmp_path)
@@ -99,8 +98,7 @@ def test_frozen_session_extracts_the_complete_collection_runtime(service, tmp_pa
         "collection.py",
         "anatomy.py",
         "wrist.py",
-        "images.py",
-        "render_images.py",
+        "recording_metadata.py",
         "arrays.py",
         "trajectory.py",
         "scene_geometry.py",
@@ -360,16 +358,16 @@ def test_worker_failure_keeps_specific_error_after_process_exits(service):
     assert not failed.get("scene_ready_at")
 
 
-def test_image_capture_is_frozen_and_cannot_change_an_active_session(service):
-    job = service.create(True, image_capture=True)
-    assert job["profile"]["image_capture"] is True
-    ns = {"__name__": "test_image_capsule"}
+def test_collection_stores_state_metadata_without_image_capture(service):
+    job = service.create(True)
+    assert "image_capture" not in job["profile"]
+    ns = {"__name__": "test_worker"}
     exec(compile(service.get(job["id"])["worker"], "runner.py", "exec"), ns)
-    assert "class ImageRecorder" in ns["COLLECTION_FILES"]["images.py"]
-    assert service.create(image_capture=True)["id"] == job["id"]
-    with pytest.raises(ValueError, match="image capture"):
-        service.create(image_capture=False)
-
+    assert "render_images.py" not in ns["COLLECTION_FILES"]
+    assert "images.py" not in ns["COLLECTION_FILES"]
+    assert "def state_metadata" in ns["COLLECTION_FILES"]["recording_metadata.py"]
+    assert "prepare_training_images" not in ns
+    assert service.create()["id"] == job["id"]
 
 def test_retargeter_selection_is_frozen_and_blocks_switching_active_session(
     service, monkeypatch

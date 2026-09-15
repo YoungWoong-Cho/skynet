@@ -88,12 +88,12 @@ def test_camera_preview_keeps_final_saved_state(tmp_path, monkeypatch):
     from skynet_app import episode_preview_worker as worker
     from skynet_app.adapters import episode_geometry
     from skynet_app.live_xr_review import ArrayUnpickler
-    for name in ('HandKinematics', 'camera_layout', 'recorded_urdf', 'replay_urdf'):
+    for name in ('HandKinematics', 'camera_layout', 'recorded_urdf', 'replay_urdf', 'pose_matrix', 'MAX_VIEWER_BYTES'):
         monkeypatch.setattr(worker, name, getattr(episode_geometry, name), raising=False)
     monkeypatch.setattr(worker, 'ArrayUnpickler', ArrayUnpickler, raising=False)
     states = [{'articulation': {'robot': {'root_pose': np.array([ROOT]), 'joint_position': np.array([[i, .1*i]])}}} for i in range(3)]
     recording = tmp_path / 'episode.pkl'
-    recording.write_bytes(pickle.dumps({'episodes':[{'states':states}]}))
+    recording.write_bytes(pickle.dumps({'format':'dexverse_trajectory', 'schema_version':3, 'robot_type':'test', 'episodes':[{'states':states, 'actions':np.zeros((2,2)), 'num_steps':2, 'success':True}]}))
     metadata = {'robot':'test', 'hand':'right', 'robot_joint_names':['move','bend'], 'action_joint_names':['bend','move'],
                 'groups':[{'wrist_indices':[1]}], 'step_dt':.1, 'kinematics_urdf':XML,
                 'kinematics_sha256':hashlib.sha256(XML.encode()).hexdigest(), 'cameras':{'front':{'width':16,'height':16}}}
@@ -109,8 +109,92 @@ def test_camera_preview_keeps_final_saved_state(tmp_path, monkeypatch):
                                     'recording':str(recording), 'source_sha256':hashlib.sha256(recording.read_bytes()).hexdigest(), 'episode':0, 'repository':'/missing'})
     assert result == {'state':'READY'}
     data = json.loads((tmp_path/'preview/viewer.json').read_text())
-    assert len(written) == 2
+    assert len(written) == 0
+    assert not (tmp_path / "preview/views.mp4").exists()
+    assert data["views"] == []
     assert len(data['frames']) == 3
     assert data['frames'][-1]['index'] == 2 and data['frames'][-1]['time'] == .2
     np.testing.assert_allclose(data['frames'][-1]['hand_poses']['actual']['joints'], [.2,2])
     np.testing.assert_allclose(data['frames'][-1]['actual'], HandKinematics(XML,['bend','move'],['move']).points([.2,2], ROOT))
+
+
+def test_raw_recording_preview_has_no_image_dependency(tmp_path, monkeypatch):
+    import pickle
+    from skynet_app import episode_preview_worker as worker
+    from skynet_app.adapters import episode_geometry
+    from skynet_app.live_xr_review import ArrayUnpickler
+    for name in ("HandKinematics", "recorded_urdf", "replay_urdf", "pose_matrix", "MAX_VIEWER_BYTES"):
+        monkeypatch.setattr(worker, name, getattr(episode_geometry, name), raising=False)
+    monkeypatch.setattr(worker, "ArrayUnpickler", ArrayUnpickler, raising=False)
+    metadata = dict(robot="test", hand="right", robot_joint_names=["move", "bend"], action_joint_names=["bend", "move"],
+                    groups=[dict(wrist_indices=[1])], step_dt=.02, kinematics_urdf=XML,
+                    kinematics_sha256=hashlib.sha256(XML.encode()).hexdigest(),
+                    scene_geometry=dict(schema="skynet.scene-geometry/v1", objects=[dict(name="cube", type="box")]))
+    states = [dict(articulation=dict(robot=dict(root_pose=np.array([ROOT]), joint_position=np.array([[i, .1*i]]))),
+                   rigid_object=dict(cube=dict(root_pose=np.array([[i,0,0,1,0,0,0]])))) for i in range(3)]
+    path = tmp_path / "source.pkl"
+    raw = pickle.dumps(dict(format="dexverse_trajectory", schema_version=3, robot_type="test", skynet_state_metadata=metadata,
+                            episodes=[dict(actions=np.zeros((2,2)), states=states, success=True, num_steps=2)]))
+    path.write_bytes(raw)
+    # A recorded metadata path must never fall back to HDF5 or image encoders.
+    monkeypatch.setattr(worker, "_legacy_metadata", lambda *a: (_ for _ in ()).throw(AssertionError("read images")))
+    request = dict(output=str(tmp_path/"preview"), recording=str(path), source_sha256=hashlib.sha256(raw).hexdigest(),
+                   robot="test", episode=0, repository="/missing", hand_visual_url="/frozen/hand", preview_version="test-v1")
+    assert worker.prepare_preview(request) == {"state":"READY"}
+    result = json.loads((tmp_path/"preview/viewer.json").read_text())
+    assert result["views"] == [] and "video_file" not in result
+    assert result["hand_visual_available"] is True
+    assert [frame["time"] for frame in result["frames"]] == [0, .02, .04]
+    assert result["frames"][-1]["objects"]["cube"] == [2,0,0,1,0,0,0]
+    np.testing.assert_allclose(result["frames"][1]["actual"], HandKinematics(XML,["bend","move"],["move"]).points([.1,1],ROOT))
+    assert path.read_bytes() == raw
+    assert not list((tmp_path/"preview").glob("*.mp4"))
+    path.write_bytes(raw + b"changed")
+    with __import__("pytest").raises(ValueError, match="checksum changed"):
+        worker.prepare_preview(request)
+
+
+def test_frozen_hand_assets_are_verified_and_do_not_use_current_catalog(tmp_path):
+    from skynet_app.episode_previews import verified_hand_file
+    import pytest
+    folder = tmp_path / "bundle"; (folder/"assets").mkdir(parents=True)
+    asset = folder/"assets/hand.stl"; asset.write_bytes(b"original mesh")
+    model = folder/"simulation.urdf"
+    model.write_text('<robot><link name="palm"><visual><geometry><mesh filename="assets/hand.stl"/></geometry></visual></link></robot>')
+    manifest = dict(digest="a"*64, robot="saved", files={str(p.relative_to(folder)):dict(size_bytes=p.stat().st_size, sha256=hashlib.sha256(p.read_bytes()).hexdigest()) for p in (asset,model)})
+    (folder/"manifest.json").write_text(json.dumps(manifest))
+    request = dict(root=str(folder), digest="a"*64, robot="saved", url_prefix="/recording/hand/", name="simulation.urdf")
+    result = verified_hand_file(request)
+    assert 'filename="/recording/hand/assets/hand.stl"' in result["text"]
+    assert "/api/hands/" not in result["text"]
+    with pytest.raises(ValueError, match="Unknown"):
+        verified_hand_file(dict(request, name="assets/../../outside"))
+    asset.write_bytes(b"modified mesh")
+    with pytest.raises(ValueError, match="checksum changed"):
+        verified_hand_file(dict(request, name="assets/hand.stl"))
+
+
+def test_cluster_preview_uses_task_version_pinned_repository():
+    from pathlib import Path
+    from types import SimpleNamespace
+    from skynet_app.cluster_runtime import WORK_ROOT
+    from skynet_app.dexverse_versions import V1_REVISION, V1_REPOSITORY
+    from skynet_app.episode_previews import EpisodePreviews
+    root = Path(__file__).resolve().parents[1]
+    base = json.loads((root / 'config/live_video.json').read_text())
+    for task, revision, repository in [
+        ('Dexverse-PickCube-v0', base['source_revision'], base['repository']),
+        ('Dexverse-PushT-v1', V1_REVISION, WORK_ROOT + '/' + V1_REPOSITORY),
+    ]:
+        session = dict(id='recording', recordings=['recordings/live/episode.pkl'],
+                       recording_checksums={'recordings/live/episode.pkl': 'a' * 64},
+                       profile=dict(task=task, source_revision=revision, robot='floating_shadow_hand'))
+        live = SimpleNamespace(root=root, archive=SimpleNamespace(resolve=lambda job, path: (object(), 'sky2', '/archive/' + path)))
+        reviews = SimpleNamespace(live=live, source=lambda *args: (session, '/unused'),
+                                  remote_location=lambda *args: SimpleNamespace(path='/archive/reviews/review.json'))
+        previews = EpisodePreviews(reviews)
+        try:
+            _, gateway, _, request = previews.location('recording', 0, 0)
+            assert gateway == 'sky2' and request['repository'] == repository
+        finally:
+            previews.executor.shutdown(wait=True)

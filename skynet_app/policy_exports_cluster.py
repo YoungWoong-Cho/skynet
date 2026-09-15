@@ -12,6 +12,8 @@ from .cluster_runtime import ClusterError, SubmissionOutcomeUnknown, WORK_ROOT
 from .database import canonical_json
 from .dataset_formats import RECIPES, XPL_COMMIT
 from .remote_artifacts import RemoteArtifact
+from .observation_preparation import ObservationsPending
+from .preparation_states import TERMINAL_FAILURE_STATES, RUNNING_STATES, WAITING_STATES, observed_state
 
 
 class ArchivePending(ValueError):
@@ -88,7 +90,7 @@ class ClusterPolicyPreparation:
         )
 
     def _stage_cluster_attempt(self, job):
-        sources = self._archived_sources(job)
+        sources = self.observations.ensure(job, self._archived_sources(job))
         queue = CLUSTER.queues["normal"]
         self.update(job["id"], state="STAGING", stage="STAGING", error=None,
                     cluster_partition=queue.partition, cluster_account=queue.account, cluster_cpus=4,
@@ -176,11 +178,15 @@ class ClusterPolicyPreparation:
             if not status:
                 return
             state = status["State"]
-            if state in {"PENDING", "CONFIGURING", "RUNNING", "COMPLETING", "SUSPENDED"}:
-                self.update(identifier, state="RUNNING" if state in {"RUNNING", "COMPLETING"} else "PENDING",
-                            stage="CONVERTING" if state in {"RUNNING", "COMPLETING"} else "QUEUED", error=None,
-                            detail="Preparing and validating data on the cluster" if state in {"RUNNING", "COMPLETING"}
-                            else "Waiting for cluster CPU resources" + (f": {status['Reason']}" if status.get("Reason") else ""))
+            if state != "COMPLETED" and state not in TERMINAL_FAILURE_STATES:
+                current = observed_state(state, job["state"])
+                detail = (
+                    "Preparing and validating data on the cluster" if state in RUNNING_STATES
+                    else "Waiting for cluster CPU resources" + (f": {status['Reason']}" if status.get("Reason") else "")
+                    if state in WAITING_STATES else f"Awaiting scheduler confirmation ({state})"
+                )
+                self.update(identifier, state=current, stage="CONVERTING" if current == "RUNNING" else "QUEUED",
+                            error=None, detail=detail)
                 return
             if state != "COMPLETED":
                 message = f"Cluster preparation ended as {state}"
@@ -201,6 +207,8 @@ class ClusterPolicyPreparation:
             _, raw = self.cluster.read_file(job["cluster_root"] + "/result.json", "sky2", max_bytes=10_000_000)
             result = json.loads(raw)
             self._publish_cluster_result(job, result)
+        except ObservationsPending as exc:
+            self.update(identifier, state="QUEUED", stage="OBSERVATIONS", detail=str(exc), error=None)
         except ArchivePending as exc:
             self.update(identifier, state="QUEUED", stage="ARCHIVING", detail=str(exc), error=None)
         except SubmissionOutcomeUnknown as exc:

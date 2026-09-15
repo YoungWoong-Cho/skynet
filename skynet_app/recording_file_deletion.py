@@ -66,7 +66,7 @@ class RecordingFileMaintenance(RecordingMaintenance):
     def _graph(self, c, kind, identifier):
         target = self._target(c, kind, identifier)
         _, graph, blockers = super()._graph(
-            c, "recording", target["id"], pending_target=(kind, identifier)
+            c, "recording", target["id"], pending_target=(kind, identifier), selected_path=target["selected_path"]
         )
         graph["live_xr_sessions"] = [target]
         return target, graph, blockers
@@ -135,7 +135,8 @@ class RecordingFileMaintenance(RecordingMaintenance):
         root = str(PurePosixPath(archive["root"]).parent)
         base = str(PurePosixPath(root).parent)
         dataset_root = next(key for key, paths in groups.items() if base in paths)
-        groups[dataset_root] = [root + "/" + path for path in sorted(removed)]
+        retained_observations = [path for path in groups[dataset_root] if "/datasets/observations/" in path]
+        groups[dataset_root] = [root + "/" + path for path in sorted(removed)] + retained_observations
         groups[dataset_root].extend(
             [
                 self.live.archive.derived_root(job) + f"/reviews/{slot}",
@@ -220,6 +221,7 @@ class RecordingFileMaintenance(RecordingMaintenance):
                 job[field].pop(name, None)
         job.pop("recording_summary", None)
         job.update(archive=archive, updated_at=utc_now())
+        self._delete_observations(c, graph)
         c.execute("SET LOCAL skynet.delete_history='on'")
         children = [row["id"] for row in graph["live_conversions"]]
         for table, field in (("events", "entity_id"), ("tracking_bindings", "scope_id")):

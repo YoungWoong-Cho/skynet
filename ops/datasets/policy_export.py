@@ -4,7 +4,7 @@ DP/ACT schemas and resize conventions follow the unmodified converters in xpolic
 All output is built in a private job directory and published only after validation.
 """
 
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import hashlib
 import io
 import json
@@ -27,6 +27,48 @@ SLOTS = {
 
 
 from artifacts import digest as sha256, pack
+
+
+def camera_contract(camera):
+    """Compare physical calibration independently of capture/provenance wording."""
+    transform = camera.get("world_from_camera")
+    if transform is None and camera.get("quaternion_world_ros") is not None:
+        q = np.asarray(camera["quaternion_world_ros"], dtype=float)
+        if q.shape != (4,) or not np.isfinite(q).all() or np.linalg.norm(q) == 0:
+            raise ValueError("Invalid recorded camera orientation")
+        w, x, y, z = q / np.linalg.norm(q)
+        transform = np.eye(4)
+        transform[:3, :3] = [[1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w)],
+                             [2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w)],
+                             [2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)]]
+        transform[:3, 3] = camera["position_world"]
+        transform = transform.tolist()
+    result = {k: camera.get(k) for k in ("sensor", "width", "height", "intrinsic_matrix")}
+    result["world_from_camera"] = transform
+    if transform is None or result["intrinsic_matrix"] is None:
+        result["recipe"] = {k: camera[k] for k in ("offset", "projection", "mount") if k in camera}
+    return result
+
+
+def capture_contract(metadata):
+    fields = ("robot", "task", "hand", "source_revision", "action_joint_names", "robot_joint_names",
+              "groups", "action_scale", "action_offset", "action_semantics", "step_dt", "color_space",
+              "hand_adapter_digest", "hand_asset", "units", "wrist_rotation_order", "hand_order", "hands")
+    result = {key: metadata.get(key) for key in fields}
+    result["cameras"] = {name: camera_contract(camera) for name, camera in metadata.get("cameras", {}).items()}
+    return result
+
+
+def same_capture_contract(first, second):
+    def equal(a, b):
+        if isinstance(a, dict) and isinstance(b, dict):
+            return set(a) == set(b) and all(equal(a[k], b[k]) for k in a)
+        if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+            return len(a) == len(b) and all(equal(x, y) for x, y in zip(a, b))
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            return bool(np.isclose(a, b, rtol=1e-6, atol=1e-8))
+        return a == b
+    return equal(capture_contract(first), capture_contract(second))
 
 
 def raw_episode(path):
@@ -147,7 +189,15 @@ def source_data(source, visual):
         raise ValueError("Source checksum verification failed")
     payload, episode = raw_episode(source["recording"])
     metadata = payload.get("skynet_state_metadata")
-    if visual or not metadata:
+    shared = {}
+    for camera, modalities in source.get("observation_artifacts", {}).items():
+        if "rgb" in modalities:
+            from observation_artifacts import ArtifactArray
+            array = ArtifactArray(modalities["rgb"], source_sha256=source["sha256"], camera_id=camera, modality="rgb")
+            shared[camera] = array
+            if metadata is None:
+                metadata = array.manifest.get("capture")
+    if (visual and not shared) or not metadata:
         if not source.get("images"):
             raise ValueError("This older recording has no joint-layout metadata. Use its prepared dataset or finish its existing image extraction. New recordings save state metadata without images.")
         if sha256(source["images"]) != source["image_sha256"]:
@@ -156,7 +206,9 @@ def source_data(source, visual):
             meta, n, order = validate(source, src)
             yield meta, n, order, src
         return
-    meta = metadata
+    meta = dict(metadata)
+    if shared:
+        meta.pop("scene_geometry", None)
     actions = np.asarray(episode["actions"])
     names = meta["action_joint_names"]
     if (actions.ndim != 2 or actions.shape[1] != len(names) or len(set(names)) != len(names)
@@ -167,7 +219,7 @@ def source_data(source, visual):
     states = np.stack([np.asarray(v["articulation"]["robot"]["joint_position"])[0, ids] for v in episode["states"][:-1]])
     if states.shape != actions.shape or not np.isfinite(states).all() or not np.isfinite(actions).all():
         raise ValueError("Nonfinite or misaligned state/action data")
-    from images import joint_layout
+    from recording_metadata import joint_layout
     groups = joint_layout(names, meta["hand"], [names[i] for g in meta["groups"] for i in g["wrist_indices"]])
     if groups != meta["groups"]:
         raise ValueError("Joint mapping differs from the declared layout")
@@ -175,7 +227,35 @@ def source_data(source, visual):
     dt = meta["step_dt"]
     if not isinstance(dt, (int, float)) or not np.isfinite(dt) or dt <= 0:
         raise ValueError("Invalid control timing")
-    yield meta, len(actions), order, dict(state=states, action=actions, timestamps=np.arange(len(actions)) * dt)
+    values = dict(state=states, action=actions, timestamps=np.arange(len(actions)) * dt)
+    if visual:
+        if not set(SLOTS.values()).issubset(shared):
+            raise ValueError("This RGB contract requires all three calibrated scene views")
+        meta["cameras"] = {}
+        meta["observation_camera_recipes"] = {}
+        for camera in SLOTS.values():
+            array = shared[camera]
+            if array.shape != (len(actions), 256, 256, 3) or array.dtype != np.uint8 or array.manifest["timing"]["step_dt"] != dt:
+                raise ValueError("Shared RGB values differ from the recording camera or timing contract")
+            recipe = array.manifest["recipe"]
+            meta["cameras"][camera] = {**recipe["camera"], "width": recipe["width"], "height": recipe["height"]}
+            meta["observation_camera_recipes"][camera] = meta["cameras"][camera].copy()
+            with h5py.File(array.path, "r") as observations:
+                intrinsics = observations["calibration/intrinsics"][:]
+                poses = observations["calibration/world_from_camera"][:]
+            if not np.allclose(intrinsics, intrinsics[0], rtol=0, atol=1e-6) or not np.allclose(poses, poses[0], rtol=0, atol=1e-6):
+                raise ValueError("This policy contract requires fixed scene cameras")
+            meta["cameras"][camera].update(intrinsic_matrix=intrinsics[0].tolist(), world_from_camera=poses[0].tolist(), mount="fixed_scene")
+            values["images/" + camera] = array
+        meta["color_space"] = "RGB"
+    with ExitStack() as opened:
+        # A converter scans each view sequentially. Keep those verified files
+        # open for this episode instead of reopening HDF5 for every RGB frame.
+        if visual:
+            for camera, array in shared.items():
+                if camera in SLOTS.values():
+                    values["images/" + camera] = opened.enter_context(h5py.File(array.path, "r"))["values"]
+        yield meta, len(actions), order, values
 
 
 def split(values, groups):
@@ -215,7 +295,7 @@ def export(request):
             if not visual:
                 meta = {k: v for k, v in meta.items() if k not in {"cameras", "color_space", "image_recipe_sha256", "render_mode", "source_sha256"}}
             calibration = {k: v for k, v in meta.items() if k != "source_sha256"}
-            if common is not None and common != calibration:
+            if common is not None and not same_capture_contract(common, calibration):
                 raise ValueError(
                     "Camera calibration, robot layout, or timing differs between episodes"
                 )
@@ -329,6 +409,10 @@ def export(request):
                     source_index=source["index"],
                 )
             )
+            if source.get("observation_artifacts"):
+                episodes[-1]["observation_artifacts"] = source["observation_artifacts"]
+            if source.get("observation_streams"):
+                episodes[-1]["observation_streams"] = source["observation_streams"]
             print(
                 json.dumps(
                     {

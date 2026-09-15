@@ -7,7 +7,7 @@ import numpy as np
 import simplejpeg
 
 from artifacts import digest, pack
-from policy_export import source_data
+from policy_export import source_data, same_capture_contract
 from egoverse_zarr_writer import ZarrWriter
 from egoverse_splits import OVERFIT_MODE, validate_split
 
@@ -22,7 +22,7 @@ def export(request):
     for index, source in enumerate(request["sources"]):
         with source_data(source, True) as (meta, n, order, src):
             capture = {k: v for k, v in meta.items() if k != "source_sha256"}
-            if common is not None and capture != common:
+            if common is not None and not same_capture_contract(common, capture):
                 raise ValueError(
                     "Robot, camera calibration or timing differs between episodes"
                 )
@@ -82,11 +82,15 @@ def export(request):
                     steps=n,
                     path=relative,
                     sha256=source["sha256"],
-                    image_sha256=source["image_sha256"],
+                    image_sha256=source.get("image_sha256"),
                     session_id=source["session_id"],
                     source_index=source["index"],
                 )
             )
+            if source.get("observation_artifacts"):
+                episodes[-1]["observation_artifacts"] = source["observation_artifacts"]
+            if source.get("observation_streams"):
+                episodes[-1]["observation_streams"] = source["observation_streams"]
             print(
                 json.dumps(
                     dict(

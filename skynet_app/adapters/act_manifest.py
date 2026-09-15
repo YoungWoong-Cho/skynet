@@ -154,6 +154,7 @@ def manifest():
                 description="ACT HDF5 with three RGB views and joints.",
                 observations=["state", "rgb"],
                 action_representation="raw_joint_position_command",
+                observation_requirements=RECIPES["act"]["observation_requirements"],
             ),
             supported_canonical_fields=[
                 *common,

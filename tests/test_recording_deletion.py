@@ -323,3 +323,176 @@ def test_retired_conversion_history_still_blocks_deleting_unfinished_work(record
     assert folder.exists()
     with service.db.connection() as connection:
         assert connection.execute('SELECT payload_json FROM live_conversions WHERE id=?', (identifier,)).fetchone()
+
+
+def observation(recording, *, source_path="recordings/one.pkl", label="rgb", inputs=(), producer_state=None):
+    """Persist an immutable observation and real bytes for deletion tests."""
+    from skynet_app.database import utc_now
+    from skynet_app.observation_contracts import content_digest
+    service, live, job, _, _, root = recording
+    spec = dict(schema="skynet.observation-artifact/v1", source_sha256="a"*64,
+                modality=label, dependencies=list(inputs))
+    key = content_digest(spec)
+    path = root / "datasets/observations" / spec["source_sha256"] / key
+    path.mkdir(parents=True)
+    (path/"data.bin").write_bytes(b"immutable observation")
+    now, producer = utc_now(), str(uuid4()) if producer_state else None
+    with service.db.transaction() as c:
+        if producer:
+            c.execute("INSERT INTO observation_producers(id,attempt_token,state,payload_json,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+                      (producer,str(uuid4()),producer_state,"{}",now,now))
+        c.execute("INSERT INTO observation_artifacts(artifact_key,spec_json,state,producer_id,path,manifest_sha256,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                  (key,canonical_json(spec),"RUNNING" if producer else "READY",producer,str(path),"b"*64,now,now))
+        c.execute("INSERT INTO observation_sources VALUES (?,?,?)",(key,job["id"],source_path))
+        for parent in inputs:
+            c.execute("INSERT INTO observation_artifact_inputs VALUES (?,?)",(key,parent))
+    return key,path
+
+
+def test_unreferenced_observations_delete_outputs_before_inputs(recording):
+    service,live,job,folder,_,_ = recording
+    depth,depth_path = observation(recording,label="depth")
+    cloud,cloud_path = observation(recording,label="cloud",inputs=[depth])
+    plan=service.preview("recording",job["id"])
+    assert not plan["blockers"]
+    assert plan["records"]["observation_artifacts"] == [cloud,depth]
+    assert {str(depth_path),str(cloud_path)} <= {item["path"] for item in plan["files"]}
+    service.delete("recording",job["id"],plan["token"])
+    assert not folder.exists() and not depth_path.exists() and not cloud_path.exists()
+    with service.db.connection() as c:
+        assert not c.execute("SELECT * FROM observation_sources").fetchall()
+        assert not c.execute("SELECT * FROM observation_artifacts").fetchall()
+
+
+def test_shared_observation_keeps_bytes_and_other_source_alias(recording):
+    import json
+    service,live,job,folder,_,_ = recording
+    key,path=observation(recording)
+    other=dict(id=str(uuid4()), profile={"task_name":"Other"}, recordings=["recordings/copy.pkl"])
+    with service.db.transaction() as c:
+        c.execute("INSERT INTO live_xr_sessions VALUES (?,?)",(other["id"],canonical_json(other)))
+        c.execute("INSERT INTO observation_sources VALUES (?,?,?)",(key,other["id"],"recordings/copy.pkl"))
+        # A consumer is safe because another original with the same content remains.
+        export=str(uuid4())
+        c.execute("INSERT INTO policy_exports VALUES (?,?)",(export,canonical_json(dict(id=export,state="READY"))))
+        c.execute("INSERT INTO observation_job_inputs VALUES (?,?)",(export,key))
+    plan=service.preview("recording",job["id"])
+    assert not plan["blockers"]
+    assert "observation_artifacts" not in plan["records"]
+    service.delete("recording",job["id"],plan["token"])
+    assert path.exists() and not folder.exists()
+    with service.db.connection() as c:
+        assert [row[0] for row in c.execute("SELECT session_id FROM observation_sources WHERE artifact_key=?",(key,))] == [other["id"]]
+        assert c.execute("SELECT 1 FROM observation_job_inputs WHERE artifact_key=?",(key,)).fetchone()
+
+
+@pytest.mark.parametrize("consumer",["job","version","producer"])
+def test_observation_consumers_block_before_original_file_deletion(recording,consumer):
+    service,live,job,folder,_,_ = recording
+    key,path=observation(recording,producer_state="RUNNING" if consumer=="producer" else None)
+    if consumer=="job":
+        with service.db.transaction() as c:
+            export=str(uuid4())
+            c.execute("INSERT INTO policy_exports VALUES (?,?)",(export,canonical_json(dict(id=export,state="RUNNING"))))
+            c.execute("INSERT INTO observation_job_inputs VALUES (?,?)",(export,key))
+    if consumer=="version":
+        resource=service.db.create_data_resource(category="dataset",provider="test",namespace="test",source_key="consumer",kind="demonstrations")
+        version=service.db.create_data_resource_version(resource["id"],revision="r",format="test",path="/dataset",manifest_sha256="c"*64)
+        with service.db.transaction() as c:
+            c.execute("INSERT INTO observation_version_inputs VALUES (?,?)",(version["id"],key))
+    plan=service.preview("recording",job["id"])
+    assert plan["blockers"] and not plan["files"]
+    with pytest.raises(ValueError,match="dependencies"):
+        service.delete("recording",job["id"],plan["token"])
+    assert folder.exists() and path.exists()
+
+
+def test_new_observation_consumer_invalidates_deletion_preview(recording):
+    service,live,job,folder,_,_ = recording
+    key,path=observation(recording)
+    plan=service.preview("recording",job["id"])
+    with service.db.transaction() as c:
+        export=str(uuid4())
+        c.execute("INSERT INTO policy_exports VALUES (?,?)",(export,canonical_json(dict(id=export,state="QUEUED"))))
+        c.execute("INSERT INTO observation_job_inputs VALUES (?,?)",(export,key))
+    with pytest.raises(ValueError,match="dependencies"):
+        service.delete("recording",job["id"],plan["token"])
+    assert folder.exists() and path.exists()
+
+
+def observation_producer(recording, keys, *, state):
+    from skynet_app.database import utc_now
+    service, _, job, _, _, root = recording
+    identifier, token, now = str(uuid4()), str(uuid4()), utc_now()
+    capsule = root / 'jobs/runs' / identifier
+    payload = dict(id=identifier, attempt_token=token, root=str(capsule / 'observations' / token),
+                   request=dict(requests=[dict(artifact_key=key) for key in keys],
+                                sources=[dict(session_id=job['id'], path='recordings/one.pkl')],
+                                worker_files={'worker.py': 'frozen worker source'}))
+    capsule.mkdir(parents=True)
+    (capsule / 'request.json').write_text(canonical_json(payload))
+    with service.db.transaction() as connection:
+        connection.execute('INSERT INTO observation_producers(id,attempt_token,state,payload_json,created_at,updated_at) VALUES (?,?,?,?,?,?)',
+                           (identifier, token, state, canonical_json(payload), now, now))
+        for key in keys:
+            connection.execute('UPDATE observation_artifacts SET producer_id=? WHERE artifact_key=?', (identifier, key))
+    return identifier, capsule
+
+
+@pytest.mark.parametrize('state', ['READY', 'FAILED'])
+def test_exclusive_observation_cleanup_removes_terminal_producer_capsules_and_rows(recording, state):
+    service, _, job, _, _, _ = recording
+    depth, depth_path = observation(recording, label='depth')
+    cloud, cloud_path = observation(recording, label='cloud', inputs=[depth])
+    locks = [path.with_name('.' + path.name + '.publish.lock') for path in (depth_path, cloud_path)]
+    for lock in locks:
+        lock.write_bytes(b'')
+    # A previous failed attempt has the same requested artifacts but no current
+    # ownership FKs after retry; its historical capsule must be cleaned too.
+    previous, previous_capsule = observation_producer(recording, [depth, cloud], state='FAILED')
+    producer, capsule = observation_producer(recording, [depth, cloud], state=state)
+    plan = service.preview('recording', job['id'])
+    assert not plan['blockers']
+    assert set(plan['records']['observation_producers']) == {producer, previous}
+    assert {str(capsule), str(previous_capsule)} <= {item['path'] for item in plan['files']}
+    service.delete('recording', job['id'], plan['token'])
+    assert not capsule.exists() and not previous_capsule.exists()
+    assert not depth_path.exists() and not cloud_path.exists()
+    assert all(not lock.exists() for lock in locks)
+    with service.db.connection() as connection:
+        assert not connection.execute('SELECT * FROM observation_artifacts').fetchall()
+        assert not connection.execute('SELECT * FROM observation_producers').fetchall()
+
+
+@pytest.mark.parametrize('state', ['READY', 'FAILED', 'RUNNING'])
+def test_retained_recording_artifact_keeps_its_entire_producer(recording, state):
+    service, _, job, folder, _, _ = recording
+    exclusive, exclusive_path = observation(recording, label='first-view')
+    shared, shared_path = observation(recording, label='other-view')
+    exclusive_lock = exclusive_path.with_name('.' + exclusive_path.name + '.publish.lock')
+    shared_lock = shared_path.with_name('.' + shared_path.name + '.publish.lock')
+    exclusive_lock.write_bytes(b'')
+    shared_lock.write_bytes(b'')
+    producer, capsule = observation_producer(recording, [exclusive, shared], state=state)
+    other_id = str(uuid4())
+    with service.db.transaction() as connection:
+        connection.execute('INSERT INTO live_xr_sessions VALUES (?,?)',
+                           (other_id, canonical_json(dict(id=other_id, recordings=['recordings/copy.pkl']))))
+        connection.execute('INSERT INTO observation_sources VALUES (?,?,?)', (shared, other_id, 'recordings/copy.pkl'))
+    plan = service.preview('recording', job['id'])
+    assert 'observation_producers' not in plan['records']
+    if state == 'RUNNING':
+        assert plan['blockers'] and not plan['files']
+        with pytest.raises(ValueError, match='dependencies'):
+            service.delete('recording', job['id'], plan['token'])
+        assert exclusive_path.exists() and exclusive_lock.exists() and folder.exists()
+    else:
+        assert not plan['blockers']
+        assert str(capsule) not in {item['path'] for item in plan['files']}
+        service.delete('recording', job['id'], plan['token'])
+        assert not exclusive_path.exists() and not exclusive_lock.exists() and not folder.exists()
+    assert capsule.exists() and shared_path.exists() and shared_lock.exists()
+    with service.db.connection() as connection:
+        assert connection.execute('SELECT state FROM observation_producers WHERE id=?', (producer,)).fetchone()[0] == state
+        assert connection.execute('SELECT producer_id FROM observation_artifacts WHERE artifact_key=?', (shared,)).fetchone()[0] == producer
+        assert connection.execute('SELECT 1 FROM observation_sources WHERE session_id=? AND artifact_key=?', (other_id, shared)).fetchone()

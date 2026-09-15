@@ -35,30 +35,6 @@ def test_image_receipts_require_original_and_image_checksums(tmp_path):
         worker.attach_rendered_images(tmp_path, original)
 
 
-def test_render_process_has_no_xr_runtime_and_requires_ready_receipt(tmp_path, monkeypatch):
-    args = []
-    def start(argv, **kwargs):
-        assert "XR_RUNTIME_JSON" not in kwargs["env"]
-        assert "render_images.py" in argv[1]
-        args.append(argv)
-        (tmp_path / "image-progress.json").write_text(json.dumps(dict(state="READY", completed=1, total=1)))
-        return SimpleNamespace(poll=lambda: 0, returncode=0)
-    monkeypatch.setattr(worker.subprocess, "Popen", start)
-    states = []
-    worker.prepare_training_images(tmp_path, tmp_path / "profile.json", tmp_path, tmp_path,
-        {"XR_RUNTIME_JSON": "headset-runtime", "PATH": "/bin"}, lambda state, **details: states.append(state))
-    assert args and states == ["RENDERING_IMAGES", "RENDERING_IMAGES"]
-
-
-def test_render_timeout_terminates_child_and_never_marks_ready(tmp_path, monkeypatch):
-    calls = []
-    process = SimpleNamespace(poll=lambda: None, terminate=lambda: calls.append("terminate"), wait=lambda **k: 0)
-    monkeypatch.setattr(worker.subprocess, "Popen", lambda *a, **k: process)
-    with pytest.raises(TimeoutError, match="original recordings are preserved"):
-        worker.prepare_training_images(tmp_path, tmp_path / "profile.json", tmp_path, tmp_path, {}, lambda *a, **k: None, timeout=0)
-    assert calls == ["terminate"]
-
-
 def test_receipt_hashing_runs_without_python_311_file_digest(tmp_path, monkeypatch):
     import io
     monkeypatch.delattr(worker.hashlib, "file_digest", raising=False)

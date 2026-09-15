@@ -11,33 +11,8 @@ const dom = new JSDOM(
 );
 const { window } = dom,
   requests = [];
-let videoPauses = 0;
-window.HTMLMediaElement.prototype.pause = function () {
-  videoPauses++;
-};
-window.HTMLMediaElement.prototype.load = function () {};
 const get = (id) => window.document.getElementById(id);
-const watchdogs = new Map();
-let nextWatchdog = 100000;
-const realSetTimeout = window.setTimeout.bind(window);
-const realClearTimeout = window.clearTimeout.bind(window);
-window.setTimeout = (callback, delay, ...args) => {
-  if (delay !== 30000) return realSetTimeout(callback, delay, ...args);
-  const id = ++nextWatchdog;
-  watchdogs.set(id, callback);
-  return id;
-};
-window.clearTimeout = (id) => {
-  watchdogs.delete(id);
-  realClearTimeout(id);
-};
-const mediaEvent = (event, readyState = 2) => {
-  Object.defineProperty(get("live-review-video"), "readyState", {
-    value: readyState,
-    configurable: true,
-  });
-  get("live-review-video").dispatchEvent(new window.Event(event));
-};
+let nextPollId = 100000;
 const dialog = get("live-review-dialog");
 dialog.showModal = () => {
   dialog.open = true;
@@ -55,8 +30,13 @@ window.fetch = (path, options) =>
     }),
   );
 const flush = () => new Promise((resolve) => setImmediate(resolve));
-let viewerOptions;
-window.SkynetEpisodeViewer = {open: (...args) => { viewerOptions = args[3]; }, close() {}};
+let viewerOptions, viewerVideoId, viewerPlaying = false;
+const viewerPauses = [];
+window.SkynetEpisodeViewer = {
+  open: (...args) => { viewerOptions = args[3]; viewerVideoId = args[1]; },
+  pause: (hostId) => { viewerPauses.push(hostId); viewerPlaying = false; },
+  close() { viewerPlaying = false; },
+};
 const data = {
   task_name: "Stick",
   hand_name: "Right",
@@ -92,40 +72,9 @@ try {
   await flush();
   requests[1].resolve(data);
   await flush();
-  assert.equal(requests[2].path.endsWith("/video?episode=0"), true);
-  requests[2].resolve({
-    state: "READY",
-    kind: "replay",
-    sha256: "first-video",
-  });
-  await flush();
-  assert.equal(get("live-review-video").hidden, false);
-  assert.match(
-    get("live-review-video").src,
-    /first\/recordings\/0\/video.mp4\?episode=0&v=first-video$/,
-  );
-  assert.equal(get("live-review-video-status").textContent, "Loading video…");
-  assert.equal(watchdogs.size, 1);
-  const initialWatchdog = [...watchdogs.values()][0];
-  mediaEvent("stalled", 0);
-  assert.equal(
-    [...watchdogs.values()][0],
-    initialWatchdog,
-    "Repeated stalls must not postpone the timeout",
-  );
-  [...watchdogs.values()][0]();
-  assert.match(
-    get("live-review-video-status").textContent,
-    /did not load within 30 seconds/,
-  );
-  assert.equal(get("live-review-video-retry").hidden, false);
-  mediaEvent("loadeddata");
-  assert.equal(watchdogs.size, 0);
-  assert.equal(get("live-review-video-retry").hidden, true);
-  assert.match(
-    get("live-review-video-status").textContent,
-    /rendered from recorded states/,
-  );
+  assert.equal(requests.length, 2, "Opening a recording must not request video");
+  assert.equal(get("live-review-video"), null, "Collection has no hidden media element");
+  assert.equal(viewerVideoId, null, "Collection opens the state-only viewer");
   assert.equal(get("live-review-data").open, false);
   assert.equal(get("live-review-source").hidden, false);
   assert.equal(get("live-review-source-label").textContent, "Path · sky2");
@@ -133,27 +82,6 @@ try {
   assert.equal(get("live-review-source-copy").dataset.copyValue, "/cluster/original/episode-1.pkl");
   assert.equal(get("live-review-source").nextElementSibling, get("live-review-data"));
   assert.deepEqual(viewerOptions.sourceNames, data.hand_metadata.source_names);
-  get("live-review-video").dispatchEvent(new window.Event("error"));
-  assert.equal(get("live-review-video-retry").hidden, false);
-  get("live-review-video-retry").click();
-  assert.equal(requests[3].options.method, "POST");
-  requests[3].resolve({
-    state: "READY",
-    kind: "capture",
-    sha256: "captured-video",
-  });
-  await flush();
-  mediaEvent("canplay");
-  assert.equal(get("live-review-video-status").textContent, "Collection video");
-  mediaEvent("waiting", 1);
-  assert.equal(get("live-review-video-status").textContent, "Buffering video…");
-  assert.equal(watchdogs.size, 1);
-  mediaEvent("playing", 3);
-  assert.equal(watchdogs.size, 0);
-  mediaEvent("seeking", 1);
-  assert.equal(watchdogs.size, 1);
-  mediaEvent("seeked", 3);
-  assert.equal(watchdogs.size, 0);
   assert.match(get("live-review-values").textContent, /Initial state/);
   assert.equal(get('live-review-seek'), null, 'Recorded values have no independent seek bar');
   assert.equal(get('live-review-context'), null, 'The duplicate title subtitle was removed');
@@ -169,38 +97,21 @@ try {
   get("live-review-field").value = "robot.joint_position";
   get("live-review-field").dispatchEvent(new window.Event("change"));
   assert.match(get("live-review-values").textContent, /1\.000000/);
-  mediaEvent("waiting", 1);
-  const staleWatchdog = [...watchdogs.values()][0];
   get("live-review-close").click();
-  assert.equal(watchdogs.size, 0);
   window.openLiveReview({ id: "stale" }, 0);
-  assert.equal(get("live-review-source").hidden, true);
-  assert.equal(get("live-review-source-path").textContent, "");
-  assert.equal(get("live-review-source-copy").dataset.copyValue, undefined);
+  const staleRequest = requests.at(-1);
   get("live-review-close").click();
   window.openLiveReview({ id: "current" }, 0);
-  staleWatchdog();
-  assert.equal(
-    get("live-review-video-retry").hidden,
-    true,
-    "A closed video's timer must not alter the new review",
-  );
-  assert.equal(get("live-review-video").hasAttribute("src"), false);
-  assert.ok(videoPauses > 0);
+  const currentRequest = requests.at(-1);
   const beforeStale = requests.length;
-  requests[4].resolve({ state: "READY" });
+  staleRequest.resolve({state: "READY"});
   await flush();
-  assert.equal(
-    requests.length,
-    beforeStale,
-    "Closed review must not fetch stale data",
-  );
-  requests[5].resolve({ state: "FAILED", error: "Host unreachable" });
+  assert.equal(requests.length, beforeStale, "Closed review must not fetch stale data");
+  currentRequest.resolve({state: "FAILED", error: "Host unreachable"});
   await flush();
   assert.match(get("live-review-status").textContent, /Host unreachable/);
-  assert.equal(get("live-review-retry").hidden, false);
   get("live-review-retry").click();
-  assert.equal(requests[6].options.method, "POST");
+  assert.equal(requests.at(-1).options.method, "POST");
   window.openLiveReview({
     id: "multiple",
     recordings: ["first.pkl", "second.pkl"],
@@ -224,91 +135,9 @@ try {
   await flush();
   requests.at(-1).resolve(data);
   await flush();
-  assert.match(
-    requests.at(-1).path,
-    /multiple\/recordings\/1\/video\?episode=0$/,
-  );
-  requests
-    .at(-1)
-    .resolve({ state: "READY", kind: "replay", sha256: "second-video" });
-  await flush();
-  assert.match(get("live-review-video").src, /recordings\/1\/video.mp4/);
+  assert.equal(requests.some(r => /\/video(?:\?|\.|$)/.test(r.path)), false);
   assert.equal(get("live-review-source-path").textContent, "/workstation/episode-2.pkl");
-  assert.equal(get("live-review-source-copy").dataset.copyValue, "/workstation/episode-2.pkl");
-  window.openLiveReview({id: "explicit-preparation"});
-  requests.at(-1).resolve({state: "READY"});
-  await flush();
-  requests.at(-1).resolve(data);
-  await flush();
-  const beforeUnprepared = requests.length;
-  requests.at(-1).resolve({state: "NOT_PREPARED"});
-  await flush();
-  assert.equal(requests.length, beforeUnprepared, "Browsing an uncached video must not queue remote work");
-  assert.equal(get("live-review-video-retry").textContent, "Prepare video");
-  assert.equal(get("live-review-video-cancel").hidden, true);
-  get("live-review-video-retry").click();
-  assert.equal(requests.at(-1).options.method, "POST");
-  requests.at(-1).resolve({state: "QUEUED", detail: "Queue position 2"});
-  await flush();
-  assert.equal(get("live-review-video-cancel").hidden, false);
-  get("live-review-video-cancel").click();
-  assert.equal(requests.at(-1).options.method, "DELETE");
-  requests.at(-1).resolve({state: "CANCELLED"});
-  await flush();
-  requests.at(-1).resolve({state: "CANCELLED"});
-  await flush();
-  assert.equal(get("live-review-video-cancel").hidden, true);
-  assert.equal(get("live-review-video-retry").textContent, "Prepare video");
-  assert.match(get("live-review-video-status").textContent, /Video preparation cancelled/);
-  get("live-review-video-retry").click();
-  requests.at(-1).resolve({state: "PREPARING", generation: "generation-a", detail: "Downloading video…"});
-  await flush();
-  assert.equal(get("live-review-video-cancel").hidden, false);
-  assert.equal(get("live-review-video-cancel").textContent, "Cancel video preparation");
-  get("live-review-video-cancel").click();
-  assert.match(requests.at(-1).path, /generation=generation-a$/);
-  requests.at(-1).resolve({state: "CANCELLING"});
-  await flush();
-  requests.at(-1).resolve({state: "CANCELLING", generation: "generation-a", can_cancel: false, detail: "Cancelling video preparation…"});
-  await flush();
-  assert.equal(get("live-review-video-cancel").hidden, false);
-  assert.equal(get("live-review-video-cancel").disabled, true);
-  assert.equal(get("live-review-video-cancel").textContent, "Cancelling…");
-  assert.equal(get("live-review-video-retry").hidden, true);
-  get("live-review-close").click();
-  window.openLiveReview({id: "cancel-recovery"});
-  requests.at(-1).resolve({state: "READY"});
-  await flush();
-  requests.at(-1).resolve(data);
-  await flush();
-  requests.at(-1).resolve({state: "CANCELLING", generation: "generation-a", can_cancel: true, detail: "Could not confirm cancellation: host unreachable. Retry cancellation."});
-  await flush();
-  assert.equal(get("live-review-video-cancel").disabled, false);
-  assert.equal(get("live-review-video-cancel").textContent, "Retry cancellation");
-  assert.match(get("live-review-video-status").textContent, /host unreachable/);
-  get("live-review-video-cancel").click();
-  const staleCancellation = requests.at(-1);
-  get("live-review-close").click();
-  window.openLiveReview({id: "gpu-wait"});
-  requests.at(-1).resolve({state: "READY"});
-  await flush();
-  requests.at(-1).resolve(data);
-  await flush();
-  requests.at(-1).resolve({state: "WAITING_GPU", generation: "generation-b", detail: "Waiting for the GPU…"});
-  await flush();
-  assert.equal(get("live-review-video-cancel").disabled, false);
-  const countBeforeStaleCancel = requests.length;
-  staleCancellation.resolve({state: "CANCELLED"});
-  await flush();
-  assert.equal(requests.length, countBeforeStaleCancel, "A stale cancellation must not reload another recording");
-  assert.match(get("live-review-video-status").textContent, /Waiting for the GPU/);
-  get("live-review-video-cancel").click();
-  assert.match(requests.at(-1).path, /generation=generation-b$/);
-  requests.at(-1).resolve({state: "CANCELLED"});
-  await flush();
-  requests.at(-1).resolve({state: "CANCELLED"});
-  await flush();
-  assert.equal(get("live-review-video-cancel").hidden, true);
+  assert.equal(get("live-review-dialog").querySelector("video"), null);
   get("live-review-close").click();
 
   // A cached connection failure must be retried once when the user opens that
@@ -318,7 +147,7 @@ try {
   const previousClearTimeout = window.clearTimeout;
   window.setTimeout = (callback, delay, ...args) => {
     if (delay !== 1500) return previousSetTimeout(callback, delay, ...args);
-    const id = ++nextWatchdog;
+    const id = ++nextPollId;
     reviewPolls.set(id, callback);
     return id;
   };
@@ -350,8 +179,6 @@ try {
   await flush();
   requests.at(-1).resolve(data);
   await flush();
-  requests.at(-1).resolve({state: "NOT_PREPARED"});
-  await flush();
   assert.equal(get("live-review-content").hidden, false);
   assert.equal(get("live-review-retry").hidden, true);
   assert.equal(reviewPolls.size, 0);
@@ -381,89 +208,6 @@ try {
   assert.equal(requests.at(-1).options.method, "POST", "A later user open gets one new recovery attempt");
   get("live-review-close").click();
 
-  // One explicit preparation follows the server's stages; observing a busy
-  // GPU must neither announce rendering nor start another preparation.
-  const openVideoFixture = async (id) => {
-    window.openLiveReview({id});
-    requests.at(-1).resolve({state: "READY"});
-    await flush();
-    requests.at(-1).resolve(data);
-    await flush();
-    assert.match(requests.at(-1).path, /\/video\?episode=0$/);
-    assert.equal(requests.at(-1).options.method, undefined);
-    requests.at(-1).resolve({state: "NOT_PREPARED"});
-    await flush();
-  };
-  const videoRequestsSince = (index) => requests.slice(index).filter(({path}) => path.includes("/video?"));
-  const beforeStages = requests.length;
-  await openVideoFixture("truthful-video-stages");
-  get("live-review-video-retry").click();
-  assert.equal(requests.at(-1).options.method, "POST");
-  requests.at(-1).resolve({state: "QUEUED", generation: "stable-generation", detail: "Waiting to prepare video…"});
-  await flush();
-  const stageDetails = [
-    ["STARTING", "Starting video preparation…"],
-    ["WAITING_GPU", "Collection session c94e16e6 is using the GPU. Waiting… 115 seconds remain."],
-    ["WAITING_GPU", "Collection session c94e16e6 is using the GPU. Waiting… 110 seconds remain."],
-    ["PREPARING", "Rendering recorded scene…"],
-  ];
-  for (const [state, detail] of stageDetails) {
-    await pollReview();
-    assert.equal(requests.at(-1).options.method, undefined, "Stage polling must only GET the current preparation");
-    requests.at(-1).resolve({state, detail, generation: "stable-generation"});
-    await flush();
-    assert.ok(get("live-review-video-status").textContent.startsWith(detail), "Backend stage, owner and remaining-time detail must be preserved");
-    if (state !== "PREPARING") assert.doesNotMatch(get("live-review-video-status").textContent, /Rendering/);
-    assert.equal(get("live-review-video-cancel").hidden, false, `${state} remains cancellable`);
-    assert.equal(get("live-review-video-cancel").disabled, false);
-    assert.equal(get("live-review-video-retry").hidden, true);
-    assert.equal(get("live-review-video").hidden, true);
-    assert.equal(videoRequestsSince(beforeStages).filter(({options}) => options.method === "POST").length, 1);
-  }
-  await pollReview();
-  assert.equal(requests.at(-1).options.method, undefined);
-  requests.at(-1).resolve({state: "READY", generation: "stable-generation", kind: "replay", sha256: "rendered-once"});
-  await flush();
-  mediaEvent("loadeddata");
-  assert.equal(reviewPolls.size, 0, "Completed preparation stops status polling");
-  assert.equal(get("live-review-video").hidden, false);
-  assert.equal(get("live-review-video-cancel").hidden, true);
-  assert.equal(get("live-review-video-retry").hidden, true);
-  assert.match(get("live-review-video").src, /truthful-video-stages\/recordings\/0\/video.mp4\?episode=0&v=rendered-once$/);
-  assert.equal(videoRequestsSince(beforeStages).filter(({options}) => options.method === "POST").length, 1);
-  get("live-review-close").click();
-
-  const beforeTimeout = requests.length;
-  await openVideoFixture("busy-video-timeout");
-  get("live-review-video-retry").click();
-  requests.at(-1).resolve({state: "WAITING_GPU", generation: "timed-out-generation", detail: "Collection session c94e16e6 is using the GPU. Waiting…"});
-  await flush();
-  await pollReview();
-  requests.at(-1).resolve({state: "FAILED", error: "The GPU is still busy. End collection or wait, then retry."});
-  await flush();
-  assert.equal(reviewPolls.size, 0, "The server's terminal timeout must stop automatic polling");
-  assert.match(get("live-review-video-status").textContent, /GPU is still busy/);
-  assert.equal(get("live-review-video-cancel").hidden, true);
-  assert.equal(get("live-review-video-retry").hidden, false);
-  assert.equal(get("live-review-video-retry").textContent, "Retry video");
-  assert.equal(videoRequestsSince(beforeTimeout).filter(({options}) => options.method === "POST").length, 1);
-  get("live-review-video-retry").click();
-  assert.equal(videoRequestsSince(beforeTimeout).filter(({options}) => options.method === "POST").length, 2, "Only a new user Retry starts another preparation");
-  requests.at(-1).resolve({state: "STARTING", generation: "retry-generation"});
-  await flush();
-  assert.match(get("live-review-video-status").textContent, /^Starting video preparation/);
-  assert.equal(get("live-review-video-cancel").hidden, false);
-  get("live-review-video-cancel").click();
-  assert.equal(requests.at(-1).options.method, "DELETE");
-  assert.match(requests.at(-1).path, /generation=retry-generation$/);
-  requests.at(-1).resolve({state: "CANCELLED"});
-  await flush();
-  assert.equal(requests.at(-1).options.method, undefined);
-  requests.at(-1).resolve({state: "CANCELLED"});
-  await flush();
-  assert.equal(reviewPolls.size, 0);
-  assert.match(get("live-review-video-status").textContent, /preparation cancelled/);
-  get("live-review-close").click();
   window.setTimeout = previousSetTimeout;
   window.clearTimeout = previousClearTimeout;
   const session = {id:"recording-delete-test", recordings:["recordings/one.pkl", "recordings/two.pkl", "recordings/three.pkl"]};
@@ -471,6 +215,12 @@ try {
   const remove = get("live-review-delete");
   assert.equal(remove.hidden, false);
   assert.equal(remove.dataset.deleteKind, "recording-file", "reuse the existing delegated deletion control");
+  viewerPlaying = true;
+  const pausesBeforeDelete = viewerPauses.length;
+  remove.click();
+  assert.equal(viewerPauses.length, pausesBeforeDelete + 1);
+  assert.equal(viewerPauses.at(-1), "live-episode-viewer");
+  assert.equal(viewerPlaying, false, "Delete pauses the actual 3D timeline");
   const selectedIdentity = remove.dataset.deleteId;
   assert.equal(window.atob(selectedIdentity.split(":")[1]), session.recordings[1]);
   get("live-review-recording").value = "2";
@@ -490,7 +240,7 @@ try {
   assert.equal(remove.hidden, false, "a single recording still has Delete when the selector is hidden");
   get("live-review-close").click();
   console.log(
-    "Review UI: frame boundaries, values, close races, selected recording recovery, truthful video stages, GET-only polling and bounded retry passed.",
+    "Review UI: frame boundaries, values, close races, selected recording recovery, no video requests, GET-only review polling and bounded retry passed.",
   );
 } finally {
   window.close();

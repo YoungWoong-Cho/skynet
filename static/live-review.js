@@ -7,204 +7,10 @@
     frame = 0,
     timer;
   const dialog = el("live-review-dialog");
-  const video = el("live-review-video");
   let reviewSession;
-  let videoToken = 0,
-    videoTimer,
-    videoGeneration = "",
-    mediaTimer,
-    mediaTime = 0,
-    mediaLabel = "",
-    mediaCurrent = () => false;
-  function stopMediaWatch() {
-    clearTimeout(mediaTimer);
-    mediaTimer = undefined;
-  }
-  function videoFailure(message) {
-    stopMediaWatch();
-    video.pause();
-    el("live-review-video-status").textContent = message;
-    el("live-review-video-retry").hidden = false;
-    el("live-review-video-retry").textContent = "Retry video";
-  }
-  function watchMedia(message) {
-    if (!mediaCurrent() || mediaTimer !== undefined) return;
-    const current = mediaCurrent;
-    mediaTimer = setTimeout(() => {
-      if (current()) videoFailure(message);
-    }, 30000);
-  }
-  function mediaReady() {
-    if (!mediaCurrent() || video.readyState < 2) return;
-    stopMediaWatch();
-    el("live-review-video-status").textContent = mediaLabel;
-    el("live-review-video-retry").hidden = true;
-    el("live-review-video-cancel").hidden = true;
-    el("live-review-video-retry").textContent = "Retry video";
-  }
-  function clearVideo() {
+  function closeViewer() {
     window.SkynetEpisodeViewer?.close("live-episode-viewer");
-    ++videoToken;
-    videoGeneration = "";
-    el("live-review-video-cancel").disabled = false;
-    clearTimeout(videoTimer);
-    stopMediaWatch();
-    mediaTime = 0;
-    mediaCurrent = () => false;
-    video.pause();
-    video.removeAttribute("src");
-    video.load();
-    video.hidden = true;
-    el("live-review-video-download").hidden = true;
-    el("live-review-video-retry").hidden = true;
-    el("live-review-video-cancel").hidden = true;
   }
-  async function loadVideo(ownToken, ownVideoToken, index, start = false) {
-    clearTimeout(videoTimer);
-    const current = () =>
-      ownToken === token && ownVideoToken === videoToken && dialog.open;
-    try {
-      const result = await request(
-        base + `/video?episode=${index}`,
-        start ? { method: "POST" } : {},
-      );
-      if (!current()) return;
-      el("live-review-video-retry").hidden = true;
-      videoGeneration = result.generation || "";
-      const cancel = el("live-review-video-cancel");
-      cancel.hidden = ![
-        "QUEUED",
-        "STARTING",
-        "PREPARING",
-        "WAITING_GPU",
-        "CANCELLING",
-        "INTERRUPTED",
-      ].includes(result.state);
-      cancel.disabled = result.state === "CANCELLING" && !result.can_cancel;
-      cancel.textContent =
-        result.state === "CANCELLING"
-          ? result.can_cancel
-            ? "Retry cancellation"
-            : "Cancelling…"
-          : "Cancel video preparation";
-      if (result.state === "READY") {
-        const url =
-          base +
-          `/video.mp4?episode=${index}&v=${encodeURIComponent(result.sha256)}`;
-        mediaCurrent = current;
-        video.preload = "auto";
-        video.src = url;
-        video.hidden = false;
-        el("live-review-video-download").href = url;
-        el("live-review-video-download").hidden = false;
-        mediaLabel =
-          result.kind === "capture"
-            ? "Collection video"
-            : result.capture_error
-              ? `Scene replay · video capture failed: ${result.capture_error}`
-              : "Scene replay · rendered from recorded states";
-        el("live-review-video-status").textContent = "Loading video…";
-        watchMedia(
-          "The video did not load within 30 seconds. Retry to reload it.",
-        );
-        video.load();
-      } else if (result.state === "FAILED") {
-        throw new Error(result.error);
-      } else if (["NOT_PREPARED", "CANCELLED"].includes(result.state)) {
-        el("live-review-video-status").textContent =
-          (result.state === "CANCELLED"
-            ? "Video preparation cancelled. "
-            : "Video is not prepared. ") +
-          "Prepare video to download it or render recorded states on the collection workstation. Browsing recorded values does not start video work.";
-        el("live-review-video-retry").textContent = "Prepare video";
-        el("live-review-video-retry").hidden = false;
-      } else {
-        el("live-review-video-status").textContent =
-          (result.detail ||
-            (result.state === "STARTING"
-              ? "Starting video preparation…"
-              : "Preparing video…")) +
-          (["CANCELLING", "INTERRUPTED"].includes(result.state)
-            ? ""
-            : " You can cancel preparation. It continues if you close this review.");
-        videoTimer = setTimeout(
-          () => loadVideo(ownToken, ownVideoToken, index),
-          1500,
-        );
-      }
-    } catch (error) {
-      if (!current()) return;
-      el("live-review-video-status").textContent =
-        "Video unavailable: " + error.message;
-      el("live-review-video-retry").hidden = false;
-      el("live-review-video-retry").textContent = "Retry video";
-    }
-  }
-  video.addEventListener("error", () => {
-    if (!mediaCurrent()) return;
-    videoFailure("The video could not be played. Retry to reload it.");
-  });
-  for (const event of ["loadeddata", "canplay", "playing", "seeked"])
-    video.addEventListener(event, mediaReady);
-  video.addEventListener("waiting", () => {
-    if (!mediaCurrent()) return;
-    el("live-review-video-status").textContent = "Buffering video…";
-    watchMedia("Video playback stalled. Retry to reload it.");
-  });
-  video.addEventListener("stalled", () => {
-    if (video.readyState < 2)
-      watchMedia("The video stopped loading. Retry to reload it.");
-  });
-  video.addEventListener("seeking", () => {
-    watchMedia("The video could not seek to that point. Retry to reload it.");
-  });
-  video.addEventListener("pause", () => {
-    if (video.readyState >= 2 && !video.seeking) stopMediaWatch();
-  });
-  video.addEventListener("timeupdate", () => {
-    if (!video.paused && video.currentTime !== mediaTime) mediaReady();
-    mediaTime = video.currentTime;
-  });
-  el("live-review-video-retry").onclick = () => {
-    clearVideo();
-    el("live-review-video-status").textContent =
-      "Requesting video preparation…";
-    loadVideo(token, videoToken, Number(el("live-review-episode").value), true);
-  };
-  el("live-review-video-cancel").onclick = async () => {
-    const ownToken = token;
-    const ownVideoToken = ++videoToken;
-    clearTimeout(videoTimer);
-    const current = () =>
-      ownToken === token && ownVideoToken === videoToken && dialog.open;
-    const button = el("live-review-video-cancel");
-    if (button.disabled) return;
-    button.disabled = true;
-    try {
-      await request(
-        base +
-          `/video?episode=${Number(el("live-review-episode").value)}` +
-          (videoGeneration
-            ? `&generation=${encodeURIComponent(videoGeneration)}`
-            : ""),
-        {
-          method: "DELETE",
-        },
-        65000,
-      );
-      if (current())
-        await loadVideo(
-          ownToken,
-          ownVideoToken,
-          Number(el("live-review-episode").value),
-        );
-    } catch (error) {
-      if (current()) el("live-review-video-status").textContent = error.message;
-    } finally {
-      if (current() && button.textContent !== "Cancelling…")
-        button.disabled = false;
-    }
-  };
   const status = (message) => {
     el("live-review-status").textContent = message;
   };
@@ -223,7 +29,7 @@
     return result;
   }
   function pause() {
-    video.pause();
+    window.SkynetEpisodeViewer?.pause("live-episode-viewer");
   }
   function flat(value, prefix = "", result = {}) {
     for (const [key, item] of Object.entries(value)) {
@@ -309,21 +115,12 @@
   }
   function chooseEpisode() {
     pause();
-    clearVideo();
-    el("live-review-video-status").textContent = "Checking video…";
-    const selectedIndex = Number(el("live-review-recording").value);
-    const cameraReceipt =
-      reviewSession.recording_images?.[
-        reviewSession.recordings?.[selectedIndex]
-      ];
-    if (!cameraReceipt)
-      loadVideo(token, videoToken, Number(el("live-review-episode").value));
-    else el("live-review-video-status").textContent = "";
+    closeViewer();
     episode = data.episodes[Number(el("live-review-episode").value)];
     frame = 0;
     window.SkynetEpisodeViewer?.open(
       "live-episode-viewer",
-      "live-review-video",
+      null,
       base,
       {
         collection: true,
@@ -403,7 +200,7 @@
   }
   function selectRecording(index) {
     pause();
-    clearVideo();
+    closeViewer();
     const path = reviewSession.recordings?.[index];
     const remove = el("live-review-delete");
     remove.hidden = !path;
@@ -447,20 +244,19 @@
     if (!session.recordings?.length) SkynetDialog.close(dialog);
     else window.openLiveReview(session, Math.min(selection, session.recordings.length - 1));
   };
-  el("live-review-delete").addEventListener("click", () => { pause(); video.pause(); });
+  el("live-review-delete").addEventListener("click", pause);
   el("live-review-recording").onchange = (event) =>
     selectRecording(Number(event.target.value));
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
       pause();
-      video.pause();
     }
   });
   dialog.addEventListener("close", () => {
     ++token;
     clearTimeout(timer);
     pause();
-    clearVideo();
+    closeViewer();
   });
   el("live-review-retry").onclick = () => {
     status("Retrying download…");

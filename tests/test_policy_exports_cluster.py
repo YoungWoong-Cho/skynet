@@ -77,7 +77,17 @@ class Cluster:
 def setup(offline_setup, monkeypatch):
     service, session, source = offline_setup
     monkeypatch.setattr(service, "prepare", PolicyExportService.prepare.__get__(service))
-    monkeypatch.setattr(service, "create", PolicyExportService.create.__get__(service))
+    create = PolicyExportService.create.__get__(service)
+    def legacy_create(*args, **kwargs):
+        # These tests exercise already-frozen, image-backed jobs from before the
+        # observation service. New state-only jobs have their own integration suite.
+        job = create(*args, **kwargs)
+        for field in ("observation_contract", "observation_worker_sha256", "observation_plan_sha256"):
+            job.pop(field, None)
+        with service.database.transaction() as connection:
+            connection.execute("UPDATE policy_exports SET payload_json=? WHERE id=?", (json.dumps(job), job["id"]))
+        return job
+    monkeypatch.setattr(service, "create", legacy_create)
     session["archive"] = dict(state="READY", root=f"{WORK_ROOT}/datasets/raw/test/output")
     resolved, ensured = [], []
     def resolve(current, relative):
@@ -574,3 +584,26 @@ def test_failed_capsule_upload_never_submits_job(setup, monkeypatch):
     result = service.get(job["id"])
     assert not result.get("cluster_script")
     assert "upload verification failed" in result["error"]
+
+
+@pytest.mark.parametrize('scheduler_state', ['REQUEUED', 'RESIZING', 'UNKNOWN', 'SPECIAL_EXIT', 'PREEMPTED', 'REVOKED'])
+def test_scheduler_transition_and_unknown_state_preserve_cpu_attempt(setup, scheduler_state):
+    service, session, _, _, _ = setup
+    job = service.create(session['id'], 'dp', 'Keep CPU attempt')
+    service.prepare(job['id'])
+    original = service.get(job['id'])
+    service.cluster.state = scheduler_state
+    service.prepare(job['id'])
+    service.retry(job['id'])
+    service.prepare(job['id'])
+    current = service.get(job['id'])
+    assert current['state'] == ('RUNNING' if scheduler_state == 'RESIZING' else 'PENDING')
+    assert current['attempt_id'] == original['attempt_id']
+    assert current['cluster_job_id'] == original['cluster_job_id']
+    assert current['cluster_script'] == original['cluster_script']
+    assert len(service.cluster.submissions) == 1
+    receipt(service, current)
+    service.cluster.state = 'COMPLETED'
+    service.prepare(job['id'])
+    assert service.get(job['id'])['state'] == 'READY'
+    assert len(service.cluster.submissions) == 1

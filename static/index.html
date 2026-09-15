@@ -2627,8 +2627,7 @@ trainer.deterministic=true"
                         <ol class="live-xr-steps">
                           <li>
                             In <strong>Collect</strong>, choose a hand and task.
-                            Enable <strong>Capture training images</strong> for
-                            visual policy training, then choose
+                            Choose
                             <strong>Start session</strong>.
                           </li>
                           <li>
@@ -2654,15 +2653,15 @@ trainer.deterministic=true"
                             Choose <strong>End collection</strong> in the
                             headset or <strong>Stop session</strong> in Skynet.
                             Pending saves finish and unfinished attempts are
-                            discarded. If training images are enabled, wait for
-                            <strong>Preparing training images</strong> to finish
-                            after the headset session closes.
+                            discarded. Saved recordings contain actions and
+                            scene states.
                           </li>
                           <li>
-                            Open <strong>Recording</strong> to review saved
-                            episodes. For visual policy data, use
-                            <strong>Recording → Register</strong> and choose a
-                            training format.
+                            In <strong>Recordings</strong>, choose
+                            <strong>View</strong> to inspect saved episodes in
+                            3D. Choose <strong>Convert</strong> and a policy to
+                            prepare its dataset. Conversion prepares the camera
+                            data it needs and reuses matching saved data.
                           </li>
                         </ol>
                         <ul id="live-xr-unavailable"></ul>
@@ -3672,17 +3671,9 @@ Select a session.</pre
                           <span id="live-xr-retargeter-description" class="secondary"></span>
                         </div>
                       </div>
-                      <label class="check-field"
-                        ><input
-                          id="live-xr-images"
-                          type="checkbox"
-                          checked=""
-                        />Capture training images (three scene views)</label
-                      >
                       <p class="collection-section-help">
-                        Records exact scene states, then prepares matching RGB
-                        images after the headset session ends. Wait for image
-                        preparation before exporting.
+                        Saves recorded states and actions. Review recordings in 3D;
+                        Convert prepares the observations required by the selected policy.
                       </p>
                       <p
                         id="live-xr-selection-note"
@@ -3809,42 +3800,6 @@ Select a session.</pre
                       ><select id="live-review-episode"></select>
                     </div>
                     <div id="live-episode-viewer"></div>
-                    <video
-                      id="live-review-video"
-                      controls=""
-                      playsinline=""
-                      preload="metadata"
-                      hidden=""
-                      aria-label="Recorded demonstration video"
-                    ></video>
-                    <p
-                      id="live-review-video-status"
-                      class="secondary"
-                      role="status"
-                    ></p>
-                    <div class="live-review-downloads">
-                      <button
-                        id="live-review-video-retry"
-                        class="button button-outline"
-                        type="button"
-                        hidden=""
-                      >
-                        Prepare video</button
-                      ><button
-                        id="live-review-video-cancel"
-                        class="button button-outline"
-                        type="button"
-                        hidden=""
-                      >
-                        Cancel queued video</button
-                      ><a
-                        id="live-review-video-download"
-                        class="text-button"
-                        download=""
-                        hidden=""
-                        >Download video</a
-                      >
-                    </div>
                     <div id="live-review-source" class="field" hidden="">
                       <span id="live-review-source-label">Path</span>
                       <span class="copy-value">

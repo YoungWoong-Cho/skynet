@@ -150,7 +150,7 @@ try {
     JSON.parse(requests[2].options.body).task,
     "Dexverse-PickCube-v0",
   );
-  assert.equal(JSON.parse(requests[2].options.body).image_capture, true);
+  assert.equal("image_capture" in JSON.parse(requests[2].options.body), false);
   assert.equal(
     JSON.parse(requests[2].options.body).retargeter,
     "vector-wrist-joint",
@@ -332,10 +332,10 @@ try {
   await flush();
   assert.equal(get("live-xr-start").disabled, true);
   assert.equal(get("live-xr-stop").disabled, true);
-  assert.equal(get("live-xr-start").textContent, "Preparing training images…");
+  assert.equal(get("live-xr-start").textContent, "Finishing collection…");
   assert.equal(
     get("live-xr-progress-title").textContent,
-    "Preparing images for episode 1 of 2",
+    "Stopping…",
   );
   assert.equal(get("live-xr-address").hidden, true);
   // A failed poll must not present stale startup steps as actively progressing.
@@ -385,7 +385,6 @@ try {
       robot: get("live-xr-hand").value,
       task: get("live-xr-task").value,
       retargeting: { key: get("live-xr-retargeter").value },
-      image_capture: get("live-xr-images").checked,
     },
   };
   window.loadLiveXR();

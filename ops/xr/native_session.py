@@ -68,7 +68,7 @@ def cloudxr_failure(root, started, fallback):
 
 
 def write_collection_files(root):
-    required = {"collection.py", "anatomy.py", "wrist.py", "images.py", "render_images.py", "arrays.py", "scene_geometry.py", "retargeting_runtime.py", "trajectory.py"}
+    required = {"collection.py", "anatomy.py", "wrist.py", "recording_metadata.py", "arrays.py", "scene_geometry.py", "retargeting_runtime.py", "trajectory.py"}
     if set(COLLECTION_FILES) != required:
         raise ValueError("Automatic collection runtime is incomplete in this session")
     source_root = root / "collector"
@@ -266,51 +266,6 @@ def attach_rendered_images(root, validated):
         if digest != image["sha256"] or image["steps"] != original["steps"]:
             raise ValueError("Rendered images are incomplete or changed")
         original["images"] = image
-
-
-def prepare_training_images(root, config, runtime, repo, env, publish, timeout=1800):
-    """Run only after all XR children exit, while the managed GPU lock is held."""
-    clean_env = {k: v for k, v in env.items() if k != "XR_RUNTIME_JSON"}
-    clean_env["ENABLE_CAMERAS"] = "1"
-    publish("RENDERING_IMAGES", server_ready=False, startup_stage="images",
-            detail="Headset session ended. Preparing training images from saved scene states")
-    process = None
-    try:
-        with (root / "images.log").open("w") as stream:
-            process = subprocess.Popen(
-                [str(runtime / "bin/python"), str(root / "collector/render_images.py"), str(config.resolve()), str(root)],
-                cwd=repo, env=clean_env, stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT,
-            )
-        deadline = time.monotonic() + timeout
-        previous = None
-        while process.poll() is None:
-            if time.monotonic() >= deadline:
-                raise TimeoutError("Training image preparation exceeded 30 minutes; original recordings are preserved")
-            progress = root / "image-progress.json"
-            if progress.exists():
-                if progress.stat().st_size > 8192:
-                    raise ValueError("Invalid image preparation progress")
-                value = json.loads(progress.read_text())
-                if value != previous:
-                    publish("RENDERING_IMAGES", server_ready=False, image_render_progress=value,
-                            detail=value.get("detail", "Preparing training images"))
-                    previous = value
-            time.sleep(1)
-        if process.returncode:
-            raise RuntimeError(simulation_failure(root / "images.log", "Training image preparation failed; original recordings are preserved"))
-        progress = json.loads((root / "image-progress.json").read_text())
-        if progress.get("state") != "READY" or progress.get("completed") != progress.get("total"):
-            raise ValueError("Training image preparation did not finish")
-        publish("RENDERING_IMAGES", server_ready=False, image_render_progress=progress,
-                detail="Verifying training images")
-    finally:
-        if process is not None and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
 
 
 def main():
@@ -644,12 +599,6 @@ def main():
             for log in cloudxr_log_paths(root, started):
                 if log.parent != root:
                     (root / log.name).write_bytes(log.read_bytes())
-            if cfg.get("image_capture") and validated and pending_result and pending_result[0] != "FAILED":
-                prepare_training_images(root, args.config, runtime, repo, env, publish)
-                refresh_saved()
-                if any(not v.get("images") for v in validated.values()):
-                    raise ValueError("Training images are missing for a saved episode")
-                pending_result[1]["detail"] = f"Collection ended. {len(validated)} episodes and their training images are ready."
             # Isaac creates nested logs in TMPDIR. Remove only this newly-created
             # private job directory, after both child processes have exited.
             shutil.rmtree(run)
@@ -657,7 +606,7 @@ def main():
             publish(
                 "FAILED",
                 server_ready=False,
-                detail="Training image preparation failed; original recordings are preserved" if status.get("state") == "RENDERING_IMAGES" else "Session cleanup failed",
+                detail="Session cleanup failed; original recordings are preserved",
                 error=str(exc),
             )
             raise

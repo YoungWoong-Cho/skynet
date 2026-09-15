@@ -3665,6 +3665,9 @@ table:has(> tbody#data-bundles-body) :is(th, td):nth-child(5) {
   gap: 20px;
   margin: 12px 0 20px;
 }
+.episode-viewer:has(> .episode-viewer-hand[hidden]) {
+  grid-template-columns: minmax(0, 1fr);
+}
 .episode-viewer-main {
   min-width: 0;
 }

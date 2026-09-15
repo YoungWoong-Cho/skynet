@@ -33,7 +33,7 @@ WORKER_STATES = TERMINAL | {
     "AWAITING_HEADSET",
     "COLLECTING",
     "STOPPING",
-    "RENDERING_IMAGES",
+    "RENDERING_IMAGES",  # Read existing frozen workers until they finish.
 }
 
 
@@ -184,7 +184,6 @@ class LiveXRService:
         accepted_license=False,
         task=None,
         robot=None,
-        image_capture=False,
         retargeter="dexpilot",
     ):
         if not self.consent(accepted_license)["accepted"]:
@@ -205,7 +204,6 @@ class LiveXRService:
         retargeting = configuration(retargeter, profile.get("work_root", WORK_ROOT))
         profile.update(
             retargeting=retargeting,
-            image_capture=image_capture,
             task=task_info["key"],
             robot=hand["key"],
             hand=hand["side"],
@@ -227,8 +225,7 @@ class LiveXRService:
             "scene_geometry.py": (
                 Path(__file__).parent / "adapters/scene_geometry.py"
             ).read_text(),
-            "images.py": (self.root / "ops/xr/images.py").read_text(),
-            "render_images.py": (self.root / "ops/xr/render_images.py").read_text(),
+            "recording_metadata.py": (self.root / "ops/xr/recording_metadata.py").read_text(),
             "arrays.py": "import pickle\nimport numpy as np\n"
             + inspect.getsource(ArrayUnpickler),
             "anatomy.py": (self.root / "ops/xr/hands/anatomy.py").read_text(),
@@ -247,10 +244,6 @@ class LiveXRService:
                     ):
                         raise ValueError(
                             "A different live session is already running. Stop it before changing the hand or task."
-                        )
-                    if bool(job["profile"].get("image_capture")) != image_capture:
-                        raise ValueError(
-                            "Stop the current session before changing image capture."
                         )
                     if (
                         job["profile"].get("retargeting", {}).get("key", "dexpilot")
@@ -439,7 +432,7 @@ class LiveXRService:
     @staticmethod
     def compile(job):
         p, root = job["profile"], job["root"]
-        minutes = p["duration_minutes"] + (35 if p.get("image_capture") else 5)
+        minutes = p["duration_minutes"] + 5
         directives = (
             []
             if p.get("execution") == "workstation"

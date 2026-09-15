@@ -126,12 +126,7 @@ def test_preparation_preserves_dataset_name_when_freezing_native_assets(setup):
     service, session, _ = setup
     job = service.create(session["id"], "egoverse", "My recorded demonstrations")
     assert job["name"] == "My recorded demonstrations"
-    assert (
-        service.database.get_data_resource(job["resource_id"])["metadata"][
-            "display_name"
-        ]
-        == job["name"]
-    )
+    assert service.database.get_data_resource(job["resource_id"])["display_name"] == job["name"]
     worker = service.root / job["id"] / "worker"
     assert (worker / "egoverse-LICENSE").is_file()
     assert (worker / "egoverse_data.py").is_file()

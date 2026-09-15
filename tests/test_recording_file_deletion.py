@@ -210,3 +210,23 @@ def test_dataset_dependency_and_shared_camera_files_block_removal(files):
 def test_reject_invalid_recording_identity(value):
     with pytest.raises(ValueError):
         recording_identity(value)
+
+
+def test_deleting_one_recording_keeps_shared_observation_and_other_episode(files):
+    from tests.test_recording_deletion import observation
+    service,live,session,names,final,calls = files
+    from skynet_app.recording_deletion import WORK_ROOT
+    root=Path(WORK_ROOT)
+    folder,review=final.parent,service.reviews.root
+    job=live.get(session)
+    original=Path(job["archive"]["root"])
+    key,path=observation((service,live,job,folder,review,root),source_path=job["recordings"][0])
+    with service.db.transaction() as c:
+        c.execute("INSERT INTO observation_sources VALUES (?,?,?)",(key,session,job["recordings"][1]))
+    selected=identity(session,job["recordings"][0])
+    plan=service.preview("recording-file",selected)
+    assert not plan["blockers"]
+    service.delete("recording-file",selected,plan["token"])
+    assert path.exists() and (original/job["recordings"][1]).exists()
+    with service.db.connection() as c:
+        assert [row[0] for row in c.execute("SELECT recording_path FROM observation_sources WHERE artifact_key=?",(key,))] == [job["recordings"][1]]

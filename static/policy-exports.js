@@ -75,15 +75,16 @@
     }
     const hint = el("policy-export-format-help");
     hint.textContent =
-      policy?.available && (!policy.trainable || policy.split_mode === "upstream") ? policy.description : "";
+      policy?.available && (!policy.trainable || policy.split_mode === "upstream")
+        ? policy.description
+        : policy?.available && policy.observation_requirements?.streams?.length
+          ? "Conversion prepares missing camera data and reuses matching data."
+          : "";
     hint.hidden = !hint.textContent;
     const noValidation =
       policy?.trainable && policy.split_mode !== "upstream" &&
       (source?.episodes < 2 ||
         Number(el("preparation-validation").value) === 0);
-    const missingImages =
-      policy?.observations?.includes("rgb") &&
-      source?.images < source?.episodes;
     const insufficientEpisodes = source && policy?.minimum_episodes && source.episodes < policy.minimum_episodes;
     const message = !source
       ? "Loading recordings…"
@@ -93,9 +94,7 @@
           ? policy?.description || "Choose an available policy."
           : insufficientEpisodes
             ? "ACT Native needs two episodes for its original 80/20 split. Choose ACT · Skynet recordings for single-episode training."
-          : missingImages
-            ? "This format requires completed training images for every recording."
-            : "";
+          : "";
     error(
       "policy-export-compatibility",
       message ||
@@ -113,8 +112,7 @@
       !source?.eligible ||
       !source.episodes ||
       !policy?.available ||
-      insufficientEpisodes ||
-      missingImages;
+      insufficientEpisodes;
   }
   const stageLabels = {
     QUEUED: "Queued",
@@ -122,6 +120,7 @@
     SUBMITTING: "Submitting CPU job to sky2",
     ARCHIVING: "Waiting for the recording archive on sky2",
     FETCHING: "Checking originals",
+    OBSERVATIONS: "Preparing required observations",
     CONVERTING: "Converting",
     VALIDATING: "Validating",
     TRANSFERRING: "Copying to cluster",
@@ -133,6 +132,7 @@
     if (job.state === "DELETE_FAILED")
       return `Deletion incomplete · ${job.error}`;
     if (job.state === "FAILED") return `Failed · ${job.error}`;
+    if (job.stage === "OBSERVATIONS") return job.detail || "Preparing required camera data";
     const progress = job.progress
       ? ` · ${job.progress.episodes_done}/${job.progress.episodes_total} episodes`
       : "";

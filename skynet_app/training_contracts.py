@@ -18,6 +18,14 @@ class DatasetRequirement(CanonicalModel):
     mode: Literal["dataset", "simulation", "custom"] = "dataset"
     observations: list[str] = Field(default_factory=list)
     action_representation: str | None = None
+    observation_requirements: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_observations(self):
+        if self.observation_requirements is not None:
+            from .observation_contracts import validate_requirements
+            self.observation_requirements = validate_requirements(self.observation_requirements)
+        return self
 
 
 class TrainingPreset(CanonicalModel):

@@ -1,6 +1,6 @@
 from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import PlainTextResponse, FileResponse
+from fastapi.responses import PlainTextResponse, FileResponse, Response
 from pydantic import BaseModel, ConfigDict
 from .collection_api import service as collection
 from .cluster_runtime import ClusterError
@@ -28,7 +28,6 @@ class StartRequest(BaseModel):
     accepted_license: bool = False
     task: str | None = None
     robot: str | None = None
-    image_capture: bool = False
     retargeter: str = "dexpilot"
 
 
@@ -61,7 +60,7 @@ def overview():
 @router.post("/sessions", status_code=202)
 def start(request: StartRequest):
     return checked(
-        service.create, request.accepted_license, request.task, request.robot, request.image_capture, request.retargeter
+        service.create, request.accepted_license, request.task, request.robot, request.retargeter
     )
 
 
@@ -116,14 +115,20 @@ def video_status(identifier: str, index: int, episode: int = 0):
     return checked(videos.status, identifier, index, episode)
 
 
-@router.post("/sessions/{identifier}/recordings/{index}/video", status_code=202)
-def video_create(identifier: str, index: int, episode: int = 0):
-    return checked(videos.create, identifier, index, episode)
-
-
 @router.delete("/sessions/{identifier}/recordings/{index}/video")
 def video_cancel(identifier: str, index: int, episode: int = 0, generation: str | None = None):
     return checked(videos.cancel, identifier, index, episode, generation)
+
+
+@router.get("/sessions/{identifier}/recordings/{index}/hand/{path:path}")
+def recorded_hand_asset(identifier: str, index: int, path: str, request: Request):
+    transport, gateway, artifact = checked(episode_previews.hand_file, identifier, index, path)
+    if "text" in artifact:
+        return Response(artifact["text"], media_type="application/xml")
+    if transport is None:
+        return FileResponse(artifact["path"])
+    remote = RemoteArtifact(transport, gateway, artifact["path"], artifact["size_bytes"])
+    return checked(lambda: remote.response(request, media_type="application/octet-stream"))
 
 
 @router.get("/sessions/{identifier}/recordings/{index}/viewer")

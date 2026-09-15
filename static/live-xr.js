@@ -11,7 +11,6 @@
     AWAITING_HEADSET: "Scene ready",
     COLLECTING: "Session in progress",
     STOPPING: "Stopping…",
-    RENDERING_IMAGES: "Preparing training images…",
   };
   const startingStates = new Set([
     "PREPARING",
@@ -109,8 +108,6 @@
       STOPPED: "Session stopped",
     };
     if (ended[session.state]) return ended[session.state];
-    if (session.state === "RENDERING_IMAGES")
-      return session.detail || "Preparing training images…";
     if (session.stop_requested || session.state === "STOPPING")
       return "Stopping…";
     if (session.state === "PENDING") return "Waiting for GPU…";
@@ -231,8 +228,7 @@
       !pending.existingIds.has(s.id) &&
       s.profile?.robot === pending.robot &&
       s.profile?.task === pending.task &&
-      (s.profile?.retargeting?.key || "dexpilot") === pending.retargeter &&
-      !!s.profile?.image_capture === pending.imageCapture,
+      (s.profile?.retargeting?.key || "dexpilot") === pending.retargeter,
     );
     if (!session) return;
     pending.observedId = session.id;
@@ -455,11 +451,9 @@
     el("live-xr-hand").disabled = active || submitting || !catalog;
     el("live-xr-retargeter").disabled = active || submitting || !catalog;
     el("live-xr-task").disabled = active || submitting || !catalog;
-    if (el("live-xr-images"))
-      el("live-xr-images").disabled = active || submitting || !catalog;
     el("live-xr-start").textContent = active
       ? running.state === "RENDERING_IMAGES"
-        ? "Preparing training images…"
+        ? "Finishing collection…"
         : running.stop_requested
           ? "Stopping…"
           : (running.state === "PREPARING"
@@ -656,7 +650,6 @@
       robot: el("live-xr-hand").value,
       task: el("live-xr-task").value,
       retargeter: el("live-xr-retargeter").value,
-      imageCapture: !!el("live-xr-images")?.checked,
     };
     render();
     el("live-xr-message").textContent = "";
@@ -668,7 +661,6 @@
           accepted_license: el("live-xr-consent").checked,
           task: el("live-xr-task").value,
           robot: el("live-xr-hand").value,
-          image_capture: !!el("live-xr-images")?.checked,
           retargeter: el("live-xr-retargeter").value,
         }),
       });

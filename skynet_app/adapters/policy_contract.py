@@ -6,6 +6,19 @@ CAMERAS = ("scene_front", "scene_left", "scene_right")
 JOINT_SEMANTICS = "raw_joint_position_command; target = action * scale + offset"
 
 
+def observation_camera_recipe_matches(expected, actual):
+    """Check explicitly frozen camera fields; source-pinned defaults may add keys."""
+    def matches(wanted, value):
+        if isinstance(wanted, dict):
+            return isinstance(value, dict) and all(key in value and matches(item, value[key]) for key, item in wanted.items())
+        if isinstance(wanted, (list, tuple)):
+            return isinstance(value, (list, tuple)) and len(wanted) == len(value) and all(matches(a, b) for a, b in zip(wanted, value))
+        if type(wanted) in (int, float) and type(value) in (int, float):
+            return math.isfinite(wanted) and math.isfinite(value) and math.isclose(wanted, value, rel_tol=1e-6, abs_tol=1e-8)
+        return wanted == value
+    return bool(expected) and set(expected) == set(actual) and matches(expected, actual)
+
+
 def recorded_contract(metadata, *, images=True):
     capture = metadata.get("capture") or {}
     return {
