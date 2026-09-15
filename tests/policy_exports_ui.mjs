@@ -119,7 +119,8 @@ const options = {
 const resource = {
   id: "dataset",
   category: "dataset",
-  name: "Hand demos",
+  source_key: "new",
+  display_name: "Hand demos",
   metadata: { managed_dataset: true, session_id: "new" },
   versions: [],
 };
@@ -477,7 +478,7 @@ try {
   assert.equal(typeof finishOldPreparation, "function");
   await w.openPolicyExport("new");
   assert.equal(el("create-policy-export").disabled, false);
-  finishOldPreparation({session: options.sessions[0], policies: options.policies, resource: {id: "older-resource", name: "Old"}});
+  finishOldPreparation({session: options.sessions[0], policies: options.policies, resource: {id: "older-resource", source_key: "old", display_name: "Old"}});
   await oldPreparation;
   el("policy-export-form").dispatchEvent(new w.Event("submit", {cancelable: true}));
   await flush();

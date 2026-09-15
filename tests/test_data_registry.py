@@ -25,7 +25,7 @@ class DataRegistryTestCase(unittest.TestCase):
             category="file",
             provider="huggingface",
             namespace="dexverse",
-            name="DexVerse_release",
+            source_key="DexVerse_release",
             kind="simulation_assets",
             metadata={"license": "upstream"},
         )
@@ -48,7 +48,7 @@ class DataRegistryTestCase(unittest.TestCase):
             category="dataset",
             provider="derived",
             namespace="dexverse",
-            name=name,
+            source_key=name,
             kind="demonstrations",
         )
         return self.database.create_data_resource_version(
@@ -89,7 +89,7 @@ class DataRegistryTestCase(unittest.TestCase):
             runtime_lock_sha256="3" * 64,
         )
 
-        self.assertEqual(derivation["inputs"][0]["version"]["resource"]["name"], "DexVerse_release")
+        self.assertEqual(derivation["inputs"][0]["version"]["resource"]["source_key"], "DexVerse_release")
         self.assertEqual(derivation["output_version"]["format"], "lerobot-v3")
         self.assertEqual(derivation["converter_config"], {"fps": 30})
         with self.assertRaisesRegex(ValueError, "lineage cycle"):

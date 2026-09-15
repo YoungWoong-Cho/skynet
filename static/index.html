@@ -4011,47 +4011,18 @@ Select a session.</pre
                   >
                     <input id="data-resource-id" type="hidden" />
                     <div class="form-grid">
-                      <div class="field">
-                        <label for="data-resource-provider">Provider</label>
-                        <input
-                          id="data-resource-provider"
-                          value="huggingface"
-                          list="data-provider-options"
-                          required=""
-                        />
-                        <datalist id="data-provider-options">
-                          <option value="huggingface"></option>
-                          <option value="s3"></option>
-                          <option value="local"></option>
-                          <option value="http"></option>
-                        </datalist>
-                      </div>
-                      <div class="field">
-                        <label for="data-resource-namespace">Namespace</label>
-                        <input
-                          id="data-resource-namespace"
-                          placeholder="organization or owner"
-                          required=""
-                        />
-                      </div>
-                      <div class="field">
+                      <div class="field span-4">
                         <label for="data-resource-name">Name</label>
                         <input
                           id="data-resource-name"
                           placeholder="dataset name"
-                          required=""
                         />
-                      </div>
-                      <div class="field">
-                        <label for="data-resource-kind">Type</label>
-                        <input
-                          id="data-resource-category"
-                          type="hidden"
-                          value="dataset"
-                        />
-                        <select id="data-resource-kind" required="">
-                          <option value="">Loading types…</option>
-                        </select>
+                        <p
+                          id="data-resource-name-help"
+                          class="registry-section-help"
+                        >
+                          Leave blank to use the source name.
+                        </p>
                       </div>
                       <div class="field span-4">
                         <label for="data-resource-description"
@@ -4064,6 +4035,72 @@ Select a session.</pre
                         />
                       </div>
                     </div>
+                    <details
+                      id="data-resource-source-details"
+                      class="collection-disclosure"
+                      open=""
+                    >
+                      <summary>Source details</summary>
+                      <div class="form-grid">
+                        <div class="field">
+                          <label for="data-resource-provider">Provider</label>
+                          <input
+                            id="data-resource-provider"
+                            value="huggingface"
+                            list="data-provider-options"
+                            required=""
+                          />
+                          <datalist id="data-provider-options">
+                            <option value="huggingface"></option>
+                            <option value="s3"></option>
+                            <option value="local"></option>
+                            <option value="http"></option>
+                          </datalist>
+                        </div>
+                        <div class="field">
+                          <label for="data-resource-namespace">Namespace</label>
+                          <input
+                            id="data-resource-namespace"
+                            placeholder="organization or owner"
+                            required=""
+                          />
+                        </div>
+                        <div class="field">
+                          <label for="data-resource-source-key"
+                            >Source key</label
+                          >
+                          <input
+                            id="data-resource-source-key"
+                            placeholder="identifier at the source"
+                            required=""
+                          />
+                          <p class="registry-section-help">
+                            Fixed identifier within this provider and namespace.
+                          </p>
+                        </div>
+                        <div class="field">
+                          <label for="data-resource-kind">Type</label>
+                          <input
+                            id="data-resource-category"
+                            type="hidden"
+                            value="dataset"
+                          />
+                          <select id="data-resource-kind" required="">
+                            <option value="">Loading types…</option>
+                          </select>
+                        </div>
+                        <div
+                          id="data-resource-identity-field"
+                          class="field span-4"
+                          hidden=""
+                        >
+                          <label for="data-resource-visible-id"
+                            >Resource ID</label
+                          >
+                          <input id="data-resource-visible-id" readonly="" />
+                        </div>
+                      </div>
+                    </details>
                     <div class="form-actions">
                       <button
                         id="create-data-resource"

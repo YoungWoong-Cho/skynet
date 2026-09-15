@@ -1282,15 +1282,25 @@ def _sweep_from_frontend(raw: str | None) -> dict[str, Any]:
 
 
 class DataResourceCreateRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
     category: Literal["dataset", "file"]
     provider: str = Field(min_length=1, max_length=128)
     namespace: str = Field(min_length=1, max_length=255)
-    name: str = Field(min_length=1, max_length=255)
+    source_key: str = Field(min_length=1, max_length=255)
+    display_name: str | None = Field(default=None, min_length=1)
     kind: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
     description: str = Field(default="", max_length=4096)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("provider", "namespace", "name", "kind")
+    @field_validator("display_name")
+    @classmethod
+    def validate_display_name(cls, value: str | None) -> str:
+        if value is None or not value.strip():
+            raise ValueError("display_name cannot be blank or null")
+        return value.strip()
+
+    @field_validator("provider", "namespace", "source_key", "kind")
     @classmethod
     def strip_identity(cls, value: str) -> str:
         stripped = value.strip()
@@ -1306,9 +1316,19 @@ class DataResourceCreateRequest(BaseModel):
 
 
 class DataResourceEditRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    display_name: str | None = Field(default=None, min_length=1)
     description: str | None = Field(default=None, max_length=4096)
     metadata: dict[str, Any] | None = None
     archived: bool | None = None
+
+    @field_validator("display_name")
+    @classmethod
+    def validate_display_name(cls, value: str | None) -> str:
+        if value is None or not value.strip():
+            raise ValueError("display_name cannot be blank or null")
+        return value.strip()
 
 
 class DataVersionCreateRequest(BaseModel):
@@ -6531,7 +6551,7 @@ class PipelineService:
         metadata.update({
             "repository_type": "dataset",
             "source_uri": (
-                f"https://huggingface.co/datasets/{resource['namespace']}/{resource['name']}"
+                f"https://huggingface.co/datasets/{resource['namespace']}/{resource['source_key']}"
             ),
         })
         self.database.update_data_resource(resource_id, metadata=metadata)
@@ -6597,7 +6617,7 @@ class PipelineService:
             "resource_id": record["resource_id"],
             "provider": resource["provider"],
             "namespace": resource["namespace"],
-            "name": resource["name"],
+            "name": resource["source_key"],
             "revision": request.get("revision"),
             "subset": request.get("subset"),
             "format": request.get("format"),
@@ -6632,7 +6652,7 @@ class PipelineService:
             "manifest_path": result.get("manifest_path"),
             "snapshot_path": result.get("snapshot_path"),
             "resource_uri": (
-                f"resource:huggingface/{resource['namespace']}/{resource['name']}"
+                f"resource:huggingface/{resource['namespace']}/{resource['source_key']}"
                 f"@{result['revision']}#subset={result['subset']}"
             ),
         }
@@ -9621,7 +9641,7 @@ def _http_error(error: Exception) -> HTTPException:
     if isinstance(error, INTEGRITY_ERRORS):
         message = str(error)
         identities = {
-            "data_resources.provider": "A resource with this provider, namespace, and name already exists. Open that resource or choose another name.",
+            "data_resources_provider_namespace_source_key_key": "A resource with this provider, namespace, and source key already exists. Open that resource or choose another source key.",
             "data_resource_versions.resource_id": "This revision and format are already registered for the resource. Use the existing immutable version or choose a new revision.",
             "data_bundles.name": "This bundle name and version already exist. Open the existing bundle or choose a new version.",
         }

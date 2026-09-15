@@ -25,7 +25,7 @@ def preview(service, workspace, kind, identifier):
     except ValueError as error:
         graph = None
         if not blockers:
-            blockers.append(dict(kind="dataset", id=None, label=resource["name"], reason=str(error)))
+            blockers.append(dict(kind="dataset", id=None, label=resource["display_name"], reason=str(error)))
     locations = graph["locations"] if graph else []
     managed = (resource["provider"], resource["namespace"]) == ("collection", "datasets")
     paths = {l["path"] for l in locations if managed and l["version_id"] in {v["id"] for v in versions if v["format"] != "skynet.episodes/v1"}}
@@ -34,7 +34,7 @@ def preview(service, workspace, kind, identifier):
         paths.add(str(service.root / job["id"]))
         if job.get("version_id") and job.get("target")=="cluster":
             paths.add(f"{WORK_ROOT}/jobs/runs/{job['id']}")
-    plan = dict(label=resource.get("metadata", {}).get("display_name") or resource["name"],
+    plan = dict(label=resource["display_name"],
                 blockers=blockers, counts={"prepared_results": sum(v["format"] != "skynet.episodes/v1" for v in versions)},
                 files=[dict(path=path, size_bytes=None, exists=None) for path in sorted(paths)],
                 notices=["Original recordings are kept. Prepared files and their registration history are removed." if managed else
@@ -70,7 +70,7 @@ def local_copy_preview(service, workspace, identifier):
     resource = service.database.get_data_resource(job["resource_id"])
     blockers = []
     if identifier in service.active or job["state"] != "READY":
-        blockers.append(dict(kind="prepared", id=identifier, label=resource["name"], reason="Wait for preparation to finish"))
+        blockers.append(dict(kind="prepared", id=identifier, label=resource["display_name"], reason="Wait for preparation to finish"))
     for use in service.database.data_version_usage(version["manifest_sha256"]):
         visible = workspace.owns("experiments", use["experiment_id"])
         blockers.append(dict(kind="experiment", id=use["experiment_id"] if visible else None,
@@ -79,12 +79,12 @@ def local_copy_preview(service, workspace, identifier):
     cluster = [item for item in version.get("locations", []) if item["kind"] == "cluster" and item["status"] == "AVAILABLE"
                and item["manifest_sha256"] == version["manifest_sha256"]]
     if not cluster:
-        blockers.append(dict(kind="prepared", id=identifier, label=resource["name"], reason="Transfer and verify a cluster copy first"))
+        blockers.append(dict(kind="prepared", id=identifier, label=resource["display_name"], reason="Transfer and verify a cluster copy first"))
     directory = service.root / identifier
     # Only converted local data is removed, never metadata or source recordings.
     files = [dict(path=str(path), exists=path.exists(), size_bytes=path.stat().st_size if path.is_file() else None)
              for path in (directory / "output", directory / "dataset.zip")]
-    plan = dict(label=resource.get("metadata", {}).get("display_name") or resource["name"],
+    plan = dict(label=resource["display_name"],
                 counts={"local_copies": 1}, blockers=blockers, files=files,
                 notices=["Only this computer's prepared files are removed. Original recordings, dataset registration, and the verified cluster copy are kept. The cluster copy is checked again before deletion."], retry=False)
     plan["token"] = content_sha256(dict(plan=plan, state=job["state"], version=version["manifest_sha256"],

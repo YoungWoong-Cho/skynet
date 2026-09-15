@@ -127,7 +127,7 @@ def test_dataset_dependency_uses_all_recording_memberships(recording):
         category="dataset",
         provider="collection",
         namespace="datasets",
-        name="Combined",
+        source_key="Combined",
         kind="demonstrations",
         metadata={"session_id": job["id"]},
     )
@@ -152,7 +152,7 @@ def test_changed_files_and_new_dependencies_invalidate_confirmation(recording):
         category="dataset",
         provider="collection",
         namespace="datasets",
-        name="New",
+        source_key="New",
         kind="demonstrations",
         metadata={"session_id": job["id"]},
     )
@@ -185,7 +185,7 @@ def test_interrupted_delete_retains_intent_blocks_consumers_and_retries(
             category="dataset",
             provider="collection",
             namespace="datasets",
-            name="Race",
+            source_key="Race",
             kind="demonstrations",
             metadata={"session_id": job["id"]},
         )

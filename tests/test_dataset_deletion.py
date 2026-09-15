@@ -179,7 +179,7 @@ def test_empty_collection_registration_can_be_deleted(setup):
     service, _, _ = setup
     resource = service.database.create_data_resource(
         category="dataset", provider="collection", namespace="datasets",
-        name="Empty registration", kind="demonstrations",
+        source_key="Empty registration", kind="demonstrations",
     )
     assert service.delete_dataset(resource["id"])["deleted"]
     assert service.database.get_data_resource(resource["id"]) is None
@@ -237,7 +237,7 @@ def test_external_registration_deletion_preserves_source_and_blocks_active_impor
     from skynet_app import prepared_deletion
     service, _, _ = setup
     db = service.database
-    resource = db.create_data_resource(category='dataset', provider='huggingface', namespace='test', name='External', kind='dataset')
+    resource = db.create_data_resource(category='dataset', provider='huggingface', namespace='test', source_key='External', kind='dataset')
     source = tmp_path / 'external.zarr'
     source.write_bytes(b'Externally owned dataset')
     version = db.create_data_resource_version(resource['id'], revision='1', format='zarr', path=str(source), manifest_sha256='e'*64)

@@ -13,7 +13,7 @@ w.HTMLDialogElement.prototype.close=function(value=''){if(this.open){this.return
 const flush = async()=>{for(let i=0;i<3;i++)await new Promise(r=>setImmediate(r));};
 try {
   for(const file of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js']) w.eval((await readFile(new URL('../static/'+file,import.meta.url),'utf8')) + (file==='app.js' ? '\nwindow.setRegistryTestData=(resources,imports=[])=>{dataResourceRows=resources;dataImportRows=imports;renderDataResources();renderDataImports();};' : ''));
-  w.setRegistryTestData([{id:'resource',category:'dataset',provider:'local',namespace:'test',name:'Example',kind:'demonstrations'}]);
+  w.setRegistryTestData([{id:'resource',category:'dataset',provider:'local',namespace:'test',display_name:'Example',source_key:'example-source',kind:'demonstrations'}]);
   for(const [launch,panel] of [['show-data-resource-form','data-resource-form'],['show-data-derivation-form','data-derivation-form']]) {
     el(launch).click();
     assert.equal(el(panel+'-dialog').open,true,panel);

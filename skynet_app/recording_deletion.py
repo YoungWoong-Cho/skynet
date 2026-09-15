@@ -118,7 +118,7 @@ class RecordingMaintenance(Maintenance):
                 block(
                     "dataset",
                     resource["id"],
-                    resource["metadata"].get("display_name") or resource["name"],
+                    resource["display_name"],
                     "Delete this dataset first",
                 )
         for record in rows(c, "live_conversions"):

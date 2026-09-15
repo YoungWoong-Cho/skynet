@@ -34,7 +34,7 @@ def test_single_episode_export_preserves_source_and_separate_dataset(setup):
     assert data["valid_dataloader_params"] == {}
     assert data["train_datasets"]["skynet_joints"]["resolver"]["folder_path"] == str(root / "dataset/train")
     assert {str(p): digest(p) for p in source.rglob('*') if p.is_file()} == before
-    assert service.database.get_data_resource(full['resource_id'])['metadata']['display_name'] == 'All recordings'
+    assert service.database.get_data_resource(full['resource_id'])['display_name'] == 'All recordings'
 
 
 @pytest.mark.parametrize('changes', [
@@ -43,7 +43,7 @@ def test_single_episode_export_preserves_source_and_separate_dataset(setup):
 ])
 def test_invalid_overfit_is_rejected_before_registration(setup, changes):
     service, session, _ = setup
-    kwargs = dict(session_id=session['id'], format='egoverse', name='Overfit', overfit_episode=0)
+    kwargs = dict(identifier=session['id'], format='egoverse', name='Overfit', overfit_episode=0)
     kwargs.update(changes)
     before = len(service.list())
     with pytest.raises(ValueError):

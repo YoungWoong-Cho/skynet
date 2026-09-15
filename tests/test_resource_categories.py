@@ -13,26 +13,26 @@ def test_allowed_types_match_request_and_database_constraints(tmp_path):
     db = Database(tmp_path / 'catalog')
     for category, types in RESOURCE_TYPES.items():
         for kind in types:
-            payload = dict(category=category, kind=kind, provider='test', namespace='catalog', name=kind)
+            payload = dict(category=category, kind=kind, provider='test', namespace='catalog', source_key=kind)
             request = DataResourceCreateRequest(**payload)
             result = db.create_data_resource(**request.model_dump())
             assert result['category'] == category
     for category, kind in [('dataset', 'model'), ('file', 'demonstrations'), ('dataset', 'qa_fixture'), ('dataset', 'typo'), ('other', 'dataset')]:
-        payload = dict(category=category, kind=kind, provider='test', namespace='invalid', name=kind)
+        payload = dict(category=category, kind=kind, provider='test', namespace='invalid', source_key=kind)
         with pytest.raises(ValidationError):
             DataResourceCreateRequest(**payload)
         with pytest.raises(ValueError):
             db.create_data_resource(**payload)
         with pytest.raises(INTEGRITY_ERRORS), db.transaction() as c:
-            c.execute('INSERT INTO data_resources (id, provider, namespace, name, category, kind, metadata_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
-                      (f'{category}-{kind}', 'test', 'invalid', kind, category, kind, '{}', '2026-01-01', '2026-01-01'))
+            c.execute('INSERT INTO data_resources (id, provider, namespace, source_key, display_name, category, kind, metadata_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                      (f'{category}-{kind}', 'test', 'invalid', kind, kind, category, kind, '{}', '2026-01-01', '2026-01-01'))
     with pytest.raises(ValidationError):
-        DataResourceCreateRequest(provider='test', namespace='missing', name='missing', kind='dataset')
+        DataResourceCreateRequest(provider='test', namespace='missing', source_key='missing', kind='dataset')
 
 
 def test_file_versions_cannot_hide_recording_sources(tmp_path):
     db = Database(tmp_path / 'catalog')
-    resource = db.create_data_resource(category='file', kind='model', provider='test', namespace='files', name='model')
+    resource = db.create_data_resource(category='file', kind='model', provider='test', namespace='files', source_key='model')
     metadata = {'sources': [{'session_id': 'recording-a'}]}
     with pytest.raises(ValueError, match='Files cannot be linked'):
         db.create_data_resource_version(resource['id'], revision='v1', format='pt', path='/cluster/model', manifest_sha256='a'*64, metadata=metadata)
@@ -45,7 +45,7 @@ def test_file_versions_cannot_hide_recording_sources(tmp_path):
 
 def test_publishing_and_deleting_result_updates_parent(tmp_path):
     db = Database(tmp_path / 'catalog')
-    resource = db.create_data_resource(category='dataset', kind='demonstrations', provider='collection', namespace='datasets', name='cube')
+    resource = db.create_data_resource(category='dataset', kind='demonstrations', provider='collection', namespace='datasets', source_key='cube')
     with db.transaction() as c:
         c.execute("UPDATE data_resources SET updated_at='2026-01-01T00:00:00.000Z' WHERE id=?", (resource['id'],))
     version = db.create_data_resource_version(resource['id'], revision='v1', format='zarr', path='/cluster/cube', manifest_sha256='a'*64)
@@ -85,10 +85,26 @@ def test_legacy_classification_migration_preserves_payload_and_provenance(tmp_pa
 def test_file_is_not_a_training_dataset_but_remains_an_asset_input(tmp_path):
     from skynet_app import data_selection
     db = Database(tmp_path / 'choices')
-    resource = db.create_data_resource(category='file', kind='simulation_assets', provider='test', namespace='files', name='scene')
+    resource = db.create_data_resource(category='file', kind='simulation_assets', provider='test', namespace='files', source_key='scene')
     version = db.create_data_resource_version(resource['id'], revision='v1', format='usd', path='/cluster/scene', manifest_sha256='a'*64)
     assert data_selection.choices(db) == []
     with pytest.raises(ValueError, match='Choose a dataset'):
         data_selection.snapshot(db, [{'version_id':version['id']}])
     asset = data_selection.snapshot(db, [{'role':'simulation_assets', 'version_id':version['id']}])
     assert asset['assignments'][0]['role'] == 'simulation_assets'
+
+
+def test_duplicate_source_identity_is_reported_as_conflict(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    from skynet_app import pipeline_api
+
+    db = Database(tmp_path / "identity-conflict")
+    monkeypatch.setattr(pipeline_api, "service", SimpleNamespace(database=db))
+    request = DataResourceCreateRequest(category="dataset", provider="test", namespace="catalog",
+        source_key="same-key", display_name="A display name", kind="dataset")
+    pipeline_api.create_data_resource(request)
+    with pytest.raises(HTTPException) as caught:
+        pipeline_api.create_data_resource(request.model_copy(update={"display_name": "Another label"}))
+    assert caught.value.status_code == 409
+    assert "source key already exists" in caught.value.detail

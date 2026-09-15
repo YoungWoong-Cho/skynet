@@ -143,7 +143,7 @@ def test_preparation_options_reads_only_selected_recording(setup, monkeypatch):
     assert result["session"]["eligible"]
     assert result["session"]["episodes"] == 2
     assert result["resource"]["id"] == resource["id"]
-    assert result["resource"]["metadata"]["display_name"] == "Existing dataset"
+    assert result["resource"]["display_name"] == "Existing dataset"
     assert "versions" not in result["resource"]
     assert len(queries) == 3, queries
     assert "WHERE id=?" in queries[0]

@@ -257,7 +257,7 @@
       preparationDirty = false;
       populatePolicies();
       el("policy-export-name").value =
-        resource?.metadata?.display_name || resource?.name || source.name;
+        resource?.display_name || source.name;
       el("policy-export-name").readOnly = Boolean(resource);
       el("policy-export-name-help").textContent = resource
         ? "Adds a prepared result to this dataset."
@@ -355,7 +355,7 @@
       ),
     ];
     const presets = dataset
-      ? `<td><button type="button" class="text-button" data-dataset-presets="${esc(selectedResource.id)}" data-dataset-label="${esc(selectedResource.metadata?.display_name || selectedResource.name)}" data-preset-ids="${esc(JSON.stringify(presetIds))}">${presetIds.length} preset${presetIds.length === 1 ? "" : "s"}</button></td>`
+      ? `<td><button type="button" class="text-button" data-dataset-presets="${esc(selectedResource.id)}" data-dataset-label="${esc(selectedResource.display_name)}" data-preset-ids="${esc(JSON.stringify(presetIds))}">${presetIds.length} preset${presetIds.length === 1 ? "" : "s"}</button></td>`
       : "";
     const source =
       dataset && resourceRecordingIds(selectedResource).length
@@ -531,8 +531,7 @@
         ? (snapshot?.exports || []).filter((j) => j.resource_id === r.id)
         : [];
     const versions = r.versions || [];
-    el("prepared-dataset-title").textContent =
-      r.metadata?.display_name || r.name;
+    el("prepared-dataset-title").textContent = r.display_name;
     const results = versions.filter((v) => v.format !== "skynet.episodes/v1");
     el("prepared-dataset-context").textContent =
       `${results.length} result${results.length === 1 ? "" : "s"}`;
@@ -551,7 +550,7 @@
         rows.push(sourceVersionRow(version, r.category === "dataset"));
     }
     const focusedResult = document.activeElement?.dataset?.datasetResultToggle;
-    const title = r.metadata?.display_name || r.name;
+    const title = r.display_name;
     const description =
       r.description?.trim() && r.description.trim() !== title.trim()
         ? `<p>${esc(r.description)}</p>`
@@ -581,7 +580,7 @@
     selectedResource = { ...preparation?.resource, id: job.resource_id };
     const policy = preparation?.policies.find((item) => item.id === job.format);
     el("prepared-dataset-title").textContent =
-      job.name || preparation?.resource?.metadata?.display_name || el("policy-export-name").value;
+      job.name || preparation?.resource?.display_name || el("policy-export-name").value;
     el("prepared-dataset-context").textContent = job.state === "READY"
       ? "Conversion is prepared"
       : "Conversion request accepted";

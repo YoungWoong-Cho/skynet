@@ -28,8 +28,8 @@ def reads(monkeypatch):
 
 def dataset(db, index=0):
     resource = db.create_data_resource(
-        category="dataset", provider="collection", namespace="datasets", name=f"Data {index}",
-        kind="demonstrations", metadata={"session_id": f"recording-{index}", "display_name": f"Label {index}"},
+        category="dataset", provider="collection", namespace="datasets", source_key=f"Data {index}",
+        kind="demonstrations", display_name=f"Label {index}", metadata={"session_id": f"recording-{index}"},
     )
     digest = hashlib.sha256(str(index).encode()).hexdigest()
     prepared = db.create_data_resource_version(
@@ -75,14 +75,14 @@ def test_choices_keep_exact_frozen_receipt_and_location_selection(db):
     expected_assignment = {
         "role": "training_data", "position": 0, "mount_path": None, "required": True,
         "config": {"location_id": location["id"], "location": location},
-        "resource": {key: resource[key] for key in ("provider", "namespace", "name", "kind")},
+        "resource": {**{key: resource[key] for key in ("provider", "namespace", "kind")}, "name": resource["source_key"]},
         "version": {key: version[key] for key in (
             "revision", "format", "path", "source_uri", "manifest_sha256", "status", "size_bytes", "metadata",
         )},
     }
     expected_assignment["version"]["metadata"] = {**version["metadata"], "registered_version_id": version["id"]}
     expected = {
-        "schema_version": "skynet.data-bundle/v1", "name": resource["name"],
+        "schema_version": "skynet.data-bundle/v1", "name": resource["source_key"],
         "version": "experiment-inputs", "metadata": {"direct_selection": True},
         "assignments": [expected_assignment],
     }

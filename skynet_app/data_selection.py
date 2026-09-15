@@ -39,7 +39,7 @@ def snapshot(database, selections):
                 "registered_version_id": version_id,
             }
             assignments.append(assignment)
-            names.append(row["name"])
+            names.append(row["source_key"])
     return _manifest(assignments, names)
 
 
@@ -75,10 +75,10 @@ def choices(database):
             assignment["version"]["metadata"] = {
                 **assignment["version"]["metadata"], "registered_version_id": version["id"],
             }
-            frozen = _manifest([assignment], [resource["name"]])
+            frozen = _manifest([assignment], [resource["source_key"]])
             result.append({
                 **frozen, "id": version["id"], "selection": selection,
-                "name": resource.get("metadata", {}).get("display_name") or resource["name"],
+                "name": resource["display_name"],
                 "format": version["format"], "created_at": version["created_at"],
                 "resource_id": resource["id"],
             })

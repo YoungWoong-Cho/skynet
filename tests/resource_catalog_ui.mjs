@@ -17,12 +17,12 @@ try{
   w.eval('window.seedPresets = rows => { experimentRows=rows; renderExperiments(); };');
   const types={dataset:{dataset:'Dataset',demonstrations:'Demonstrations'},file:{model:'Model',simulation_assets:'Simulation assets'}};
   const resources=[
-    {id:'cube',category:'dataset',kind:'demonstrations',provider:'collection',name:'Cube',recording_ids:['one','two'],versions:[
+    {id:'cube',category:'dataset',kind:'demonstrations',provider:'collection',display_name:'Cube',source_key:'Cube',recording_ids:['one','two'],versions:[
       {id:'source',format:'skynet.episodes/v1'}, {id:'z1',format:'egoverse-episodes-zarr/v1'},
       {id:'z2',format:'egoverse-episodes-zarr/v1'}, {id:'h1',format:'xpolicylab-act-hdf5/v1'}]},
-    {id:'external',category:'dataset',kind:'dataset',provider:'huggingface',name:'External',versions:[]},
-    {id:'file',category:'file',kind:'model',provider:'huggingface',name:'Robot model',versions:[]},
-    {id:'unclassified',kind:'demonstrations',provider:'test',name:'Unknown',versions:[]},
+    {id:'external',category:'dataset',kind:'dataset',provider:'huggingface',display_name:'External',source_key:'External',versions:[]},
+    {id:'file',category:'file',kind:'model',provider:'huggingface',display_name:'Robot model',source_key:'Robot model',versions:[]},
+    {id:'unclassified',kind:'demonstrations',provider:'test',display_name:'Unknown',source_key:'Unknown',versions:[]},
   ];
   let imports=[{id:'failed-import',resource_id:'external',state:'FAILED',error:'Download interrupted'}];
   w.api=async path=>path.startsWith('/api/data/resources?')?{resources,resource_types:types}:path==='/api/data/imports'?{imports}:{items:[]};
@@ -59,11 +59,12 @@ try{
   el('show-data-resource-form').click();
   assert.equal(el('data-resource-category').value,'file');
   assert.deepEqual([...el('data-resource-kind').options].map(x=>x.value),Object.keys(types.file));
-  el('data-resource-provider').value='huggingface';el('data-resource-namespace').value='org';el('data-resource-name').value='Robot';el('data-resource-kind').value='model';
+  el('data-resource-provider').value='huggingface';el('data-resource-namespace').value='org';el('data-resource-name').value='Robot';el('data-resource-source-key').value='robot-v1';el('data-resource-kind').value='model';
   let submitted;
   w.api=async (path,request={})=>{if(request.method==='POST'){submitted=JSON.parse(request.body);throw Error('Stop after capturing request');}return {};};
   await w.createDataResource({preventDefault(){}});
   assert.equal(submitted.category,'file');assert.equal(submitted.kind,'model');
+  assert.equal(submitted.display_name,'Robot');assert.equal(submitted.source_key,'robot-v1');assert.equal('name' in submitted,false);
   // Reciprocal links carry exact IDs, while typing returns to ordinary search.
   const presets=[{id:'preset',name:'Cube preset',dataset_ids:['cube']},{id:'other',name:'Other preset',dataset_ids:['external']}];
   w.api=async path=>path.startsWith('/api/data/resources?')?{resources,resource_types:types}:path==='/api/data/imports'?{imports}:path==='/api/experiments'?{experiments:presets}:{};

@@ -228,6 +228,8 @@ class CollectionAdapterManifest(BaseModel):
 
 
 class DataRegistrationTarget(BaseModel):
+    # This identity is part of the immutable collection manifest v1 format.
+    # Its name field maps to the registry source_key.
     model_config = ConfigDict(extra="forbid")
 
     provider: str = Field(min_length=1, max_length=128)
@@ -1041,7 +1043,7 @@ class CollectionStore:
                 if current["status"] != "CAPTURED":
                     raise ValueError("only a captured session can be completed")
                 resource = connection.execute(
-                    "SELECT * FROM data_resources WHERE provider = ? AND namespace = ? AND name = ?",
+                    "SELECT * FROM data_resources WHERE provider = ? AND namespace = ? AND source_key = ?",
                     (target.provider, target.namespace, target.name),
                 ).fetchone()
                 if resource is not None and resource["category"] != "dataset":
@@ -1049,7 +1051,7 @@ class CollectionStore:
                 if resource is None:
                     resource = self.database._insert_data_resource(
                         connection, category="dataset", provider=target.provider, namespace=target.namespace,
-                        name=target.name, kind=target.kind,
+                        source_key=target.name, kind=target.kind,
                         description="Native raw captures registered by collection sessions",
                         metadata={"collection_schema_version": COLLECTION_SCHEMA_VERSION,
                                   **request.resource_metadata},

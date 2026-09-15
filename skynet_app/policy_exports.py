@@ -223,11 +223,11 @@ class PolicyExportService(ClusterPolicyPreparation):
             category="dataset",
             provider="collection",
             namespace="datasets",
-            name=identity,
+            source_key=identity,
+            display_name=label,
             kind="demonstrations",
             description=label,
             metadata={
-                "display_name": label,
                 "session_id": session["id"],
                 "managed_dataset": True,
                 **({"overfit_episode": overfit_episode} if overfit_episode is not None else {}),
@@ -341,7 +341,7 @@ class PolicyExportService(ClusterPolicyPreparation):
         )
         session_resources = {}
         for resource in resources:
-            for identifier in (resource["name"], resource.get("metadata", {}).get("recording_session_id")):
+            for identifier in (resource["source_key"], resource.get("metadata", {}).get("recording_session_id")):
                 if identifier is not None:
                     session_resources.setdefault(identifier, resource)
         sessions = []
@@ -573,10 +573,10 @@ class PolicyExportService(ClusterPolicyPreparation):
                 resource = self.dataset(
                     sessions[selections[0]["session_id"]], name
                 )
-            # Preparation adds immutable versions to an existing identity. Its
-            # name is chosen only when dataset() first creates the resource;
-            # retries and failed conversions must never rename earlier versions.
-            name = resource.get("metadata", {}).get("display_name") or resource["name"]
+            # Preparation adds immutable versions to an existing identity.
+            # Use its current display label without changing the resource or
+            # labels already captured in earlier conversion receipts.
+            name = resource["display_name"]
             for job in jobs:
                 if (
                     job.get("fingerprint") == identity

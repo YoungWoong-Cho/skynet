@@ -30,7 +30,8 @@ def _bundle() -> dict:
                     "resource": {
                         "provider": "memory",
                         "namespace": "tests",
-                        "name": "robot",
+                        "source_key": "robot",
+                        "display_name": "Robot recordings",
                         "kind": "demonstrations",
                     },
                 },
@@ -92,3 +93,16 @@ def test_unknown_format_is_explicitly_unsupported():
     inspection = preview["assignments"][0]["inspection"]
     assert inspection["status"] == "unsupported"
     assert "No static dataset preview adapter" in inspection["warnings"][0]
+
+
+def test_cached_preview_uses_current_resource_display_name():
+    bundle = _bundle()
+    bundle["manifest_sha256"] = "d" * 64
+    bundle["assignments"][0]["version"]["format"] = "custom-binary-v9"
+    first = build_data_bundle_preview(bundle, NoRemoteCluster())
+    bundle["assignments"][0]["version"]["resource"]["display_name"] = "Renamed recordings"
+    renamed = build_data_bundle_preview(bundle, NoRemoteCluster())
+    assert first["assignments"][0]["resource"]["display_name"] == "Robot recordings"
+    assert renamed["assignments"][0]["resource"]["display_name"] == "Renamed recordings"
+    assert renamed["assignments"][0]["resource"]["source_key"] == "robot"
+    assert renamed["assignments"][0]["inspection"] == first["assignments"][0]["inspection"]

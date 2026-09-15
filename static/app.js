@@ -238,6 +238,7 @@ const elements = {
   dataResourceProvider: document.querySelector("#data-resource-provider"),
   dataResourceNamespace: document.querySelector("#data-resource-namespace"),
   dataResourceName: document.querySelector("#data-resource-name"),
+  dataResourceSourceKey: document.querySelector("#data-resource-source-key"),
   dataResourceKind: document.querySelector("#data-resource-kind"),
   dataResourceDescription: document.querySelector("#data-resource-description"),
   createDataResource: document.querySelector("#create-data-resource"),
@@ -13390,7 +13391,7 @@ function dataResourceIdentity(resource) {
   return (
     [
       resource.provider,
-      [resource.namespace, resource.name].filter(Boolean).join("/"),
+      [resource.namespace, resource.source_key].filter(Boolean).join("/"),
     ]
       .filter(Boolean)
       .join(":") ||
@@ -13840,7 +13841,7 @@ async function showDatasetRecordings(resourceId) {
   await activateTab("data", true, "recording");
   window.filterSimulationRecordings(
     resourceRecordingIds(resource),
-    resource.metadata?.display_name || resource.name,
+    resource.display_name,
   );
   document
     .getElementById("simulation-recordings-search")
@@ -13965,9 +13966,9 @@ function renderDataResources() {
       [
         resource.id,
         resource.resource_id,
-        resource.metadata?.display_name,
+        resource.display_name,
         resource.namespace,
-        resource.name,
+        resource.source_key,
         resource.kind,
         resource.provider,
         ...resourceRecordingIds(resource),
@@ -13978,6 +13979,13 @@ function renderDataResources() {
         .includes(query)
     );
   });
+  if (showRecording) {
+    rows.sort(
+      (left, right) =>
+        (Date.parse(right.updated_at || right.created_at || "") || 0) -
+        (Date.parse(left.updated_at || left.created_at || "") || 0),
+    );
+  }
   const unit = dataCatalogView === "files" ? "file set" : "dataset";
   elements.dataResourceCount.hidden = showRecording;
   elements.dataResourceCount.textContent = `${query || recordingId ? rows.length + " of " : ""}${available.length} ${unit}${available.length === 1 ? "" : "s"}`;
@@ -13988,7 +13996,7 @@ function renderDataResources() {
           const recordingCount = resourceRecordingIds(resource).length;
           const formats = dataFormatsLabel(resource);
           return `<tr data-resource-id="${escapeHtml(id)}">
-        <td><span class="node-name">${escapeHtml(resource.metadata?.display_name || [resource.namespace, resource.name].filter(Boolean).join("/"))}</span>${resource.archived_at ? `<span class="secondary">Archived</span>` : ""}${dataResourceActivity(id)}</td>
+        <td><span class="node-name">${escapeHtml(resource.display_name)}</span>${resource.archived_at ? `<span class="secondary">Archived</span>` : ""}${dataResourceActivity(id)}</td>
         ${showRecording ? `<td><button type="button" class="text-button" data-resource-action="recordings" data-id="${escapeHtml(id)}">${recordingCount} recording${recordingCount === 1 ? "" : "s"}</button></td>` : ""}
         ${showRecording ? "" : `<td>${escapeHtml(dataResourceTypeLabel(resource))}</td>`}
         <td>${formats ? `<button type="button" class="text-button" data-resource-action="dataset" data-id="${escapeHtml(id)}">${escapeHtml(formats)}</button>` : "—"}</td>
@@ -14212,7 +14220,7 @@ function openDataInspection(resourceId) {
     (r) => String(r.id) === inspectedDataResourceId,
   );
   document.getElementById("data-inspection-title").textContent =
-    (resource?.metadata?.display_name || resource?.name || "Dataset") +
+    (resource?.display_name || "Dataset") +
     " · Files and history";
   SkynetDialog.open(document.getElementById("data-inspection-dialog"));
 }
@@ -14492,7 +14500,8 @@ async function createDataResource(event) {
       body: JSON.stringify({
         provider: elements.dataResourceProvider.value.trim(),
         namespace: elements.dataResourceNamespace.value.trim(),
-        name: elements.dataResourceName.value.trim(),
+        source_key: elements.dataResourceSourceKey.value.trim(),
+        display_name: elements.dataResourceName.value.trim() || undefined,
         category: document.getElementById("data-resource-category").value,
         kind: elements.dataResourceKind.value.trim(),
         description: elements.dataResourceDescription.value.trim(),
@@ -14507,6 +14516,7 @@ async function createDataResource(event) {
     );
     elements.showDataResourceForm.textContent = "New";
     elements.dataResourceName.value = "";
+    elements.dataResourceSourceKey.value = "";
     elements.dataResourceDescription.value = "";
     elements.dataResourceForm.reset();
     await loadDataRegistry(true);
@@ -16205,10 +16215,10 @@ const interactiveTutorialTours = {
       },
       {
         id: "name",
-        selector: "#data-resource-name",
+        selector: "#data-resource-source-key",
         gate: "field",
-        title: "Give the resource a unique name",
-        instruction: "The generated name carries this tutorial session token.",
+        title: "Give the resource a unique source key",
+        instruction: "The generated source key carries this tutorial session token.",
         useValue: ({ token }) => `${token}-resource`,
         validate: tutorialNonEmpty,
       },
@@ -16969,7 +16979,7 @@ function tutorialHasExperimentPreview(payload) {
 }
 
 function tutorialResourceIdentity({ token }) {
-  return [{ paths: ["name"], value: `${token}-resource` }];
+  return [{ paths: ["source_key"], value: `${token}-resource` }];
 }
 
 function tutorialAdapterSlug(token, suffix) {
@@ -16999,7 +17009,7 @@ function tutorialExperimentAdapterIdentity({ token }) {
 
 function tutorialResourceFormIdentity({ token }) {
   return (
-    document.querySelector("#data-resource-name")?.value === `${token}-resource`
+    document.querySelector("#data-resource-source-key")?.value === `${token}-resource`
   );
 }
 
@@ -17115,6 +17125,21 @@ function loadTutorialSession(page) {
             : record.cleanupState,
       }));
     }
+    // Existing resource tutorial receipts refer to the same immutable key under
+    // its former API field. Preserve ownership checks when resuming cleanup.
+    saved.ownedRecords = (saved.ownedRecords || []).map((record) =>
+      record.kind === "data-resource"
+        ? {
+            ...record,
+            expectedIdentity: (record.expectedIdentity || []).map((rule) => ({
+              ...rule,
+              paths: rule.paths.map((path) =>
+                path === "name" ? "source_key" : path,
+              ),
+            })),
+          }
+        : record,
+    );
     return saved.definitionVersion === 3 ? saved : null;
   } catch {
     return null;
@@ -18148,10 +18173,17 @@ function resetDataResourceEditor(hide = true) {
     files ? "simulation_assets" : "demonstrations",
   );
   document.querySelector("#data-resource-id").value = "";
+  document.querySelector("#data-resource-visible-id").value = "";
+  document.querySelector("#data-resource-identity-field").hidden = true;
+  document.querySelector("#data-resource-source-details").open = true;
+  elements.dataResourceName.disabled = false;
+  elements.dataResourceName.required = false;
+  elements.dataResourceSourceKey.readOnly = false;
+  document.querySelector("#data-resource-name-help").hidden = false;
   for (const id of [
     "data-resource-provider",
     "data-resource-namespace",
-    "data-resource-name",
+    "data-resource-source-key",
     "data-resource-kind",
   ])
     document.querySelector(`#${id}`).disabled = false;
@@ -18177,14 +18209,22 @@ async function openDataResourceEditor(id, launcher = null) {
       resource.provider || "";
     document.querySelector("#data-resource-namespace").value =
       resource.namespace || "";
-    document.querySelector("#data-resource-name").value = resource.name || "";
+    elements.dataResourceName.value = resource.display_name || "";
+    elements.dataResourceName.disabled = false;
+    elements.dataResourceName.required = true;
+    elements.dataResourceSourceKey.value = resource.source_key || "";
+    elements.dataResourceSourceKey.disabled = false;
+    elements.dataResourceSourceKey.readOnly = true;
+    document.querySelector("#data-resource-visible-id").value = resource.id || id;
+    document.querySelector("#data-resource-identity-field").hidden = false;
+    document.querySelector("#data-resource-source-details").open = false;
+    document.querySelector("#data-resource-name-help").hidden = true;
     setDataResourceTypes(resource.category, resource.kind);
     document.querySelector("#data-resource-description").value =
       resource.description || "";
     for (const fieldId of [
       "data-resource-provider",
       "data-resource-namespace",
-      "data-resource-name",
       "data-resource-kind",
     ])
       document.querySelector(`#${fieldId}`).disabled = true;
@@ -18192,7 +18232,7 @@ async function openDataResourceEditor(id, launcher = null) {
     elements.dataResourceForm.querySelector("h2, h3").textContent =
       resource.category === "file" ? "Edit files" : "Edit dataset";
     revealPanel(document.querySelector("#data-resource-form"), {
-      focusTarget: document.querySelector("#data-resource-description"),
+      focusTarget: elements.dataResourceName,
       launcher: revealLauncher,
     });
   } catch (error) {
@@ -18204,11 +18244,13 @@ async function openDataResourceEditor(id, launcher = null) {
 
 async function updateDataResource(id) {
   const form = document.querySelector("#data-resource-form");
+  elements.dataResourceName.value = elements.dataResourceName.value.trim();
   if (!form.reportValidity()) return;
   try {
     await api(`/api/data/resources/${encodeURIComponent(id)}`, {
       method: "PATCH",
       body: JSON.stringify({
+        display_name: elements.dataResourceName.value.trim(),
         description: document
           .querySelector("#data-resource-description")
           .value.trim(),

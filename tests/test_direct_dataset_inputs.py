@@ -12,7 +12,7 @@ from skynet_app.model_io import adapter_io_contract
 
 def registered(tmp_path):
     db = Database(tmp_path / 'test-db')
-    resource = db.create_data_resource(category="dataset", provider='collection', namespace='datasets', name='Cube', kind='dataset')
+    resource = db.create_data_resource(category="dataset", provider='collection', namespace='datasets', source_key='Cube', kind='dataset')
     version = db.create_data_resource_version(resource['id'], revision='capture-a', format='zarr',
         path='/cluster/prepared/a', manifest_sha256='a'*64,
         metadata={'episodes': 1, 'capture': {'action_joint_names': ['a','b','c'], 'robot_joint_names': ['a','b','c']}})

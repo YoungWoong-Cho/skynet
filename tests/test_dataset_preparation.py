@@ -278,7 +278,7 @@ def test_other_session_resource_is_rejected(setup):
         category="dataset",
         provider="collection",
         namespace="sessions",
-        name="another",
+        source_key="another",
         kind="demonstrations",
         metadata={"session_id": "another"},
     )

@@ -63,7 +63,7 @@ try {
   assert.equal(el('data-bundle-assignments'),null);
   w.loadDataRegistry=async()=>{};
   w.activateTab('datasets');el('data-show-archived').checked=true;
-  w.registryFixture([], [{id:'archived',category:'dataset',archived_at:'today',name:'Example'}]);
+  w.registryFixture([], [{id:'archived',category:'dataset',archived_at:'today',display_name:'Example',source_key:'example-source'}]);
   assert.ok(el('data-resources-body').querySelector('[data-resource-action="restore"]'));
   assert.equal(el('data-resources-body').querySelector('[data-resource-action="version"]'),null);
   // Each integration has one visible action; validation happens in Connect.

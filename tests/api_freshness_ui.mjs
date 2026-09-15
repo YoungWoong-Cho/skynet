@@ -91,7 +91,7 @@ try {
  let datasets=[dataset('old')],selectionReads=0,registryReads=0;
  handle=async(path)=>{
   if(path==='/api/data/selections'){selectionReads++;return Response.json({datasets});}
-  if(path.startsWith('/api/data/resources?')){registryReads++;assert.match(path,/include_versions=true/);return Response.json({resources:[{id:'r',category:'dataset',kind:'dataset',name:'Registered',versions:[]}],resource_types:{}});}
+  if(path.startsWith('/api/data/resources?')){registryReads++;assert.match(path,/include_versions=true/);return Response.json({resources:[{id:'r',category:'dataset',kind:'dataset',display_name:'Registered',source_key:'registered',versions:[]}],resource_types:{}});}
   if(path==='/api/data/imports')return Response.json({imports:[]});
   if(path==='/api/data/derivations')return Response.json({derivations:[]});
   if(path==='/api/adapters?include_archived=true')return Response.json({adapters:[]});

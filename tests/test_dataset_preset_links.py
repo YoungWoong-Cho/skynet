@@ -10,7 +10,7 @@ def test_links_include_all_revisions_and_only_owned_dataset_inputs(tmp_path):
     bob = system.for_workspace(directory.open('bob@example.com')[0]['id'])
     versions = []
     for index, category in enumerate(['dataset', 'dataset', 'file']):
-        resource = system.create_data_resource(category=category, provider='test', namespace='inputs', name=f'input-{index}', kind='dataset' if category == 'dataset' else 'model')
+        resource = system.create_data_resource(category=category, provider='test', namespace='inputs', source_key=f'input-{index}', kind='dataset' if category == 'dataset' else 'model')
         versions.append(system.create_data_resource_version(resource['id'], revision='1', format='zarr', path=f'/cluster/{index}', manifest_sha256=str(index+1)*64))
     def spec(version, direct=False):
         bundle = system.create_data_bundle(name=version['id'] + str(direct), version='1', assignments=[{'role':'training_data', 'version_id':version['id']}])

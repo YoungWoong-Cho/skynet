@@ -313,17 +313,18 @@ def build_huggingface_import_job(
     if queue is None:
         raise ValueError(f"unknown import queue: {queue_name}")
     run_id = f"data-import-{import_id}"
-    job_slug = re.sub(r"[^A-Za-z0-9_-]+", "-", str(resource["name"])).strip("-")[:30]
+    job_slug = re.sub(r"[^A-Za-z0-9_-]+", "-", str(resource["source_key"])).strip("-")[:30]
     job_name = f"hf-{job_slug}-{import_id[:8]}"
     run_directory = f"{CLUSTER.paths.jobs}/runs/{run_id}"
     result_path = f"{run_directory}/import-result.json"
+    # Keep the v1 wire identity stable for existing imports and their receipts.
     payload = {
         "schema_version": "skynet.data-import-request/v1",
         "import_id": import_id,
         "resource_id": str(resource["id"]),
         "provider": str(resource["provider"]),
         "namespace": str(resource["namespace"]),
-        "name": str(resource["name"]),
+        "name": str(resource["source_key"]),
         "kind": str(resource["kind"]),
         "revision": str(request["revision"]),
         "subset": str(request["subset"]),

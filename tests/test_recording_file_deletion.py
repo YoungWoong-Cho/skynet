@@ -185,7 +185,7 @@ def test_dataset_dependency_and_shared_camera_files_block_removal(files):
         category="dataset",
         provider="collection",
         namespace="datasets",
-        name="Training",
+        source_key="Training",
         kind="demonstrations",
         metadata={"session_id": session},
     )

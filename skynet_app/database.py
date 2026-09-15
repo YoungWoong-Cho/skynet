@@ -3241,20 +3241,29 @@ class Database:
         *,
         provider: str,
         namespace: str,
-        name: str,
+        source_key: str,
         category: str,
         kind: str,
+        display_name: str | None = None,
         description: str = "",
         metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         validate_resource_type(category, kind)
         validate_resource_metadata(category, metadata)
+        if "display_name" in (metadata or {}):
+            raise ValueError("Use the resource display_name field instead of metadata.display_name")
+        label = display_name if display_name is not None else "/".join(
+            value for value in (namespace, source_key) if value
+        )
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError("Display name must not be empty")
         now = utc_now()
         values = {
             "id": new_id(),
             "provider": provider,
             "namespace": namespace,
-            "name": name,
+            "source_key": source_key,
+            "display_name": label.strip(),
             "category": category,
             "kind": kind,
             "description": description,
@@ -3275,15 +3284,17 @@ class Database:
         *,
         provider: str,
         namespace: str,
-        name: str,
+        source_key: str,
         category: str,
         kind: str,
+        display_name: str | None = None,
         description: str = "",
         metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self.transaction() as connection:
             return self._insert_data_resource(
-                connection, provider=provider, namespace=namespace, name=name,
+                connection, provider=provider, namespace=namespace, source_key=source_key,
+                display_name=display_name,
                 category=category, kind=kind, description=description, metadata=metadata,
             )
 
@@ -3309,7 +3320,7 @@ class Database:
         with self.read_snapshot() as connection:
             rows = connection.execute(
                 f"SELECT * FROM data_resources {where} "
-                "ORDER BY lower(provider), lower(namespace), lower(name)",
+                "ORDER BY lower(provider), lower(namespace), lower(source_key)",
                 parameters,
             ).fetchall()
             return self._data_resource_payloads(
@@ -3325,8 +3336,8 @@ class Database:
                 """
                 SELECT * FROM data_resources
                 WHERE provider = 'collection' AND namespace = 'datasets'
-                  AND (name = ? OR json_extract(metadata_json, '$.recording_session_id') = ?)
-                ORDER BY lower(provider), lower(namespace), lower(name)
+                  AND (source_key = ? OR json_extract(metadata_json, '$.recording_session_id') = ?)
+                ORDER BY lower(provider), lower(namespace), lower(source_key)
                 LIMIT 1
                 """,
                 (identity if identity is not None else session_id, session_id),
@@ -3348,14 +3359,21 @@ class Database:
         self,
         resource_id: str,
         *,
+        display_name: str | None = None,
         description: str | None = None,
         metadata: Mapping[str, Any] | None = None,
         archived: bool | None = None,
     ) -> dict[str, Any]:
         fields: dict[str, Any] = {"updated_at": utc_now()}
+        if display_name is not None:
+            if not isinstance(display_name, str) or not display_name.strip():
+                raise ValueError("Display name must not be empty")
+            fields["display_name"] = display_name.strip()
         if description is not None:
             fields["description"] = description
         if metadata is not None:
+            if "display_name" in metadata:
+                raise ValueError("Use the resource display_name field instead of metadata.display_name")
             fields["metadata_json"] = canonical_json(dict(metadata))
         if archived is not None:
             fields["archived_at"] = utc_now() if archived else None
@@ -3682,7 +3700,7 @@ class Database:
                   AND (json_extract(a.value, '$.version.metadata.registered_version_id') IS NOT NULL
                        OR (r.provider=json_extract(a.value, '$.resource.provider')
                            AND r.namespace=json_extract(a.value, '$.resource.namespace')
-                           AND r.name=json_extract(a.value, '$.resource.name')))
+                           AND r.source_key=json_extract(a.value, '$.resource.name')))
                 ORDER BY e.name, er.revision_number, r.id, v.id
             """).fetchall()]
 
@@ -4088,8 +4106,9 @@ class Database:
             "required": bool(assignment.get("required", True)),
             "config": config,
             "resource": {
-                key: resource[key]
-                for key in ("provider", "namespace", "name", "kind")
+                **{key: resource[key] for key in ("provider", "namespace", "kind")},
+                # The v1 receipt schema and digest retain their original identity field.
+                "name": resource["source_key"],
             },
             "version": {
                 key: version[key]

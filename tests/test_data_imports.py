@@ -20,7 +20,7 @@ RESOURCE = {
     "id": "resource-1",
     "provider": "huggingface",
     "namespace": "nvidia",
-    "name": "PhysicalAI-Robotics-GR00T-X-Embodiment-Sim",
+    "source_key": "PhysicalAI-Robotics-GR00T-X-Embodiment-Sim",
     "kind": "demonstrations",
 }
 
@@ -105,7 +105,7 @@ def import_result(record):
         "resource_id": record["resource_id"],
         "provider": "huggingface",
         "namespace": RESOURCE["namespace"],
-        "name": RESOURCE["name"],
+        "name": RESOURCE["source_key"],
         "kind": RESOURCE["kind"],
         "revision": "e" * 40,
         "version_revision": f"{'e' * 40}#subset=gr1_arms_only.CanSort",
@@ -132,7 +132,7 @@ def test_submit_and_reconcile_publishes_directly_selectable_data():
             category="dataset",
             provider=RESOURCE["provider"],
             namespace=RESOURCE["namespace"],
-            name=RESOURCE["name"],
+            source_key=RESOURCE["source_key"],
             kind=RESOURCE["kind"],
         )
         cluster = ImportCluster()
@@ -151,7 +151,7 @@ def test_submit_and_reconcile_publishes_directly_selectable_data():
 @pytest.fixture
 def submitted_import(tmp_path):
     database = Database(tmp_path / "skynet.db")
-    resource = database.create_data_resource(category="dataset", **{key: RESOURCE[key] for key in ("provider", "namespace", "name", "kind")})
+    resource = database.create_data_resource(category="dataset", **{key: RESOURCE[key] for key in ("provider", "namespace", "source_key", "kind")})
     cluster = ImportCluster()
     cluster.state = "RUNNING"
     service = PipelineService(database, cluster)
@@ -300,7 +300,7 @@ def test_cancelling_import_still_claims_identity_despite_changed_budget(submitte
 
 def test_concurrent_import_identity_claim_is_atomic(tmp_path):
     database = Database(tmp_path / "skynet.db")
-    resource = database.create_data_resource(category="dataset", **{key: RESOURCE[key] for key in ("provider", "namespace", "name", "kind")})
+    resource = database.create_data_resource(category="dataset", **{key: RESOURCE[key] for key in ("provider", "namespace", "source_key", "kind")})
     barrier = threading.Barrier(2)
 
     def claim():

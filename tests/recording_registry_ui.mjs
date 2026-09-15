@@ -24,11 +24,11 @@ try {
   const copy = {...original, id: copyId, recordings: ['a']};
   const empty = {...original, id: 'unregistered'};
   let resources = [
-    {id: 'original-data', category: 'dataset', provider: 'collection', name: 'Full dataset', metadata: {session_id: originalId}, versions: [{id:'v1'}, {id:'v2'}, {id:'v3'}]},
-    {id: 'second-data', category: 'dataset', provider: 'collection', name: 'Another dataset', metadata: {session_id: originalId}, versions: []},
-    {id: 'archived-data', category: 'dataset', provider: 'collection', name: 'Archived dataset', metadata: {session_id: originalId}, archived_at: '2026-09-10', versions: []},
-    {id: 'copy-data', category: 'dataset', provider: 'collection', name: 'One episode', metadata: {session_id: originalId, recording_session_id: copyId}, versions: []},
-    {id: 'external', category: 'dataset', provider: 'huggingface', name: '<b>External</b>', metadata: {session_id: originalId}, versions: []},
+    {id: 'original-data', category: 'dataset', provider: 'collection', display_name: 'Full dataset', source_key: 'Full dataset', metadata: {session_id: originalId}, versions: [{id:'v1'}, {id:'v2'}, {id:'v3'}]},
+    {id: 'second-data', category: 'dataset', provider: 'collection', display_name: 'Another dataset', source_key: 'Another dataset', metadata: {session_id: originalId}, versions: []},
+    {id: 'archived-data', category: 'dataset', provider: 'collection', display_name: 'Archived dataset', source_key: 'Archived dataset', metadata: {session_id: originalId}, archived_at: '2026-09-10', versions: []},
+    {id: 'copy-data', category: 'dataset', provider: 'collection', display_name: 'One episode', source_key: 'One episode', metadata: {session_id: originalId, recording_session_id: copyId}, versions: []},
+    {id: 'external', category: 'dataset', provider: 'huggingface', display_name: '<b>External</b>', source_key: '<b>External</b>', metadata: {session_id: originalId}, versions: []},
   ];
   const requests = [];
   w.api = async path => {
@@ -94,7 +94,7 @@ try {
   await w.loadDataRegistry(true);
   assert.equal(registered(0).textContent, '2 datasets');
   // Files never expose recording ownership, even for a stale response.
-  resources.push({id:'assets', name:'Scene', kind:'simulation_assets', category:'file',provider:'collection', metadata:{session_id:originalId, recording_session_id:originalId}, versions:[]});
+  resources.push({id:'assets', display_name:'Scene', source_key:'Scene', kind:'simulation_assets', category:'file',provider:'collection', metadata:{session_id:originalId, recording_session_id:originalId}, versions:[]});
   await w.loadDataRegistry(true);
   assert.equal(registered(0).textContent, '2 datasets', 'file sets do not count as registered datasets');
   await w.activateTab('data', true, 'files'); await flush();
@@ -111,7 +111,7 @@ try {
   assert.equal(el('data-resource-recording-column').hidden, false);
   assert.equal(el('data-resources-body').rows[0].cells.length, 6);
   assert.equal(el('data-resource-count').hidden, true);
-  resources.push({id:'multi',category:'dataset',provider:'collection',name:'Combined recordings',kind:'demonstrations',recording_ids:[originalId,copyId],metadata:{session_id:originalId},versions:[]});
+  resources.push({id:'multi',category:'dataset',provider:'collection',display_name:'Combined recordings', source_key:'Combined recordings',kind:'demonstrations',recording_ids:[originalId,copyId],metadata:{session_id:originalId},versions:[]});
   await w.loadDataRegistry(true);
   const multi=el('data-resources-body').querySelector('[data-resource-id=multi]');
   assert.equal(multi.cells[1].textContent,'2 recordings');

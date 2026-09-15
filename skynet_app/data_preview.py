@@ -75,10 +75,10 @@ def _huggingface_content_base(
     if str(resource.get("provider") or "").lower() != "huggingface":
         return None
     namespace = str(resource.get("namespace") or "").strip()
-    name = str(resource.get("name") or "").strip()
+    source_key = str(resource.get("source_key") or "").strip()
     revision_value = str(version.get("revision") or "")
     revision, _, fragment = revision_value.partition("#")
-    if not namespace or not name or not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+    if not namespace or not source_key or not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
         return None
     metadata = version.get("metadata") if isinstance(version.get("metadata"), dict) else {}
     subset = str(metadata.get("subset") or "").strip()
@@ -86,7 +86,7 @@ def _huggingface_content_base(
         subset = str(parse_qs(fragment).get("subset", [""])[0]).strip()
     base = (
         "https://huggingface.co/datasets/"
-        f"{quote(namespace, safe='')}/{quote(name, safe='')}/resolve/{revision.lower()}"
+        f"{quote(namespace, safe='')}/{quote(source_key, safe='')}/resolve/{revision.lower()}"
     )
     if subset:
         base += "/" + "/".join(quote(part, safe="") for part in PurePosixPath(subset).parts)
@@ -454,6 +454,19 @@ def _usage_summary(assignments: list[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _with_current_resource_labels(preview, bundle):
+    """Mutable registry labels are read live, outside the immutable preview cache."""
+    result = copy.deepcopy(preview)
+    labels = {
+        (str(item.get("role") or ""), _integer(item.get("position")) or 0):
+            ((item.get("version") or {}).get("resource") or {}).get("display_name")
+        for item in bundle.get("assignments", []) if isinstance(item, dict)
+    }
+    for item in result["assignments"]:
+        item["resource"]["display_name"] = labels.get((item["role"], item["position"]))
+    return result
+
+
 def build_data_bundle_preview(
     bundle: Mapping[str, Any],
     cluster: ClusterClient,
@@ -467,7 +480,7 @@ def build_data_bundle_preview(
     with _PREVIEW_CACHE_LOCK:
         cached = _PREVIEW_CACHE.get(cache_key)
     if cached is not None:
-        return copy.deepcopy(cached)
+        return _with_current_resource_labels(cached, bundle)
 
     assignments = bundle.get("assignments")
     if not isinstance(assignments, list):
@@ -546,7 +559,7 @@ def build_data_bundle_preview(
                     "id": resource.get("id"),
                     "provider": resource.get("provider"),
                     "namespace": resource.get("namespace"),
-                    "name": resource.get("name"),
+                    "source_key": resource.get("source_key"),
                     "kind": resource.get("kind"),
                 },
                 "version": {
@@ -590,8 +603,8 @@ def build_data_bundle_preview(
     with _PREVIEW_CACHE_LOCK:
         if len(_PREVIEW_CACHE) >= 128:
             _PREVIEW_CACHE.pop(next(iter(_PREVIEW_CACHE)))
-        _PREVIEW_CACHE[cache_key] = copy.deepcopy(result)
-    return result
+        _PREVIEW_CACHE[cache_key] = result
+    return _with_current_resource_labels(result, bundle)
 
 
 def resolve_data_bundle_preview_media(
