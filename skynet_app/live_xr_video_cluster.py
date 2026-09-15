@@ -4,7 +4,7 @@ import hashlib
 import json
 import shlex
 
-from .capture_processing.slurm import compile_isaac_job
+from .isaac_job import compile_isaac_job
 from .cluster_runtime import WORK_ROOT, ClusterError, SubmissionOutcomeUnknown
 
 TERMINAL = {"COMPLETED", "CANCELLED", "FAILED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE"}

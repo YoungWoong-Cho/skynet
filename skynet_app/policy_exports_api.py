@@ -35,6 +35,26 @@ def overview():
     return checked(service.options)
 
 
+@router.get("/jobs")
+def jobs():
+    from .workspaces import CURRENT_WORKSPACE
+    if CURRENT_WORKSPACE.get() is not None:
+        from .pipeline_api import service as pipeline_service
+        return checked(lambda: service.job_overview(workspace_database=pipeline_service.database))
+    return checked(service.job_overview)
+
+
+@router.get("/options/{session_id}")
+def preparation_options(session_id: str):
+    from .workspaces import CURRENT_WORKSPACE
+    if CURRENT_WORKSPACE.get() is not None:
+        from .pipeline_api import service as pipeline_service
+        return checked(lambda: service.preparation_options(
+            session_id, workspace_database=pipeline_service.database
+        ))
+    return checked(service.preparation_options, session_id)
+
+
 @router.post("", status_code=202)
 def create(request: ExportRequest):
     return checked(

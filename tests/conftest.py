@@ -38,6 +38,4 @@ def prepared_hand_store(tmp_path, monkeypatch):
 
     monkeypatch.setattr("skynet_app.live_xr.build_hand", build)
     monkeypatch.setattr("skynet_app.live_xr.upload_hand", upload)
-    monkeypatch.setattr("skynet_app.capture_processing.service.build_hand", build)
-    monkeypatch.setattr("skynet_app.capture_processing.service.upload_hand", upload)
     return build

@@ -93,7 +93,7 @@ def test_ctrl_c_during_metadata_read_preserves_tunnel_until_owner_cleanup(tmp_pa
     assert "Transfer survived Ctrl+C" in result.stdout
 
 
-@pytest.mark.parametrize("code,reason", [(-2, "signal 2"), (255, "status 255")])
+@pytest.mark.parametrize("code,reason", [(-2, "signal 2"), (255, "status 255"), (1, "status 1")])
 def test_metadata_transport_failure_reports_host_and_exit_reason(
     monkeypatch, code, reason
 ):
@@ -104,5 +104,6 @@ def test_metadata_transport_failure_reports_host_and_exit_reason(
         "run",
         lambda *args, **kwargs: SimpleNamespace(returncode=code, stdout="", stderr=""),
     )
-    with pytest.raises(OSError, match=f"metadata-host; SSH.*{reason}"):
+    with pytest.raises(OSError, match=f"metadata-host; SSH.*{reason}") as error:
         objects._exchange({})
+    assert isinstance(error.value, ConnectionError) == (code == 255 or code < 0)

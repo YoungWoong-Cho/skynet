@@ -19,7 +19,7 @@ def service(tmp_path, monkeypatch, prepared_hand_store):
     source = Path(__file__).resolve().parents[1]
     (tmp_path / "config").mkdir()
     (tmp_path / "ops/xr").mkdir(parents=True)
-    for name in ("config/capture_pipelines.json", "ops/xr/native_session.py"):
+    for name in ("ops/xr/native_session.py",):
         (tmp_path / name).write_text((source / name).read_text())
     (tmp_path / "ops/xr/hands").mkdir()
     for name in (
@@ -34,7 +34,7 @@ def service(tmp_path, monkeypatch, prepared_hand_store):
     (tmp_path / "config/live_xr.json").write_text(
         json.dumps(
             {
-                "pipeline_key": "dexverse-shadow-right",
+                **json.loads((source / "config/live_xr.json").read_text()),
                 "execution": "workstation",
                 "gateway": "test-workstation",
                 "work_root": "/home/test/skynet-xr",

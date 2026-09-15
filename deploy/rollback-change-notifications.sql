@@ -1,0 +1,25 @@
+-- Stop app writers and restore the prior source before running this rollback.
+BEGIN;
+SELECT pg_advisory_xact_lock(-8777073831261177637);
+DROP TRIGGER IF EXISTS skynet_change ON data_resources;
+DROP TRIGGER IF EXISTS skynet_change ON data_resource_versions;
+DROP TRIGGER IF EXISTS skynet_change ON data_locations;
+DROP TRIGGER IF EXISTS skynet_change ON data_derivations;
+DROP TRIGGER IF EXISTS skynet_change ON data_derivation_inputs;
+DROP TRIGGER IF EXISTS skynet_change ON data_imports;
+DROP TRIGGER IF EXISTS skynet_change ON data_bundles;
+DROP TRIGGER IF EXISTS skynet_change ON data_bundle_assignments;
+DROP TRIGGER IF EXISTS skynet_change ON policy_exports;
+DROP TRIGGER IF EXISTS skynet_change ON live_xr_sessions;
+DROP TRIGGER IF EXISTS skynet_change ON adapters;
+DROP TRIGGER IF EXISTS skynet_change ON workspace_storage;
+DROP TRIGGER IF EXISTS skynet_change ON tracking_connections;
+DROP TRIGGER IF EXISTS skynet_change ON slack_notifications;
+DROP TRIGGER IF EXISTS skynet_change ON workspace_sessions;
+DROP TRIGGER IF EXISTS skynet_change ON experiments;
+DROP TRIGGER IF EXISTS skynet_change ON experiment_revisions;
+DROP TRIGGER IF EXISTS skynet_change ON variants;
+DROP TRIGGER IF EXISTS skynet_change ON runs;
+DROP FUNCTION IF EXISTS skynet_notify_change();
+DELETE FROM skynet_schema_migrations WHERE version = 11;
+COMMIT;

@@ -7,26 +7,15 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import anyio
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from .capture_processing.api import router as capture_processing_router
+from .availability import ClusterApplication, unavailable_response
 from .cluster_config import CLUSTER
-from .background_owner import BackgroundOwner
 from .cluster_runtime import ClusterError
-from .workspaces import WorkspaceMiddleware, session_router
-from .slack_api import slack_router
-from .maintenance_api import router as maintenance_router
-from .collection_api import router as collection_router
-from .local_capture_api import router as local_capture_router
-from .hands_api import router as hands_router
-from .live_xr_api import router as live_xr_router
-from .live_xr_api import conversions as live_conversions
-from .live_xr_api import archive as live_archive
-from .policy_exports_api import router as policy_exports_router, service as policy_exports
-from .pipeline_api import router as pipeline_router
-from .pipeline_api import service as pipeline_service
 
 
 APP_ROOT = Path(__file__).resolve().parent.parent
@@ -52,37 +41,74 @@ printf '\n__SKYNET_USER_USAGE__\n'
 LC_ALL=C {GPU_USAGE_USER_COMMAND} 2>/dev/null || true
 '''
 
-def _start_background_services():
-    pipeline_service.start()
-    live_conversions.start()
-    policy_exports.start()
-    storage = json.loads((APP_ROOT / "config/live_storage.json").read_text())
-    live_archive.start(enabled=storage["enabled"], cleanup_enabled=storage["cleanup_source"])
+def _create_cluster_application():
+    # These imports construct services and connect to the central database.
+    # Defer the entire dependency graph so the local page can open offline.
+    from .background_owner import BackgroundOwner
+    from .changes import ChangeFeed, change_router
+    from .collection_api import router as collection_router
+    from .hands_api import router as hands_router
+    from .live_xr_api import router as live_xr_router
+    from .live_xr_api import archive as live_archive
+    from .maintenance_api import router as maintenance_router
+    from .pipeline_api import router as pipeline_router, service as pipeline_service
+    from .policy_exports_api import router as policy_exports_router, service as policy_exports
+    from .slack_api import slack_router
+    from .workspaces import WorkspaceMiddleware, session_router
+
+    def start_services():
+        pipeline_service.start()
+        policy_exports.start()
+        storage = json.loads((APP_ROOT / "config/live_storage.json").read_text())
+        live_archive.start(enabled=storage["enabled"], cleanup_enabled=storage["cleanup_source"])
+
+    def stop_services():
+        live_archive.stop()
+        policy_exports.stop()
+        pipeline_service.stop()
+
+    api = FastAPI(title="Skynet Slurm Console", version="0.2.0", docs_url="/api/docs", redoc_url=None)
+    api.add_middleware(WorkspaceMiddleware, services=pipeline_service)
+    api.add_api_route("/api/cluster", cluster, methods=["GET"])
+    api.add_api_route("/api/workspace/init", initialize_workspace, methods=["POST"])
+    api.include_router(session_router(pipeline_service.directory))
+    for router in (
+        pipeline_router, maintenance_router, slack_router(pipeline_service),
+        collection_router, hands_router, live_xr_router,
+        policy_exports_router,
+    ):
+        api.include_router(router)
+    feed = ChangeFeed(pipeline_service.system.database)
+    api.include_router(change_router(feed, pipeline_service.directory))
+    owner = BackgroundOwner(
+        pipeline_service.system.database, start_services, stop_services, companions=(feed,)
+    )
+    return api, owner
 
 
-def _stop_background_services():
-    live_archive.stop()
-    policy_exports.stop()
-    live_conversions.stop()
-    pipeline_service.stop()
+cluster_application = ClusterApplication(_create_cluster_application)
 
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    owner = BackgroundOwner(pipeline_service.system.database, _start_background_services, _stop_background_services)
-    application.state.background_owner = owner
-    owner.start()
     try:
-        yield
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(cluster_application.connect)
+            try:
+                yield
+            finally:
+                tasks.cancel_scope.cancel()
     finally:
-        owner.stop()
+        with anyio.CancelScope(shield=True):
+            await anyio.to_thread.run_sync(cluster_application.stop)
 
 
 app = FastAPI(
     title="Skynet Slurm Console",
     version="0.2.0",
-    docs_url="/api/docs",
+    docs_url=None,
     redoc_url=None,
+    openapi_url=None,
     lifespan=lifespan,
 )
 
@@ -446,21 +472,23 @@ def _as_http_error(error: Exception) -> HTTPException:
 
 
 @app.get("/api/health")
-def health() -> dict[str, object]:
+def health():
+    if cluster_application.application is None:
+        return cluster_application.pending_response(ok=False, gateways=list(SSH_HOSTS))
     return {"ok": True, "gateways": list(SSH_HOSTS)}
 
 
-@app.get("/api/cluster")
 def cluster(gateway: str = Query(default="auto")) -> dict[str, object]:
     try:
         active_gateway, output = _run_with_fallback(QUERY_COMMAND, gateway)
         return _parse_snapshot(output, active_gateway)
-    except (ClusterUnavailable, subprocess.TimeoutExpired) as error:
-        raise _as_http_error(error) from error
+    except (ClusterUnavailable, subprocess.TimeoutExpired):
+        return unavailable_response(gateways=list(SSH_HOSTS))
 
 
-@app.post("/api/workspace/init")
 def initialize_workspace(gateway: str = Query(default="auto")) -> dict[str, object]:
+    from .pipeline_api import service as pipeline_service
+
     try:
         work_root = pipeline_service.work_root
         result = pipeline_service.storage.configure(work_root, work_root, pipeline_service.cluster, gateway)
@@ -482,15 +510,5 @@ def index() -> HTMLResponse:
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
-app.add_middleware(WorkspaceMiddleware, services=pipeline_service)
-app.include_router(session_router(pipeline_service.directory))
-app.include_router(pipeline_router)
-app.include_router(maintenance_router)
-app.include_router(slack_router(pipeline_service))
-app.include_router(collection_router)
-app.include_router(local_capture_router)
-app.include_router(hands_router)
-app.include_router(live_xr_router)
-app.include_router(policy_exports_router)
-app.include_router(capture_processing_router)
 app.mount("/static", StaticFiles(directory=STATIC_ROOT), name="static")
+app.mount("/", cluster_application)

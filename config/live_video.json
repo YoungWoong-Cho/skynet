@@ -1,0 +1,11 @@
+{
+  "gateway": "sky2",
+  "account": "overcap",
+  "partition": "overcap",
+  "repository": "/coc/flash7/ycho420/repos/skynet-dexverse/30cc673e27684b9f10186fa6bea731aed246bc9f",
+  "runtime": "/coc/flash7/ycho420/envs/isaacsim-5.1.0_isaaclab-2.3.2_py311",
+  "asset_bundle": "/coc/flash7/ycho420/datasets/bundles/dexverse/simulation-assets/versions/release-d4cc36e10e27e481f31ebb7bf5111d37c7b51e51--manitwin-525bc931c201988806a17fe3b5f96646a00de6ff",
+  "source_revision": "30cc673e27684b9f10186fa6bea731aed246bc9f",
+  "schema": "skynet.live-video-profile/v1",
+  "gpu_type": "rtx_6000"
+}

@@ -82,7 +82,7 @@ def test_recording_links_follow_resource_ownership_not_source_membership(setup, 
     derived.update(id='derived', recordings=original['recordings'][:1])
     resource = service.database.get_data_resource(subset['resource_id'])
     service.database.update_data_resource(resource['id'], metadata={**resource['metadata'], 'recording_session_id': derived['id']})
-    monkeypatch.setattr(service.live, 'list', lambda: [derived, original])
+    monkeypatch.setattr(service.live, 'list', lambda **_: [derived, original])
     monkeypatch.setattr(service.live, 'get', lambda identifier: derived if identifier == derived['id'] else original)
     options = service.options()
     links = {j['id']: j['recording_session_id'] for j in options['exports']}

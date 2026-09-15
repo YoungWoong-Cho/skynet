@@ -18,7 +18,7 @@ from .cluster_runtime import (
     WORK_ROOT,
 )
 from .database import canonical_json, utc_now
-from .capture_processing.dexverse_runner import TASK, ROBOT, REVISION
+from .dexverse_release import TASK, ROBOT, REVISION
 from .live_xr_catalog import selection
 from .dexverse_versions import environment_profile
 from .simulation_hands import build as build_hand, upload as upload_hand
@@ -86,14 +86,14 @@ class LiveXRService:
             "accepted_at": row[0] if row else None,
         }
 
-    def list(self):
+    def list(self, *, include_private=False):
         with self.database.connection() as c:
             jobs = [
                 json.loads(row[0])
                 for row in c.execute("SELECT payload_json FROM live_xr_sessions")
             ]
         return [
-            self.public(j)
+            j if include_private else self.public(j)
             for j in sorted(jobs, key=lambda j: j["created_at"], reverse=True)
         ]
 
@@ -135,33 +135,15 @@ class LiveXRService:
 
     def profile(self):
         config = json.loads((self.root / "config/live_xr.json").read_text())
-        pipelines = json.loads(
-            (self.root / "config/capture_pipelines.json").read_text()
-        )["pipelines"]
-        profile = next(
-            (p for p in pipelines if p["key"] == config["pipeline_key"]), None
-        )
-        if profile is None or (
-            profile["task"],
-            profile["robot"],
-            profile["source_revision"],
+        profile = dict(config, execution=config.get("execution", "slurm"))
+        if (
+            profile.get("task"),
+            profile.get("robot"),
+            profile.get("source_revision"),
         ) != (TASK, ROBOT, REVISION):
             raise ValueError(
                 "Unsupported live task, robot or source revision; configure a matching live worker first"
             )
-        profile = dict(profile, execution=config.get("execution", "slurm"))
-        for key in (
-            "cloudxr_runtime",
-            "gpu_type",
-            "duration_minutes",
-            "gateway",
-            "work_root",
-            "repository",
-            "runtime",
-            "memory_gb",
-        ):
-            if key in config:
-                profile[key] = config[key]
         if profile["execution"] == "workstation":
             validate_profile(profile)
             for key in ("account", "partition", "gpu_type", "asset_bundle"):

@@ -25,7 +25,7 @@ from .live_xr import TERMINAL
 from .live_xr_review import ArrayUnpickler
 from .cluster_runtime import ClusterClient, ClusterError, WORK_ROOT
 from .cluster_config import CLUSTER
-from .capture_processing.service import upload_capture
+from .cluster_upload import upload_capture
 from .policy_exports_cluster import ClusterPolicyPreparation
 
 FORMATS = list(RECIPES.values())
@@ -163,7 +163,7 @@ class PolicyExportService(ClusterPolicyPreparation):
             name = recordings[index]
             image = session.get("recording_images", {}).get(name)
             if not require_images and not image:
-                self.reviews.source(session["id"], index)
+                self.reviews.source_for_session(session, index)
                 checksum = session.get("recording_checksums", {}).get(name, "")
                 if not re.fullmatch(r"[a-f0-9]{64}", checksum):
                     raise ValueError("Recording checksum is missing")
@@ -214,13 +214,8 @@ class PolicyExportService(ClusterPolicyPreparation):
         return result
 
     def dataset(self, session, name=None, *, create=True, overfit_episode=None):
-        resources = self.database.list_data_resources(
-            provider="collection", namespace="datasets", include_archived=True
-        )
         identity = session["id"] if overfit_episode is None else f"{session['id']}:overfit:{overfit_episode}"
-        existing = next((r for r in resources if r["name"] == identity or (
-            r.get("metadata", {}).get("recording_session_id") == session["id"]
-        )), None)
+        existing = self.database.find_collection_dataset(session["id"], identity)
         if existing or not create:
             return existing
         label = name or session["profile"]["display_name"]
@@ -315,14 +310,49 @@ class PolicyExportService(ClusterPolicyPreparation):
             directories.add(str(PurePosixPath(root) / path.parent) if archived else str(PurePosixPath(root) / "output" / path.parent))
         return [dict(kind="remote", host="sky2" if archived else session.get("gateway") or session.get("profile", {}).get("gateway") or "Collection host", path=path) for path in sorted(directories)]
 
+    def preparation_options(self, session_id, *, workspace_database=None):
+        """Only the selected recording and policy choices needed by Convert."""
+        session = self.live.get(session_id)
+        resource = self.database.find_collection_dataset(session_id)
+        try:
+            self.sources(session, require_images=False)
+            reason = "Dataset is archived" if (resource or {}).get("archived_at") else None
+        except (ValueError, KeyError) as exc:
+            reason = str(exc)
+        return dict(
+            session=dict(
+                id=session["id"],
+                name=session["profile"]["display_name"],
+                episodes=len(session.get("recordings", [])),
+                eligible=reason is None,
+                reason=reason,
+                images=len(session.get("recording_images") or {}),
+                resource_id=(resource or {}).get("id"),
+            ),
+            resource=resource,
+            policies=catalog(workspace_database or self.database),
+        )
+
     def options(self, *, workspace_database=None):
+        # The catalog only needs each collection resource once. Keep the same
+        # first-match ordering as dataset(), including single-recording overfits.
+        resources = self.database.list_data_resources(
+            provider="collection", namespace="datasets", include_archived=True
+        )
+        session_resources = {}
+        for resource in resources:
+            for identifier in (resource["name"], resource.get("metadata", {}).get("recording_session_id")):
+                if identifier is not None:
+                    session_resources.setdefault(identifier, resource)
         sessions = []
-        for session in self.live.list():
+        # Public sessions omit the archive manifest needed for source validation.
+        # Load full records once rather than rereading the DB for every episode.
+        for session in self.live.list(include_private=True):
             resource = None
             try:
                 sources = self.sources(session, require_images=False)
                 reason = None
-                resource = self.dataset(session, create=False)
+                resource = session_resources.get(session["id"])
             except (ValueError, KeyError) as exc:
                 sources, reason = [], str(exc)
             if session.get("recordings"):
@@ -349,28 +379,42 @@ class PolicyExportService(ClusterPolicyPreparation):
         # A dataset belongs to a recording entry independently of which source
         # recordings a preparation used. Subsets must not replace their source's link.
         resource_sessions = {s["resource_id"]: s["id"] for s in sessions if s["resource_id"]}
-        jobs = self.list()
+        jobs = self.job_overview(workspace_database=workspace_database, policies=policies)["exports"]
         for job in jobs:
             job["recording_session_id"] = resource_sessions.get(job.get("resource_id"))
-            if job["state"] not in {"READY", "FAILED", "DELETE_FAILED"}:
-                self.dispatch(job["id"])
             policy = next((p for p in policies if p["id"] == job["format"]), {})
             job["training_setup"] = policy.get("training_setup")
-            job["training_ready"] = bool(
-                job.get("training_ready") and policy.get("trainable")
-            )
-            version = self.database.get_data_resource_version(job.get("version_id", ""))
+            job["training_ready"] = bool(job.get("training_ready") and policy.get("trainable"))
+        return dict(
+            formats=FORMATS,
+            policies=policies,
+            sessions=sessions,
+            exports=jobs,
+            targets=[
+                dict(id="cluster", name="Training cluster"),
+            ],
+        )
+
+    def job_overview(self, *, workspace_database=None, policies=None):
+        """Pure progress read; scheduling and remote reconciliation belong to the monitor."""
+        jobs = self.list()
+        if policies is None:
+            policies = catalog(workspace_database or self.database) if jobs else []
+        policy_by_id = {policy["id"]: policy for policy in policies}
+        versions = self.database.get_data_resource_versions(
+            {job["version_id"] for job in jobs if job.get("version_id")}
+        )
+        usage = self.database.data_version_usage_many(
+            {version["manifest_sha256"] for version in versions.values()},
+            workspace_id=getattr(workspace_database, "workspace_id", None),
+        )
+        for job in jobs:
+            policy = policy_by_id.get(job["format"], {})
+            job["training_setup"] = policy.get("training_setup")
+            job["training_ready"] = bool(job.get("training_ready") and policy.get("trainable"))
+            version = versions.get(job.get("version_id"))
             job["locations"] = version.get("locations", []) if version else []
-            job["usage"] = (
-                self.database.data_version_usage(version["manifest_sha256"])
-                if version
-                else []
-            )
-            if workspace_database is not None:
-                own_usage = [item for item in job["usage"] if workspace_database.owns("experiments", item["experiment_id"])]
-                if len(own_usage) != len(job["usage"]):
-                    own_usage.append({"other_workspace": True})
-                job["usage"] = own_usage
+            job["usage"] = usage.get(version["manifest_sha256"], []) if version else []
             if job.get("stage") == "CONVERTING":
                 log = self.root / job["id"] / "export.log"
                 if log.exists():
@@ -383,15 +427,7 @@ class PolicyExportService(ClusterPolicyPreparation):
                                     job["progress"] = progress
                             except ValueError:
                                 pass
-        return dict(
-            formats=FORMATS,
-            policies=policies,
-            sessions=sessions,
-            exports=jobs,
-            targets=[
-                dict(id="cluster", name="Training cluster"),
-            ],
-        )
+        return {"formats": FORMATS, "exports": jobs}
 
     @guarded_recording
     def create(
@@ -431,10 +467,12 @@ class PolicyExportService(ClusterPolicyPreparation):
         ):
             raise ValueError("Select 1–25 unique collection sessions")
         sources = []
+        sessions = {}
         for selection in sorted(selections, key=lambda s: s["session_id"]):
+            sessions[selection["session_id"]] = self.live.get(selection["session_id"])
             sources.extend(
                 self.sources(
-                    self.live.get(selection["session_id"]), selection.get("indices"),
+                    sessions[selection["session_id"]], selection.get("indices"),
                     require_images="rgb" in RECIPES[format]["observations"]
                 )
             )
@@ -513,9 +551,10 @@ class PolicyExportService(ClusterPolicyPreparation):
             resource = (
                 self.database.get_data_resource(resource_id)
                 if resource_id
-                else self.dataset(self.live.get(selections[0]["session_id"]), name, overfit_episode=overfit_episode)
+                else self.dataset(sessions[selections[0]["session_id"]], name, overfit_episode=overfit_episode)
             )
-            if resource and any(j.get("resource_id") == resource["id"] and j["state"] == "DELETE_FAILED" for j in self.list()):
+            jobs = self.list()
+            if resource and any(j.get("resource_id") == resource["id"] and j["state"] == "DELETE_FAILED" for j in jobs):
                 raise ValueError("Finish dataset deletion before preparing it again")
             if (
                 not resource
@@ -532,14 +571,13 @@ class PolicyExportService(ClusterPolicyPreparation):
                         "Choose a collection resource belonging to the selected session"
                     )
                 resource = self.dataset(
-                    self.live.get(selections[0]["session_id"]), name
+                    sessions[selections[0]["session_id"]], name
                 )
             # Preparation adds immutable versions to an existing identity. Its
             # name is chosen only when dataset() first creates the resource;
             # retries and failed conversions must never rename earlier versions.
             name = resource.get("metadata", {}).get("display_name") or resource["name"]
-            source_version = self.register_source(resource, sources, split)
-            for job in self.list():
+            for job in jobs:
                 if (
                     job.get("fingerprint") == identity
                     and job.get("resource_id") == resource["id"]
@@ -556,6 +594,7 @@ class PolicyExportService(ClusterPolicyPreparation):
                     ):
                         return self.retry(job["id"], target=target)
                     return job
+            source_version = self.register_source(resource, sources, split)
             identifier = str(uuid4())
             directory = self.root / identifier
             frozen = directory / "worker"

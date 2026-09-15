@@ -47,19 +47,16 @@ def service(tmp_path, monkeypatch, prepared_hand_store):
     root = Path(__file__).resolve().parents[1]
     (tmp_path / "config").mkdir()
     (tmp_path / "ops/xr").mkdir(parents=True)
-    (tmp_path / "config/capture_pipelines.json").write_text(
-        (root / "config/capture_pipelines.json").read_text()
+    profile = json.loads((root / "config/live_xr.json").read_text())
+    profile.update(
+        execution="slurm", gateway="sky2", account="overcap", partition="overcap",
+        work_root="/coc/flash7/ycho420",
+        repository="/coc/flash7/ycho420/repos/skynet-dexverse/" + profile["source_revision"],
+        runtime="/coc/flash7/ycho420/envs/isaacsim-5.1.0_isaaclab-2.3.2_py311",
+        cloudxr_runtime="/coc/flash7/ycho420/tools/skynet-xr/native-5.0.1",
+        gpu_type="rtx_6000", duration_minutes=30,
     )
-    (tmp_path / "config/live_xr.json").write_text(
-        json.dumps(
-            {
-                "pipeline_key": "dexverse-shadow-right",
-                "cloudxr_runtime": "/coc/flash7/ycho420/tools/skynet-xr/native-5.0.1",
-                "gpu_type": "rtx_6000",
-                "duration_minutes": 30,
-            }
-        )
-    )
+    (tmp_path / "config/live_xr.json").write_text(json.dumps(profile))
     (tmp_path / "ops/xr/native_session.py").write_text(
         (root / "ops/xr/native_session.py").read_text()
     )

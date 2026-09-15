@@ -608,8 +608,7 @@
       // A POST can lose its reply while the session starts and even fails.
       // Follow its newly observed session so its real error stays visible.
       recoverSubmission();
-      window.setConversionTarget?.(result.conversion_target);
-      el("live-xr-consent-field").hidden = result.license.accepted;
+        el("live-xr-consent-field").hidden = result.license.accepted;
       el("live-xr-consent").required = !result.license.accepted;
       render();
       for (const session of sessions.filter(

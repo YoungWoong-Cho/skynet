@@ -1,4 +1,4 @@
-"""Shared Isaac job template extracted from the existing capture-cycle launcher.
+"""Isaac job template for simulator replay.
 
 Submission, recovery and scheduler reads remain in ClusterClient.
 """

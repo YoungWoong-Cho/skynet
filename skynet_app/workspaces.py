@@ -20,8 +20,10 @@ from psycopg import OperationalError, InterfaceError
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import MutableHeaders
 
+from .availability import unavailable_response
 from .database import APP_ROOT, Database
 from .workspace_schema import LEGACY_WORKSPACE, normalize_email
 
@@ -202,10 +204,7 @@ class WorkspaceMiddleware:
             if started or scope["type"] != "http":
                 raise
             logging.getLogger(__name__).error("Workspace database unavailable (%s)", type(error).__name__)
-            await JSONResponse(
-                {"detail": "Central database is unavailable. Try again shortly.", "code": "database_unavailable"},
-                status_code=503, headers={"Cache-Control": "no-store", "Retry-After": "5"},
-            )(scope, receive, send)
+            await unavailable_response(code="database_unavailable")(scope, receive, send)
 
     async def _dispatch(self, scope, receive, send):
         if scope["type"] != "http":
@@ -220,11 +219,11 @@ class WorkspaceMiddleware:
                 return await JSONResponse({"detail": "Use this app's own page to make changes"}, status_code=403)(scope, receive, send)
         if path == "/api/workspace/session":
             expected = request.headers.get("x-skynet-workspace")
-            current = self.services.directory.resolve(request.cookies.get(COOKIE))
+            current = await run_in_threadpool(self.services.directory.resolve, request.cookies.get(COOKIE))
             if expected and expected != (current or {}).get("id"):
                 return await JSONResponse({"detail": "The workspace changed in another tab. Reload this page.", "code": "workspace_changed"}, status_code=409)(scope, receive, send)
             return await self.app(scope, receive, send)
-        workspace = self.services.directory.resolve(request.cookies.get(COOKIE))
+        workspace = await run_in_threadpool(self.services.directory.resolve, request.cookies.get(COOKIE))
         if workspace is None:
             return await JSONResponse({"detail": "Enter your email to open a workspace", "code": "workspace_required"}, status_code=401)(scope, receive, send)
         expected = request.headers.get("x-skynet-workspace")
@@ -232,12 +231,15 @@ class WorkspaceMiddleware:
             return await JSONResponse({"detail": "The workspace changed in another tab. Reload this page.", "code": "workspace_changed"}, status_code=409)(scope, receive, send)
         settings_request = path.startswith(("/api/workspace/", "/api/tracking/", "/api/notifications/"))
         if (request.method not in {"GET", "HEAD", "OPTIONS", "DELETE"}
-                and not settings_request and not path.endswith(("/cancel", "/reconcile"))
-                and self.services.for_workspace(workspace["id"]).storage.work_root is None):
-            from .workspace_storage import STORAGE_REQUIRED
-            return await JSONResponse(
-                {"detail": STORAGE_REQUIRED, "code": "storage_required"}, status_code=409,
-            )(scope, receive, send)
+                and not settings_request and not path.endswith(("/cancel", "/reconcile"))):
+            work_root = await run_in_threadpool(
+                lambda: self.services.for_workspace(workspace["id"]).storage.work_root
+            )
+            if work_root is None:
+                from .workspace_storage import STORAGE_REQUIRED
+                return await JSONResponse(
+                    {"detail": STORAGE_REQUIRED, "code": "storage_required"}, status_code=409,
+                )(scope, receive, send)
         scope.setdefault("state", {})["workspace"] = workspace
         token = CURRENT_WORKSPACE.set(workspace["id"])
 

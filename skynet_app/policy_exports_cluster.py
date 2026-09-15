@@ -39,9 +39,12 @@ class ClusterPolicyPreparation:
         if archive is None:
             raise ValueError("Collection archiving is unavailable; preparation requires a verified sky2 copy")
         sources = []
+        sessions = {}
         for item in job["sources"]:
             session_id = item.get("session_id", job["session_id"])
-            session = self.live.get(session_id)
+            if session_id not in sessions:
+                sessions[session_id] = self.live.get(session_id)
+            session = sessions[session_id]
             descriptor = session.get("archive") or {}
             if descriptor.get("state") not in {"VERIFIED", "CLEANUP_PENDING", "READY"}:
                 archive.ensure(session_id)
@@ -95,11 +98,12 @@ class ClusterPolicyPreparation:
         root = f"{WORK_ROOT}/jobs/runs/{job['id']}/{relative}"
         worker = root + "/worker"
         local_worker = self.root / job["id"] / "worker"
-        for path in sorted(local_worker.rglob("*")):
-            if path.is_file() and "__pycache__" not in path.parts:
-                self.cluster.write_capsule_file(job["id"], f"{relative}/worker/{path.relative_to(local_worker)}", path.read_text(), "sky2")
-        self.cluster.write_capsule_file(job["id"], f"{relative}/worker/cluster_worker.py",
-                                        Path(__file__).with_name("policy_export_worker.py").read_text(), "sky2")
+        files = {
+            f"{relative}/worker/{path.relative_to(local_worker)}": path.read_text()
+            for path in sorted(local_worker.rglob("*"))
+            if path.is_file() and "__pycache__" not in path.parts
+        }
+        files[f"{relative}/worker/cluster_worker.py"] = Path(__file__).with_name("policy_export_worker.py").read_text()
         request = {key: job[key] for key in ("format", "split", "contract", "source_revision", "converter_sha256")}
         request.update(job_id=job["id"], attempt_id=attempt_id, sources=sources,
                        output=root + "/output", prepared_root=f"{WORK_ROOT}/datasets/prepared",
@@ -111,14 +115,17 @@ class ClusterPolicyPreparation:
                 raise ValueError("Previous preparation is outside this job's attempt directory")
             request["reuse_output"] = str(previous / "output")
         if job.get("migrating_local_copy"):
-            from .capture_processing.service import upload_capture
+            from .cluster_upload import upload_capture
             output = self.root / job["id"] / "output"
             manifest = verified_local_manifest(output, job["manifest_sha256"])
             request.update(migration=True, expected_manifest_sha256=job["manifest_sha256"], sources=[], loader=None)
             for name, receipt in {**manifest["files"], "manifest.json": {"sha256": job["manifest_sha256"]}}.items():
                 upload_capture(self.cluster, output / name, job["id"], receipt["sha256"], "sky2",
                                relative_path=f"{relative}/output/{name}", timeout=3600)
-        self.cluster.write_capsule_file(job["id"], relative + "/request.json", canonical_json(request), "sky2")
+        files[relative + "/request.json"] = canonical_json(request)
+        # Submit only after every frozen worker file has been verified on sky2.
+        # One transfer avoids paying for a fresh SSH connection for each file.
+        self.cluster.write_capsule_files(job["id"], files, "sky2")
         profile = CLUSTER.runtime_profiles["egoverse-native" if job["format"] == "egoverse" else "skynet-dp"]
         interpreter = [str(profile.environment_path) + "/bin/python"]
         dependencies = local_worker / "conversion-dependencies.json"
@@ -292,7 +299,7 @@ class ClusterPolicyPreparation:
     def _migrate_existing_cluster_copy(self, job):
         """Retain an existing ZIP without scheduling a redundant repack job."""
         from ops.datasets.artifacts import digest
-        from .capture_processing.service import upload_capture
+        from .cluster_upload import upload_capture
         version = self.database.get_data_resource_version(job["version_id"])
         expected_path = f"{WORK_ROOT}/datasets/prepared/{job['manifest_sha256']}"
         location = next((v for v in version.get("locations", []) if v["kind"] == "cluster"

@@ -100,7 +100,8 @@ class MetadataObjects:
                 else f"SSH exited with status {result.returncode}"
             )
             detail = result.stderr.strip()[-500:]
-            raise OSError(
+            error_type = ConnectionError if result.returncode == 255 or result.returncode < 0 else OSError
+            raise error_type(
                 f"Central metadata transfer failed ({self.host}; {status})"
                 + (f": {detail}" if detail else "")
             )

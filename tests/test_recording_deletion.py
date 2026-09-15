@@ -34,9 +34,9 @@ def recording(tmp_path, monkeypatch):
     reviews = SimpleNamespace(root=tmp_path / "reviews", active=set())
     videos = SimpleNamespace(active=set())
     previews = SimpleNamespace(states={}, lock=threading.RLock())
-    conversions = SimpleNamespace(root=tmp_path / "conversions", active=set())
     service = RecordingMaintenance(
-        db.for_workspace("legacy"), live, reviews, videos, previews, conversions
+        db.for_workspace("legacy"), live, reviews, videos, previews,
+        conversion_root=tmp_path / "conversions",
     )
     identifier = str(uuid4())
     manifest = dict(schema="skynet.live-archive/v1", session_id=identifier, files=[])
@@ -98,7 +98,7 @@ def test_recording_delete_cascades_files_and_records_and_is_idempotent(recording
     for path in (
         conversion["root"],
         conversion["dataset_root"],
-        service.conversions.root / conversion_id,
+        service.conversion_root / conversion_id,
     ):
         Path(path).mkdir(parents=True)
         (Path(path) / "data").write_bytes(b"temporary")
@@ -308,3 +308,18 @@ def test_pinned_variant_blocks_recording_deletion_with_preset_name(recording):
         for item in plan["blockers"]
     )
     assert folder.exists()
+
+
+def test_retired_conversion_history_still_blocks_deleting_unfinished_work(recording):
+    service, _, job, folder, _, root = recording
+    identifier = str(uuid4())
+    historical = dict(id=identifier, session_id=job['id'], state='RUNNING',
+                      root=str(root / 'jobs/runs' / identifier))
+    with service.db.transaction() as connection:
+        connection.execute('INSERT INTO live_conversions VALUES (?,?)',
+                           (identifier, canonical_json(historical)))
+    plan = service.preview('recording', job['id'])
+    assert any('conversion' in blocker['reason'] for blocker in plan['blockers'])
+    assert folder.exists()
+    with service.db.connection() as connection:
+        assert connection.execute('SELECT payload_json FROM live_conversions WHERE id=?', (identifier,)).fetchone()

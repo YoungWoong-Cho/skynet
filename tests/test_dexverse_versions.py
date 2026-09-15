@@ -156,21 +156,6 @@ def test_recorder_flushes_resets_without_duplicate_or_lost_episodes(
         )
 
 
-def test_v1_converter_identity_does_not_depend_on_a_local_source_checkout(monkeypatch):
-    from skynet_app.dexverse_versions import V1_CONVERTER_SHA256
-    from skynet_app.live_conversion import pinned_converter_digest
-
-    def unexpected(*args, **kwargs):
-        raise AssertionError(
-            "The pinned v1 converter must not require local git objects"
-        )
-
-    monkeypatch.setattr("subprocess.check_output", unexpected)
-    assert (
-        pinned_converter_digest({"source_revision": V1_REVISION}) == V1_CONVERTER_SHA256
-    )
-
-
 @pytest.mark.parametrize("sides", [("right",), ("right", "left")])
 def test_v1_configs_use_selected_hand_before_native_default(monkeypatch, sides):
     import runpy

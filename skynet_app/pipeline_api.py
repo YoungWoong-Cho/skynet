@@ -5229,9 +5229,13 @@ class PipelineService:
         fields = {"api_key": ("api_key",), "token": ("token",), "basic": ("username", "password")}.get(mode, ())
         return {key: credentials[key] for key in fields if credentials.get(key)}
 
-    def _bound_tracking_credentials(self, provider: str, endpoint: str | None) -> tuple[dict[str, str], str | None]:
+    def _bound_tracking_credentials(
+        self, provider: str, endpoint: str | None, *,
+        connections: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> tuple[dict[str, str], str | None]:
         with self._tracking_connection_lock:
-            connection = self.database.get_tracking_connection(provider) or {}
+            connection = (connections.get(provider) if connections is not None
+                          else self.database.get_tracking_connection(provider)) or {}
             config = connection.get("config_json") or {}
             if config.get("authentication") == "none":
                 return {}, None
@@ -5250,7 +5254,9 @@ class PipelineService:
                 return {}, None
             return environment, "environment" if environment else None
 
-    def _ensure_tracking_credentials_restored(self) -> None:
+    def _ensure_tracking_credentials_restored(
+        self, connections: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> None:
         if self._credentials_restored:
             return
         with self._credential_restore_lock:
@@ -5258,7 +5264,8 @@ class PipelineService:
                 return
             self._credentials_restored = True
             for provider in ("wandb", "mlflow"):
-                connection = self.database.get_tracking_connection(provider)
+                connection = (connections.get(provider) if connections is not None
+                              else self.database.get_tracking_connection(provider))
                 if not connection or self.credentials.get(provider):
                     continue
                 config = connection.get("config_json") or {}
@@ -5391,11 +5398,15 @@ class PipelineService:
                 self.credentials.mark_error(provider, sanitize(str(error), secrets=tuple(credentials.values())))
                 raise
 
-    def _mlflow_settings(self, provider: Any | None = None) -> TrackingSettings:
+    def _mlflow_settings(
+        self, provider: Any | None = None, *,
+        connections: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> TrackingSettings:
         with self._tracking_connection_lock:
-            self._ensure_tracking_credentials_restored()
+            self._ensure_tracking_credentials_restored(connections)
             settings = TrackingSettings.from_env(self._tracking_environment())
-            connection = self.database.get_tracking_connection("mlflow") or {}
+            connection = (connections.get("mlflow") if connections is not None
+                          else self.database.get_tracking_connection("mlflow")) or {}
             requested_uri = self._tracking_provider_value(provider, "tracking_uri") if provider else None
             trusted_uri = connection.get("endpoint") or settings.tracking_uri
             if requested_uri and trusted_uri:
@@ -5407,7 +5418,7 @@ class PipelineService:
                         "experiment MLflow URI does not match the validated connection endpoint"
                     )
             tracking_uri = trusted_uri or requested_uri
-            credentials, _ = self._bound_tracking_credentials("mlflow", tracking_uri)
+            credentials, _ = self._bound_tracking_credentials("mlflow", tracking_uri, connections=connections)
             return replace(
                 settings,
                 tracking_uri=tracking_uri,
@@ -5417,11 +5428,15 @@ class PipelineService:
                 verify_tls=bool((connection.get("config_json") or {}).get("verify_tls", settings.verify_tls)),
             )
 
-    def _wandb_settings(self, provider: Any | None = None) -> WandBSettings:
+    def _wandb_settings(
+        self, provider: Any | None = None, *,
+        connections: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> WandBSettings:
         with self._tracking_connection_lock:
-            self._ensure_tracking_credentials_restored()
+            self._ensure_tracking_credentials_restored(connections)
             settings = WandBSettings.from_env(self._tracking_environment())
-            connection = self.database.get_tracking_connection("wandb") or {}
+            connection = (connections.get("wandb") if connections is not None
+                          else self.database.get_tracking_connection("wandb")) or {}
             requested_url = (
                 self._tracking_provider_value(provider, "base_url") if provider else None
             )
@@ -5435,7 +5450,7 @@ class PipelineService:
                         "experiment W&B base URL does not match the validated connection endpoint"
                     )
             base_url = trusted_url or requested_url
-            credentials, _ = self._bound_tracking_credentials("wandb", base_url)
+            credentials, _ = self._bound_tracking_credentials("wandb", base_url, connections=connections)
             entity = (
                 self._tracking_provider_value(provider, "entity") if provider else None
             ) or connection.get("workspace") or settings.entity
@@ -5449,12 +5464,15 @@ class PipelineService:
 
     def tracking_connections(self) -> dict[str, Any]:
         with self._tracking_connection_lock:
-            self._ensure_tracking_credentials_restored()
+            # A fresh scoped read is shared only within this response, under the
+            # same lock as credential restoration and endpoint binding.
+            connections = self.database.list_tracking_connections()
+            self._ensure_tracking_credentials_restored(connections)
             results: dict[str, Any] = {}
             for provider in ("wandb", "mlflow"):
                 runtime = self.credentials.state(provider)
                 if provider == "wandb":
-                    settings = self._wandb_settings()
+                    settings = self._wandb_settings(connections=connections)
                     public = {
                         "provider": provider,
                         "base_url": settings.public_dict()["base_url"],
@@ -5462,15 +5480,15 @@ class PipelineService:
                         "configured": settings.configured,
                     }
                 else:
-                    settings = self._mlflow_settings()
+                    settings = self._mlflow_settings(connections=connections)
                     public = {
                         "provider": provider,
                         "tracking_uri": settings.public_dict()["tracking_uri"],
                         "username": settings.username,
                         "configured": settings.configured,
                     }
-                effective_credentials, credential_source = self._bound_tracking_credentials(provider, settings.base_url if provider == "wandb" else settings.tracking_uri)
-                expected_mode = ((self.database.get_tracking_connection(provider) or {}).get("config_json") or {}).get("authentication")
+                effective_credentials, credential_source = self._bound_tracking_credentials(provider, settings.base_url if provider == "wandb" else settings.tracking_uri, connections=connections)
+                expected_mode = ((connections.get(provider) or {}).get("config_json") or {}).get("authentication")
                 connected = bool(runtime.get("connected")) and (expected_mode in (None, "none") or bool(effective_credentials))
                 configured = bool(public["configured"])
                 status = (
@@ -9622,6 +9640,7 @@ def list_data_resources(
     namespace: str | None = Query(default=None),
     kind: str | None = Query(default=None),
     include_archived: bool = Query(default=False),
+    include_versions: bool = Query(default=False),
 ) -> dict[str, Any]:
     return {
         "resource_types": RESOURCE_TYPES,
@@ -9630,6 +9649,7 @@ def list_data_resources(
             namespace=namespace,
             kind=kind,
             include_archived=include_archived,
+            include_versions=include_versions,
         )
     }
 
@@ -9941,7 +9961,7 @@ def preview_model_io(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
 @router.get("/adapters")
 def adapters(include_archived: bool = Query(default=False)) -> dict[str, Any]:
     records = []
-    for row in service.database.list_adapter_registry(include_archived=include_archived):
+    for row in service.database.list_adapter_registry(include_archived=include_archived, include_editable=True):
         version = row.get("latest_version") or {}
         manifest = version.get("manifest") or {}
         manifest_error = None
@@ -9953,7 +9973,7 @@ def adapters(include_archived: bool = Query(default=False)) -> dict[str, Any]:
         capabilities = normalized_manifest.get("capabilities") or {}
         records.append({
             **row,
-            "editable": service.database.owns("adapters", row["id"], writable=True),
+            "editable": row["editable"],
             "slug": normalized_manifest.get("slug") or row.get("seed_key") or row["id"],
             "label": normalized_manifest.get("display_name") or row["name"],
             "version": version.get("version_number"),
@@ -11808,6 +11828,8 @@ def delete_tracking_connection(provider: str) -> dict[str, Any]:
 @router.get("/settings")
 def settings() -> dict[str, Any]:
     connections = service.tracking_connections()["connections"]
+    storage = service.storage.snapshot()
+    paths = storage["paths"]
     tracking = {
         "providers": list(connections.values()),
         "connections": connections,
@@ -11815,18 +11837,18 @@ def settings() -> dict[str, Any]:
     }
     return {
         "paths": {
-            "work_root": service.storage.work_root,
+            "work_root": storage["settings"]["work_root"],
             "database": "central-postgresql",
             "local_capsules": str(LOCAL_CAPSULE_ROOT),
-            "evaluation_root": service.storage.public_paths()["evaluation"],
+            "evaluation_root": paths["evaluation"],
         },
         "cluster": {
             **CLUSTER.public_dict(),
-            "paths": service.storage.public_paths(),
+            "paths": paths,
             "multi_node": False,
             "multi_gpu_single_node": True,
         },
-        "storage": service.storage.settings(),
+        "storage": storage["settings"],
         "runtime_profiles": CLUSTER.public_runtime_profiles(),
         "checkpoint": {
             "save_every_steps": CLUSTER.defaults.checkpoint_save_steps,

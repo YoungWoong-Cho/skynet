@@ -466,3 +466,62 @@ def test_file_stream_without_cancellation_preserves_original_contract(monkeypatc
         [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'abcd')"], **kw))
     assert b"".join(ClusterClient(("host",)).stream_file_range(
         cluster_runtime.WORK_ROOT + "/video.mp4", "host", start=0, end=3)) == b"abcd"
+
+
+def test_capsule_batch_transfers_exact_files_in_one_verified_connection(tmp_path, monkeypatch):
+    root = tmp_path.resolve() / "work"
+    monkeypatch.setattr(cluster_runtime, "WORK_ROOT", str(root))
+    client = ClusterClient(("sky2",))
+    calls = []
+    def local(host, command, *, stdin=None, timeout=30):
+        calls.append((host, command))
+        result = subprocess.run(command, shell=True, input=stdin, text=True, capture_output=True)
+        if result.returncode:
+            raise ClusterError(result.stderr)
+        return result.stdout
+    monkeypatch.setattr(client, "ssh", local)
+    files = {"worker/a.py": "print('한글')\n", "worker/space name.txt": "$(touch unexpected)\n", "request.json": "{}"}
+    host, paths = client.write_capsule_files("batch-1", files, "sky2")
+    assert host == "sky2" and len(calls) == 1
+    assert {name: Path(path).read_text() for name, path in paths.items()} == files
+    assert not list(root.rglob(".upload-*"))
+    # Repeating a partial/uncertain upload is safe before job submission.
+    client.write_capsule_files("batch-1", files, "sky2")
+    assert {name: Path(path).read_text() for name, path in paths.items()} == files
+
+
+def test_capsule_batch_rejects_invalid_paths_and_unverified_receipts(monkeypatch):
+    import pytest
+    client = ClusterClient(("sky2",))
+    calls = []
+    def ssh(*args, **kwargs):
+        calls.append(args)
+        return '{}'
+    monkeypatch.setattr(client, "ssh", ssh)
+    for files in ({"../outside": "bad"}, {"/absolute": "bad"}, {"a/b": "one", "a//b": "two"}):
+        with pytest.raises(ValueError):
+            client.write_capsule_files("batch-1", files, "sky2")
+    assert calls == []
+    with pytest.raises(ClusterError, match="verification failed"):
+        client.write_capsule_files("batch-1", {"worker.py": "frozen"}, "sky2")
+
+
+def test_capsule_batch_preserves_symlink_targets(tmp_path, monkeypatch):
+    import pytest
+    root = tmp_path.resolve() / "work"
+    monkeypatch.setattr(cluster_runtime, "WORK_ROOT", str(root))
+    destination = root / "jobs/runs/batch-1/worker"
+    destination.mkdir(parents=True)
+    protected = tmp_path.resolve() / "protected"
+    protected.write_text("keep")
+    (destination / "frozen.py").symlink_to(protected)
+    client = ClusterClient(("sky2",))
+    def local(host, command, *, stdin=None, timeout=30):
+        result = subprocess.run(command, shell=True, input=stdin, text=True, capture_output=True)
+        if result.returncode:
+            raise ClusterError(result.stderr)
+        return result.stdout
+    monkeypatch.setattr(client, "ssh", local)
+    with pytest.raises(ClusterError, match="symbolic links"):
+        client.write_capsule_files("batch-1", {"worker/frozen.py": "replace"}, "sky2")
+    assert protected.read_text() == "keep"

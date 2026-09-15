@@ -124,6 +124,13 @@ class Database:
             connection.close()
 
     @contextmanager
+    def read_snapshot(self) -> Iterator[PostgresConnection]:
+        """One fresh, consistent view for reads that assemble several tables."""
+        with self.connection() as connection, connection.raw.transaction():
+            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            yield connection
+
+    @contextmanager
     def transaction(self, *, immediate: bool = True) -> Iterator[PostgresConnection]:
         with self._write_lock:
             connection = self._connect()
@@ -332,6 +339,14 @@ class Database:
             return self._decode(connection.execute(
                 "SELECT * FROM tracking_connections WHERE owner_id = ? AND provider = ?", (self.workspace_id or LEGACY_WORKSPACE, provider)
             ).fetchone())
+
+    def list_tracking_connections(self) -> dict[str, dict[str, Any]]:
+        with self.connection() as connection:
+            rows = self._decode_many(connection.execute(
+                "SELECT * FROM tracking_connections WHERE owner_id = ? ORDER BY provider",
+                (self.workspace_id or LEGACY_WORKSPACE,),
+            ).fetchall())
+        return {row["provider"]: row for row in rows}
 
     def delete_tracking_connection(self, provider: str) -> None:
         with self.transaction() as connection:
@@ -2708,23 +2723,41 @@ class Database:
         })
         return version_id
 
-    def list_adapter_registry(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
+    def list_adapter_registry(
+        self, *, include_archived: bool = False, include_editable: bool = False
+    ) -> list[dict[str, Any]]:
         with self.connection() as connection:
-            keys = connection.execute(
+            # Select only the latest manifest; historical versions contribute
+            # counts, creation time and key eligibility without being decoded.
+            rows = connection.execute(
                 f"""
-                SELECT adapter_key, min(lower(name)) AS sort_name
-                FROM adapters
-                WHERE {visible_sql("adapters")} AND (? = 1 OR archived_at IS NULL)
-                GROUP BY adapter_key
-                ORDER BY sort_name, adapter_key
+                WITH visible_adapters AS (
+                    SELECT * FROM adapters WHERE {visible_sql("adapters")}
+                ), registry AS (
+                    SELECT adapter_key, max(version_number) AS latest_number,
+                           count(*) AS registry_count, min(created_at) AS registry_created_at,
+                           min(lower(name)) FILTER (
+                               WHERE ? = 1 OR archived_at IS NULL
+                           ) AS sort_name
+                    FROM visible_adapters GROUP BY adapter_key
+                )
+                SELECT a.*, r.registry_count, r.registry_created_at,
+                       (current_workspace_id() IS NULL OR
+                        a.owner_id = current_workspace_id()) AS registry_editable
+                FROM visible_adapters a JOIN registry r
+                    ON r.adapter_key = a.adapter_key AND r.latest_number = a.version_number
+                WHERE r.sort_name IS NOT NULL
+                ORDER BY r.sort_name, r.adapter_key
                 """,
                 (int(include_archived),),
             ).fetchall()
-            result: list[dict[str, Any]] = []
-            for key in keys:
-                bundle = self._adapter_bundle(self._adapter_rows(connection, key["adapter_key"]))
-                if bundle is not None:
-                    result.append(bundle)
+            result = []
+            for row in rows:
+                item = self._adapter_bundle([row])
+                item.update(version_count=row["registry_count"], created_at=row["registry_created_at"])
+                if include_editable:
+                    item["editable"] = bool(row["registry_editable"])
+                result.append(item)
             return result
 
     def get_adapter(
@@ -3124,11 +3157,17 @@ class Database:
         row: Record | Mapping[str, Any],
         *,
         include_resource: bool = False,
+        locations: Sequence[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         result = cls._decode(row) if isinstance(row, Record) else dict(row)
         assert result is not None
         result["metadata"] = result.pop("metadata_json", {})
-        result["locations"] = [dict(item) for item in connection.execute("SELECT * FROM data_locations WHERE version_id=? ORDER BY kind, host", (result["id"],)).fetchall()]
+        if locations is None:
+            locations = connection.execute(
+                "SELECT * FROM data_locations WHERE version_id=? ORDER BY kind, host",
+                (result["id"],),
+            ).fetchall()
+        result["locations"] = [dict(item) for item in locations]
         if include_resource:
             resource_row = connection.execute(
                 "SELECT * FROM data_resources WHERE id = ?", (result["resource_id"],)
@@ -3139,29 +3178,62 @@ class Database:
         return result
 
     @classmethod
-    def _data_resource_payload(
-        cls,
-        connection: PostgresConnection,
-        row: Record,
-        *,
-        include_versions: bool,
-    ) -> dict[str, Any]:
-        result = cls._public_data_resource(row)
-        version_rows = connection.execute(
-            "SELECT * FROM data_resource_versions WHERE resource_id = ? "
-            "ORDER BY created_at DESC, id DESC",
-            (result["id"],),
-        ).fetchall()
-        versions = [
-            cls._public_data_version(connection, version_row)
-            for version_row in version_rows
-        ]
-        result["recording_ids"] = resource_recording_ids(result, versions)
-        result["version_count"] = len(versions)
-        result["latest_version"] = versions[0] if versions else None
-        if include_versions:
-            result["versions"] = versions
+    def _data_version_payloads(cls, connection, rows, *, include_resource=False):
+        if not rows:
+            return []
+        locations = {}
+        for row in connection.execute(
+            "SELECT * FROM data_locations WHERE version_id = ANY(?) ORDER BY kind, host",
+            ([row["id"] for row in rows],),
+        ).fetchall():
+            locations.setdefault(row["version_id"], []).append(row)
+        resources = {}
+        if include_resource:
+            resources = {
+                row["id"]: cls._public_data_resource(row)
+                for row in connection.execute(
+                    "SELECT * FROM data_resources WHERE id = ANY(?)",
+                    (list({row["resource_id"] for row in rows}),),
+                ).fetchall()
+            }
+        result = []
+        for row in rows:
+            version = cls._public_data_version(connection, row, locations=locations.get(row["id"], []))
+            if include_resource:
+                version["resource"] = resources[version["resource_id"]]
+            result.append(version)
         return result
+
+    @classmethod
+    def _data_resource_payloads(cls, connection, rows, *, include_versions):
+        if not rows:
+            return []
+        version_rows = connection.execute(
+            "SELECT * FROM data_resource_versions WHERE resource_id = ANY(?) "
+            "ORDER BY created_at DESC, id DESC",
+            ([row["id"] for row in rows],),
+        ).fetchall()
+        by_resource = {}
+        for version in cls._data_version_payloads(connection, version_rows):
+            by_resource.setdefault(version["resource_id"], []).append(version)
+        result = []
+        for row in rows:
+            resource = cls._public_data_resource(row)
+            versions = by_resource.get(resource["id"], [])
+            resource.update(
+                recording_ids=resource_recording_ids(resource, versions),
+                version_count=len(versions), latest_version=versions[0] if versions else None,
+            )
+            if include_versions:
+                resource["versions"] = versions
+            result.append(resource)
+        return result
+
+    @classmethod
+    def _data_resource_payload(cls, connection, row, *, include_versions):
+        return cls._data_resource_payloads(
+            connection, [row], include_versions=include_versions
+        )[0]
 
     def _insert_data_resource(
         self,
@@ -3221,27 +3293,45 @@ class Database:
         provider: str | None = None,
         namespace: str | None = None,
         kind: str | None = None,
+        category: str | None = None,
         include_archived: bool = False,
+        include_versions: bool = False,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         parameters: list[Any] = []
         if not include_archived:
             clauses.append("archived_at IS NULL")
-        for column, value in (("provider", provider), ("namespace", namespace), ("kind", kind)):
+        for column, value in (("provider", provider), ("namespace", namespace), ("kind", kind), ("category", category)):
             if value is not None:
                 clauses.append(f"{column} = ?")
                 parameters.append(value)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self.connection() as connection:
+        with self.read_snapshot() as connection:
             rows = connection.execute(
                 f"SELECT * FROM data_resources {where} "
                 "ORDER BY lower(provider), lower(namespace), lower(name)",
                 parameters,
             ).fetchall()
-            return [
-                self._data_resource_payload(connection, row, include_versions=False)
-                for row in rows
-            ]
+            return self._data_resource_payloads(
+                connection, rows, include_versions=include_versions
+            )
+
+    def find_collection_dataset(
+        self, session_id: str, identity: str | None = None
+    ) -> dict[str, Any] | None:
+        """Find a recording's dataset without expanding unrelated versions."""
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM data_resources
+                WHERE provider = 'collection' AND namespace = 'datasets'
+                  AND (name = ? OR json_extract(metadata_json, '$.recording_session_id') = ?)
+                ORDER BY lower(provider), lower(namespace), lower(name)
+                LIMIT 1
+                """,
+                (identity if identity is not None else session_id, session_id),
+            ).fetchone()
+            return self._public_data_resource(row) if row is not None else None
 
     def get_data_resource(self, resource_id: str) -> dict[str, Any] | None:
         with self.connection() as connection:
@@ -3596,41 +3686,74 @@ class Database:
                 ORDER BY e.name, er.revision_number, r.id, v.id
             """).fetchall()]
 
-    def data_version_usage(self, manifest_sha256):
+    def data_version_usage_many(
+        self, manifest_sha256s: Sequence[str], *, workspace_id: str | None = None
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Load usage once; optionally redact all records outside one workspace."""
+        digests = list(dict.fromkeys(manifest_sha256s))
+        if not digests:
+            return {}
+        result = {digest: [] for digest in digests}
+        hidden = set()
         with self.connection() as connection:
-            return [dict(row) for row in connection.execute("""
-                SELECT DISTINCT e.id AS experiment_id, e.name, er.revision_number, r.id AS run_id, r.status AS run_status
+            rows = connection.execute("""
+                SELECT DISTINCT json_extract(assignment.value, '$.version.manifest_sha256') AS digest,
+                       e.owner_id AS usage_owner_id, e.id AS experiment_id, e.name,
+                       er.revision_number, r.id AS run_id, r.status AS run_status
                 FROM experiment_revisions er JOIN experiments e ON e.id=er.experiment_id
                 LEFT JOIN variants v ON v.experiment_revision_id=er.id
                 LEFT JOIN runs r ON r.variant_id=v.id
                 CROSS JOIN json_each(er.requested_spec_json, '$.data.bundle.assignments') assignment
-                WHERE json_extract(assignment.value, '$.version.manifest_sha256')=?
+                WHERE json_extract(assignment.value, '$.version.manifest_sha256') = ANY(?)
                 ORDER BY e.name, er.revision_number
-            """, (manifest_sha256,)).fetchall()]
+            """, (digests,)).fetchall()
+        for row in rows:
+            item = dict(row)
+            digest, owner = item.pop("digest"), item.pop("usage_owner_id")
+            if workspace_id is not None and owner != workspace_id:
+                hidden.add(digest)
+            else:
+                result[digest].append(item)
+        for digest in hidden:
+            result[digest].append({"other_workspace": True})
+        return result
+
+    def data_version_usage(self, manifest_sha256):
+        return self.data_version_usage_many([manifest_sha256])[manifest_sha256]
+
+    def get_data_resource_versions(
+        self, version_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Expand selected versions and their links with a fixed number of reads."""
+        identifiers = list(dict.fromkeys(version_ids))
+        if not identifiers:
+            return {}
+        with self.read_snapshot() as connection:
+            rows = connection.execute(
+                "SELECT * FROM data_resource_versions WHERE id = ANY(?)", (identifiers,),
+            ).fetchall()
+            versions = self._data_version_payloads(connection, rows, include_resource=True)
+            result = {version["id"]: dict(version, derivation_id=None, used_by_bundles=[])
+                      for version in versions}
+            if not result:
+                return result
+            for row in connection.execute(
+                "SELECT id, output_version_id FROM data_derivations WHERE output_version_id = ANY(?)",
+                (list(result),),
+            ).fetchall():
+                result[row["output_version_id"]]["derivation_id"] = row["id"]
+            for row in connection.execute("""
+                SELECT a.version_id, b.id, b.name, b.version, a.role, a.position
+                FROM data_bundle_assignments a JOIN data_bundles b ON b.id = a.bundle_id
+                WHERE a.version_id = ANY(?)
+                ORDER BY b.name, b.version, a.role, a.position
+            """, (list(result),)).fetchall():
+                item = self._decode(row)
+                result[item.pop("version_id")]["used_by_bundles"].append(item)
+            return result
 
     def get_data_resource_version(self, version_id: str) -> dict[str, Any] | None:
-        with self.connection() as connection:
-            row = connection.execute(
-                "SELECT * FROM data_resource_versions WHERE id = ?", (version_id,)
-            ).fetchone()
-            if row is None:
-                return None
-            result = self._public_data_version(connection, row, include_resource=True)
-            derivation = connection.execute(
-                "SELECT id FROM data_derivations WHERE output_version_id = ?", (version_id,)
-            ).fetchone()
-            result["derivation_id"] = derivation["id"] if derivation is not None else None
-            result["used_by_bundles"] = self._decode_many(connection.execute(
-                """
-                SELECT b.id, b.name, b.version, a.role, a.position
-                FROM data_bundle_assignments a
-                JOIN data_bundles b ON b.id = a.bundle_id
-                WHERE a.version_id = ?
-                ORDER BY b.name, b.version, a.role, a.position
-                """,
-                (version_id,),
-            ).fetchall())
-            return result
+        return self.get_data_resource_versions([version_id]).get(version_id)
 
     @classmethod
     def _public_data_import(cls, row: Record) -> dict[str, Any]:
@@ -3944,9 +4067,15 @@ class Database:
             raise KeyError(f"Data resource version not found: {assignment['version_id']}")
         version = cls._public_data_version(connection, version_row, include_resource=True)
         resource = version.pop("resource")
+        return cls.bundle_manifest_assignment(assignment, resource, version)
+
+    @staticmethod
+    def bundle_manifest_assignment(assignment, resource, version):
+        """Build the same immutable receipt from already loaded registered records."""
         config = dict(assignment.get("config") or {})
         if config.get("location_id"):
-            location = connection.execute("SELECT * FROM data_locations WHERE id=? AND version_id=?", (config["location_id"], assignment["version_id"])).fetchone()
+            location = next((item for item in version["locations"]
+                             if item["id"] == config["location_id"]), None)
             if location is None or location["status"] != "AVAILABLE" or location["kind"] != "cluster":
                 raise ValueError("Dataset copy is not verified on the training cluster")
             config["location"] = dict(location)

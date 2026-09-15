@@ -207,7 +207,10 @@ class LiveReviewService:
         )
 
     def source(self, identifier, index):
-        job = self.live.get(identifier)
+        return self.source_for_session(self.live.get(identifier), index)
+
+    def source_for_session(self, job, index):
+        """Validate a source using the full saved session, including its archive."""
         if not job.get("recordings"):
             raise ValueError(
                 "Review is available after a successful demonstration has been saved"

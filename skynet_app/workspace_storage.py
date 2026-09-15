@@ -73,21 +73,34 @@ class WorkspaceStorage:
             raise ValueError(STORAGE_REQUIRED)
         return root
 
-    def public_paths(self) -> dict[str, Any]:
-        if self.work_root is not None:
-            return self.paths.model_dump()
+    @staticmethod
+    def _public_paths(work_root: str | None) -> dict[str, Any]:
+        if work_root is not None:
+            return paths_for_root(work_root).model_dump()
         paths = CLUSTER.paths.model_dump()
         for key in PERSONAL_PATHS:
             paths[key] = None
         return paths
 
-    def settings(self) -> dict[str, Any]:
+    @staticmethod
+    def _settings(work_root: str | None) -> dict[str, Any]:
         return {
-            "work_root": self.work_root,
-            "configured": self.work_root is not None,
+            "work_root": work_root,
+            "configured": work_root is not None,
             "shared_datasets": CLUSTER.paths.datasets,
             "shared_environments": CLUSTER.paths.environments,
         }
+
+    def public_paths(self) -> dict[str, Any]:
+        return self._public_paths(self.work_root)
+
+    def settings(self) -> dict[str, Any]:
+        return self._settings(self.work_root)
+
+    def snapshot(self) -> dict[str, Any]:
+        """Resolve one current root for all sections of a settings response."""
+        root = self.work_root
+        return {"paths": self._public_paths(root), "settings": self._settings(root)}
 
     def _check_update(self, connection, root: str, expected: str | None) -> None:
         row = connection.execute(
@@ -145,8 +158,9 @@ class WorkspaceStorage:
 
     def allowed_roots(self) -> set[str]:
         roots = {CLUSTER.paths.work_root}
-        if self.work_root is not None:
-            roots.add(self.work_root)
+        root = self.work_root
+        if root is not None:
+            roots.add(root)
         with self.database.connection() as connection:
             rows = connection.execute(
                 f"SELECT id,run_directory FROM runs WHERE {visible_sql('runs')}"

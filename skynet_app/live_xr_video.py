@@ -21,6 +21,8 @@ from .live_xr_video_worker import control
 from .live_xr_video_cluster import control_cluster
 from .remote_artifacts import RemoteArtifact
 from .cluster_runtime import WORK_ROOT
+from .dexverse_versions import environment_profile
+from .simulation_hands import upload as upload_hand
 
 MAX_BYTES = 256 * 1024 * 1024
 GPU_WAIT_SECONDS = 120
@@ -65,6 +67,41 @@ class LiveVideoService:
         self.executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="review-video"
         )
+
+    def cluster_profile(self, session):
+        """Resolve the archived recording's renderer without a conversion service."""
+        profile = json.loads((self.live.root / "config/live_video.json").read_text())
+        cluster = self.live.archive.cluster
+        cluster.candidates(profile["gateway"])
+        for name in ("repository", "runtime", "asset_bundle"):
+            cluster._remote_path(profile[name])
+        profile = dict(profile, execution="slurm", work_root=WORK_ROOT)
+        original = session["profile"]
+        profile = environment_profile(profile, original["task"], cluster_root=WORK_ROOT)
+        if profile["source_revision"] != original["source_revision"]:
+            raise ValueError(
+                "The video renderer and recording use different DexVerse revisions"
+            )
+        for key in ("robot", "task", "hand", "hand_name", "task_name"):
+            if key in original:
+                profile[key] = original[key]
+        if original.get("hand_bundle"):
+            bundle = original["hand_bundle"]
+            if not re.fullmatch(r"[a-f0-9]{64}", bundle["digest"]):
+                raise ValueError("Recording has an invalid hand bundle identity")
+            profile["hand_bundle"] = dict(
+                bundle, root=f"{WORK_ROOT}/hands/{profile['robot']}/{bundle['digest']}"
+            )
+        return profile
+
+    def ensure_hand(self, profile, transport, gateway):
+        if profile.get("hand_bundle"):
+            from .simulation_hands import find_bundle
+
+            bundle = profile["hand_bundle"]
+            local = find_bundle(profile["robot"], bundle["digest"], app_root=self.live.root)
+            if upload_hand(local, WORK_ROOT, transport, gateway) != bundle["root"]:
+                raise ValueError("Uploaded hand bundle path differs from the saved request")
 
     @cached_property
     def sources(self):
@@ -283,7 +320,7 @@ class LiveVideoService:
                     suffix = f"/attempts/{token}"
                     cluster_root = f"{WORK_ROOT}/jobs/runs/{token}"
                     if root == cluster_root and getattr(self.live, "archive", None) is not None:
-                        profile = self.live.conversions.profile(job)
+                        profile = self.cluster_profile(job)
                         recovered_remote = (self.live.archive.cluster, dict(job, profile=profile, gateway="sky2"), root)
                     elif not re.fullmatch(re.escape(prefix) + r"[a-f0-9]{16}" + re.escape(suffix), root):
                         raise ValueError("The saved video process identity does not match this recording")
@@ -331,10 +368,10 @@ class LiveVideoService:
         profile = job["profile"]
         archived = (job.get("archive") or {}).get("state") in {"VERIFIED", "CLEANUP_PENDING", "READY"}
         if archived:
-            profile = self.live.conversions.profile(job)
+            profile = self.cluster_profile(job)
             job = dict(job, profile=profile, gateway=job["archive"]["gateway"])
             transport = self.live.archive.cluster
-            self.live.conversions.ensure_hand(profile, transport, job["gateway"])
+            self.ensure_hand(profile, transport, job["gateway"])
         elif profile.get("execution") != "workstation":
             raise ValueError(
                 "Video replay for older cluster recordings is unsupported. Use a workstation collection."

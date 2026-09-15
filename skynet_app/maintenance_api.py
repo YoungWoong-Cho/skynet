@@ -36,11 +36,11 @@ def manager():
 
 
 def recording_manager(kind="recording"):
-    from .live_xr_api import service, reviews, videos, episode_previews, conversions
+    from .live_xr_api import service, reviews, videos, episode_previews
     from .recording_deletion import RecordingMaintenance
     from .recording_file_deletion import RecordingFileMaintenance
     implementation = RecordingFileMaintenance if kind == "recording-file" else RecordingMaintenance
-    return implementation(manager().db, service, reviews, videos, episode_previews, conversions)
+    return implementation(manager().db, service, reviews, videos, episode_previews)
 
 
 def invoke(operation):

@@ -1062,77 +1062,204 @@ function reconcileTableSequence(tbody, sequence) {
   });
 }
 
-// A slow response from an earlier GET must not overwrite a newer poll/manual
-// refresh. Stale callers receive a clone of the newest response for that key.
+// Reads share work only within the same committed-change generation.
+function apiReadTopics(path) {
+  if (path.startsWith("/api/data/exports/jobs")) return ["exports", "data", "adapters"];
+  if (path.startsWith("/api/data/exports/options/")) return ["data", "recordings", "adapters"];
+  if (path.startsWith("/api/data/exports")) return ["exports", "data", "recordings", "adapters"];
+  if (path.startsWith("/api/data/")) return ["data"];
+  if (path.startsWith("/api/collection/")) return ["recordings"];
+  if (path.startsWith("/api/adapters")) return ["adapters"];
+  if (/^\/api\/(settings|tracking|workspace|notifications)/.test(path)) return ["settings"];
+  if (/^\/api\/(runs|experiments|evaluations)/.test(path)) return ["runs", "data", "adapters", "settings"];
+  return ["other"];
+}
+
 function installLatestApiReadGuard() {
   if (window.fetch.__latestApiReadGuard) return;
   const nativeFetch = window.fetch.bind(window);
-  const generations = new Map();
-  const latest = new Map();
-  const pending = new Map();
-  const releasePending = (key) => {
-    const remaining = (pending.get(key) || 1) - 1;
-    if (remaining > 0) {
-      pending.set(key, remaining);
-      return;
-    }
-    pending.delete(key);
-    latest.delete(key);
-    generations.delete(key);
+  const latest = new Map(), pending = new Map(), epochs = new Map();
+  const epoch = (topics) => topics.map(topic => epochs.get(topic) || 0).join(":");
+  window.apiReadGeneration = path => epoch(apiReadTopics(new URL(path, window.location.href).pathname));
+  window.invalidateApiReads = (topics) => {
+    for (const topic of new Set(topics)) epochs.set(topic, (epochs.get(topic) || 0) + 1);
+  };
+  const release = key => {
+    const remaining = pending.get(key) - 1;
+    if (remaining) pending.set(key, remaining);
+    else { pending.delete(key); latest.delete(key); }
   };
   const guardedFetch = async (input, init = {}) => {
-    const request =
-      typeof Request !== "undefined" && input instanceof Request ? input : null;
-    const method = String(
-      init.method || request?.method || "GET",
-    ).toUpperCase();
+    const request = typeof Request !== "undefined" && input instanceof Request ? input : null;
+    const method = String(init.method || request?.method || "GET").toUpperCase();
     const url = new URL(request?.url || String(input), window.location.href);
-    if (
-      method !== "GET" ||
-      url.origin !== window.location.origin ||
-      !url.pathname.startsWith("/api/")
-    ) {
+    if (url.origin !== window.location.origin || !url.pathname.startsWith("/api/"))
       return nativeFetch(input, init);
+    if (method !== "GET") {
+      const response = await nativeFetch(input, init);
+      const preview = ["/api/model-io/preview", "/api/experiments/preview", "/api/evaluations/validate-target"].includes(url.pathname);
+      if (response.ok && !["HEAD", "OPTIONS"].includes(method) && !preview) {
+        // A successful write is a read barrier even for callers outside api().
+        const topics = ["data", "exports", "recordings", "adapters", "settings", "runs", "other"];
+        window.invalidateApiReads(topics);
+        window.SkynetRefresh?.invalidate(apiReadTopics(url.pathname), { reads: false });
+      }
+      return response;
     }
-
-    // Gateway selection is mutable UI state, so all cluster snapshots share a
-    // key. Other resources retain their full path/query identity.
-    const key =
-      url.pathname === "/api/cluster"
-        ? "GET:/api/cluster"
-        : `GET:${url.pathname}${url.search}`;
-    const requestIdentity = url.href;
-    const inFlight = latest.get(key);
+    const topics = apiReadTopics(url.pathname);
+    const key = url.pathname === "/api/cluster" ? "GET:/api/cluster" : `GET:${url.pathname}${url.search}`;
     pending.set(key, (pending.get(key) || 0) + 1);
-    if (inFlight?.requestIdentity === requestIdentity) {
-      try {
-        const shared = await inFlight.responsePromise;
-        return shared.replay.clone();
-      } finally {
-        releasePending(key);
-      }
-    }
-    const generation = (generations.get(key) || 0) + 1;
-    generations.set(key, generation);
     try {
-      const responsePromise = nativeFetch(input, init).then((response) => ({
-        response,
-        replay: response.clone(),
-      }));
-      latest.set(key, { generation, requestIdentity, responsePromise });
-      const result = await responsePromise;
-      const current = latest.get(key);
-      if (current && current.generation !== generation) {
-        const newest = await current.responsePromise;
-        return newest.replay.clone();
+      while (true) {
+        const generation = epoch(topics);
+        let read = latest.get(key);
+        if (!read || read.identity !== url.href || read.generation !== generation) {
+          read = { identity: url.href, generation,
+            promise: nativeFetch(input, init).then(response => ({ response, replay: response.clone() })) };
+          latest.set(key, read);
+        }
+        let result;
+        try { result = await read.promise; }
+        catch (error) {
+          if (generation !== epoch(topics) && !init.signal?.aborted) continue;
+          throw error;
+        }
+        if (generation !== epoch(topics)) continue;
+        const current = latest.get(key);
+        if (current !== read) {
+          const newest = await current.promise;
+          if (current.generation !== epoch(topics)) continue;
+          const response = newest.replay.clone();
+          response.__skynetReadGeneration = current.generation;
+          return response;
+        }
+        const response = result.replay.clone();
+        response.__skynetReadGeneration = generation;
+        return response;
       }
-      return result.response;
-    } finally {
-      releasePending(key);
-    }
+    } finally { release(key); }
   };
   Object.defineProperty(guardedFetch, "__latestApiReadGuard", { value: true });
   window.fetch = guardedFetch;
+}
+
+// One dirty bit and one trailing refresh per view; no time-based response cache.
+function createRefreshCoordinator() {
+  const subscriptions = new Map();
+  let scheduled = false, stopped = false;
+  const flush = () => {
+    scheduled = false;
+    if (stopped) return Promise.resolve();
+    if (document.visibilityState !== "visible") return Promise.resolve();
+    const pending = [];
+    for (const state of subscriptions.values()) {
+      if (!state.dirty || !state.visible()) continue;
+      if (!state.running) {
+        let succeeded = false;
+        state.running = (async () => {
+          while (!stopped && state.dirty && document.visibilityState === "visible" && state.visible()) {
+            state.dirty = false;
+            await state.refresh();
+          }
+          succeeded = true;
+        })().catch(error => {
+          state.dirty = true;
+          state.error?.(error);
+        }).finally(() => {
+          state.running = null;
+          // A change can arrive after the loop exits but before this finalizer.
+          // Failed reads remain dirty until another event/focus, without spinning.
+          if (succeeded && !stopped && state.dirty && document.visibilityState === "visible" && state.visible()) schedule();
+        });
+      }
+      pending.push(state.running);
+    }
+    return Promise.all(pending);
+  };
+  const schedule = () => {
+    if (scheduled) return;
+    scheduled = true;
+    queueMicrotask(() => { void flush(); });
+  };
+  return {
+    get stopped() { return stopped; },
+    stop() { stopped = true; subscriptions.clear(); },
+    register(key, topics, visible, refresh, invalidate = () => {}) {
+      subscriptions.set(key, { topics, visible, refresh, invalidate, dirty: true, running: null });
+    },
+    invalidate(topics, { reads = true } = {}) {
+      if (stopped) return;
+      if (reads) window.invalidateApiReads?.(topics);
+      for (const state of subscriptions.values()) {
+        if (!state.topics.some(topic => topics.includes(topic))) continue;
+        state.dirty = true;
+        state.invalidate(topics);
+      }
+      schedule();
+    },
+    flush,
+  };
+}
+
+function initializeLiveRefresh() {
+  const refresh = window.SkynetRefresh = createRefreshCoordinator();
+  window.stopSkynetLiveRefresh = () => refresh.stop();
+  refresh.register("registry", ["data"], () => ["datasets", "collection"].includes(activeTab),
+    () => loadDataRegistry(true), () => loadedTabs.delete("datasets"));
+  refresh.register("training-data", ["data"], () => activeTab === "experiments",
+    () => loadDataBundles(true), () => { dataBundlesLoaded = false; });
+  refresh.register("adapters", ["adapters"], () => ["experiments", "adapters"].includes(activeTab),
+    () => loadAdapters(true), () => { adaptersLoaded = false; });
+  refresh.register("settings", ["settings"], () => activeTab === "settings",
+    () => loadSettings(true), () => { loadedTabs.delete("settings"); trackingConnectionsLoaded = false; });
+  refresh.register("experiment-tracking", ["settings"], () => activeTab === "experiments",
+    () => loadTrackingConnections(true), () => { trackingConnectionsLoaded = false; });
+  refresh.register("recordings", ["recordings"], () => activeTab === "collection",
+    () => window.loadLiveXR?.(), () => loadedTabs.delete("collection"));
+  const topics = ["data", "exports", "recordings", "adapters", "settings"];
+  if (window.EventSource && window.SkynetWorkspace?.id) {
+    let stream = null, retry = null, delay = 1000, stopped = false;
+    const reconnect = () => {
+      stream?.close();
+      stream = null;
+      refresh.connected = false;
+      document.dispatchEvent(new CustomEvent("skynet-live-updates", { detail: { connected: false } }));
+      if (stopped || retry !== null) return;
+      retry = setTimeout(() => { retry = null; connect(); }, delay);
+      delay = Math.min(delay * 2, 30000);
+    };
+    const connect = () => {
+      if (stopped) return;
+      stream = new EventSource(`/api/changes?expected_workspace=${encodeURIComponent(window.SkynetWorkspace.id)}`);
+      stream.addEventListener("resync", () => {
+        delay = 1000;
+        refresh.connected = true;
+        refresh.invalidate(topics);
+      });
+      stream.addEventListener("change", event => {
+        try {
+          const value = JSON.parse(event.data);
+          if (value.v !== 1 || !Array.isArray(value.topics)) {
+            refresh.invalidate(topics);
+            return;
+          }
+          refresh.invalidate(value.topics.filter(topic => topics.includes(topic)));
+        } catch { refresh.invalidate(topics); }
+      });
+      stream.addEventListener("unavailable", reconnect);
+      stream.addEventListener("error", reconnect);
+    };
+    connect();
+    window.stopSkynetLiveRefresh = () => {
+      refresh.stop();
+      stopped = true; clearTimeout(retry); stream?.close();
+    };
+    window.addEventListener("pagehide", window.stopSkynetLiveRefresh, { once: true });
+  }
+  window.addEventListener("focus", () => refresh.invalidate(topics));
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") refresh.invalidate(topics);
+  });
 }
 let latestSnapshot;
 let activeTab = "cluster";
@@ -1140,6 +1267,7 @@ let experimentRows = [];
 let runRows = [];
 let evaluationRows = [];
 let adapterRows = [];
+let adaptersLoaded = false;
 const adapterDeclaredValueState = new Map();
 const adapterDeclaredScopeHashes = new Map();
 let renderedAdapterDeclaredScope = null;
@@ -1360,15 +1488,23 @@ async function apiRequest(path, options = {}) {
   if (request.signal?.aborted) forwardAbort();
   else request.signal?.addEventListener("abort", forwardAbort, { once: true });
   const signal = controller?.signal || request.signal;
+  // Coalesced readers share the fetch rejection, including an older read's deadline.
+  const timeoutMessage = `Request timed out after ${Math.ceil(timeoutMs / 1000)} seconds. Check the connection and try again.`;
   const timer = controller
-    ? setTimeout(() => controller.abort(), timeoutMs)
+    ? setTimeout(
+        () => controller.abort(new DOMException(timeoutMessage, "TimeoutError")),
+        timeoutMs,
+      )
     : null;
   try {
     const headers = new Headers(request.headers || {});
     if (request.body && !headers.has("Content-Type"))
       headers.set("Content-Type", "application/json");
+    const readGeneration = readOnly ? globalThis.window?.apiReadGeneration?.(path) : null;
     const response = await fetch(path, { ...request, headers, signal });
     const raw = await response.text();
+    if (readOnly && (response.__skynetReadGeneration ?? readGeneration) !== globalThis.window?.apiReadGeneration?.(path))
+      return apiRequest(path, options);
     let payload = {};
     if (raw) {
       try {
@@ -1388,9 +1524,7 @@ async function apiRequest(path, options = {}) {
     return payload;
   } catch (error) {
     if (controller?.signal.aborted && !request.signal?.aborted) {
-      throw new Error(
-        `Request timed out after ${Math.ceil(timeoutMs / 1000)} seconds. Check the connection and try again.`,
-      );
+      throw new Error(timeoutMessage);
     }
     throw error;
   } finally {
@@ -4369,7 +4503,7 @@ function populateExperimentAdapters(preserveId = "") {
 }
 
 async function loadAdapters(force = false) {
-  if (adapterRows.length && !force) {
+  if (adaptersLoaded && !force) {
     populateExperimentAdapters(elements.experimentAdapter.value);
     renderAdapters();
     return;
@@ -4382,6 +4516,7 @@ async function loadAdapters(force = false) {
   try {
     const payload = await api("/api/adapters?include_archived=true");
     adapterRows = listFrom(payload, ["adapters"]);
+    adaptersLoaded = true;
     populateExperimentAdapters(selected);
     if (
       !selected ||
@@ -8709,11 +8844,12 @@ async function loadExperiments(force = false) {
   if (loadedTabs.has("experiments") && !force) return;
   elements.refreshExperiments.disabled = true;
   clearNotice(elements.experimentsError);
-  await Promise.all([
+  // List rows do not depend on training form catalogs becoming available.
+  void Promise.all([
     loadTrainingInputs(force),
     loadEvaluationSuites(force, ""),
     loadTrackingConnections(force).catch(() => undefined),
-  ]);
+  ]).catch(() => undefined);
   try {
     const payload = await api("/api/experiments");
     experimentRows = listFrom(payload, ["experiments"]);
@@ -13565,7 +13701,7 @@ function experimentBundleCompatibility(
 }
 
 async function loadDataBundles(force = false) {
-  if (trainingDatasetRows.length && !force) {
+  if (dataBundlesLoaded && !force) {
     populateExperimentDataBundles();
     return;
   }
@@ -13575,6 +13711,7 @@ async function loadDataBundles(force = false) {
   try {
     const payload = await api("/api/data/selections");
     trainingDatasetRows = listFrom(payload, ["datasets"]);
+    dataBundlesLoaded = true;
     populateExperimentDataBundles();
   } catch (error) {
     elements.experimentDataBundleStatus.textContent =
@@ -14249,31 +14386,16 @@ async function loadDataRegistry(force = false) {
   try {
     const [resourcePayload, importPayload, derivationPayload] =
       await Promise.all([
-        api("/api/data/resources?include_archived=true"),
+        api("/api/data/resources?include_archived=true&include_versions=true"),
         api("/api/data/imports"),
         api("/api/data/derivations"),
       ]);
     if (generation !== dataRegistryGeneration) return;
     const resources = listFrom(resourcePayload, ["resources"]);
-    const details = await Promise.all(
-      resources.map(async (resource) => {
-        if (Array.isArray(resource.versions)) return resource;
-        const id = resource.id || resource.resource_id;
-        try {
-          return entityFrom(
-            await api(`/api/data/resources/${encodeURIComponent(id)}`),
-            "resource",
-          );
-        } catch (error) {
-          throw new Error(
-            `Versions for ${dataResourceIdentity(resource)} could not be loaded: ${error.message}`,
-          );
-        }
-      }),
-    );
-    if (generation !== dataRegistryGeneration) return;
+    if (resources.some(resource => !Array.isArray(resource.versions)))
+      throw new Error("Resource registry response is missing version summaries. Refresh after the server update.");
     dataResourceTypes = resourcePayload.resource_types || {};
-    dataResourceRows = details;
+    dataResourceRows = resources;
     dataResourceCatalogState = "ready";
     notifyRecordingRegistryChanged();
     dataImportRows = listFrom(importPayload, ["imports"]);
@@ -19615,6 +19737,7 @@ function activateTab(tab, updateHash = true, requestedView = null) {
     else if (navigation) history.replaceState(null, "", destination);
   }
   const loading = loadActiveTab(next);
+  void window.SkynetRefresh?.flush();
   window.scrollTo({ top: 0, behavior: "instant" });
   return loading;
 }
@@ -19913,6 +20036,7 @@ document.addEventListener("visibilitychange", () => {
     evaluationDetailPollTimer = null;
     return;
   }
+  if (activeTab === "runs") void loadRuns(true, { background: true });
   if (activeTab === "runs" && activeRunDetailId && !elements.runDetail.hidden) {
     startRunDetailPolling(activeRunDetailId, null, { initialDelay: 0 });
   }
@@ -20252,6 +20376,7 @@ elements.validateAdapter.addEventListener("click", validateAdapterManifest);
 installStructuredEvaluationTaskOptions();
 installViewportFilterMenus();
 installLatestApiReadGuard();
+initializeLiveRefresh();
 installDisclosureBehavior();
 initializeTutorials();
 dataNavigation.mountTutorial();

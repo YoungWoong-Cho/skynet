@@ -2,6 +2,7 @@
 
 import json
 import re
+from pathlib import Path
 from uuid import UUID
 
 from .cluster_config import CLUSTER
@@ -22,10 +23,12 @@ def mentions(value, identifier):
 
 
 class RecordingMaintenance(Maintenance):
-    def __init__(self, database, live, reviews, videos, previews, conversions):
+    def __init__(self, database, live, reviews, videos, previews, *, conversion_root=None):
         super().__init__(database, live.archive.cluster)
         self.live, self.reviews, self.videos = live, reviews, videos
-        self.previews, self.conversions = previews, conversions
+        self.previews = previews
+        # Historical receipts and files remain deletable without starting a worker.
+        self.conversion_root = Path(conversion_root or live.root / "data/live-conversions")
 
     def remote(self, operation, root, items=None, protected=None, gateway="auto"):
         # These are shared collection archives, independent of the caller's
@@ -123,10 +126,7 @@ class RecordingMaintenance(Maintenance):
             if conversion.get("session_id") != identifier:
                 continue
             graph["live_conversions"].append(record)
-            if (
-                conversion.get("state") not in {"READY", "FAILED", "CANCELLED"}
-                or conversion["id"] in self.conversions.active
-            ):
+            if conversion.get("state") not in {"READY", "FAILED", "CANCELLED"}:
                 block(
                     "recording",
                     identifier,
@@ -226,8 +226,8 @@ class RecordingMaintenance(Maintenance):
             ):
                 raise ValueError("Conversion storage does not match its immutable ID")
             groups.setdefault(WORK_ROOT, []).extend(paths)
-            groups.setdefault("local:" + str(self.conversions.root), []).append(
-                str(self.conversions.root / key)
+            groups.setdefault("local:" + str(self.conversion_root), []).append(
+                str(self.conversion_root / key)
             )
         # Rendered video attempts have immutable generation capsules outside the
         # archive. Their receipts stay in the local review status directory.

@@ -142,7 +142,7 @@ test('collection defaults preserve zero and false, respect gateway choice and re
 
 test('a disconnected read expires with a useful error, while submission requests have no read timeout', async () => {
   let calls = 0;
-  const c = load(['apiRequest'], {Headers, AbortController, setTimeout: cb => { queueMicrotask(cb); return 1; }, clearTimeout() {}, apiErrorMessage: String,
+  const c = load(['apiRequest'], {Headers, AbortController, DOMException, setTimeout: cb => { queueMicrotask(cb); return 1; }, clearTimeout() {}, apiErrorMessage: String,
     fetch: async (path, options) => {
       calls++;
       if (options.method === 'POST') { assert.equal(options.signal, undefined); return {ok:true, text:async()=>'{"submitted":true}'}; }

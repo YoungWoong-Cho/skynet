@@ -9,17 +9,15 @@
     catalogState = "loading";
   function catalogStatus(state, error) {
     catalogState = state;
-    if (state !== "ready" && dialog.open)
-      el("create-policy-export").disabled = true;
     document.dispatchEvent(
       new CustomEvent("dataset-preparation-status", {
         detail: { state, error },
       }),
     );
   }
-  const request = async (path = "", options = {}) => {
+  const request = async (path = "/jobs", options = {}) => {
     const catalog =
-      path === "" && (!options.method || options.method === "GET");
+      path === "/jobs" && (!options.method || options.method === "GET");
     const token = catalog ? ++catalogSequence : null;
     if (catalog) catalogStatus("loading");
     try {
@@ -42,7 +40,8 @@
   el("policy-export-error").after(retryPreparation);
   const esc = escapeHtml;
   let snapshot = null,
-    registrySignature = null,
+    preparation = null,
+    preparationDirty = false,
     resourceId = null,
     selectedResource = null,
     sourceSessionId = null;
@@ -50,11 +49,13 @@
     timer = null,
     generation = 0,
     detailGeneration = 0,
-    refreshPromise = null;
+    refreshPromise = null,
+    pendingConfirmation = null;
   const expandedResults = new Set();
   const terminal = (job) =>
     ["READY", "FAILED", "DELETE_FAILED"].includes(job.state);
-  const recipe = (id) => snapshot?.policies.find((p) => p.id === id);
+  const recipe = (id) => snapshot?.policies?.find((p) => p.id === id)
+    || snapshot?.formats?.find((p) => p.id === id);
   const splitLabel = (split) =>
     typeof split === "string" ? split : !split?.validation?.length
       ? `${split?.train?.length || 0} train · no validation`
@@ -66,8 +67,8 @@
     el(id).hidden = !message;
   }
   function sourceNote() {
-    const policy = recipe(el("policy-export-format").value);
-    const source = snapshot?.sessions.find((s) => s.id === sourceSessionId);
+    const policy = preparation?.policies.find((p) => p.id === el("policy-export-format").value);
+    const source = preparation?.session;
     for (const id of ["preparation-validation", "preparation-seed"]) {
       el(id).disabled = source?.episodes === 1 || policy?.split_mode === "upstream";
       el(id).closest(".field").hidden = el(id).disabled;
@@ -108,7 +109,7 @@
     );
     el("create-policy-export").disabled =
       busy ||
-      catalogState !== "ready" ||
+      !preparation ||
       !source?.eligible ||
       !source.episodes ||
       !policy?.available ||
@@ -176,47 +177,49 @@
     await refresh();
   }
   async function updateSnapshot(value) {
+    // Readiness and training setup come from the server's current adapter catalog.
+    // A browser snapshot must never override a newly archived/restored policy.
     snapshot = value;
     renderHistory();
-    const signature = JSON.stringify(
-      snapshot.exports.map((j) => [
-        j.id,
-        j.resource_id,
-        j.version_id,
-        j.bundle_id,
-        j.state,
-        j.locations,
-      ]),
-    );
-    // A dialog can observe completion before the poll does. Compare against the
-    // registry's last update, rather than the previous dialog/poll snapshot.
-    if (signature !== registrySignature) {
-      await loadDataRegistry(true);
-      registrySignature = signature;
+  }
+  function populatePolicies(selected = null) {
+    const control = el("policy-export-format");
+    control.replaceChildren();
+    for (const policy of preparation.policies) {
+      const format = policy.container && !policy.name.toLowerCase().includes(policy.container.toLowerCase())
+        ? ` · ${policy.container}` : "";
+      control.add(new Option(
+        `${policy.name}${format}${!policy.available ? " · unavailable" : !policy.trainable ? " · export only" : ""}`,
+        policy.id));
     }
+    if (selected !== null) control.value = selected;
+  }
+  function visible() {
+    return !window.SkynetRefresh?.stopped && document.visibilityState === "visible" &&
+      (dialog.open || detail.open ||
+        (typeof activeTab !== "undefined" && ["collection", "datasets"].includes(activeTab)));
   }
   async function refreshNow() {
     clearTimeout(timer);
     try {
       await request();
-      if (dialog.open && el("policy-export-format").options.length) {
-        error("policy-export-error", null);
-        retryPreparation.hidden = true;
-        sourceNote();
+      if (dialog.open && preparationDirty) {
+        preparationDirty = false;
+        const token = generation;
+        const current = await request(`/options/${encodeURIComponent(sourceSessionId)}`);
+        if (token === generation && dialog.open) {
+          const selected = el("policy-export-format").value;
+          preparation = current;
+          populatePolicies(selected);
+          sourceNote();
+        }
       }
-      if (detail.open && selectedResource) await renderDataset();
-      if (snapshot.exports.some((j) => !terminal(j)))
-        timer = setTimeout(refresh, 3000);
+      if (detail.open && selectedResource && pendingConfirmation !== detailGeneration)
+        await renderDataset();
+      if (visible() && !window.SkynetRefresh?.connected && snapshot.exports.some((j) => !terminal(j)))
+        timer = setTimeout(() => { if (visible() && !window.SkynetRefresh?.connected) void refresh(); }, 3000);
     } catch (e) {
-      if (dialog.open) {
-        error("policy-export-error", e.message);
-        el("create-policy-export").disabled = true;
-        retryPreparation.hidden = false;
-        retryPreparation.onclick = () =>
-          el("policy-export-format").options.length
-            ? refresh()
-            : window.openPolicyExport(sourceSessionId);
-      } else if (detail.open) datasetLoadError(e.message);
+      if (detail.open) datasetLoadError(e.message);
       else {
         el("policy-export-history").hidden = false;
         el("policy-export-jobs").textContent = e.message;
@@ -228,6 +231,7 @@
     SkynetDialog.close(detail);
     sourceSessionId = sessionId;
     resourceId = null;
+    preparation = null;
     error("policy-export-error", null);
     retryPreparation.hidden = true;
     retryPreparation.onclick = () => window.openPolicyExport(sessionId);
@@ -243,30 +247,15 @@
     try {
       if (!sessionId)
         throw new Error("Open preparation from a recording session.");
-      await request();
+      const result = await request(`/options/${encodeURIComponent(sessionId)}`);
       if (token !== generation || !dialog.open) return;
-      const source = snapshot.sessions.find((s) => s.id === sessionId);
+      preparation = result;
+      const { session: source, resource } = preparation;
       if (!source)
         throw new Error("This recording session is no longer available.");
       resourceId = source.resource_id || null;
-      const resource = resourceId
-        ? (await api(`/api/data/resources/${encodeURIComponent(resourceId)}`))
-            .resource
-        : null;
-      if (token !== generation || !dialog.open) return;
-      for (const policy of snapshot.policies) {
-        const format =
-          policy.container &&
-          !policy.name.toLowerCase().includes(policy.container.toLowerCase())
-            ? ` · ${policy.container}`
-            : "";
-        el("policy-export-format").add(
-          new Option(
-            `${policy.name}${format}${!policy.available ? " · unavailable" : !policy.trainable ? " · export only" : ""}`,
-            policy.id,
-          ),
-        );
-      }
+      preparationDirty = false;
+      populatePolicies();
       el("policy-export-name").value =
         resource?.metadata?.display_name || resource?.name || source.name;
       el("policy-export-name").readOnly = Boolean(resource);
@@ -274,9 +263,9 @@
         ? "Adds a prepared result to this dataset."
         : "Name this dataset.";
       sourceNote();
-      renderHistory();
     } catch (e) {
       if (token === generation && dialog.open) {
+        preparation = null;
         error("policy-export-compatibility", null);
         error("policy-export-error", e.message);
         retryPreparation.hidden = false;
@@ -535,15 +524,7 @@
         activityError = `Conversion history unavailable: ${e.message}`;
       }
       if (token !== detailGeneration || !detail.open) return;
-      // The catalog read can publish a just-finished conversion. Read its
-      // resource again so Formats and the detail rows use the same results.
-      if (!activityError) {
-        const current = await api(
-          `/api/data/resources/${encodeURIComponent(r.id)}`,
-        );
-        if (token !== detailGeneration || !detail.open) return;
-        selectedResource = r = current.resource;
-      }
+
     }
     const jobs =
       r.category === "dataset"
@@ -593,8 +574,44 @@
     }
   }
 
+  function showAcceptedPreparation(job) {
+    const token = ++detailGeneration;
+    pendingConfirmation = token;
+    expandedResults.clear();
+    selectedResource = { ...preparation?.resource, id: job.resource_id };
+    const policy = preparation?.policies.find((item) => item.id === job.format);
+    el("prepared-dataset-title").textContent =
+      job.name || preparation?.resource?.metadata?.display_name || el("policy-export-name").value;
+    el("prepared-dataset-context").textContent = job.state === "READY"
+      ? "Conversion is prepared"
+      : "Conversion request accepted";
+    error("prepared-dataset-error", null);
+    el("prepared-dataset-actions").innerHTML =
+      `<button type="button" class="button button-outline" data-data-history="${esc(job.resource_id)}">Files and history</button>`;
+    el("prepared-dataset-content").innerHTML =
+      `<section data-preparation-accepted><strong>${esc(policy?.name || job.format || "Dataset conversion")}</strong>
+      <p>${statusPill(job.state || "ACCEPTED")} ${esc(job.detail || stageLabels[job.stage] || job.state || "Request accepted")}</p>
+      <p class="secondary">Loading dataset details…</p></section>`;
+    SkynetDialog.close(dialog);
+    SkynetDialog.open(detail);
+    return token;
+  }
+  async function finishAcceptedPreparation(token) {
+    try {
+      // An older poll may predate the accepted job. Complete a fresh read before
+      // replacing its acknowledgment with the complete dataset history.
+      await refreshAfterMutation();
+      if (token !== detailGeneration || !detail.open) return;
+      pendingConfirmation = null;
+      await renderDataset(token);
+    } catch (e) {
+      if (token === detailGeneration && detail.open) datasetLoadError(e.message);
+    }
+  }
+
   window.openPreparedDataset = async (id) => {
     const token = ++detailGeneration;
+    pendingConfirmation = null;
     const retainDetails = detail.open && selectedResource?.id === id;
     if (!retainDetails) {
       expandedResults.clear();
@@ -716,18 +733,10 @@
           seed: Number(el("preparation-seed").value),
         }),
       });
-      if (token === generation && dialog.open) {
-        SkynetDialog.close(dialog);
-        await activateTab("data", true, "registry");
-        await loadDataRegistry(true);
-        const search = el("data-resource-search");
-        delete search.dataset.recordingId;
-        delete search.dataset.resourceIds;
-        search.value = job.resource_id;
-        refreshDataResourceTables();
-        await window.openPreparedDataset(job.resource_id);
-      }
-      await refresh();
+      if (token === generation && dialog.open)
+        void finishAcceptedPreparation(showAcceptedPreparation(job));
+      else
+        void refreshAfterMutation();
     } catch (e) {
       if (token === generation && dialog.open)
         error("policy-export-error", e.message);
@@ -736,7 +745,22 @@
       sourceNote();
     }
   };
-  document.addEventListener("collection-recordings-changed", refresh);
+  window.SkynetRefresh?.register("exports", ["exports", "data", "adapters", "recordings"], visible, refresh,
+    topics => {
+      if (topics.includes("adapters")) catalogState = "loading";
+      if (topics.some(topic => ["adapters", "recordings", "data"].includes(topic))) preparationDirty = true;
+    });
+  document.addEventListener("collection-recordings-changed", () => {
+    if (visible()) void refresh();
+  });
   document.addEventListener("dataset-preparation-refresh-requested", refresh);
-  refresh();
+  document.addEventListener("skynet-live-updates", () => {
+    clearTimeout(timer);
+    if (visible() && !window.SkynetRefresh?.connected) void refresh();
+  });
+  document.addEventListener("visibilitychange", () => {
+    clearTimeout(timer);
+    if (visible()) void refresh();
+  });
+  if (visible()) void refresh();
 })();

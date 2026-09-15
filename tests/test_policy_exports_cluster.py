@@ -19,6 +19,7 @@ from test_policy_exports import setup as offline_setup
 class Cluster:
     def __init__(self):
         self.files, self.submissions = {}, []
+        self.uploads = []
         self.state = "PENDING"
         self.fail_submit = False
         self.fail_status = False
@@ -31,6 +32,13 @@ class Cluster:
         remote = f"{WORK_ROOT}/jobs/runs/{identifier}/{path}"
         self.files[remote] = content
         return gateway, remote
+
+    def write_capsule_files(self, identifier, files, gateway):
+        self.uploads.append(dict(files))
+        return gateway, {
+            path: self.write_capsule_file(identifier, path, content, gateway)[1]
+            for path, content in files.items()
+        }
 
     def submit_script(self, script, identifier, gateway, *, submission_key):
         assert gateway == "sky2"
@@ -112,6 +120,9 @@ def test_all_formats_use_resumable_cpu_job_and_only_remote_payloads(setup, forma
     assert pending["cluster_account"] == "rl2-lab"
     assert pending["cluster_cpus"] == 4
     assert len(service.cluster.submissions) == 1
+    assert len(service.cluster.uploads) == 1
+    assert any(path.endswith("/request.json") for path in service.cluster.uploads[0])
+    assert any(path.endswith("/worker/cluster_worker.py") for path in service.cluster.uploads[0])
     script = pending["cluster_script"]
     assert "#SBATCH --cpus-per-task=4" in script
     assert "#SBATCH --gres" not in script and "export CUDA_VISIBLE_DEVICES=" in script
@@ -307,7 +318,7 @@ def test_migration_retains_exact_local_payload_until_cluster_verification(setup,
         assert gateway == "sky2" and hashlib.sha256(path.read_bytes()).hexdigest() == checksum
         uploaded.append(relative_path)
         return f"{WORK_ROOT}/jobs/runs/{identifier}/{relative_path}"
-    monkeypatch.setattr("skynet_app.capture_processing.service.upload_capture", upload)
+    monkeypatch.setattr("skynet_app.cluster_upload.upload_capture", upload)
     service.migrate_local_copy(job["id"])
     service.prepare(job["id"])
     pending = service.get(job["id"])
@@ -427,7 +438,7 @@ def test_existing_verified_cluster_copy_migrates_original_zip_without_cpu_job(of
         uploads.append(relative_path)
         if failure == "zip_changed":
             archive.write_bytes(zip_bytes + b"new local bytes")
-    monkeypatch.setattr("skynet_app.capture_processing.service.upload_capture", upload)
+    monkeypatch.setattr("skynet_app.cluster_upload.upload_capture", upload)
     if failure == "zip_record_mismatch":
         archive.write_bytes(zip_bytes + b"unrecorded bytes")
         with pytest.raises(ValueError, match="recorded checksum"):
@@ -536,3 +547,30 @@ def test_retry_publishes_verified_archive_only_from_its_own_previous_attempt(set
     assert final["state"] == ("READY" if archive == "previous" else "FAILED"), final
     if archive == "previous":
         assert final["remote_archive"] == result["archive_path"]
+
+
+def test_archive_source_lookup_reads_each_selected_session_once(setup, monkeypatch):
+    service, session, _, resolved, _ = setup
+    job = service.create(session["id"], "dp", "Archived demonstration")
+    reads = []
+    def get(identifier):
+        reads.append(identifier)
+        return session
+    monkeypatch.setattr(service.live, "get", get)
+    sources = service._archived_sources(job)
+    assert len(sources) == len(session["recordings"])
+    assert reads == [session["id"]]
+    assert set(resolved) == {source["path"] for source in sources} | {source["image_path"] for source in sources}
+
+
+def test_failed_capsule_upload_never_submits_job(setup, monkeypatch):
+    service, session, *_ = setup
+    job = service.create(session["id"], "dp", "Archived demonstration")
+    def broken(*args, **kwargs):
+        raise ClusterError("Cluster capsule upload verification failed")
+    monkeypatch.setattr(service.cluster, "write_capsule_files", broken)
+    service.prepare(job["id"])
+    assert service.cluster.submissions == []
+    result = service.get(job["id"])
+    assert not result.get("cluster_script")
+    assert "upload verification failed" in result["error"]

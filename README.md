@@ -54,6 +54,13 @@ uv run uvicorn skynet_app.main:app --reload --reload-dir skynet_app --reload-dir
 
 Open `http://127.0.0.1:8080` and enter your email. No password or email verification is required. See [email workspaces](docs/email-workspaces.md) for migration and shared-data behavior. The generated API documentation is available at `http://127.0.0.1:8080/api/docs`.
 
+If the cluster or its central database cannot be reached, the local page stays
+available and displays “Cannot access the Skynet cluster” with network/VPN
+guidance and a **Retry connection** button. Startup retries the cluster connection
+five seconds after each failed attempt. Restore network/VPN access and retry the
+page to resume your existing workspace. Requests rejected while startup is
+waiting are not replayed.
+
 Run the test suite:
 
 ```bash
@@ -596,3 +603,10 @@ For a read-only metadata and file-presence check, run `python skynet_app/adapter
 - Statistical reproducibility may be the strongest available guarantee for nondeterministic frameworks and simulators.
 
 Policy-aware dataset preparation and management are described in [Dataset preparation](docs/policy-data-exports.md). One dataset groups original revisions, prepared formats, verified local/cluster copies and experiment usage. DP and ACT support training and evaluation through the pinned XPolicyLab adapters; shared XPolicyLab HDF5 is an export format. All entry points use the same preparation workflow.
+
+
+## Retired collection workflows
+
+The old state-only conversion routes under `/api/collection/live/conversions`, their creation endpoint, and the `/api/collection/local` and `/api/collection/processing` routers have been removed. Current recording conversion uses `/api/data/exports`. The removed code no longer starts its conversion monitor or adds conversion-history reads to the live collection overview.
+
+Stored recordings, datasets, files, and historical database rows are preserved. Current video rendering, archive/deletion guards, binary uploads, and Slurm helpers remain supported. Details: [retired conversion routes](docs/collection-conversion.md), [retired offline experiment](docs/dexverse-recording-pipeline.md).

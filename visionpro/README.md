@@ -1,6 +1,6 @@
 # Skynet Capture (visionOS 2.0+)
 
-A native offline recorder for Apple Vision Pro. No NVIDIA GPU or CloudXR connection is needed. Hand joints and device poses come from ARKit; camera images, object poses, task success and robot actions are not synthesized.
+A standalone native offline recorder for Apple Vision Pro. The former Skynet backend importer and offline experiment APIs have been retired; this app exports native files through the system share control. No NVIDIA GPU or CloudXR connection is needed. Hand joints and device poses come from ARKit; camera images, object poses, task success and robot actions are not synthesized.
 
 ## Install and test
 
@@ -10,8 +10,8 @@ A native offline recorder for Apple Vision Pro. No NVIDIA GPU or CloudXR connect
 4. Enable Settings → Privacy & Security → Developer Mode on the headset after pairing. Complete any restart and confirmation, select the headset as Xcode's run destination, and run the app. Developer provisioning may require Apple account authentication and headset confirmation. The first connection can take several minutes while Xcode prepares the headset; keep it worn, unlocked, and on the same network. If launch is blocked by an untrusted developer certificate, open Settings → General → VPN & Device Management on the headset, select your Developer App certificate, and trust it, then run again from Xcode.
 5. Enter a task name and choose Start recording. Allow hand tracking and keep both hands visible. Tracking opens automatically and recording begins when a hand and the head are tracked. Cancel is available while preparing; failures or a 30-second readiness timeout show a specific message.
 6. Record approximately 10 seconds, move both hands and your head, then Stop and save. Tracking closes automatically. Confirm the saved frame and tracked-head counts are nonzero.
-7. Choose Share beside a saved recording to open AirDrop / Save to Files. Share becomes available after tracking closes and uses the native system share control with a supplied preview. In the Skynet browser, Data → Collection → Import recording. Verify left/right/head counts, duration and warnings. Export the original and compare SHA-256 if checking data integrity.
-8. Repeat the same import: it should report the existing recording. Interrupt tracking during a second recording: it must be labeled interrupted and rejected as a completed dataset.
+7. Choose Share beside a saved recording to open AirDrop / Save to Files. Share becomes available after tracking closes and uses the native system share control with a supplied preview. Preserve the exported JSONL file as the original recording; Skynet no longer exposes the old import UI or API.
+8. Interrupt tracking during a second recording: the saved file must be labeled interrupted. Consumers must not treat it as a completed demonstration.
 
 Temporary tracking pauses while preparing can recover when the app becomes active. A pause during recording finalizes that file as interrupted and ends tracking; choose Start recording for a new capture. The UI handles the tracking-space lifecycle automatically.
 
@@ -26,18 +26,16 @@ Each UTF-8 JSONL file has one `header`, sequential `frame` records, and one `foo
 - One frame is generated per hand update; left/right records interleave. Head pose is queried at the current `CACurrentMediaTime`, stored as `head_timestamp`. ARKit hand-update timestamps can have a different clock origin and must not be used as head-query times. Starting with recorder 1.1, the header names each timestamp clock explicitly; preserve these separate clocks when processing data. This is event-driven sampling, not a promised fixed rate. No pose is substituted when a head anchor is unavailable. Consumers must honor tracking flags, including each joint's flag.
 - Footer: frame count, completion flag, stop reason, duration and tracked-hand counts. Interrupted or incomplete files remain available for recovery but are not accepted as completed datasets.
 
-Capture streams to disk and synchronizes periodically. Memory use does not grow with recording duration. The importer validates every record and preserves the source bytes. Its 512 MB limit bounds upload/validation cost. Imports are content-addressed and repeated imports are idempotent. A changed file cannot replace an existing session identity.
+Capture streams to disk and synchronizes periodically. Memory use does not grow with recording duration. Consumers of exported files must validate every record, preserve the source bytes, and respect interrupted or incomplete recordings.
 
-## Storage and future providers
+## Storage and backend support
 
-The server saves files under its database directory, `local-captures/`, and registers them with format `visionpro_tracking_jsonl_v1` and status `LOCAL`. They are not automatically available on the training cluster. Export the original for storage elsewhere; robot training requires an explicitly implemented retargeting/conversion pipeline and transfer to accessible storage.
+Recordings remain in the native app's Documents/Skynet Recordings folder until explicitly removed. Export originals with the system share control. Skynet's former `/api/collection/local` and `/api/collection/processing` APIs and their provider implementation have been removed; existing server-side files and database records were not deleted by that code cleanup.
 
-`skynet_app/local_capture.py` defines the `CaptureProvider` protocol and provider registry. Providers inspect native files; shared storage, identity, import and export logic remains independent of their device. Cluster collection adapters remain the separate execution path for simulators such as DexVerse.
-
-DexVerse's Isaac Sim/CloudXR workflow requires an NVIDIA GPU host. Its raw robot-action pickle format is distinct from local headset tracking. The pinned CloudXR sample client requires a newer visionOS release than this local app. Do not relabel one format as the other.
+For live simulator collection, use the supported Isaac Sim/CloudXR workflow in Skynet. Its robot-action trajectories have a different schema from this recorder's headset tracking.
 
 ## Build verification
 
 `xcodebuild -project visionpro/SkynetCapture.xcodeproj -scheme SkynetCapture -sdk xros -destination 'generic/platform=visionOS' -derivedDataPath /tmp/skynet-vision-build CODE_SIGNING_ALLOWED=NO build`
 
-This verifies compilation for physical hardware. It does not provision or install the app. Real headset recording, permissions, sharing and re-import must be tested separately.
+This verifies compilation for physical hardware. It does not provision or install the app. Real headset recording, permissions and sharing must be tested separately.

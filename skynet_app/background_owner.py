@@ -11,10 +11,11 @@ log = logging.getLogger(__name__)
 
 
 class BackgroundOwner:
-    def __init__(self, database, start_services, stop_services, *, interval=3):
+    def __init__(self, database, start_services, stop_services, *, interval=3, companions=()):
         self.database = database
         self.start_services, self.stop_services = start_services, stop_services
         self.interval = interval
+        self.companions = companions
         self.stop_event = threading.Event()
         self.thread = None
         self.state = "stopped"
@@ -23,6 +24,8 @@ class BackgroundOwner:
         if self.thread and self.thread.is_alive():
             return
         self.stop_event.clear()
+        for companion in self.companions:
+            companion.start()
         self.thread = threading.Thread(
             target=self._run, name="skynet-background-owner", daemon=True
         )
@@ -76,5 +79,9 @@ class BackgroundOwner:
 
     def stop(self):
         self.stop_event.set()
-        if self.thread:
-            self.thread.join(timeout=30)
+        try:
+            if self.thread:
+                self.thread.join(timeout=30)
+        finally:
+            for companion in self.companions:
+                companion.stop()

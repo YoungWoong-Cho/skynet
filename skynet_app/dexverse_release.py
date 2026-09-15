@@ -55,3 +55,9 @@ def release_profile(target, task, cluster_root):
         gateway="sky2",
         image_capture=False,
     )
+
+
+# Default live collection release, independent of the retired offline launcher.
+TASK = "Dexverse-PickUpStick-v0"
+ROBOT = "skynet_shadow_right"
+REVISION = "30cc673e27684b9f10186fa6bea731aed246bc9f"

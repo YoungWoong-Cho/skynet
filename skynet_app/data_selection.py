@@ -40,6 +40,10 @@ def snapshot(database, selections):
             }
             assignments.append(assignment)
             names.append(row["name"])
+    return _manifest(assignments, names)
+
+
+def _manifest(assignments, names):
     manifest = {
         "schema_version": "skynet.data-bundle/v1", "name": ", ".join(names),
         "version": "experiment-inputs", "metadata": {"direct_selection": True},
@@ -52,11 +56,8 @@ def snapshot(database, selections):
 def choices(database):
     """List actual prepared results, including incompatible formats for explanation."""
     result = []
-    for resource in database.list_data_resources():
-        if resource["category"] != "dataset":
-            continue
-        full = database.get_data_resource(resource["id"])
-        for version in full.get("versions", []):
+    for resource in database.list_data_resources(category="dataset", include_versions=True):
+        for version in resource["versions"]:
             if version["format"] == "skynet.episodes/v1":
                 continue
             locations = [loc for loc in version.get("locations", [])
@@ -67,10 +68,17 @@ def choices(database):
             # One deterministic cluster location per result; a saved experiment keeps its receipt.
             location = min(locations, key=lambda loc: str(loc["id"])) if locations else None
             selection = {"version_id": version["id"], "location_id": location["id"] if location else None}
-            frozen = snapshot(database, [selection])
+            assignment = database.bundle_manifest_assignment({
+                "role": "training_data", "position": 0, "version_id": version["id"],
+                "config": {"location_id": selection["location_id"]},
+            }, resource, version)
+            assignment["version"]["metadata"] = {
+                **assignment["version"]["metadata"], "registered_version_id": version["id"],
+            }
+            frozen = _manifest([assignment], [resource["name"]])
             result.append({
                 **frozen, "id": version["id"], "selection": selection,
-                "name": full.get("metadata", {}).get("display_name") or full["name"],
+                "name": resource.get("metadata", {}).get("display_name") or resource["name"],
                 "format": version["format"], "created_at": version["created_at"],
                 "resource_id": resource["id"],
             })

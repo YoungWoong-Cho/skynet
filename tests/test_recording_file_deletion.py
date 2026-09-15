@@ -34,7 +34,7 @@ def files(recording, monkeypatch):  # noqa: F811 - imported pytest fixture
         parent.reviews,
         parent.videos,
         parent.previews,
-        parent.conversions,
+        conversion_root=parent.conversion_root,
     )
     old = Path(job["archive"]["root"]).parent
     # Three native files, each with a camera sidecar and independent cached review.

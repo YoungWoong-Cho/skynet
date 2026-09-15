@@ -81,7 +81,7 @@ def setup(tmp_path, monkeypatch):
                 while block := f.read(8192):
                     yield block
     session = dict(id="session-1", state="STOPPED", root=str(source.parent), gateway="test-host", created_at="2026-09-08", profile=dict(display_name="Test hand", task="test-task", robot="floating_shadow_bimanual"), recordings=[r["path"] for r in receipts], recording_checksums={r["path"]: r["sha256"] for r in receipts}, recording_images={r["path"]: r["images"] for r in receipts})
-    live = SimpleNamespace(root=ROOT, database=Database(tmp_path / "db.store"), get=lambda identifier: session, list=lambda: [session], transport=lambda _: Transport())
+    live = SimpleNamespace(root=ROOT, database=Database(tmp_path / "db.store"), get=lambda identifier: session, list=lambda **kwargs: [session], transport=lambda _: Transport())
     service = PolicyExportService(LiveReviewService(live, root=tmp_path / "reviews"), root=tmp_path / "exports")
     monkeypatch.setattr(service, "dispatch", lambda _: None)
     # Exercise the actual converter locally against tiny synthetic recordings.
@@ -402,15 +402,25 @@ def test_shared_preparation_redacts_other_workspace_experiment_details(setup, mo
     created = service.create(session['id'], 'act', 'Shared preparation')
     job = service.get(created['id'])
     job['state'] = 'READY'
+    job['version_id'] = job['source_version_id']
     monkeypatch.setattr(service, 'list', lambda: [dict(job)])
-    monkeypatch.setattr(service.database, 'get_data_resource_version', lambda _: {'manifest_sha256': 'a'*64, 'locations': []})
-    monkeypatch.setattr(service.database, 'data_version_usage', lambda _: [
-        {'experiment_id': 'private-experiment', 'name': 'Private name', 'run_id': 'private-run', 'revision_number': 1}
-    ])
+    version = service.database.get_data_resource_version(job['version_id'])
+    spec = {'data': {'bundle': {'assignments': [{'version': {'manifest_sha256': version['manifest_sha256']}}]}}}
+    private = service.database.create_experiment(name='Private name', requested_spec=spec)
     workspace, _ = WorkspaceDirectory(service.database).open('teammate@example.com')
     scoped = Database(service.database.path, workspace_id=workspace['id'])
     result = service.options(workspace_database=scoped)
     assert result['exports'][0]['usage'] == [{'other_workspace': True}]
     assert 'Private name' not in json.dumps(result)
     # Internal deletion checks retain the actual dependency information.
-    assert service.database.data_version_usage('a'*64)[0]['experiment_id'] == 'private-experiment'
+    assert service.database.data_version_usage(version['manifest_sha256'])[0]['experiment_id'] == private['id']
+
+
+def test_duplicate_preparation_does_not_scan_other_datasets_or_upload_metadata(setup, monkeypatch):
+    service, session, _ = setup
+    first = service.create(session["id"], "dp", "Saved dataset")
+    def unexpected(*args, **kwargs):
+        pytest.fail("Duplicate preparation must use its saved identity without registry scan or metadata upload")
+    monkeypatch.setattr(service.database, "list_data_resources", unexpected)
+    monkeypatch.setattr(service, "register_source", unexpected)
+    assert service.create(session["id"], "dp", "Duplicate")["id"] == first["id"]

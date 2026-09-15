@@ -12,6 +12,11 @@ const dom = new JSDOM(
 const w = dom.window,
   el = (id) => w.document.getElementById(id),
   calls = [];
+let exportSubscription;
+w.activeTab = "cluster";
+w.SkynetRefresh = {connected: true, register(_key, topics, visible, refresh, invalidate) {
+  exportSubscription = {topics, visible, refresh, invalidate};
+}};
 const catalogEvents = [];
 w.document.addEventListener("dataset-preparation-status", event => catalogEvents.push(event.detail));
 w.HTMLDialogElement.prototype.showModal = function () {
@@ -120,8 +125,13 @@ const resource = {
 };
 w.api = async (path, request = {}) => {
   calls.push([path, request]);
-  if (request.method === "POST") return { id: "job", resource_id: "dataset" };
+  if (request.method === "POST") return { id: "job", resource_id: "dataset", state: "QUEUED", stage: "QUEUED", format: "dp", detail: "Waiting for conversion worker" };
   if (path.startsWith("/api/data/resources/")) return { resource };
+  if (path.startsWith("/api/data/exports/options/")) {
+    const session = options.sessions.find(item => item.id === decodeURIComponent(path.split("/").at(-1)));
+    return structuredClone({session, policies: options.policies, resource: session?.resource_id ? resource : null});
+  }
+  if (path === "/api/data/exports/jobs") return structuredClone({formats: options.policies, exports: options.exports});
   return structuredClone(options);
 };
 const flush = async () => {
@@ -136,6 +146,7 @@ try {
     ),
   );
   await flush();
+  assert.equal(calls.length, 0, "Other tabs do not eagerly load the export catalog or registry");
   assert.equal(w.stateClass("SUCCEEDED"), "is-running");
   assert.equal(w.stateClass("ON CLUSTER"), "is-running");
   assert.equal(w.stateClass("LOCAL"), "is-local");
@@ -150,7 +161,10 @@ try {
     el("policy-export-compatibility").textContent,
     /Images unavailable/,
   );
+  const beforeOpenCalls = calls.length, beforeOpenRegistry = registryRefreshes.length;
   await w.openPolicyExport("new", "dataset");
+  assert.deepEqual(calls.slice(beforeOpenCalls).map(([path]) => path), ["/api/data/exports/options/new"], "Opening Convert requests only the selected recording's settings");
+  assert.equal(registryRefreshes.length, beforeOpenRegistry, "Convert does not reload the dataset registry");
   assert.equal(el("create-policy-export").disabled, false);
   el("policy-export-format").value = "openpi";
   el("policy-export-format").dispatchEvent(new w.Event("change"));
@@ -185,6 +199,7 @@ try {
   });
   assert.equal(el("policy-export-dialog").open, false);
   assert.equal(el("prepared-dataset-dialog").open, true);
+  assert.doesNotMatch(el("prepared-dataset-content").textContent, /Loading dataset details/, "The first accepted job advances to dataset details without a previously loaded catalog");
   options.policies.push({id:'egoverse',name:'EgoVerse',available:true,trainable:true});
   await w.openPolicyExport('new');
   el('policy-export-format').value='egoverse';
@@ -325,9 +340,9 @@ try {
   options.exports[0].state = "READY";
   options.exports[0].bundle_id = "new-cluster-bundle";
   await w.openPreparedDataset("dataset");
-  assert.equal(registryRefreshes.length, beforeReady + 1, "opening a completed conversion refreshes the registry even before polling");
+  assert.equal(registryRefreshes.length, beforeReady, "Detail refresh does not reload the whole registry; the shared data invalidation owns it");
   await w.openPreparedDataset("dataset");
-  assert.equal(registryRefreshes.length, beforeReady + 1, "unchanged data does not reload the registry");
+  assert.equal(registryRefreshes.length, beforeReady, "unchanged data does not reload the registry");
   options.exports = [];
   resource.metadata = {};
   resource.versions = [{id: "imported", format: "lerobot-v2.0", status: "READY", path: "/cluster/imported", revision: "abc123", metadata: {episodes: 42}}];
@@ -342,6 +357,35 @@ try {
   assert.equal(el("policy-export-name").readOnly, true, "Preparing another version cannot rename the dataset");
   assert.match(el("policy-export-name-help").textContent, /prepared result to this dataset/);
   const normalApi = w.api;
+  const normalRegistry = w.loadDataRegistry, normalActivation = w.activateTab;
+  const existingExports = options.exports;
+  options.exports = [{id: "accepted-refresh", resource_id: "dataset", state: "QUEUED", format: "dp"}];
+  let finishAcceptedRegistry;
+  w.loadDataRegistry = () => assert.fail("Job status refresh must not reload the registry");
+  w.api = (path, request = {}) => path === "/api/data/exports/jobs"
+    ? new Promise(resolve => { finishAcceptedRegistry = () => resolve({exports: structuredClone(options.exports)}); })
+    : normalApi(path, request);
+  w.activateTab = () => assert.fail("Acknowledging a conversion must not wait for tab-wide loading");
+  const beforeAcceptedCalls = calls.length;
+  el("policy-export-form").dispatchEvent(new w.Event("submit", {cancelable: true}));
+  await flush();
+  assert.equal(typeof finishAcceptedRegistry, "function");
+  assert.equal(el("policy-export-dialog").open, false);
+  assert.equal(el("prepared-dataset-dialog").open, true);
+  assert.equal(el("prepared-dataset-context").textContent, "Conversion request accepted");
+  assert.match(el("prepared-dataset-content").textContent, /QUEUED.*Waiting for conversion worker/s);
+  assert.equal(calls.slice(beforeAcceptedCalls).filter(([path]) => path.startsWith("/api/data/resources/")).length, 0,
+    "Acknowledgment appears before any dataset detail or full registry response");
+  assert.equal(calls.slice(beforeAcceptedCalls).filter(([, request]) => request.method === "POST").length, 1);
+  el("close-prepared-dataset").click();
+  finishAcceptedRegistry();
+  await flush();
+  assert.equal(el("prepared-dataset-dialog").open, false, "Delayed background enrichment cannot reopen a dismissed acknowledgment");
+  w.loadDataRegistry = normalRegistry;
+  w.activateTab = normalActivation;
+  w.api = normalApi;
+  options.exports = existingExports;
+  await w.openPolicyExport("new");
   let finishSubmission;
   w.api = (path, request = {}) => request.method === "POST"
     ? new Promise(resolve => { finishSubmission = resolve; }) : normalApi(path, request);
@@ -371,7 +415,7 @@ try {
   assert.equal(el("prepared-dataset-error").hidden, true, "Successful retry clears the matching detail error");
   assert.match(el("prepared-dataset-content").textContent, /lerobot-v2.0/);
   w.api = async (path, request = {}) => {
-    if (path === "/api/data/exports") throw new Error("Preparation catalog temporarily unavailable");
+    if (path === "/api/data/exports/jobs") throw new Error("Preparation catalog temporarily unavailable");
     return normalApi(path, request);
   };
   await w.openPreparedDataset("dataset");
@@ -385,7 +429,7 @@ try {
   assert.equal(el("prepared-dataset-error").hidden, true);
   assert.equal(catalogEvents.at(-1).state, "ready", "Retry broadcasts recovery to the recording table");
   w.api = async (path, request = {}) => {
-    if (path === "/api/data/exports") throw new Error("Later catalog outage");
+    if (path === "/api/data/exports/jobs") throw new Error("Later catalog outage");
     return normalApi(path, request);
   };
   w.document.dispatchEvent(new w.CustomEvent("collection-recordings-changed"));
@@ -398,7 +442,7 @@ try {
   await flush();
   assert.equal(el("prepared-dataset-error").hidden, true);
   w.api = async (path, request = {}) => {
-    if (path === "/api/data/exports") throw new Error("Initial preparation catalog outage");
+    if (path === "/api/data/exports/options/new") throw new Error("Initial preparation options outage");
     return normalApi(path, request);
   };
   await w.openPolicyExport("new");
@@ -424,24 +468,43 @@ try {
   assert.equal(el("prepared-dataset-error").hidden, true, "A late failure cannot contaminate the replacement dataset");
   assert.match(el("prepared-dataset-content").textContent, /lerobot-v2.0/);
   w.api = normalApi;
-  let finishOldRegistryRefresh;
-  const ordinaryRegistryRefresh = w.loadDataRegistry;
-  w.loadDataRegistry = () => new Promise(resolve => { finishOldRegistryRefresh = resolve; });
+  let finishOldPreparation;
+  w.api = (path, request = {}) => path === "/api/data/exports/options/old"
+    ? new Promise(resolve => { finishOldPreparation = resolve; }) : normalApi(path, request);
   options.sessions[0].resource_id = "older-resource";
-  options.exports = [{id: "force-registry-change", state: "READY", resource_id: "dataset"}];
   const oldPreparation = w.openPolicyExport("old");
   await flush();
-  assert.equal(typeof finishOldRegistryRefresh, "function");
-  w.loadDataRegistry = ordinaryRegistryRefresh;
+  assert.equal(typeof finishOldPreparation, "function");
   await w.openPolicyExport("new");
   assert.equal(el("create-policy-export").disabled, false);
-  finishOldRegistryRefresh();
+  finishOldPreparation({session: options.sessions[0], policies: options.policies, resource: {id: "older-resource", name: "Old"}});
   await oldPreparation;
   el("policy-export-form").dispatchEvent(new w.Event("submit", {cancelable: true}));
   await flush();
   const currentPreparation = calls.filter(([path, request]) => path === "/api/data/exports" && request.method === "POST").at(-1);
   assert.equal(JSON.parse(currentPreparation[1].body).session_id, "new");
-  assert.equal(JSON.parse(currentPreparation[1].body).resource_id, "dataset", "A late registry refresh for an earlier dialog cannot replace the current dataset binding");
+  assert.equal(JSON.parse(currentPreparation[1].body).resource_id, "dataset", "A late response for an earlier dialog cannot replace the current dataset binding");
+  w.api = normalApi;
+  let finishBackgroundCatalog;
+  w.api = (path, request = {}) => path === "/api/data/exports/jobs" && !request.method
+    ? new Promise(resolve => { finishBackgroundCatalog = resolve; }) : normalApi(path, request);
+  w.document.dispatchEvent(new w.CustomEvent("collection-recordings-changed"));
+  await flush();
+  assert.equal(typeof finishBackgroundCatalog, "function");
+  await w.openPolicyExport("new");
+  assert.equal(el("create-policy-export").disabled, false, "A pending background catalog cannot delay Convert settings");
+  finishBackgroundCatalog(structuredClone({formats: options.policies, exports: options.exports}));
+  await flush();
+  assert.equal(el("create-policy-export").disabled, false, "Background catalog updates cannot disable a prepared Convert dialog");
+  w.api = async (path, request = {}) => {
+    if (path === "/api/data/exports/jobs") throw new Error("Unrelated catalog outage");
+    return normalApi(path, request);
+  };
+  w.document.dispatchEvent(new w.CustomEvent("collection-recordings-changed"));
+  await flush();
+  assert.equal(el("create-policy-export").disabled, false, "A catalog outage does not invalidate the selected recording's successful settings response");
+  assert.equal(el("policy-export-error").hidden, true);
+  w.api = normalApi;
   resource.metadata = {managed_dataset: true};
   for (const [state, expected, jobId] of [
     ["QUEUED", "QUEUED", null],
@@ -515,7 +578,7 @@ try {
   assert.equal(el('prepared-dataset-context').textContent,'3 results');
   resource.category='file';
   w.api=async (path, request={})=>{
-    if(path==='/api/data/exports') throw new Error('Collection backend unavailable');
+    if(path==='/api/data/exports/jobs') throw new Error('Collection backend unavailable');
     return normalApi(path, request);
   };
   await w.openPreparedDataset('dataset');
@@ -527,6 +590,55 @@ try {
   await w.openPreparedDataset(resource.id);
   assert.equal(el('prepared-dataset-detail').hidden, false);
   assert.equal(el('prepared-dataset-dialog').querySelector('[data-dialog-close]').textContent.trim(), 'Close');
+  // Server readiness wins over an earlier browser policy snapshot.
+  w.api = normalApi;
+  resource.category = 'dataset';
+  options.exports = [{id:'availability', resource_id:'dataset', format:'dp', state:'READY',
+    version_id:'version-dp', training_ready:true, training_setup:{adapter:'current-policy'},
+    locations:[{kind:'cluster',status:'AVAILABLE',path:'/prepared'}]}];
+  await w.openPreparedDataset('dataset');
+  assert.ok(el('prepared-dataset-content').querySelector('[data-preparation-train]'));
+  options.exports[0].training_ready = false;
+  await exportSubscription.refresh();
+  assert.equal(el('prepared-dataset-content').querySelector('[data-preparation-train]'),null,
+    'A freshly archived adapter cannot remain trainable through cached policy fields');
+  options.exports[0].training_ready = true;
+  options.exports[0].training_setup = {adapter:'restored-policy'};
+  await exportSubscription.refresh();
+  let selectedJob;
+  w.usePreparedDataset = async job => {selectedJob=job;};
+  el('prepared-dataset-content').querySelector('[data-preparation-train]').click();await flush();
+  assert.equal(selectedJob.training_setup.adapter,'restored-policy');
+  // Availability updates in an open Convert form retain the user's fields.
+  options.sessions[1].resource_id = null;
+  await w.openPolicyExport('new');
+  el('policy-export-format').value='dp';
+  el('policy-export-name').value='Unsaved dataset title';
+  el('preparation-seed').value='17';
+  options.policies[0].available=false;
+  exportSubscription.invalidate(['adapters']);await exportSubscription.refresh();
+  assert.equal(el('create-policy-export').disabled,true);
+  assert.equal(el('policy-export-format').value,'dp');
+  assert.equal(el('policy-export-name').value,'Unsaved dataset title');
+  assert.equal(el('preparation-seed').value,'17');
+  options.policies[0].available=true;
+  exportSubscription.invalidate(['adapters']);await exportSubscription.refresh();
+  assert.equal(el('create-policy-export').disabled,false);
+  // Live SSE replaces polling; disconnected fallback remains jobs-only.
+  w.SkynetDialog.close(el('policy-export-dialog'));w.activeTab='datasets';
+  options.exports[0].state='RUNNING';
+  let fallbackTimers=0;
+  const originalTimer=w.setTimeout.bind(w);
+  w.setTimeout=(callback,delay,...args)=>{
+    if(delay===3000){fallbackTimers++;return -123;}
+    return originalTimer(callback,delay,...args);
+  };
+  await exportSubscription.refresh();assert.equal(fallbackTimers,0);
+  w.SkynetRefresh.connected=false;
+  await exportSubscription.refresh();assert.equal(fallbackTimers,1);
+  assert.equal(calls.some(([path,request])=>path==='/api/data/exports' && !request.method),false,
+    'Current UI never downloads the full export catalog');
+  assert.equal(registryRefreshes.length,0,'Export state changes never fan out to whole-registry reads');
   console.log('Dataset registration, source selection, recovery, shared deletion entry points and direct data use passed.');
 
 } finally {

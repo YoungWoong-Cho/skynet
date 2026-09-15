@@ -6,14 +6,43 @@
   const email = document.getElementById("workspace-email");
   const message = document.getElementById("workspace-message");
   const button = form.querySelector("button[type=submit]");
+  const retry = document.createElement("button");
+  retry.id = "workspace-retry";
+  retry.type = "button";
+  retry.className = "button";
+  retry.textContent = "Retry connection";
+  retry.hidden = true;
+  message.after(retry);
   const originalFetch = window.fetch.bind(window);
   let workspace = null;
   let leaving = false;
+  let applicationStarted = false;
   const requests = new Set();
+  const sessionChannel = typeof BroadcastChannel === "undefined"
+    ? null : new BroadcastChannel("skynet-workspace-session");
+  if (sessionChannel) {
+    sessionChannel.onmessage = event => {
+      if (event.data?.type === "session-changed") leave("Workspace session changed in another tab.");
+    };
+    window.addEventListener("pagehide", () => sessionChannel.close(), { once: true });
+  }
+  window.addEventListener("pageshow", event => {
+    if (!event.persisted || leaving) return;
+    // A restored page has stopped streams and may hold an expired workspace.
+    // Reload once to revalidate the cookie and create fresh subscriptions.
+    leaving = true;
+    window.stopSkynetLiveRefresh?.();
+    content.hidden = true;
+    gate.hidden = false;
+    message.textContent = "Reconnecting…";
+    for (const controller of requests) controller.abort();
+    location.reload();
+  });
 
   function leave(messageText = "") {
     if (leaving) return;
     leaving = true;
+    window.stopSkynetLiveRefresh?.();
     content.hidden = true;
     gate.hidden = false;
     message.textContent = "Switching workspace…";
@@ -27,16 +56,24 @@
   }
 
   async function sessionRequest(method = "GET", payload) {
-    const response = await originalFetch("/api/workspace/session", {
-      method,
-      credentials: "same-origin",
-      cache: "no-store",
-      headers: {
-        "Content-Type": "application/json",
-        ...(workspace ? { "X-Skynet-Workspace": workspace.id } : {}),
-      },
-      ...(payload ? { body: JSON.stringify(payload) } : {}),
-    });
+    let response;
+    try {
+      response = await originalFetch("/api/workspace/session", {
+        method,
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: {
+          "Content-Type": "application/json",
+          ...(workspace ? { "X-Skynet-Workspace": workspace.id } : {}),
+        },
+        ...(payload ? { body: JSON.stringify(payload) } : {}),
+      });
+    } catch (error) {
+      if (error.name === "AbortError") throw error;
+      throw new Error(
+        "Cannot connect to Skynet. Check your network or VPN connection and try again.",
+      );
+    }
     const result = await response.json().catch(() => ({}));
     if (!response.ok)
       throw new Error(
@@ -62,9 +99,10 @@
       const controller = new AbortController();
       const signal =
         options.signal || (typeof input !== "string" ? input.signal : null);
-      const abort = () => controller.abort(signal?.reason);
-      if (signal?.aborted) abort();
-      else signal?.addEventListener("abort", abort, { once: true });
+      // Keep forwarding deadlines after headers arrive, while the response body loads.
+      const requestSignal = signal
+        ? AbortSignal.any([controller.signal, signal])
+        : controller.signal;
       const headers = new Headers(
         options.headers ||
           (typeof input !== "string" ? input.headers : undefined),
@@ -75,7 +113,7 @@
         const response = await originalFetch(input, {
           ...options,
           headers,
-          signal: controller.signal,
+          signal: requestSignal,
         });
         if (response.status === 401 || response.status === 409) {
           const result = await response
@@ -96,12 +134,12 @@
         return response;
       } finally {
         requests.delete(controller);
-        signal?.removeEventListener("abort", abort);
       }
     };
   }
 
   async function loadApplication() {
+    applicationStarted = true;
     document.getElementById("workspace-current-email").textContent =
       workspace.email;
     document.getElementById("workspace-current-email").title = workspace.email;
@@ -149,7 +187,8 @@
     }
     gate.hidden = true;
     content.hidden = false;
-    // Keep sticky page headings below the header when its controls wrap.
+    // Measure only the sticky offset. The header uses a separate responsive
+    // minimum so a temporary wrap cannot lock it at its largest observed height.
     if (typeof ResizeObserver !== "undefined") {
       new ResizeObserver((entries) => {
         const height = entries[0].target.getBoundingClientRect().height;
@@ -175,13 +214,18 @@
     if (button.disabled || !form.reportValidity()) return;
     button.disabled = true;
     message.textContent = "Opening workspace…";
+    retry.hidden = true;
+    retry.disabled = true;
     try {
       await sessionRequest("POST", { email: email.value.trim() });
+      sessionChannel?.postMessage({ type: "session-changed" });
       leave();
     } catch (error) {
       message.textContent = error.message;
       button.disabled = false;
       email.focus();
+    } finally {
+      retry.disabled = false;
     }
   });
 
@@ -192,6 +236,7 @@
       signOutButton.disabled = true;
       try {
         await sessionRequest("DELETE");
+        sessionChannel?.postMessage({ type: "session-changed" });
         leave();
       } catch (error) {
         signOutButton.disabled = false;
@@ -203,6 +248,8 @@
   async function start() {
     message.textContent = "Loading workspace…";
     button.disabled = true;
+    retry.disabled = true;
+    retry.hidden = true;
     try {
       workspace = await sessionRequest();
       if (workspace) return await loadApplication();
@@ -216,7 +263,16 @@
     } catch (error) {
       message.textContent = error.message;
       button.disabled = false;
+      retry.hidden = false;
+    } finally {
+      retry.disabled = false;
     }
   }
+  retry.addEventListener("click", () => {
+    if (retry.disabled || button.disabled) return;
+    // A partially loaded app must restart without installing scripts twice.
+    if (applicationStarted) location.reload();
+    else start();
+  });
   start();
 })();

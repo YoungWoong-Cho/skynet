@@ -323,6 +323,71 @@ class ClusterClient:
         host, _ = self.run_with_fallback(command, gateway, stdin=content, timeout=30)
         return host, destination
 
+    def write_capsule_files(
+        self,
+        run_id: str,
+        files: Mapping[str, str],
+        gateway: str = "auto",
+    ) -> tuple[str, dict[str, str]]:
+        """Upload a frozen capsule in one connection, verifying every file."""
+        run_id = self._run_id(run_id)
+        if not files:
+            raise ValueError("A capsule upload must contain at least one file")
+        contents = {}
+        for name, content in files.items():
+            relative = self._relative_path(name)
+            if relative in contents:
+                raise ValueError("Capsule paths must be unique")
+            if not isinstance(content, str):
+                raise ValueError("Capsule contents must be text")
+            contents[relative] = content
+        root = self.run_directory(run_id)
+        expected = {
+            name: hashlib.sha256(content.encode()).hexdigest()
+            for name, content in contents.items()
+        }
+        script = r"""
+import hashlib, json, os, pathlib, sys, tempfile
+request = json.load(sys.stdin)
+root = pathlib.Path(request["root"])
+if not root.is_absolute():
+    raise ValueError("Capsule root must be absolute")
+files = []
+for name, content in request["files"].items():
+    relative = pathlib.PurePosixPath(name)
+    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+        raise ValueError("Invalid capsule path")
+    path = root / relative
+    if any(part.is_symlink() for part in (path, *path.parents)):
+        raise ValueError("Capsule uploads cannot follow symbolic links")
+    files.append((name, path, content.encode()))
+receipts = {}
+for name, path, content in files:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".upload-")
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    receipts[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+print(json.dumps(receipts))
+"""
+        host, output = self.run_with_fallback(
+            shlex.join(["python3", "-c", script]), gateway,
+            stdin=json.dumps({"root": root, "files": contents}), timeout=30,
+        )
+        try:
+            if json.loads(output) != expected:
+                raise ValueError("Checksum receipt differs from the frozen capsule")
+        except (ValueError, TypeError) as error:
+            raise ClusterError("Cluster capsule upload verification failed") from error
+        return host, {name: f"{root}/{name}" for name in contents}
+
     def remove_capsule_file(
         self,
         run_id: str,

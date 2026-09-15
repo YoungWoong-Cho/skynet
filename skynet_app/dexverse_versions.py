@@ -4,7 +4,6 @@ from pathlib import PurePosixPath
 
 V1_REVISION = "917092d28764549f0f6a77872022c93ef3373c48"
 V1_REPOSITORY = "repos/DexVerse-ce974ac6/" + V1_REVISION
-V1_CONVERTER_SHA256 = "a97b0042f7948b4320c18f3383856dafe314023c67c6a8e4ea984a246ce1aa67"
 
 # Ordered as upstream benchmark.BASELINE_V1_TASKS at V1_REVISION. Labels describe
 # the v1 tasks, whose historical Gym names do not always describe the new goal.
