@@ -32,7 +32,7 @@ RECIPES = {
     ),
     "act": dict(
         id="act",
-        name="ACT",
+        name="ACT · Skynet recordings",
         observations=["state", "rgb"],
         format="xpolicylab-act-hdf5/v1",
         container="HDF5",
@@ -40,6 +40,14 @@ RECIPES = {
         adapter="xpolicylab-act",
         trainable=True,
         description="RGB and joint observations for ACT training.",
+    ),
+    "act-native": dict(
+        id="act-native", name="XPolicyLab · ACT · Native", observations=["state", "rgb"],
+        format="xpolicylab-act-hdf5/v1", container="HDF5", contract="skynet.act-rgb-joints/v1",
+        adapter="xpolicylab-act-native", trainable=True, split_mode="upstream", minimum_episodes=2,
+        description="Original ACT training uses its own random 80/20 split and normalization over all episodes.",
+        training_setup=dict(adapter="xpolicylab-act-native", repository=XPL_REPOSITORY,
+            revision=XPL_COMMIT, runtime="existing", runtime_profile="skynet-dp"),
     ),
     "egoverse": dict(
         id="egoverse", name="EgoVerse · RGB and joints", observations=["state", "rgb"],

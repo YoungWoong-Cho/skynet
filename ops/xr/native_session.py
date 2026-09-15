@@ -12,6 +12,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,14 +22,60 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 COLLECTION_FILES = {}
 
 
+def cloudxr_log_paths(root, started):
+    """Read only this session's logs, including SDK redirects on older builds."""
+    candidates = {root / "cloudxr.log", *root.glob("cxr_*.log")}
+    try:
+        with (root / "cloudxr.log").open("rb") as stream:
+            console = stream.read(65536).decode(errors="replace")
+        for name in re.findall(r"/[^\s'\"]*/cxr_(?:server|streamsdk)\.[^\s'\"]+\.log", console):
+            path = Path(name)
+            if path.parent == Path("/tmp"):
+                candidates.add(path)
+    except OSError:
+        pass
+    paths = []
+    for path in sorted(candidates):
+        try:
+            stat = path.stat()
+            if (not path.is_symlink() and path.is_file()
+                    and stat.st_uid == os.getuid() and stat.st_mtime >= started):
+                paths.append(path)
+        except OSError:
+            pass
+    return paths
+
+
+def cloudxr_failure(root, started, fallback):
+    lines = []
+    for path in cloudxr_log_paths(root, started):
+        try:
+            with path.open("rb") as stream:
+                stream.seek(max(0, path.stat().st_size - 65536))
+                tail = stream.read(65536).decode(errors="replace")
+            lines.extend(re.sub(r"\x1b\[[0-9;]*m", "", tail).splitlines())
+        except OSError:
+            pass
+    for line in lines:
+        match = re.search(r"Address already in use:\s*([^\s'\";]+)", line)
+        if match:
+            return f"{fallback}: signaling address {match[1]} is already in use."
+    errors = [line for line in lines if re.search(r"Failed to|\bERROR\b|\(E\)", line)]
+    if errors:
+        detail = re.sub(r"^.*?>\s*", "", errors[-1]).strip()
+        return fallback + ": " + detail[:1000]
+    return fallback + "; inspect the CloudXR log"
+
+
 def write_collection_files(root):
-    required = {"collection.py", "anatomy.py", "wrist.py", "images.py", "render_images.py", "arrays.py", "scene_geometry.py"}
+    required = {"collection.py", "anatomy.py", "wrist.py", "images.py", "render_images.py", "arrays.py", "scene_geometry.py", "retargeting_runtime.py", "trajectory.py"}
     if set(COLLECTION_FILES) != required:
         raise ValueError("Automatic collection runtime is incomplete in this session")
     source_root = root / "collector"
     source_root.mkdir()
     for name, source in COLLECTION_FILES.items():
         (source_root / name).write_text(source)
+    sys.path.insert(0, str(source_root))
     return source_root / "collection.py"
 
 
@@ -83,11 +130,14 @@ def inspect_recording(
     if (
         not isinstance(payload, dict)
         or payload.get("format") != "dexverse_trajectory"
-        or payload.get("schema_version") != 3
+        or payload.get("schema_version") != (5 if task.endswith("-v1") else 3)
         or payload.get("task") != task
         or payload.get("robot_type") != robot
     ):
         raise ValueError("Unsupported native demonstration format, task or robot")
+    if payload["schema_version"] == 5:
+        from trajectory import validate_identity
+        validate_identity(payload, task, robot, 5)
     episodes = payload.get("episodes")
     if (
         not isinstance(episodes, list)
@@ -125,6 +175,14 @@ def inspect_recording(
     return {"episodes": len(episodes), "steps": steps, "success": True}
 
 
+def simulation_returncode(process, root):
+    """Report a collector failure even if Isaac is still waiting in app.close()."""
+    error_path = root / "collection-error.json"
+    if error_path.is_file():
+        raise RuntimeError(json.loads(error_path.read_text())["error"])
+    return process.poll()
+
+
 def simulation_failure(path, fallback):
     """Surface a bounded, actionable setup error rather than only an exit code."""
     try:
@@ -139,6 +197,11 @@ def simulation_failure(path, fallback):
         for line in lines
         if "SKYNET_HAND_ERROR: " in line
     ]
+    if not hand_errors and re.search(
+        r"CUDA error: out of memory|Out of GPU memory|ERROR_OUT_OF_DEVICE_MEMORY",
+        tail, re.IGNORECASE,
+    ):
+        return fallback + ": GPU memory is exhausted."
     errors = hand_errors or [
         line
         for line in lines
@@ -422,6 +485,7 @@ def main():
                     ACCEPT_EULA="Y",
                     XDG_RUNTIME_DIR=str(run),
                     LD_LIBRARY_PATH=str(cxr / "lib"),
+                    NV_CXR_OUTPUT_DIR=str(root),
                 ),
             )
         children.append(server)
@@ -434,10 +498,10 @@ def main():
                 raise InterruptedError("Session stopped during server startup")
             if server.poll() is not None:
                 raise RuntimeError(
-                    "CloudXR exited before readiness; inspect the CloudXR log"
+                    cloudxr_failure(root, started, "CloudXR exited before readiness")
                 )
             if time.monotonic() > deadline:
-                raise RuntimeError("CloudXR did not become ready within 45 seconds")
+                raise RuntimeError(cloudxr_failure(root, started, "CloudXR did not become ready within 45 seconds"))
             time.sleep(0.3)
         # Do not export the server's bundled libraries into Isaac Sim.
         env = dict(
@@ -500,15 +564,10 @@ def main():
                 stopping = True
                 break
             if server.poll() is not None:
-                raise RuntimeError("CloudXR stopped during the live session")
-            if sim.poll() is not None:
-                if (root / "collection-error.json").exists():
-                    raise RuntimeError(
-                        json.loads((root / "collection-error.json").read_text())[
-                            "error"
-                        ]
-                    )
-                if sim.returncode:
+                raise RuntimeError(cloudxr_failure(root, started, "CloudXR stopped during the live session"))
+            returncode = simulation_returncode(sim, root)
+            if returncode is not None:
+                if returncode:
                     raise RuntimeError(
                         simulation_failure(
                             root / "simulation.log",
@@ -582,8 +641,8 @@ def main():
             if http is not None:
                 http.shutdown()
                 http.server_close()
-            for log in Path("/tmp").glob("cxr_*.log"):
-                if log.stat().st_uid == os.getuid() and log.stat().st_mtime >= started:
+            for log in cloudxr_log_paths(root, started):
+                if log.parent != root:
                     (root / log.name).write_bytes(log.read_bytes())
             if cfg.get("image_capture") and validated and pending_result and pending_result[0] != "FAILED":
                 prepare_training_images(root, args.config, runtime, repo, env, publish)

@@ -36,13 +36,15 @@ def raw_episode(path):
     payload = ArrayUnpickler(io.BytesIO(path.read_bytes())).load()
     if (
         payload.get("format") != "dexverse_trajectory"
-        or payload.get("schema_version") != 3
+        or payload.get("schema_version") not in {3, 5}
         or payload.get("num_episodes") != 1
         or len(payload.get("episodes", [])) != 1
     ):
         raise ValueError(
             "Visual exports require one complete native episode per recording"
         )
+    from trajectory import validate_identity
+    validate_identity(payload)
     episode = payload["episodes"][0]
     if episode.get("success") is not True:
         raise ValueError("Only successful demonstrations can be exported")
@@ -189,7 +191,7 @@ def split(values, groups):
 
 
 def export(request):
-    kind = request["format"]
+    kind = "act" if request["format"] == "act-native" else request["format"]
     if kind == "egoverse":
         from egoverse_export import export as export_egoverse
         return export_egoverse(request)

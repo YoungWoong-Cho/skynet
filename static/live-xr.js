@@ -33,18 +33,21 @@
   let focusedSession = new URL(location.href).searchParams.get("live_session"),
     requestPending = false,
     requestFailure = null,
+    submissionRecovery = null,
     target = null;
   let catalog = null,
     selectionWarning = null;
   let sessions = [],
     loading = false,
     submitting = false,
+    statusUnavailable = false,
     revision = 0,
     timer;
   const visible = () =>
     !document.hidden &&
     !el("collection").hidden &&
-    (!el("collection-view-live").hidden || !el("collection-view-recordings").hidden);
+    (!el("collection-view-live").hidden ||
+      !el("collection-view-recordings").hidden);
   function focusSession(id) {
     focusedSession = id;
     const url = new URL(location.href);
@@ -56,11 +59,27 @@
     el("live-xr-error").hidden = !message;
   }
   async function api(path = "", options = {}) {
-    const r = await fetch("/api/collection/live" + path, {
-      ...options,
-      headers: { "Content-Type": "application/json" },
-      signal: AbortSignal.timeout(55000),
-    });
+    let r;
+    try {
+      r = await fetch("/api/collection/live" + path, {
+        ...options,
+        headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(55000),
+      });
+    } catch (error) {
+      const unknown = options.method && options.method !== "GET";
+      if (error.name === "TimeoutError" || error.name === "AbortError") {
+        const failure = new Error(
+          options.method && options.method !== "GET"
+            ? "The request could not be confirmed. Checking session status…"
+            : "Session status is temporarily unavailable. Retrying automatically…",
+        );
+        failure.submissionUnknown = !!unknown;
+        throw failure;
+      }
+      if (unknown) error.submissionUnknown = true;
+      throw error;
+    }
     const data = await r.json();
     if (!r.ok)
       throw new Error(
@@ -80,7 +99,8 @@
   function progressTitle(session, pending, failedRequest) {
     if (pending) return "Submitting request…";
     if (failedRequest) return "Could not start";
-    if (session.connection_check_failed) return "Status unavailable";
+    if (statusUnavailable || session.connection_check_failed)
+      return "Checking session status…";
     if (session.state === "FAILED")
       return session.scene_ready_at ? "Session failed" : "Startup failed";
     const ended = {
@@ -89,7 +109,8 @@
       STOPPED: "Session stopped",
     };
     if (ended[session.state]) return ended[session.state];
-    if (session.state === "RENDERING_IMAGES") return session.detail || "Preparing training images…";
+    if (session.state === "RENDERING_IMAGES")
+      return session.detail || "Preparing training images…";
     if (session.stop_requested || session.state === "STOPPING")
       return "Stopping…";
     if (session.state === "PENDING") return "Waiting for GPU…";
@@ -103,12 +124,14 @@
   }
   function renderProgress(running) {
     const panel = el("live-xr-progress");
-    const session =
-      running || sessions.find((s) => s.id === focusedSession);
+    const session = running || sessions.find((s) => s.id === focusedSession);
     const pending = requestPending && !running;
     const failedRequest = !running && requestFailure;
-    const completed = session && ["CAPTURED", "STOPPED"].includes(session.state)
-      && !session.error && !session.connection_check_failed;
+    const completed =
+      session &&
+      ["CAPTURED", "STOPPED"].includes(session.state) &&
+      !session.error &&
+      !session.connection_check_failed;
     panel.hidden = !pending && !failedRequest && (!session || completed);
     if (panel.hidden) return;
     const shown = pending || failedRequest ? null : session;
@@ -167,7 +190,7 @@
         !reached;
       let stepState = "pending",
         stepLabel = "Not started";
-      if (shown?.connection_check_failed) {
+      if (statusUnavailable || shown?.connection_check_failed) {
         stepLabel = "Unknown";
       } else if (failed) {
         stepState = "failed";
@@ -195,10 +218,27 @@
   }
   function apply(session) {
     revision += 1;
+    statusUnavailable = false;
     sessions = sessions.some((s) => s.id === session.id)
       ? sessions.map((s) => (s.id === session.id ? session : s))
       : [session, ...sessions];
     render();
+  }
+  function recoverSubmission() {
+    const pending = submissionRecovery;
+    if (!pending || pending.observedId) return;
+    const session = sessions.find((s) =>
+      !pending.existingIds.has(s.id) &&
+      s.profile?.robot === pending.robot &&
+      s.profile?.task === pending.task &&
+      (s.profile?.retargeting?.key || "dexpilot") === pending.retargeter &&
+      !!s.profile?.image_capture === pending.imageCapture,
+    );
+    if (!session) return;
+    pending.observedId = session.id;
+    requestPending = false;
+    requestFailure = null;
+    focusSession(session.id);
   }
   function render() {
     window.renderSimulationRecordings?.(sessions);
@@ -350,7 +390,8 @@
     }
     const running = sessions.find((s) => !terminal.has(s.state));
     const addressLine = el("live-xr-address");
-    addressLine.hidden = !running?.server_ready || !running.address || running.stop_requested;
+    addressLine.hidden =
+      !running?.server_ready || !running.address || running.stop_requested;
     addressLine.replaceChildren();
     if (!addressLine.hidden) {
       text(addressLine, "span", "Vision Pro server: ");
@@ -358,14 +399,23 @@
       const copy = text(addressLine, "button", "Copy address", "text-button");
       copy.type = "button";
       copy.onclick = async () => {
-        try { await navigator.clipboard.writeText(running.address); copy.textContent = "Copied"; }
-        catch { error("Clipboard unavailable. Enter the displayed address in the headset."); }
+        try {
+          await navigator.clipboard.writeText(running.address);
+          copy.textContent = "Copied";
+        } catch {
+          error(
+            "Clipboard unavailable. Enter the displayed address in the headset.",
+          );
+        }
       };
     }
     const active = !!running;
     if (catalog && running?.profile) {
       el("live-xr-hand").value = running.profile.robot;
       el("live-xr-task").value = running.profile.task;
+      el("live-xr-retargeter").value =
+        running.profile.retargeting?.key || "dexpilot";
+      renderRetargeter();
       el("live-xr-task-instructions").textContent =
         running.profile.instructions ||
         catalog.tasks.find((t) => t.key === running.profile.task)
@@ -379,7 +429,8 @@
     stop.disabled =
       !running?.job_id ||
       !!running.stop_requested ||
-      running.state === "STOPPING" || running.state === "RENDERING_IMAGES";
+      running.state === "STOPPING" ||
+      running.state === "RENDERING_IMAGES";
     stop.textContent =
       running?.stop_requested || running?.state === "STOPPING"
         ? "Stopping…"
@@ -400,16 +451,20 @@
         stop.textContent = "Stop session";
       }
     };
-    el("live-xr-start").disabled = active || submitting || !catalog;
+    el("live-xr-start").disabled = active || submitting || !catalog || !!selectionIncompatibility();
     el("live-xr-hand").disabled = active || submitting || !catalog;
+    el("live-xr-retargeter").disabled = active || submitting || !catalog;
     el("live-xr-task").disabled = active || submitting || !catalog;
-    if (el("live-xr-images")) el("live-xr-images").disabled = active || submitting || !catalog;
+    if (el("live-xr-images"))
+      el("live-xr-images").disabled = active || submitting || !catalog;
     el("live-xr-start").textContent = active
-      ? running.state === "RENDERING_IMAGES" ? "Preparing training images…" : running.stop_requested
-        ? "Stopping…"
-        : (running.state === "PREPARING"
-            ? stageLabels[running.startup_stage]
-            : sessionLabels[running.state]) || "Session active"
+      ? running.state === "RENDERING_IMAGES"
+        ? "Preparing training images…"
+        : running.stop_requested
+          ? "Stopping…"
+          : (running.state === "PREPARING"
+              ? stageLabels[running.startup_stage]
+              : sessionLabels[running.state]) || "Session active"
       : submitting
         ? "Starting…"
         : "Start session";
@@ -438,7 +493,17 @@
       text(el("live-xr-unavailable"), "li", names.join(", ") + ": " + reason);
     }
     for (const item of catalog.tasks) task.add(new Option(item.name, item.key));
+    const selector = el("live-xr-retargeter");
+    selector.replaceChildren();
+    const methods = catalog.retargeters || [
+      { key: "dexpilot", name: "DexPilot" },
+    ];
+    for (const item of methods) selector.add(new Option(item.name, item.key));
     const params = new URL(location.href).searchParams;
+    const chosenRetargeter = params.get("live_retargeter");
+    selector.value = methods.some((m) => m.key === chosenRetargeter)
+      ? chosenRetargeter
+      : catalog.default_retargeter || "dexpilot";
     const chosenHand = params.get("live_hand"),
       chosenTask = params.get("live_task");
     hand.value = catalog.hands.some((h) => h.key === chosenHand && h.available)
@@ -448,30 +513,65 @@
       ? chosenTask
       : catalog.default_task;
     const invalidLink =
+      (chosenRetargeter && selector.value !== chosenRetargeter) ||
       (chosenHand && hand.value !== chosenHand) ||
       (chosenTask && task.value !== chosenTask);
     if (invalidLink)
       selectionWarning =
         "Unsupported hand or task in link. Check the selection before starting.";
     updateChoices(false);
-    hand.onchange = task.onchange = () => updateChoices(true);
+    hand.onchange =
+      task.onchange =
+      selector.onchange =
+        () => {
+          updateChoices(true);
+          render();
+        };
+  }
+  function renderRetargeter() {
+    const key = el("live-xr-retargeter").value;
+    el("live-xr-retargeter-description").textContent =
+      catalog?.retargeters?.find((m) => m.key === key)?.description || "";
+  }
+  function selectionIncompatibility(item = null) {
+    const hand = catalog?.hands.find((h) => h.key === el("live-xr-hand").value);
+    const task = item || catalog?.tasks.find((t) => t.key === el("live-xr-task").value);
+    if (task?.required_hand && hand?.side !== task.required_hand)
+      return task.required_hand === "both" ? "This task requires both hands." : "This task requires a right hand.";
+    return "";
   }
   function updateChoices(persist) {
+    renderRetargeter();
     if (persist) selectionWarning = null;
     const robot = el("live-xr-hand").value,
       task = el("live-xr-task").value;
-    const verified = sessions.some(s => s.profile?.robot === robot && s.profile?.task === task && s.recordings?.length) || catalog.verified_pairs.some(
-      (pair) => pair.robot === robot && pair.task === task,
-    );
+    const method = el("live-xr-retargeter").value;
+    const verified =
+      sessions.some(
+        (s) =>
+          s.profile?.robot === robot &&
+          s.profile?.task === task &&
+          (s.profile?.retargeting?.key || "dexpilot") === method &&
+          s.recordings?.length,
+      ) ||
+      (method === "dexpilot" &&
+        catalog.verified_pairs.some(
+          (pair) => pair.robot === robot && pair.task === task,
+        ));
     el("live-xr-selection-note").textContent =
-      selectionWarning || (verified ? "" : "Not headset-tested");
+      selectionIncompatibility() || selectionWarning || (verified ? "" : "Not headset-tested");
     el("live-xr-task-instructions").textContent = catalog.tasks.find(
       (t) => t.key === task,
     ).instructions;
+    for (const option of el("live-xr-task").options) {
+      const item = catalog.tasks.find((t) => t.key === option.value);
+      option.disabled = !!selectionIncompatibility(item);
+    }
     if (persist) {
       const url = new URL(location.href);
       url.searchParams.set("live_hand", robot);
       url.searchParams.set("live_task", task);
+      url.searchParams.set("live_retargeter", method);
       history.replaceState(null, "", url);
     }
   }
@@ -491,14 +591,23 @@
       if (result.catalog && !catalog) setupChoices(result.catalog);
       // Older saved sessions predate the human-readable profile labels.
       // Resolve labels from the same catalog used by the hand/task controls.
-      sessions = result.sessions.map(session => ({
+      sessions = result.sessions.map((session) => ({
         ...session,
         profile: {
           ...session.profile,
-          task_name: session.profile.task_name || catalog?.tasks.find(task => task.key === session.profile.task)?.name,
-          hand_name: session.profile.hand_name || catalog?.hands.find(hand => hand.key === session.profile.robot)?.name,
+          task_name:
+            session.profile.task_name ||
+            catalog?.tasks.find((task) => task.key === session.profile.task)
+              ?.name,
+          hand_name:
+            session.profile.hand_name ||
+            catalog?.hands.find((hand) => hand.key === session.profile.robot)
+              ?.name,
         },
       }));
+      // A POST can lose its reply while the session starts and even fails.
+      // Follow its newly observed session so its real error stays visible.
+      recoverSubmission();
       window.setConversionTarget?.(result.conversion_target);
       el("live-xr-consent-field").hidden = result.license.accepted;
       el("live-xr-consent").required = !result.license.accepted;
@@ -511,12 +620,17 @@
         sessions = sessions.map((s) => (s.id === update.id ? update : s));
         render();
       }
+      statusUnavailable = false;
+      render();
       el("live-xr-message").textContent = "";
       error(null);
     } catch (e) {
       if (revision !== startedAtRevision) return;
+      statusUnavailable = true;
+      render();
       error(e.message);
-      el("live-xr-message").textContent = "Status may be out of date.";
+      el("live-xr-message").textContent =
+        "Retrying session status automatically…";
       window.simulationRecordingsError?.(e.message);
     } finally {
       loading = false;
@@ -533,11 +647,18 @@
   }
   el("live-xr-start-form").onsubmit = async (e) => {
     e.preventDefault();
-    if (submitting || !catalog || sessions.some((s) => !terminal.has(s.state)))
+    if (submitting || !catalog || selectionIncompatibility() || sessions.some((s) => !terminal.has(s.state)))
       return;
     submitting = true;
     requestPending = true;
     requestFailure = null;
+    const submission = submissionRecovery = {
+      existingIds: new Set(sessions.map((s) => s.id)),
+      robot: el("live-xr-hand").value,
+      task: el("live-xr-task").value,
+      retargeter: el("live-xr-retargeter").value,
+      imageCapture: !!el("live-xr-images")?.checked,
+    };
     render();
     el("live-xr-message").textContent = "";
     error(null);
@@ -549,14 +670,19 @@
           task: el("live-xr-task").value,
           robot: el("live-xr-hand").value,
           image_capture: !!el("live-xr-images")?.checked,
+          retargeter: el("live-xr-retargeter").value,
         }),
       });
       requestPending = false;
       focusSession(session.id);
-      apply(session);
+      submissionRecovery = null;
+      const known = sessions.find((s) => s.id === session.id);
+      if (!known?.updated_at || known.updated_at < session.updated_at)
+        apply(session);
       await load();
     } catch (e) {
-      requestFailure = e.message;
+      if (!submission.observedId) requestFailure = e.message;
+      if (!e.submissionUnknown) submissionRecovery = null;
       error(null);
       el("live-xr-message").textContent = "";
     } finally {
@@ -566,6 +692,11 @@
     }
   };
   window.loadLiveXR = load;
+  window.refreshRecordingsAfterDeletion = async () => {
+    revision++;
+    while (loading) await new Promise((resolve) => setTimeout(resolve, 20));
+    await load();
+  };
   document.addEventListener("visibilitychange", () => {
     if (visible()) load();
     else clearTimeout(timer);

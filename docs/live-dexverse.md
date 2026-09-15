@@ -13,6 +13,44 @@ The startup panel below **Start session** tracks the authenticated server connec
 - Previous cluster and `rl2-ws11` tests timed out on TCP 48010 from the headset, although the port responded from the cluster. On `rl2-bonjour`, both the Mac and the headset reached TCP 48010. The headset then established a streaming session, and the operator confirmed seeing the task and controlling the robot hand. Server logs also confirmed the Play command and right-wrist calibration.
 - On September 6, 2026, session `6a335a76-3fc9-4e0a-a644-b5254be0d4a3` completed the task and saved one successful demonstration. Validation confirmed 233 actions of dimension 28, 234 scene states, and finite numeric values. The native file is 315,340 bytes, SHA-256 `b1d1de5a9eb8091e913a2ff3fcb683fa128e919f894e1df5d6e5c9dad4b2fcdc`. It remains in that session's `output/recordings/live/Dexverse-PickUpStick-v0/` folder, with a validated copy on the Mac. The service completed cleanly, TCP 48010 closed, and GPU use returned to idle. This verifies live capture; it does not establish native-demo training/evaluation support.
 
+## Task versions and recording schemas
+
+The task dropdown retains the four existing v0 tasks and adds the 20 baseline
+v1 tasks, labeled `· v1`. Task selection pins both the source checkout and the
+recording schema in the session capsule:
+
+| Tasks | DexVerse checkout | Recording schema |
+| --- | --- | --- |
+| Existing v0 | `repos/skynet-dexverse/30cc673e27684b9f10186fa6bea731aed246bc9f` | 3 |
+| Baseline v1 | `repos/DexVerse-ce974ac6/917092d28764549f0f6a77872022c93ef3373c48` | 5 |
+
+These paths are relative to the configured workstation or cluster storage root.
+The v1 checkout retains its tracked procedural asset builders; the large asset
+directories link to the existing asset packs. Installation must verify the source
+revision and required asset paths on every execution host. Existing session
+capsules and recordings retain their original source and hand bundle.
+
+Both task families use Skynet Hands with six wrist axes per hand. Single-hand v1
+tasks require a right hand; the two bimanual tasks require both hands. The browser
+and backend enforce the same restriction.
+
+Schema 5 preserves the upstream task identity, action layout, reset ledger,
+command goals and task-specific reset buffers. Skynet still writes one immutable
+PKL per successful episode and groups those files under one recording session.
+Review and conversion accept schemas 3 and 5. For schema 5, replay restores the
+saved task conditions after the initial scene state; a missing command or changed
+benchmark identity is an error, not a substitute randomly reset task.
+
+Automated checks cover task selection, unchanged v0 profiles, schema validation,
+per-episode persistence and goal restoration. The [v1 runtime receipt](validation/dexverse-v1.json)
+records all 20 task environments loading with Skynet Shadow hands, taking three
+synthetic physics steps, restoring schema 5 conditions and producing all three RGB views. These checks do not establish
+headset tracking quality or successful completion of every v1 task. The newly authored cutaway-door USD must be generated with the pinned upstream
+`convert_cutaway_door.py` and installed on both the collection and replay hosts.
+The adapter also registers the canonical wrist layout with the v1 init-pose
+helpers and instantiates task configs directly with the selected Skynet hand;
+unused upstream hand USDs are not required for template construction.
+
 ## Shared hand models
 
 All new sessions use the [canonical Hands asset contract](hand-assets.md), including Shadow. Validation receipts below describe historical bundle digests; they do not establish simulator or headset validation for a different bundle.
@@ -125,3 +163,7 @@ Preparing an uncached replay uses a bounded Slurm GPU job when the session is ar
 See [collection storage](collection-storage.md) for automatic verified archiving and cleanup.
 
 Direct camera capture during live XR is unsupported in this integration. The XR renderer replaces the normal camera view with its stereo view and can return empty RGB buffers. Live collection therefore records the scene trajectory, and review labels its video **Scene replay**. If a recording contains a failed video-capture attempt, its error is shown alongside the replay.
+
+## Live startup errors
+
+CloudXR SDK logs stay in the session output directory. Older builds' redirected logs are read only when referenced by that session's console output and owned by its user. A startup failure reports the actual signaling/SDK reason in the existing error panel and session history. Simulator GPU-memory exhaustion is reported directly instead of a secondary joint-read error. Lost HTTP submission replies are reconciled to the new session so its actual failure remains visible. Skynet does not forward ports, change collection hosts, stop other workloads, or automatically retry failed sessions.

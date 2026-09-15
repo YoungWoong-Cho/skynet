@@ -68,6 +68,7 @@ def service(tmp_path, monkeypatch, prepared_hand_store):
         "collection.py",
         "hands/anatomy.py",
         "wrist.py",
+        "retargeting_runtime.py",
         "images.py",
         "render_images.py",
     ):
@@ -104,7 +105,9 @@ def test_frozen_session_extracts_the_complete_collection_runtime(service, tmp_pa
         "images.py",
         "render_images.py",
         "arrays.py",
+        "trajectory.py",
         "scene_geometry.py",
+        "retargeting_runtime.py",
     }
     assert (entry.parent / "anatomy.py").read_text() == (
         service.root / "ops/xr/hands/anatomy.py"
@@ -369,3 +372,125 @@ def test_image_capture_is_frozen_and_cannot_change_an_active_session(service):
     assert service.create(image_capture=True)["id"] == job["id"]
     with pytest.raises(ValueError, match="image capture"):
         service.create(image_capture=False)
+
+
+def test_retargeter_selection_is_frozen_and_blocks_switching_active_session(
+    service, monkeypatch
+):
+    from skynet_app import live_xr
+
+    build = live_xr.build_hand
+
+    def with_layout(robot):
+        path, m = build(robot)
+        m["hands"] = {"right": {"wrist_joints": list(range(6)), "tips": list(range(5))}}
+        m["mimic_joints"] = []
+        return path, m
+
+    monkeypatch.setattr(live_xr, "build_hand", with_layout)
+    with pytest.raises(ValueError, match="Unknown retargeting"):
+        service.create(True, retargeter="unsupported")
+    assert not service.list()
+    job = service.create(True, retargeter="vector-wrist-joint")
+    assert (
+        job["profile"]["retargeting"]["revision"]
+        == "3846d3fa207165bb0d498145aac8b885a28ea923"
+    )
+    assert service.create(True, retargeter="vector-wrist-joint")["id"] == job["id"]
+    with pytest.raises(ValueError, match="before changing retargeting"):
+        service.create(True, retargeter="dexpilot")
+    assert len(service.list()) == 1
+    service.prepare(job["id"])
+    assert service.cluster.calls == 1
+    assert any("retargeting-check.py" in args for args in service.cluster.writes)
+    assert "class CollectionRetargeting" in service.get(job["id"])["worker"]
+
+
+def test_retargeter_rejects_coupled_hand_before_creating_session(service, monkeypatch):
+    from skynet_app import live_xr
+
+    build = live_xr.build_hand
+
+    def coupled(robot):
+        path, manifest = build(robot)
+        manifest["mimic_joints"] = ["coupled"]
+        return path, manifest
+
+    monkeypatch.setattr(live_xr, "build_hand", coupled)
+    with pytest.raises(ValueError, match="coupled joints"):
+        service.create(True, retargeter="vector-wrist-joint")
+    assert not service.list()
+    assert service.cluster.calls == 0
+
+
+def test_live_progress_does_not_wait_for_unrelated_repository_writer(service):
+    """Reproduce a training write blocking the old startup/status paths."""
+    from concurrent.futures import ThreadPoolExecutor
+    from skynet_app.db_backend import lock_key
+
+    # Hold both the in-process repository mutex and PostgreSQL write lock.
+    with service.database._write_lock, service.database.connection() as connection:
+        connection.execute("BEGIN")
+        connection.execute(
+            "SELECT pg_advisory_xact_lock(?)", (lock_key("repository-write"),)
+        )
+        worker = ThreadPoolExecutor(max_workers=1)
+        try:
+
+            def startup():
+                job = service.create(True)
+                service.update(job["id"], startup_stage="runtime")
+                return service.consent(), service.get(job["id"])
+
+            future = worker.submit(startup)
+            consent, job = future.result(timeout=3)
+            assert consent["accepted"]
+            assert job["startup_stage"] == "runtime"
+        finally:
+            connection.rollback()
+    worker.shutdown(wait=True)
+
+
+def test_status_is_cached_while_remote_check_runs_and_deduplicates(
+    service, monkeypatch
+):
+    import threading
+
+    job = service.create(True)
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def slow_refresh(identifier):
+        calls.append(identifier)
+        entered.set()
+        assert release.wait(5)
+        service.update(identifier, startup_stage="runtime", error=None)
+
+    monkeypatch.setattr(service, "refresh", slow_refresh)
+    try:
+        first = service.status(job["id"])
+        assert entered.wait(2)
+        assert first["startup_stage"] == "server"
+        assert service.status(job["id"])["id"] == job["id"]
+        assert calls == [job["id"]]
+    finally:
+        release.set()
+        service.executor.shutdown(wait=True)
+    assert service.status_pending == set()
+    assert service.get(job["id"])["startup_stage"] == "runtime"
+
+
+def test_status_reschedules_after_failed_check_and_skips_finished_sessions(
+    service, monkeypatch
+):
+    job = service.create(True)
+    monkeypatch.setattr(
+        service, "refresh", lambda _: (_ for _ in ()).throw(ClusterError("offline"))
+    )
+    service.status_pending.add(job["id"])
+    with pytest.raises(ClusterError):
+        service._refresh_status(job["id"])
+    assert not service.status_pending
+    service.update(job["id"], state="FAILED", scheduler_final=True)
+    assert service.status(job["id"])["state"] == "FAILED"
+    assert not service.status_pending

@@ -1,0 +1,180 @@
+{
+  "schema": "skynet.validation.dexverse-v1/v1",
+  "checked_on": "2026-09-14",
+  "host": "rl2-bonjour",
+  "source_revision": "917092d28764549f0f6a77872022c93ef3373c48",
+  "checks": [
+    "real Isaac environment creation and reset",
+    "Skynet right/bimanual hand action layout",
+    "three synthetic physics steps",
+    "schema 5 per-episode persistence",
+    "task goal restoration after different reset",
+    "three RGB camera outputs per task"
+  ],
+  "not_verified": [
+    "human headset input or task completion",
+    "full training/evaluation for v1 tasks"
+  ],
+  "tasks": [
+    {
+      "task": "Dexverse-GraspBleach-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 28,
+      "task_state_restored": true
+    },
+    {
+      "task": "Dexverse-GraspPan-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 28,
+      "task_state_restored": true
+    },
+    {
+      "task": "Dexverse-GraspKettle-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 28,
+      "task_state_restored": true
+    },
+    {
+      "task": "Dexverse-GraspCup-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 28,
+      "task_state_restored": true
+    },
+    {
+      "task": "Dexverse-RemoveCupFromRack-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 28,
+      "task_state_restored": true
+    },
+    {
+      "task": "Dexverse-FunctionalPourCan-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 28,
+      "task_state_restored": true
+    },
+    {
+      "task": "Dexverse-FunctionalPourMug-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 28,
+      "task_state_restored": true
+    },
+    {
+      "task": "Dexverse-FunctionalHammerStrike-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 28,
+      "task_state_restored": true
+    },
+    {
+      "task": "Dexverse-OpenFaucet-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 28,
+      "task_state_restored": true
+    },
+    {
+      "task": "Dexverse-OpenDoor-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 28,
+      "task_state_restored": true
+    },
+    {
+      "task": "Dexverse-OpenLaptop-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 28,
+      "task_state_restored": true
+    },
+    {
+      "task": "Dexverse-SqueezeScissors-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 28,
+      "task_state_restored": true
+    },
+    {
+      "task": "Dexverse-SlideUtilityKnife-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 28,
+      "task_state_restored": true
+    },
+    {
+      "task": "Dexverse-OpenStapler-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 28,
+      "task_state_restored": true
+    },
+    {
+      "task": "Dexverse-OpenFlatFolder-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 28,
+      "task_state_restored": true
+    },
+    {
+      "task": "Dexverse-BimanualLiftTray-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 56,
+      "task_state_restored": true
+    },
+    {
+      "task": "Dexverse-BimanualLiftCarton-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 56,
+      "task_state_restored": true
+    },
+    {
+      "task": "Dexverse-InsertPen-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 28,
+      "task_state_restored": true
+    },
+    {
+      "task": "Dexverse-PushSmallSphereObstacleSlope-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 28,
+      "task_state_restored": true
+    },
+    {
+      "task": "Dexverse-PushT-v1",
+      "ready": true,
+      "rgb_views": 3,
+      "schema": 5,
+      "action_dimension": 28,
+      "task_state_restored": true
+    }
+  ]
+}

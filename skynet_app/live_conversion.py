@@ -13,6 +13,7 @@ import threading
 import time
 from uuid import uuid4
 
+from .recording_guard import guarded_recording
 from .database import canonical_json, utc_now
 from .live_xr import TERMINAL
 from .live_xr_archive import is_archived
@@ -27,6 +28,7 @@ from .cluster_runtime import (
 from .capture_processing.slurm import compile_isaac_job
 from .remote_artifacts import RemoteArtifact
 from .simulation_hands import upload as upload_hand
+from .dexverse_versions import environment_profile, V1_REVISION, V1_CONVERTER_SHA256
 
 FORMAT = "dexverse-demo-hdf5/v1"
 PENDING = {
@@ -98,6 +100,8 @@ except (OSError,ValueError) as error:
 
 
 def pinned_converter_digest(profile):
+    if profile["source_revision"] == V1_REVISION:
+        return V1_CONVERTER_SHA256
     upstream = subprocess.run(
         [
             "git",
@@ -133,6 +137,7 @@ class LiveConversionService:
     @cached_property
     def sources(self):
         return {
+            "trajectory.py": Path(__file__).with_name("trajectory.py").read_text(),
             **{
                 name: (self.live.root / "ops/xr" / name).read_text()
                 for name in ("convert_dataset.py", "wrist.py")
@@ -168,6 +173,7 @@ class LiveConversionService:
     def profile(self, session):
         profile = self.target()
         original = session["profile"]
+        profile = environment_profile(profile, original["task"], cluster_root=WORK_ROOT)
         if profile["source_revision"] != original["source_revision"]:
             raise ValueError(
                 "The Slurm pipeline and recording use different DexVerse revisions"
@@ -234,6 +240,7 @@ class LiveConversionService:
             )
         return value
 
+    @guarded_recording
     def create(self, session_id, name):
         session = self.live.get(session_id)
         if session["state"] not in TERMINAL:
@@ -434,16 +441,9 @@ class LiveConversionService:
     def ensure_hand(self, profile, transport, gateway):
         if profile.get("hand_bundle"):
             bundle = profile["hand_bundle"]
-            local = (
-                self.live.root
-                / "data/simulation-hands"
-                / profile["robot"]
-                / bundle["digest"]
-            )
-            if not (local / "manifest.json").is_file():
-                raise ValueError(
-                    "The recording's original hand bundle is missing locally; a different model cannot be substituted"
-                )
+            from .simulation_hands import find_bundle
+
+            local = find_bundle(profile["robot"], bundle["digest"], app_root=self.live.root)
             if (
                 upload_hand(local, WORK_ROOT, transport, gateway)
                 != bundle["root"]
@@ -750,7 +750,7 @@ else: print('{}')
                     "training_compatibility": "DexVerse state HDF5 trainer required. GR00T/OpenPI formats are unsupported.",
                 },
             )
-        location = db.record_data_location(
+        db.record_data_location(
             version["id"], kind="cluster", host="skynet",
             path=version["path"], manifest_sha256=manifest_sha,
         )

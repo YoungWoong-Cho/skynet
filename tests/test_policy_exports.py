@@ -1,4 +1,3 @@
-import importlib.util
 import json
 from pathlib import Path
 import pickle
@@ -101,7 +100,7 @@ def setup(tmp_path, monkeypatch):
     service.stop()
 
 
-@pytest.mark.parametrize("format", ["xpolicylab", "dp", "act"])
+@pytest.mark.parametrize("format", ["xpolicylab", "dp", "act", "act-native"])
 def test_real_export_preserves_commands_and_registers_immutable_lineage(setup, format):
     service, session, source = setup
     before = {str(p): digest(p) for p in source.rglob("*") if p.is_file()}
@@ -272,7 +271,7 @@ def test_export_api_validates_formats_and_exposes_downloads(setup, monkeypatch):
     app = FastAPI()
     app.include_router(api.router)
     client = TestClient(app)
-    assert {f["id"] for f in client.get("/api/data/exports").json()["formats"]} == {"dp", "dp-state", "act", "xpolicylab", "egoverse"}
+    assert {f["id"] for f in client.get("/api/data/exports").json()["formats"]} == {"dp", "dp-state", "act", "act-native", "xpolicylab", "egoverse"}
     body = dict(session_id=session["id"], format="dp", name="API export")
     assert client.post("/api/data/exports", json=dict(body, format="any-policy")).status_code == 409
     for removed in ({"target": "local"}, {"selections": [{"session_id": session["id"], "indices": [0]}]}):

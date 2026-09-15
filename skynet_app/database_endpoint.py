@@ -89,6 +89,9 @@ class SSHEndpoint:
                     stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    # Terminal Ctrl+C must reach the app first so it can finish
+                    # rollback/unlock before closing its private DB tunnel.
+                    start_new_session=True,
                 )
                 deadline = time.monotonic() + 10
                 while not local.exists():

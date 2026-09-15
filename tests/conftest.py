@@ -1,5 +1,7 @@
 """Keep generated execution artifacts inside each test's temporary directory."""
 
+from pathlib import Path
+
 import pytest
 
 pytest_plugins = ["tests.postgres_backend_plugin"]
@@ -7,6 +9,8 @@ pytest_plugins = ["tests.postgres_backend_plugin"]
 
 @pytest.fixture(autouse=True)
 def isolate_pipeline_capsules(tmp_path, monkeypatch):
+    # Portable execution capsules import the shared recording helpers by filename.
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "skynet_app"))
     monkeypatch.setattr(
         "skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", tmp_path / "capsules"
     )

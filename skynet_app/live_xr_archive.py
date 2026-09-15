@@ -13,6 +13,7 @@ import time
 from uuid import UUID
 
 from .cluster_config import CLUSTER
+from .recording_guard import guarded_recording
 from .cluster_runtime import ClusterClient, ClusterError
 from .database import canonical_json, utc_now
 from .live_xr_archive_remote import archive_control
@@ -35,7 +36,10 @@ def archive_descriptor(job, cluster, *, require_available=True):
             or not re.fullmatch(r"[a-f0-9]{64}", checksum)
             or hashlib.sha256(canonical_json(manifest).encode()).hexdigest() != checksum):
         raise ValueError("The saved archive manifest is invalid")
-    expected = f"{CLUSTER.paths.datasets}/raw/dexverse-live/{job['id']}/{checksum}/output"
+    storage_key = archive.get("storage_key", checksum)
+    if not re.fullmatch(r"[a-f0-9]{64}", str(storage_key)):
+        raise ValueError("The saved archive storage key is invalid")
+    expected = f"{CLUSTER.paths.datasets}/raw/dexverse-live/{job['id']}/{storage_key}/output"
     if archive.get("gateway") != "sky2" or archive.get("root") != expected:
         raise ValueError("The saved archive storage location is invalid")
     cluster.candidates("sky2")
@@ -76,7 +80,7 @@ class LiveArchiveService:
 
     def derived_root(self, job):
         archive = self._descriptor(job)
-        return f"{CLUSTER.paths.datasets}/raw/dexverse-live/{job['id']}/derived/{archive['manifest_sha256']}"
+        return f"{CLUSTER.paths.datasets}/raw/dexverse-live/{job['id']}/derived/{archive.get('storage_key', archive['manifest_sha256'])}"
 
     def session_root(self, job):
         return str(PurePosixPath(self._descriptor(job)["root"]).parent)
@@ -264,7 +268,7 @@ class LiveArchiveService:
         try:
             result = self._call(self.cluster, "sky2", "verify", session_id=job["id"],
                                 datasets_root=CLUSTER.paths.datasets, manifest=archive["manifest"],
-                                manifest_sha256=archive["manifest_sha256"])
+                                manifest_sha256=archive["manifest_sha256"], storage_key=archive.get("storage_key", archive["manifest_sha256"]))
             if not result.get("verified") or result.get("manifest_sha256") != archive["manifest_sha256"] or result.get("root") != archive["root"]:
                 raise ValueError("Archive verification returned a different session identity")
             return result
@@ -273,6 +277,7 @@ class LiveArchiveService:
                           detail="Archive verification failed; source cleanup is paused")
             raise
 
+    @guarded_recording
     def archive(self, identifier, *, cleanup=False):
         job = self.live.get(identifier)
         try:
@@ -315,6 +320,7 @@ class LiveArchiveService:
                           error=str(exc), detail="Archive needs attention; cleanup will resume after verification")
             raise
 
+    @guarded_recording
     def cleanup_source(self, identifier):
         self._check()
         job = self.live.get(identifier)
@@ -333,7 +339,7 @@ class LiveArchiveService:
             if self._descriptor(current)["manifest_sha256"] != archive["manifest_sha256"]:
                 raise ValueError("Archive identity changed before cleanup")
             result = self._call(self.live.transport(job), job["gateway"], "delete", **self._source(job),
-                                manifest=archive["manifest"], manifest_sha256=archive["manifest_sha256"])
+                                manifest=archive["manifest"], manifest_sha256=archive["manifest_sha256"], storage_key=archive.get("storage_key", archive["manifest_sha256"]))
             if not result.get("removed") or result.get("manifest_sha256") != archive["manifest_sha256"]:
                 raise ValueError("Workstation cleanup acknowledgement did not match")
             return self._publish(identifier, state="READY", source_removed=True, removed_at=utc_now(),

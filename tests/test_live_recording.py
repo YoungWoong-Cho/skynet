@@ -83,3 +83,16 @@ def test_simulation_failure_reports_the_imported_hand_error(tmp_path):
     assert (
         worker.simulation_failure(log, "Failed") == "Failed; inspect the simulation log"
     )
+
+
+@pytest.mark.parametrize("returncode", [None, 0, 1])
+def test_collection_failure_reported_before_simulator_exits(tmp_path, returncode):
+    from types import SimpleNamespace
+
+    process = SimpleNamespace(poll=lambda: returncode)
+    assert worker.simulation_returncode(process, tmp_path) == returncode
+    (tmp_path / "collection-error.json").write_text(
+        '{"error":"Several frames match the filter"}'
+    )
+    with pytest.raises(RuntimeError, match="Several frames match"):
+        worker.simulation_returncode(process, tmp_path)

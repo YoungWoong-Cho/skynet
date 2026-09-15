@@ -15,7 +15,7 @@ w.HTMLDialogElement.prototype.close = function() { if (this.open) { this.open = 
 const el = id => w.document.getElementById(id);
 const flush = async () => { for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve)); };
 try {
-  for (const file of ['dialogs.js', 'workspace-navigation.js', 'connection-settings.js', 'app.js', 'live-conversion.js']) {
+  for (const file of ['dialogs.js', 'workspace-navigation.js', 'connection-settings.js', 'app.js', 'live-conversion.js', 'maintenance.js']) {
     w.eval(await readFile(new URL('../static/' + file, import.meta.url), 'utf8'));
   }
   const originalId = '6a257afb-aaaa-4000-8000-000000000000';
@@ -46,7 +46,7 @@ try {
   assert.equal(registered(2).textContent, '0 datasets');
   assert.equal(recordingRows()[0].cells[2].textContent, w.formatDate(original.created_at));
   assert.equal(recordingRows()[0].cells[0].textContent.includes(w.formatDate(original.created_at)), false);
-  assert.deepEqual([...recordingRows()[0].querySelectorAll('.row-actions button')].map(x => x.textContent), ['View', 'Convert']);
+  assert.deepEqual([...recordingRows()[0].querySelectorAll('.row-actions button')].map(x => x.textContent), ['View', 'Convert', 'Delete']);
   assert.equal(el('show-data-resource-form').textContent.trim(), 'New');
   const controls = [...el('show-data-resource-form').parentElement.children];
   assert.ok(controls.indexOf(el('data-resource-search').parentElement) < controls.indexOf(el('show-data-resource-form')));
@@ -124,5 +124,41 @@ try {
   assert.deepEqual(resourceIds(),['copy-data','multi'],'both directions use full source membership');
   el('new-recording').click();await flush();
   assert.equal(new URL(w.location.href).searchParams.get('data_view'),'collect');
+  // Recording rows use the existing deletion dialog and confirmation contract.
+  await w.activateTab('data', true, 'recording');
+  const removal = recordingRows()[0].querySelector('[data-delete-kind=recording]');
+  assert.equal(removal.dataset.deleteId, originalId);
+  const endpoint = '/api/maintenance/history/recording/' + originalId;
+  let blocked = true, completeDelete;
+  const deletionCalls = [], refreshes = [];
+  w.api = async (path, options = {}) => {
+    if (!path.startsWith(endpoint)) return workingApi(path, options);
+    deletionCalls.push({path, ...options});
+    if (options.method === 'DELETE') return new Promise(resolve => {completeDelete = resolve;});
+    return {label:'Cube', token:'a'.repeat(64), counts:{live_xr_sessions:1},
+      files:[{path:'/cluster/recordings/' + originalId, size_bytes:12}],
+      blockers:blocked ? [{kind:'dataset', id:'original-data', label:'Full dataset', reason:'Delete this dataset first'}] : []};
+  };
+  removal.click(); await flush();
+  assert.equal(el('maintenance-dialog').open, true);
+  assert.equal(el('maintenance-title').textContent, 'Delete recording');
+  assert.equal(el('maintenance-confirm').disabled, true);
+  assert.equal(el('maintenance-content').querySelector('[data-entity-kind=dataset]').dataset.entityId, 'original-data');
+  assert.equal(el('maintenance-content').querySelector('[data-delete-kind=dataset]').dataset.deleteId, 'original-data');
+  el('maintenance-dialog').querySelector('[data-dialog-close]').click();
+  assert.equal(deletionCalls.filter(x => x.method === 'DELETE').length, 0, 'closing a preview never deletes');
+  blocked = false;
+  w.refreshRecordingsAfterDeletion = async () => {refreshes.push('recordings'); w.renderSimulationRecordings([copy]);};
+  w.refreshPreparedDatasets = async () => {refreshes.push('datasets');};
+  removal.click(); await flush();
+  assert.equal(el('maintenance-confirm').disabled, false);
+  assert.match(el('maintenance-content').textContent, /\/cluster\/recordings\//);
+  el('maintenance-confirm').click(); el('maintenance-confirm').click();
+  assert.equal(deletionCalls.filter(x => x.method === 'DELETE').length, 1);
+  assert.equal(JSON.parse(deletionCalls.at(-1).body).token, 'a'.repeat(64));
+  completeDelete({deleted:true}); await flush();
+  assert.equal(el('maintenance-dialog').open, false);
+  assert.deepEqual(refreshes.sort(), ['datasets','recordings']);
+  assert.deepEqual(recordingRows().map(r => r.dataset.sessionId), [copyId]);
   console.log('Recording / Registry: resource counts, source ownership, archive visibility, navigation, filtering, refresh and failure recovery passed.');
 } finally { for (const observer of observers) observer.disconnect(); await flush(); w.close(); }

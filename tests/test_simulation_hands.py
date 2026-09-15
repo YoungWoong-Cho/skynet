@@ -192,7 +192,12 @@ def test_catalog_exposes_thirteen_imported_variants_and_missing_mesh_reason():
     assert len({h["key"] for h in imported}) == 13
     for hand in imported:
         for task in catalog()["tasks"]:
-            assert selection(task["key"], hand["key"])[1] == hand
+            required = task.get("required_hand")
+            if required and required != hand["side"]:
+                with pytest.raises(ValueError, match="requires"):
+                    selection(task["key"], hand["key"])
+            else:
+                assert selection(task["key"], hand["key"])[1] == hand
     with pytest.raises(ValueError, match="missing thumb mesh"):
         selection(catalog()["default_task"], "skynet_allegro_v4_left")
 
@@ -379,3 +384,66 @@ def test_adapter_code_changes_do_not_change_physical_identity(
     _, after = build(source)
     assert before["digest"] != after["digest"]
     assert before["hand_asset"] == after["hand_asset"]
+
+
+def test_generated_runtime_cache_is_outside_the_watched_checkout(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    checkout = tmp_path / "checkout"
+    monkeypatch.setattr(hands, "ROOT", checkout)
+    target = hands.cache_root() / "robot" / "digest" / "runtime.py"
+    assert not target.is_relative_to(checkout)
+    assert target.is_relative_to(tmp_path / "cache")
+    # A bare uvicorn --reload watches *.py recursively in the checkout. Keeping
+    # generated code outside it also works for StatReload, which ignores excludes.
+    from uvicorn.config import Config
+    from uvicorn.supervisors.watchfilesreload import FileFilter
+
+    assert FileFilter(Config("skynet_app.main:app", reload=True))(
+        Path("data/simulation-hands/robot/digest/runtime.py")
+    )
+
+
+def test_bundle_lookup_supports_cache_and_original_recordings(tmp_path, monkeypatch):
+    monkeypatch.setattr(hands, "cache_root", lambda: tmp_path / "cache")
+    legacy = tmp_path / "app/data/simulation-hands/robot/old"
+    legacy.mkdir(parents=True)
+    (legacy / "manifest.json").write_text("{}")
+    assert hands.find_bundle("robot", "old", app_root=tmp_path / "app") == legacy
+    current = tmp_path / "cache/robot/new"
+    current.mkdir(parents=True)
+    (current / "manifest.json").write_text("{}")
+    assert hands.find_bundle("robot", "new", app_root=tmp_path / "app") == current
+    with pytest.raises(ValueError, match="original hand bundle"):
+        hands.find_bundle("robot", "missing", app_root=tmp_path / "app")
+
+
+def test_wuji_velocity_caps_follow_each_source_joint_and_leave_other_hands_alone(
+    tmp_path,
+):
+    path = tmp_path / "hand.urdf"
+    path.write_text(
+        '<robot><joint name="finger.1"><limit velocity="8.11"/></joint><joint name="finger.2"><limit velocity="12.86"/></joint></robot>'
+    )
+    config = RUNTIME["finger_actuator_parameters"](
+        {"hand_key": "wuji-2", "finger_joints": ["finger.2", "finger.1"]}, path
+    )
+    assert config == {
+        "armature": 0.001,
+        "velocity_limit_sim": {r"finger\.2": 12.86, r"finger\.1": 8.11},
+    }
+    assert RUNTIME["finger_actuator_parameters"]({"hand_key": "shadow"}, path) == {
+        "armature": 0.001,
+        "velocity_limit_sim": 5.0,
+    }
+    assert RUNTIME["finger_actuator_parameters"](
+        {"hand_key": "inspire-rh56"}, path
+    ) == {"armature": 0.01, "velocity_limit_sim": 5.0}
+    path.write_text(
+        '<robot><joint name="finger.1"><limit velocity="0"/></joint></robot>'
+    )
+    with pytest.raises(ValueError, match="positive finger velocity"):
+        RUNTIME["finger_actuator_parameters"](
+            {"hand_key": "wuji-2", "finger_joints": ["finger.1"]}, path
+        )

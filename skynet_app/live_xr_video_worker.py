@@ -181,7 +181,7 @@ def control(value):
                 return cached
         profile = value["profile"]
         for name, content in value["sources"].items():
-            if name not in {"render_recording.py", "video.py", "wrist.py", "arrays.py"}:
+            if name not in {"render_recording.py", "video.py", "wrist.py", "arrays.py", "trajectory.py"}:
                 raise ValueError("Invalid video worker source")
             path = root / name
             if path.exists() and path.read_text() != content:

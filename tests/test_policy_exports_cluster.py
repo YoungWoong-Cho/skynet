@@ -12,6 +12,7 @@ import pytest
 from skynet_app.cluster_runtime import ClusterClient, ClusterError, SubmissionOutcomeUnknown, WORK_ROOT
 from skynet_app.dataset_formats import RECIPES
 from skynet_app.policy_exports import PolicyExportService
+from skynet_app import policy_exports_api as api
 from test_policy_exports import setup as offline_setup
 
 
@@ -259,7 +260,6 @@ def test_converter_shell_uses_existing_configured_uv_bootstrap(setup, tmp_path, 
 def test_backend_rejects_local_target_and_explicit_download_streams_without_cache(setup, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
-    from skynet_app import policy_exports_api as api
     service, session, _, _, _ = setup
     with pytest.raises(ValueError, match="sky2"):
         service.create(session["id"], "dp", "No local", target="local")
@@ -379,6 +379,24 @@ def test_cpu_capsule_executes_real_converter_and_publishes_verified_artifacts(se
     assert manifest["format"] == RECIPES[format]["format"] and len(manifest["episodes"]) == 2
     assert digest(result["archive_path"]) == result["archive_sha256"]
     assert not (service.root / "sources").exists() and not (service.root / job["id"] / "output").exists()
+    if format == "act":
+        retry = tmp_path / "retry-attempt"
+        retry.mkdir()
+        request.update(attempt_id="retry-attempt", output=str(retry / "output"),
+                       reuse_output=str(remote / "output"), receipt_path=str(retry / "result.json"))
+        request_path.write_text(json.dumps(request))
+        again = subprocess.run([sys.executable, str(worker_script), str(request_path)], capture_output=True, text=True, timeout=30)
+        assert again.returncode == 0, again.stderr
+        reused = json.loads((retry / "result.json").read_text())
+        assert reused["manifest_sha256"] == result["manifest_sha256"]
+        assert reused["archive_path"] == result["archive_path"]
+        assert not (retry / "output").exists(), "Retry must not convert or copy the dataset again"
+        request["converter_sha256"] = "changed-converter"
+        request_path.write_text(json.dumps(request))
+        wrong = subprocess.run([sys.executable, str(worker_script), str(request_path)], capture_output=True, text=True, timeout=30)
+        assert wrong.returncode != 0
+        assert "pinned conversion" in json.loads((retry / "result.json").read_text())["error"]
+
 
 
 @pytest.mark.parametrize("failure", [None, "cluster_verification", "zip_changed", "zip_record_mismatch"])
@@ -459,3 +477,62 @@ def test_background_monitor_finishes_after_browser_closes_and_stops_cleanly(setu
     count = len(polls)
     service.dispatch(job["id"])
     assert len(polls) == count
+
+
+def test_loader_timeout_keeps_diagnostics_and_terminates_child_group(tmp_path, monkeypatch):
+    import importlib.util
+    import time
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    monkeypatch.syspath_prepend(str(root / "ops/datasets"))
+    spec = importlib.util.spec_from_file_location("loader_worker", root / "skynet_app/policy_export_worker.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    marker = tmp_path / "should-not-exist"
+    child = "import time,pathlib; time.sleep(1); pathlib.Path(" + repr(str(marker)) + ").touch()"
+    parent = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c'," + repr(child) + "]); print('loader-started',flush=True); time.sleep(60)"
+    log = tmp_path / "loader.log"
+    with pytest.raises(ValueError, match="timed out"):
+        module.run_loader([sys.executable, "-c", parent], log, timeout=0.2)
+    assert "loader-started" in log.read_text()
+    time.sleep(1)
+    assert not marker.exists()
+
+
+def test_loader_uses_short_temporary_ipc_path_with_long_storage_root(tmp_path, monkeypatch):
+    import importlib.util
+    root = Path(__file__).resolve().parents[1]
+    monkeypatch.syspath_prepend(str(root / "ops/datasets"))
+    spec = importlib.util.spec_from_file_location("short_ipc_worker", root / "skynet_app/policy_export_worker.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    long_path = tmp_path / ("a" * 130)
+    long_path.mkdir()
+    monkeypatch.setenv("TMPDIR", str(long_path))
+    script = "import json,multiprocessing.connection,os; listener=multiprocessing.connection.Listener(family='AF_UNIX'); listener.close(); print(json.dumps({'ipc':os.environ['TMPDIR']}))"
+    receipt = module.run_loader([sys.executable, "-c", script], tmp_path / "loader.log", timeout=10)
+    assert len(receipt["ipc"]) < 60
+    assert not Path(receipt["ipc"]).exists()
+
+
+@pytest.mark.parametrize("archive", ["previous", "unrelated"])
+def test_retry_publishes_verified_archive_only_from_its_own_previous_attempt(setup, archive):
+    service, session, _, _, _ = setup
+    job = service.create(session["id"], "act-native", "Retry publication")
+    service.prepare(job["id"])
+    first = service.get(job["id"])
+    service.cluster.state = "FAILED"
+    service.prepare(job["id"])
+    service.retry(job["id"])
+    service.cluster.state = "PENDING"
+    service.prepare(job["id"])
+    second = service.get(job["id"])
+    result = receipt(service, second)
+    result["archive_path"] = first["cluster_root"] + "/dataset.zip" if archive == "previous" else f"{WORK_ROOT}/jobs/runs/another-job/dataset.zip"
+    service.cluster.files[second["cluster_root"] + "/result.json"] = json.dumps(result)
+    service.cluster.state = "COMPLETED"
+    service.prepare(job["id"])
+    final = service.get(job["id"])
+    assert final["state"] == ("READY" if archive == "previous" else "FAILED"), final
+    if archive == "previous":
+        assert final["remote_archive"] == result["archive_path"]

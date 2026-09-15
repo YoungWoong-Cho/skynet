@@ -10,7 +10,7 @@ w.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
 w.CSS={escape:s=>s};
 const el=id=>w.document.getElementById(id);
 const input=key=>el('adapter-field-native-config-'+key);
-const manifest={schema_version:'skynet.adapter/v1',slug:'policy-test',display_name:'Test policy',runtime:{allowed_backends:['existing']},capabilities:{supports_resume:false}, defaults:{hyperparameters:{batch_size:256}},train:{
+const manifest={schema_version:'skynet.adapter/v1',slug:'policy-test',display_name:'Test policy',runtime:{allowed_backends:['existing']},capabilities:{supports_resume:false}, defaults:{resources:{gpu_mode:"explicit",gpu_count:1},hyperparameters:{batch_size:256}},train:{
  supported_canonical_fields:['train.batch.value'], default_preset:'state/v1',
  presets:[{id:'state/v1',name:'State preset',values:{'train.batch.value':256,'native.config.observation_mode':'state'}},{id:'rgb/v1',name:'RGB preset',values:{'train.batch.value':8,'native.config.observation_mode':'rgb'}}],
  input_fields:[
@@ -31,6 +31,9 @@ try {
   w.eval(source);
  }
  w.configureContractTest(manifest);
+ assert.equal(el('gpu-mode').value,'manual','canonical explicit allocation maps to the UI Manual choice');
+ assert.equal(el('experiment-gpu-count').value,'1');
+ assert.doesNotMatch(el('experiments-error').textContent,/Adapter default .*unavailable/);
  assert.equal(input('dataset').value,'/cluster/test');
  assert.equal(input('dataset').readOnly,true,'registered file paths are derived, not editable');
  input('training_preset').value=JSON.stringify('rgb/v1');

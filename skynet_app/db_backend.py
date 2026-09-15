@@ -263,5 +263,10 @@ class DistributedRLock:
         self.acquire()
         return self
 
-    def __exit__(self, *args):
-        self.release()
+    def __exit__(self, exc_type, error, traceback):
+        try:
+            self.release()
+        except Exception as cleanup_error:
+            if error is None:
+                raise
+            error.add_note(f"Database lock release also failed: {cleanup_error}")

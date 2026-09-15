@@ -51,7 +51,7 @@ class WorkstationClient(ClusterClient):
         return str(candidate)
 
     def write_capsule_file(self, identifier, name, content, gateway):
-        if name not in {"runner.py", "request.json", "run.sh"}:
+        if name not in {"runner.py", "request.json", "run.sh", "retargeting-check.py"}:
             raise ValueError("Unknown live session file")
         path = self.run_root(identifier) + "/" + name
         script = """import os,sys

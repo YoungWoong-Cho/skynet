@@ -4,6 +4,9 @@ import json
 
 HISTORY_TABLES = frozenset(
     {
+        "data_resources",
+        "data_resource_versions",
+        "data_bundles",
         "adapters",
         "adapter_validations",
         "evaluation_suites",
@@ -85,6 +88,11 @@ def guard_write(connection, table, values):
                 registry_dependency |= any(values.get("adapter_key") == record["adapter_key"]
                                            or values.get("source_adapter_key") == record["adapter_key"]
                                            for record in records)
+        if plan["kind"] in {"recording", "recording-file"}:
+            from .recording_deletion import mentions
+            registry_dependency = any(any(mentions(json.loads(value), identifier) for identifier in plan["records"].get("live_xr_sessions", [plan["id"]]))
+                                      for key, value in values.items()
+                                      if key.endswith("_json") and isinstance(value, str))
         if identifiers & deleting or registry_dependency:
             raise ValueError(
                 "This item is being deleted. Finish its pending deletion before using it"

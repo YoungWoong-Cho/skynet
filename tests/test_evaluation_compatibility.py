@@ -141,3 +141,21 @@ def test_real_probe_sequence_is_unscored_and_resets_before_scoring(monkeypatch):
     observation['images']['scene_front'] = np.zeros((3,2,3),dtype=np.uint8)
     with pytest.raises(ValueError, match='Camera'):
         verify_cycle(contract, reset=reset, observe=observe, predict=predict, advance=advance, report=reports.append)
+
+
+def test_native_act_composes_the_native_loader_and_blocks_foreign_inputs():
+    from skynet_app.adapters.xpolicy_native_manifest import manifests as native_manifests
+    _, document, _ = setup_case()
+    manifest = next(m for m in native_manifests() if m.slug == "xpolicylab-act-native")
+    document["source"]["adapter"] = manifest.slug
+    meta = document["data"]["bundle"]["assignments"][0]["version"]["metadata"]
+    report, _ = inspect_compatibility(document, manifest, suite())
+    assert report["status"] == "incompatible"
+    meta["contract"] = "skynet.act-rgb-joints/v1"
+    report, _ = inspect_compatibility(document, manifest, suite())
+    assert report["ready"], report
+    composed = compose_evaluator(document, manifest, suite())
+    files = composed.evaluations[0].command.capsule_files
+    for name in ("act_native_checkpoint.py", "act_native_evaluation.py", "act_native_data.py"):
+        assert "adapter-support/" + name in files
+    assert "xpolicylab-act-native" in files["adapter-support/xpolicy_evaluation.py"]

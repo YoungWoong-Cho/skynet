@@ -114,6 +114,16 @@ class EpisodeStore:
         return receipt
 
 
+def flush_recorder(recorder, store):
+    """Persist completed episodes once, including their schema 5 reset ledger."""
+    if recorder._metadata.get("schema_version") == 5:
+        resets = copy.deepcopy(recorder._reset_attempts)
+        store.metadata.update(reset_attempts=resets, num_reset_attempts=len(resets))
+    while recorder._episodes:
+        store.save(recorder._episodes[0])
+        del recorder._episodes[0]
+
+
 class ManualStart:
     """A click belongs to one attempt; stale retries cannot start another one."""
 
@@ -164,6 +174,8 @@ def run_loop(
     multi_assets=None,
     multi_usds=None,
     pose_validity=None,
+    arm_joint_ids=None,
+    stats_panel=None,
 ):
     import carb
     import torch
@@ -183,6 +195,10 @@ def run_loop(
     success_term = collection_success_term(task, success_term)
     if task == "Dexverse-PickUpStick-v0":
         recorder._metadata["skynet_success_orientation"] = "stick_either_end_up_v1"
+    expected_schema = cfg.get("recording_schema_version", 3)
+    if recorder._metadata.get("schema_version") != expected_schema:
+        raise ValueError("Recorder schema differs from the selected task environment")
+    recorder._metadata["skynet_source_revision"] = cfg.get("source_revision")
     store = EpisodeStore(root, recorder._metadata)
     executor = ThreadPoolExecutor(max_workers=1)
     start = ManualStart()
@@ -203,6 +219,10 @@ def run_loop(
     robot = env.scene["robot"]
     configure_virtual_wrist(robot, manifest, tracked_sides)
     wrist_commands = DexVerseWristContinuity(teleop._retargeters, tracked_sides)
+    from retargeting_runtime import CollectionRetargeting
+
+    commands = CollectionRetargeting(cfg, teleop, wrist_commands, root / "retargeting")
+    recorder._metadata["skynet_retargeting"] = copy.deepcopy(commands.metadata)
     from images import state_metadata
 
     _, recorder._metadata["skynet_state_metadata"] = state_metadata(env, cfg)
@@ -302,10 +322,14 @@ def run_loop(
 
     def reset():
         nonlocal phase, instruction, success_count
+        if expected_schema == 5:
+            recorder.finish_reset_without_success(reason="operator_reset")
         recorder.discard_episode()
         ns["handle_reset"](env)
+        if expected_schema == 5:
+            recorder.start_reset_attempt()
         teleop.reset()
-        wrist_commands.reset()
+        commands.reset()
         success_count = 0
         start.reset()
         phase, instruction = "ready", "Tap Start to begin"
@@ -342,10 +366,8 @@ def run_loop(
             )
         return points_by_side
 
-    # Reuse the pinned recorder's state conversion and finalization, replacing only persistence.
-    recorder.flush = lambda: (
-        store.save(recorder._episodes[-1]) if recorder._episodes else None
-    )
+    # Upstream calls flush for both completed episodes and schema 5 reset entries.
+    recorder.flush = lambda: flush_recorder(recorder, store)
     try:
         env.sim.reset()
         reset()
@@ -366,7 +388,6 @@ def run_loop(
                         raise RuntimeError(
                             "Episode could not be saved: " + str(exc)
                         ) from exc
-                    recorder._episodes.clear()
                     save_future = None
                     if not stop_requested:
                         reset()
@@ -415,10 +436,17 @@ def run_loop(
                     else:
                         instruction = "Tap Start to begin"
                     if start.consume(tracking):
-                        wrist_commands.reset()
+                        commands.reset()
+                        extra = {}
+                        if expected_schema == 5:
+                            extra["task_state"] = ns["capture_episode_task_state"](env)
+                            goal_pose = ns["_get_goal_pose_from_task_state"](extra["task_state"])
+                        else:
+                            goal_pose = ns["_get_goal_pose_from_env"](env)
                         recorder.start_episode(
                             initial_state=env.scene.get_state(is_relative=True),
-                            goal_pose=ns["_get_goal_pose_from_env"](env),
+                            goal_pose=goal_pose,
+                            **extra,
                             multi_assets=multi_assets,
                             multi_usds=multi_usds,
                             active_object_metadata=ns[
@@ -432,12 +460,7 @@ def run_loop(
                         recorder._active_episode["skynet_start_pose"] = {
                             s: p.tolist() for s, p in points.items()
                         }
-                        recorder._active_episode["skynet_retargeting"] = dict(
-                            provider="dexverse",
-                            mode="dexpilot",
-                            wrist="absolute",
-                            wrist_continuity="equivalent_euler_angles",
-                        )
+                        recorder._active_episode["skynet_retargeting"] = copy.deepcopy(commands.metadata)
                         if cfg.get("image_capture"):
                             recorder._active_episode["skynet_wall_times"] = []
                         phase, instruction = "recording", goal
@@ -446,7 +469,7 @@ def run_loop(
                     env.sim.render()
                 elif phase == "recording":
                     action = torch.as_tensor(
-                        wrist_commands.update(action.detach().cpu().numpy()),
+                        commands.update(action.detach().cpu().numpy(), raw_data),
                         device=action.device,
                         dtype=action.dtype,
                     )
@@ -464,6 +487,10 @@ def run_loop(
                         wall_times.append(time.time())
                     recorder.record_action(action.detach().clone())
                     result = env.step(action.repeat(env.num_envs, 1))
+                    if expected_schema == 5 and arm_joint_ids is not None:
+                        recorder.record_arm_joint_action(
+                            robot.data.joint_pos_target[0, arm_joint_ids].detach().clone()
+                        )
                     recorder.record_state(env.scene.get_state(is_relative=True))
                     success_count, success = ns["check_success"](
                         env, success_term, success_count

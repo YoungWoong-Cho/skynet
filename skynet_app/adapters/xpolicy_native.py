@@ -11,6 +11,8 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import socket
+import signal
+import uuid
 import subprocess
 import sys
 import tarfile
@@ -141,6 +143,7 @@ def environment_for(launch, workspace, output, count, policy):
         listener.bind(("127.0.0.1", 0))
         port = str(listener.getsockname()[1])
     environment.update({
+        "PATH": str(Path(sys.executable).parent) + os.pathsep + environment.get("PATH", ""),
         "PYTHONPATH": str(workspace) + os.pathsep + environment.get("PYTHONPATH", ""),
         "PYTHONUNBUFFERED": "1", "GIT_TERMINAL_PROMPT": "0",
         "SHELLOPTS": "errexit:pipefail",
@@ -218,6 +221,41 @@ def preflight(record, launch, workspace, environment, arguments):
         (folder / ".venv").symlink_to(Path(sys.prefix), target_is_directory=True)
 
 
+def configure_act_lifecycle(args, directory, output, environment):
+    from act_native_checkpoint import instrument
+    patch = instrument(directory)
+    epochs = getattr(args, "epochs", 6000)
+    if not 1 <= epochs <= 100000:
+        raise ValueError("ACT epochs must be between 1 and 100000")
+    stop_request = output / ("act-stop-" + uuid.uuid4().hex)
+    environment.update(
+        SKYNET_ACT_OUTPUT=str(output), SKYNET_ACT_STOP_REQUEST=str(stop_request),
+        SKYNET_ACT_MANIFEST_SHA=args.manifest_sha, SKYNET_ACT_REVISION=args.revision,
+        SKYNET_ACT_EPOCHS=str(epochs), SKYNET_ACT_RESUME=getattr(args, "resume", None) or "",
+        PYTHONPATH=str(Path(__file__).parent) + os.pathsep + environment["PYTHONPATH"],
+    )
+    return patch, stop_request
+
+
+def execute_act(command, directory, environment, stop_request):
+    # Keep data workers alive long enough to finish and atomically save this epoch.
+    # The Slurm runner signals us; its signal must not kill the inner bash first.
+    previous = {}
+    def stop(signum, _frame):
+        stop_request.write_text(str(signum))
+    try:
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGUSR1):
+            previous[sig] = signal.signal(sig, stop)
+        with tempfile.TemporaryDirectory(prefix="sk-act-", dir="/tmp") as temporary:
+            environment.update(TMPDIR=temporary, TMP=temporary, TEMP=temporary)
+            return subprocess.run(command, cwd=directory, env=environment,
+                                  stdin=subprocess.DEVNULL, start_new_session=True)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        stop_request.unlink(missing_ok=True)
+
+
 def run(args):
     records = read_catalog()
     if args.revision != records["revision"]:
@@ -227,25 +265,53 @@ def run(args):
         raise ValueError("No audited native training entrypoint for this policy")
     if not record["minimum_gpus"] <= args.gpu_count <= record["maximum_gpus"]:
         raise ValueError("GPU allocation is outside this native launcher's supported range")
-    devices = gpu_ids(args.gpu_count, os.environ)
+    verify_only = getattr(args, "verify_only", False)
+    if getattr(args, "resume", None) and (args.policy != "ACT" or verify_only):
+        raise ValueError("Native checkpoint resume is supported for ACT training only")
+    devices = "0" if verify_only else gpu_ids(args.gpu_count, os.environ)
     dataset, output = Path(args.dataset).resolve(), Path(args.output).resolve()
     manifest = verify(dataset, args.manifest_sha)
-    if manifest.get("format") != f"xpolicylab-native-{args.policy.lower()}/v1" or manifest.get("policy") != args.policy:
-        raise ValueError("Dataset was not prepared for the selected native policy")
-    if manifest.get("source_revision") != args.revision or manifest.get("contract") != "skynet.xpolicylab-native/v1":
-        raise ValueError("Dataset native source/data contract does not match")
-    launch = manifest.get("launch", {})
-    arguments = native_arguments(record, launch, args.seed, devices)
+    recorded_act = args.policy == "ACT" and manifest.get("format") == "xpolicylab-act-hdf5/v1"
+    if recorded_act:
+        from act_native_data import validate_recorded_act
+        dimensions = validate_recorded_act(dataset, manifest)
+    else:
+        if manifest.get("format") != f"xpolicylab-native-{args.policy.lower()}/v1" or manifest.get("policy") != args.policy:
+            raise ValueError("Dataset was not prepared for the selected native policy")
+        if manifest.get("source_revision") != args.revision or manifest.get("contract") != "skynet.xpolicylab-native/v1":
+            raise ValueError("Dataset native source/data contract does not match")
+    if verify_only and not recorded_act:
+        raise ValueError("Loader verification is supported for recorded ACT inputs only")
     output.mkdir(parents=True, exist_ok=True)
     workspace = output / "native-workspace"
-    # Never reuse a prior run's files or modify the shared source/input directories.
-    workspace.mkdir()
+    # Every ACT attempt exports fresh pinned code; recovery state is separate.
+    if args.policy == "ACT" and not verify_only:
+        workspace = workspace / ("attempt-" + uuid.uuid4().hex)
+        workspace.mkdir(parents=True)
+    else:
+        workspace.mkdir()
     export_source(Path(args.repository), args.revision, args.policy, workspace / "XPolicyLab")
-    copy_inputs(dataset, manifest, workspace)
+    if recorded_act:
+        from act_native_data import prepare_recorded_act
+        launch = prepare_recorded_act(dataset, manifest, workspace, dimensions)
+    else:
+        copy_inputs(dataset, manifest, workspace)
+        launch = manifest.get("launch", {})
+    arguments = native_arguments(record, launch, args.seed, devices)
     environment = environment_for(launch, workspace, output, args.gpu_count, args.policy)
     preflight(record, launch, workspace, environment, arguments)
     directory = workspace / "XPolicyLab/policy" / args.policy
+    if verify_only:
+        from act_native_data import verify_loader
+        receipt = verify_loader(directory, args.manifest_sha, args.seed)
+        (output / "loader-validation.json").write_text(json.dumps(receipt, indent=2))
+        print(json.dumps(receipt), flush=True)
+        return 0
     patches = adapt_infrastructure(record, directory)
+    stop_request = None
+    if args.policy == "ACT":
+        patch, stop_request = configure_act_lifecycle(args, directory, output, environment)
+        patches.append(patch)
     command = ["bash", "-e", "-o", "pipefail", "train.sh", *arguments]
     receipt = {"policy": args.policy, "source_revision": args.revision,
                "dataset_manifest_sha256": args.manifest_sha,
@@ -254,7 +320,9 @@ def run(args):
     receipt_path = output / "native-launch.json"
     receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
     # EOF prevents upstream prompts from hanging an unattended Slurm job.
-    completed = subprocess.run(command, cwd=directory, env=environment, stdin=subprocess.DEVNULL)
+    completed = (execute_act(command, directory, environment, stop_request)
+                 if args.policy == "ACT" else
+                 subprocess.run(command, cwd=directory, env=environment, stdin=subprocess.DEVNULL))
     receipt.update(status="completed" if completed.returncode == 0 else "failed", exit_code=completed.returncode)
     receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
     return completed.returncode
@@ -264,8 +332,11 @@ def main():
     parser = argparse.ArgumentParser()
     for flag in ("repository", "revision", "policy", "dataset", "manifest-sha", "output"):
         parser.add_argument("--" + flag, required=True)
-    parser.add_argument("--gpu-count", type=int, required=True)
+    parser.add_argument("--gpu-count", type=int, default=1)
+    parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--seed", type=int)
+    parser.add_argument("--epochs", type=int, default=6000)
+    parser.add_argument("--resume")
     args = parser.parse_args()
     try:
         return run(args)

@@ -60,6 +60,15 @@ class ClusterPolicyPreparation:
     def _loader_request(self, job, remote_worker, attempt_root):
         if not RECIPES[job["format"]]["trainable"]:
             return None
+        if job["format"] == "act-native":
+            profile = CLUSTER.runtime_profiles["skynet-dp"]
+            return dict(
+                argv=[str(profile.environment_path) + "/bin/python", f"{remote_worker}/xpolicy_native.py",
+                      "--repository", str(profile.source_prerequisites[0].path), "--revision", XPL_COMMIT,
+                      "--policy", "ACT", "--dataset", "{dataset}", "--manifest-sha", "{manifest_sha}",
+                      "--output", f"{attempt_root}/dataset-validation", "--gpu-count", "1", "--seed", "42", "--verify-only"],
+                schemas=["skynet.act-native-loader-validation/v1"], mode="rgb",
+            )
         kind = "egoverse" if job["format"] == "egoverse" else "act" if job["format"] == "act" else "dp"
         profile = CLUSTER.runtime_profiles["egoverse-native" if kind == "egoverse" else "skynet-dp"]
         mode = "rgb" if "rgb" in RECIPES[job["format"]]["observations"] else "state"
@@ -95,6 +104,12 @@ class ClusterPolicyPreparation:
         request.update(job_id=job["id"], attempt_id=attempt_id, sources=sources,
                        output=root + "/output", prepared_root=f"{WORK_ROOT}/datasets/prepared",
                        receipt_path=root + "/result.json", loader=self._loader_request(job, worker, root))
+        if job.get("previous_cluster_root") and not job.get("migrating_local_copy"):
+            previous = PurePosixPath(job["previous_cluster_root"])
+            expected_parent = PurePosixPath(f"{WORK_ROOT}/jobs/runs/{job['id']}/preparation")
+            if previous.parent != expected_parent:
+                raise ValueError("Previous preparation is outside this job's attempt directory")
+            request["reuse_output"] = str(previous / "output")
         if job.get("migrating_local_copy"):
             from .capture_processing.service import upload_capture
             output = self.root / job["id"] / "output"
@@ -194,11 +209,18 @@ class ClusterPolicyPreparation:
     def _publish_cluster_result(self, job, result):
         manifest_sha = result.get("manifest_sha256", "")
         expected_path = f"{WORK_ROOT}/datasets/prepared/{manifest_sha}"
+        allowed_archives = {job["cluster_root"] + "/dataset.zip"}
+        previous = job.get("previous_cluster_root")
+        if previous:
+            expected_parent = PurePosixPath(f"{WORK_ROOT}/jobs/runs/{job['id']}/preparation")
+            if PurePosixPath(previous).parent != expected_parent:
+                raise ValueError("Previous preparation is outside this job's attempt directory")
+            allowed_archives.add(previous + "/dataset.zip")
         if (result.get("schema") != "skynet.cluster-preparation/v1" or result.get("job_id") != job["id"]
                 or result.get("attempt_id") != job["attempt_id"] or result.get("verified") is not True
                 or not re.fullmatch(r"[a-f0-9]{64}", manifest_sha)
                 or result.get("path") != expected_path
-                or result.get("archive_path") != job["cluster_root"] + "/dataset.zip"
+                or result.get("archive_path") not in allowed_archives
                 or not re.fullmatch(r"[a-f0-9]{64}", result.get("archive_sha256", ""))):
             raise ValueError("Cluster preparation receipt did not match this attempt")
         if job.get("migrating_local_copy") and manifest_sha != job.get("manifest_sha256"):

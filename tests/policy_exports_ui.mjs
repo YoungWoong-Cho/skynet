@@ -201,6 +201,20 @@ try {
   assert.ok(!('overfit_episode' in submission));
   assert.ok(!('selections' in submission));
 
+  options.policies.push({id:'act-native',name:'XPolicyLab · ACT · Native',available:true,trainable:true,
+    split_mode:'upstream',minimum_episodes:2,description:'Original ACT uses its own 80/20 split.'});
+  await w.openPolicyExport('new');
+  el('policy-export-format').value='act-native';
+  el('policy-export-format').dispatchEvent(new w.Event('change'));
+  assert.equal(el('create-policy-export').disabled,false);
+  assert.equal(el('preparation-validation').closest('.field').hidden,true);
+  assert.match(el('policy-export-format-help').textContent,/80\/20/);
+  options.sessions.find(s=>s.id==='new').episodes=1;
+  await w.openPolicyExport('new');
+  el('policy-export-format').value='act-native';
+  el('policy-export-format').dispatchEvent(new w.Event('change'));
+  assert.equal(el('create-policy-export').disabled,true);
+  assert.match(el('policy-export-compatibility').textContent,/two episodes/);
   options.sessions.find(s=>s.id==='new').episodes=1;
   await w.openPolicyExport('new');
   el('policy-export-format').value='egoverse';
@@ -208,6 +222,13 @@ try {
   assert.equal(el('create-policy-export').disabled,false);
   assert.match(el('policy-export-compatibility').textContent,/without validation steps/);
   assert.equal(el('preparation-validation').disabled,true);
+
+  options.exports = [{id:'native',resource_id:'dataset',format:'act-native',state:'READY',episodes:51,
+    split:{train:Array(41).fill(0),validation:Array(10).fill(0)},
+    loader_validation:{train_episodes:40,validation_episodes:11}}];
+  await w.openPreparedDataset('dataset');
+  assert.match(el('prepared-dataset-content').textContent,/40 train \/ 11 validation · original ACT/);
+  assert.doesNotMatch(el('prepared-dataset-content').textContent,/41 train|10 episodes/);
 
   options.exports = [
     {

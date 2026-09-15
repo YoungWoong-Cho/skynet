@@ -106,6 +106,10 @@
       const actions = text(row, "td", "", "row-actions");
       button(actions, "View", () => window.openLiveReview(session));
       button(actions, "Convert", () => window.openPolicyExport(session.id));
+      const remove = text(actions, "button", "Delete");
+      remove.type = "button";
+      remove.dataset.deleteKind = "recording";
+      remove.dataset.deleteId = session.id;
     }
   }
   window.renderSimulationRecordings = (value) => {

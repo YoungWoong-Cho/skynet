@@ -17,6 +17,7 @@ from test_experiments import make_spec
 def runner(monkeypatch):
     root = Path(__file__).resolve().parents[1]
     monkeypatch.syspath_prepend(str(root / "ops/datasets"))
+    monkeypatch.syspath_prepend(str(root / "skynet_app/adapters"))
     spec = importlib.util.spec_from_file_location("native_runner", root / "skynet_app/adapters/xpolicy_native.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -32,15 +33,17 @@ def test_catalog_has_real_training_entries_and_no_inference_stubs():
     assert len({r["slug"] for r in records["policies"]}) == 38
     for manifest in manifests():
         assert manifest.train.capsule_files["adapter-support/xpolicy_native.py"]
-        assert not manifest.evaluations
-        assert not manifest.capabilities.supports_resume
-        assert not manifest.train.checkpoint_globs
+        assert bool(manifest.evaluations) == (manifest.slug == "xpolicylab-act-native")
+        assert manifest.capabilities.supports_resume == (manifest.slug == "xpolicylab-act-native")
+        assert bool(manifest.train.checkpoint_globs) == (manifest.slug == "xpolicylab-act-native")
         spec = make_spec()
         spec.source.adapter = manifest.slug
         spec.runtime.backend = "existing"
         spec.native.argv = []
         spec.native.resume_argv = []
         spec.native.config = {"dataset_path": "/cluster/native", "dataset_manifest_sha256": "a" * 64}
+        if manifest.slug == "xpolicylab-act-native":
+            spec.native.config["epochs"] = 6000
         spec.train.checkpoint.auto_resume = manifest.defaults.checkpoint.auto_resume
         spec.resources.gpu.count = manifest.capabilities.minimum_gpus
         spec.intent.explicit_parameters = []
@@ -89,6 +92,8 @@ def native_run(tmp_path, monkeypatch, runner):
     for args in (["init", "-q"], ["add", "."], ["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-qm", "fixture"]):
         subprocess.run(["git", "-C", str(repository), *args], check=True, capture_output=True)
     revision = subprocess.check_output(["git", "-C", str(repository), "rev-parse", "HEAD"], text=True).strip()
+    # Generic subprocess isolation uses a tiny fake launcher, not the ACT loop.
+    monkeypatch.setattr(runner, "configure_act_lifecycle", lambda a, d, o, e: ({}, o / "stop"))
     record = {**next(r for r in catalog()["policies"] if r["policy"] == "ACT"),
               "train_sha256": runner.digest(policy / "train.sh")}
     monkeypatch.setattr(runner, "read_catalog", lambda: {"revision": revision, "policies": [record]})
@@ -117,7 +122,7 @@ def test_real_subprocess_isolated_source_inputs_and_outputs(runner, native_run):
     # A local source modification must not be imported into the pinned execution.
     (source / "policy/ACT/train.sh").write_text("exit 99\n")
     assert runner.run(args) == 0
-    policy = Path(args.output) / "native-workspace/XPolicyLab/policy/ACT"
+    policy = next((Path(args.output) / "native-workspace").glob("attempt-*/XPolicyLab/policy/ACT"))
     assert (policy / "devices.txt").read_text() == "3"
     assert (policy / "arguments.txt").read_text().splitlines() == ["RoboDojo", "cube", "arx_x5", "joint", "42", "3"]
     assert (policy / "data/input.txt").read_text() == "changed"
@@ -125,8 +130,8 @@ def test_real_subprocess_isolated_source_inputs_and_outputs(runner, native_run):
     assert not (source / "policy/ACT/arguments.txt").exists()
     assert (policy.parents[1] / "__init__.py").is_file()
     assert json.loads((Path(args.output) / "native-launch.json").read_text())["exit_code"] == 0
-    with pytest.raises(FileExistsError):
-        runner.run(args)
+    assert runner.run(args) == 0
+    assert len(list((Path(args.output) / "native-workspace").glob("attempt-*"))) == 2
 
 
 def test_bad_data_fails_before_creating_workspace(runner, native_run):
@@ -189,3 +194,111 @@ def test_process_and_network_settings_follow_one_node_allocation(runner, tmp_pat
     assert env["NODE_COUNT"] == env["NUM_MACHINES"] == "1"
     assert env["MASTER_ADDR"] == "127.0.0.1"
     assert 0 < int(env["MASTER_PORT"]) < 65536
+
+
+@pytest.fixture
+def recorded_act(tmp_path, runner):
+    import h5py
+    import numpy as np
+    root = tmp_path / "recorded"
+    (root / "dataset").mkdir(parents=True)
+    names = ["wrist_x", "wrist_y", "wrist_z", "wrist_rx", "wrist_ry", "wrist_rz", "finger"]
+    manifest = {
+        "format": "xpolicylab-act-hdf5/v1", "contract": "skynet.act-rgb-joints/v1",
+        "validation": {"status": "PASSED"}, "policy_to_source_indices": list(range(7)),
+        "capture": {"action_joint_names": names,
+                    "action_semantics": "raw_joint_position_command; target = action * scale + offset",
+                    "groups": [{"wrist_indices": list(range(6)), "finger_indices": [6]}],
+                    "cameras": {"front": {}, "left": {}, "right": {}}},
+        "camera_slots": dict(cam_head="front", cam_left_wrist="left", cam_right_wrist="right"),
+        "episodes": [{"index": i, "steps": i + 2} for i in range(2)], "files": {},
+    }
+    (root / "robot_config.json").write_text(json.dumps(dict(arm_dim=[6], ee_dim=[1])))
+    for episode in manifest["episodes"]:
+        n = episode["steps"]
+        with h5py.File(root / f'dataset/episode_{episode["index"]}.hdf5', "w") as file:
+            file["action"] = np.zeros((n, 7), dtype="f4")
+            file["observations/qpos"] = np.ones((n, 7), dtype="f4")
+            for camera in manifest["camera_slots"]:
+                file.create_dataset("observations/images/" + camera, shape=(n, 480, 640, 3), dtype="u1", compression="lzf")
+    for file in root.rglob("*"):
+        if file.is_file():
+            manifest["files"][str(file.relative_to(root))] = dict(sha256=runner.digest(file), size_bytes=file.stat().st_size)
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    return root, manifest
+
+
+def test_recorded_native_inputs_merge_private_config_and_keep_source_data(runner, recorded_act, native_run):
+    from act_native_data import validate_recorded_act, prepare_recorded_act
+    root, manifest = recorded_act
+    _, _, source, _ = native_run
+    workspace = root.parent / "workspace"
+    config = workspace / "XPolicyLab/utils/robot/_robot_info.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"other_robot": {"arm_dim": [10]}}))
+    (workspace / "XPolicyLab/policy/ACT").mkdir(parents=True)
+    before = runner.digest(root / "manifest.json")
+    dims = validate_recorded_act(root, manifest)
+    launch = prepare_recorded_act(root, manifest, workspace, dims)
+    configs = json.loads((workspace / "XPolicyLab/policy/ACT/TASK_CONFIGS.json").read_text())
+    assert configs["Skynet-recordings-skynet-joint"]["dataset_dir"] == str(root / "dataset")
+    assert configs["Skynet-recordings-skynet-joint"]["camera_names"] == ["cam_head", "cam_right_wrist", "cam_left_wrist"]
+    robots = json.loads(config.read_text())
+    assert robots == {"other_robot": {"arm_dim": [10]}, "skynet": {"arm_dim": [6], "ee_dim": [1]}}
+    assert launch["action_type"] == "joint"
+    assert runner.digest(root / "manifest.json") == before
+    runner.verify(root, before)
+    assert not (source / "policy/ACT/TASK_CONFIGS.json").exists()
+
+
+@pytest.mark.parametrize("problem", ["dimension", "order", "single", "camera", "nonfinite"])
+def test_invalid_recorded_act_rejected_before_launch(recorded_act, problem):
+    from act_native_data import validate_recorded_act
+    import h5py
+    root, manifest = recorded_act
+    if problem == "dimension":
+        (root / "robot_config.json").write_text(json.dumps(dict(arm_dim=[6], ee_dim=[22])))
+    elif problem == "order":
+        manifest["policy_to_source_indices"] = list(reversed(range(7)))
+    elif problem == "single":
+        manifest["episodes"].pop()
+    elif problem == "camera":
+        manifest["camera_slots"]["cam_head"] = "left"
+    else:
+        with h5py.File(root / "dataset/episode_0.hdf5", "r+") as file:
+            file["action"][0, 0] = float("nan")
+    with pytest.raises(ValueError):
+        validate_recorded_act(root, manifest)
+
+
+def test_native_act_declares_recording_conversion_and_existing_formats():
+    from skynet_app.dataset_formats import catalog as conversion_catalog
+    records = manifests()
+    class Registry:
+        def list_adapter_registry(self):
+            return [{"slug": m.slug, "latest_version": {"manifest": m.model_dump(mode="json")}} for m in records]
+    options = conversion_catalog(Registry())
+    native = next(p for p in options if p["id"] == "act-native")
+    assert native["available"] and native["trainable"]
+    assert native["training_setup"]["adapter"] == "xpolicylab-act-native"
+    assert native["split_mode"] == "upstream"
+    assert not any(p["id"] == "xpolicylab-act-native" for p in options)
+
+
+def test_native_resume_uses_only_full_state_checkpoints():
+    manifest = next(m for m in manifests() if m.slug == "xpolicylab-act-native")
+    assert manifest.train.resume_argv == ["--resume", "{{tokens.resume_checkpoint}}"]
+    assert manifest.train.checkpoint_globs == ["artifacts/checkpoints/last.ckpt"]
+    assert manifest.train.progress.total_path == "native.config.epochs"
+    assert manifest.train.progress.source.metrics["train/kl"] == "train/kl"
+
+
+def test_native_hooks_reject_source_drift_and_trim_only_replayed_epochs(runner, tmp_path):
+    from act_native_checkpoint import instrument, trim_progress
+    (tmp_path / "imitate_episodes.py").write_text("print('changed source')")
+    with pytest.raises(ValueError, match="audited"):
+        instrument(tmp_path)
+    log = tmp_path / "logs.json.txt"
+    log.write_text('{"epoch": 0, "train_loss": 2}\n{"epoch": 1, "train_loss": 1}\n{"epoch":')
+    trim_progress(log, 1)
+    assert [json.loads(line)["epoch"] for line in log.read_text().splitlines()] == [0]

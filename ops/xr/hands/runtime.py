@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import math
+import re
 from pathlib import Path
 import sys
 import xml.etree.ElementTree as ET
@@ -34,6 +36,29 @@ def bounded_fingers(values, limits):
     if array.shape != (len(bounds),) or not np.isfinite(array).all():
         raise ValueError("Hand retargeting returned missing or nonfinite joint values")
     return np.clip(array, bounds[:, 0], bounds[:, 1])
+
+
+def finger_actuator_parameters(manifest, urdf):
+    """Keep measured drive tuning separate from the hand's physical asset."""
+    hand = manifest.get("hand_key")
+    parameters = dict(
+        armature=0.001 if hand in {"shadow", "wuji-2"} else 0.01, velocity_limit_sim=5.0
+    )
+    if hand == "wuji-2":
+        joints = {j.get("name"): j for j in ET.parse(urdf).findall("joint")}
+        speeds = {}
+        for name in manifest["finger_joints"]:
+            limit = joints[name].find("limit")
+            speed = (
+                float(limit.get("velocity", "nan"))
+                if limit is not None
+                else float("nan")
+            )
+            if not math.isfinite(speed) or speed <= 0:
+                raise ValueError("Missing positive finger velocity limit: " + name)
+            speeds[re.escape(name)] = speed
+        parameters["velocity_limit_sim"] = speeds
+    return parameters
 
 
 def adjacent_collision_pairs(urdf, depth=2):
@@ -79,11 +104,134 @@ def filter_adjacent_collisions(urdf, usd, depth=2):
     stage.GetRootLayer().Save()
 
 
+def uniform_visual_colors(urdf):
+    """Resolve colors that apply to every visual in a link, or None if unspecified.
+
+    Mixed-material links retain the converter's per-visual bindings. None
+    allows the same invisible CAD material fallback as the Hands viewer.
+    """
+
+    root = ET.parse(urdf).getroot()
+    named = {m.get("name"): m for m in root.findall("material")}
+    result = {}
+    for link in root.findall("link"):
+        colors = []
+        for visual in link.findall("visual"):
+            declaration = visual.find("material")
+            color = declaration.find("color") if declaration is not None else None
+            if color is None and declaration is not None:
+                material = named.get(declaration.get("name"))
+                color = material.find("color") if material is not None else None
+            if color is None:
+                colors.append(None)
+                continue
+            rgba = tuple(float(v) for v in color.get("rgba", "").split())
+            if len(rgba) != 4 or any(
+                not math.isfinite(v) or not 0 <= v <= 1 for v in rgba
+            ):
+                raise ValueError("Invalid URDF material color: " + link.get("name"))
+            colors.append(rgba)
+        if colors and all(c == colors[0] for c in colors):
+            result[link.get("name")] = colors[0]
+    return result
+
+
+def restore_invisible_cad_materials(stage, visual):
+    """Match the Hands viewer fallback when URDF does not specify an alpha.
+
+    Repair only constant zero opacity in known imported surface shaders. Keep
+    shading, textures, nonzero translucency, and materials outside this visual.
+    Instance overrides are local to this visual, never written to CAD assets.
+    """
+    from pxr import Usd, UsdShade
+
+    changes = []
+    for prim in Usd.PrimRange(visual, Usd.TraverseInstanceProxies()):
+        if not prim.IsA(UsdShade.Shader):
+            continue
+        if prim.GetAttribute("info:id").Get() == "UsdPreviewSurface":
+            name = "inputs:opacity"
+        elif (
+            prim.GetAttribute("info:mdl:sourceAsset:subIdentifier").Get()
+            == "OmniPBR_Opacity"
+        ):
+            if (
+                not prim.GetAttribute("inputs:enable_opacity").Get()
+                or prim.GetAttribute("inputs:enable_opacity_texture").Get()
+            ):
+                continue
+            name = "inputs:opacity_constant"
+        else:
+            continue
+        opacity = prim.GetAttribute(name)
+        if (
+            opacity.HasAuthoredValueOpinion()
+            and opacity.Get() == 0
+            and not opacity.GetConnections()
+        ):
+            changes.append((prim.GetPath(), name))
+    for path, name in changes:
+        # The importer instances each visual subtree. Uninstance just this
+        # occurrence before authoring its material override in the root layer.
+        ancestors = []
+        parent = stage.GetPrimAtPath(path)
+        while parent and parent.GetPath().HasPrefix(visual.GetPath()):
+            ancestors.append(parent.GetPath())
+            parent = parent.GetParent()
+        for ancestor in reversed(ancestors):
+            prim = stage.GetPrimAtPath(ancestor)
+            if prim.IsInstance():
+                prim.SetInstanceable(False)
+        stage.GetPrimAtPath(path).GetAttribute(name).Set(1.0)
+
+
+def configure_visual_materials(urdf, usd):
+    """Honor source URDF colors over nested mesh materials, including opacity.
+
+    Shadow's thumb DAE materials import with zero opacity despite the opaque
+    URDF declaration. Bind at the visual root with explicit precedence; avoid
+    editing shared mesh instances, collision geometry, or the source assets.
+    """
+    colors = uniform_visual_colors(urdf)
+    if not colors:
+        return
+    from pxr import Gf, Sdf, Usd, UsdShade
+
+    stage = Usd.Stage.Open(usd)
+    if stage is None or not stage.GetDefaultPrim().IsValid():
+        raise ValueError("Hand URDF conversion did not produce a valid USD")
+    root = stage.GetDefaultPrim().GetPath()
+    materials = {}
+    for link, rgba in colors.items():
+        visual = stage.GetPrimAtPath(root.AppendPath(link + "/visuals"))
+        if not visual.IsValid():
+            raise ValueError("Converted hand is missing visual geometry: " + link)
+        if rgba is None:
+            restore_invisible_cad_materials(stage, visual)
+            continue
+        if rgba not in materials:
+            path = root.AppendPath("SkynetVisualMaterials/color_" + str(len(materials)))
+            material = UsdShade.Material.Define(stage, path)
+            shader = UsdShade.Shader.Define(stage, path.AppendChild("Shader"))
+            shader.CreateIdAttr("UsdPreviewSurface")
+            shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
+                Gf.Vec3f(*rgba[:3])
+            )
+            shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(rgba[3])
+            material.CreateSurfaceOutput().ConnectToSource(
+                shader.ConnectableAPI(), "surface"
+            )
+            materials[rgba] = material
+        UsdShade.MaterialBindingAPI.Apply(visual).Bind(
+            materials[rgba], UsdShade.Tokens.strongerThanDescendants
+        )
+    stage.GetRootLayer().Save()
+
+
 def configure_mimic_constraints(usd, joints):
     """Keep URDF mechanical couplings exact in the converted PhysX model."""
     if not joints:
         return
-    import math
     from pxr import Usd, UsdPhysics
 
     stage = Usd.Stage.Open(usd)
@@ -179,6 +327,52 @@ def action_terms(manifest, action_type):
     return terms
 
 
+def register_v1_hand(manifest):
+    """Bind v1 task initialization to the selected canonical hand and wrist map."""
+    import importlib
+    from functools import partial
+
+    import gymnasium as gym
+    from dexverse.baseline_v1.config import robot_init
+    from dexverse.benchmark import V1_CONFIGS
+
+    robot = manifest["robot"]
+    layouts = hand_layouts(manifest)
+    joint_maps = {
+        side: (tuple(hand["wrist_joints"][:3]), tuple(hand["wrist_joints"][3:]))
+        for side, hand in layouts.items()
+    }
+    if len(layouts) == 1:
+        robot_init._SINGLE_FLOATING_JOINTS[robot] = next(iter(joint_maps.values()))
+        robot_init._SINGLE_ARM_FLOATING_TRANSLATION_ROBOTS = tuple(
+            dict.fromkeys((*robot_init._SINGLE_ARM_FLOATING_TRANSLATION_ROBOTS, robot))
+        )
+    else:
+        robot_init._FLOATING_BIMANUAL_JOINTS[robot] = joint_maps
+        robot_init._FLOATING_BIMANUAL_TRANSLATION_ROBOTS = tuple(
+            dict.fromkeys((*robot_init._FLOATING_BIMANUAL_TRANSLATION_ROBOTS, robot))
+        )
+        original_offsets = robot_init._bimanual_hand_mount_offsets
+
+        def mount_offsets(robot_type):
+            # Skynet's bimanual contract mounts both six-axis chains at the
+            # common base origin; their separation is set by initial joints.
+            if robot_type == robot:
+                return {side: (0.0, 0.0, 0.0) for side in layouts}
+            return original_offsets(robot_type)
+
+        robot_init._bimanual_hand_mount_offsets = mount_offsets
+
+    for task, (module, name) in V1_CONFIGS.items():
+        if ("Bimanual" in task) != (len(layouts) == 2):
+            continue
+        cfg_class = getattr(importlib.import_module("dexverse.baseline_v1.config." + module), name)
+        # Upstream parses a default native hand before applying --robot_type.
+        # Instantiate with the selected Skynet hand immediately so task contact
+        # filters and init-pose rules never need the unused native hand USD.
+        gym.spec(task).kwargs["env_cfg_entry_point"] = partial(cfg_class, robot_type=robot)
+
+
 def install(directory):
     root, m = read_bundle(directory)
     import isaaclab.sim as sim
@@ -214,6 +408,7 @@ def install(directory):
             ),
         )
     )
+    configure_visual_materials(root / "simulation.urdf", converter.usd_path)
     configure_mimic_constraints(converter.usd_path, m["mimic_joints"])
     filter_adjacent_collisions(
         root / "simulation.urdf", converter.usd_path, m["collision_neighbor_depth"]
@@ -264,9 +459,8 @@ def install(directory):
                 joint_names_expr=fingers,
                 stiffness=10.0,
                 damping=0.2,
-                armature=0.01,
                 effort_limit_sim=2.0,
-                velocity_limit_sim=5.0,
+                **finger_actuator_parameters(m, root / "simulation.urdf"),
             ),
         },
     )
@@ -301,10 +495,18 @@ def install(directory):
             ),
         )
 
-    original = base._get_tabletop_robot_setup_builders
-    base._get_tabletop_robot_setup_builders = lambda: dict(
-        original(), **{m["robot"]: builder}
-    )
+    import importlib.util
+
+    bases = [base]
+    if importlib.util.find_spec("dexverse.baseline_v1") is not None:
+        from dexverse.baseline_v1 import dexverse_base_env_cfg as v1_base
+        bases.append(v1_base)
+        register_v1_hand(m)
+    for target in bases:
+        original = target._get_tabletop_robot_setup_builders
+        target._get_tabletop_robot_setup_builders = (
+            lambda original=original: dict(original(), **{m["robot"]: builder})
+        )
     module_name = "skynet_imported_" + m["robot"]
     module = ModuleType(module_name)
     action_names = wrist + fingers

@@ -43,6 +43,7 @@ def test_remote_review_preserves_checksums_without_mac_payloads(tmp_path, payloa
     reviews = LiveReviewService(live)
     reviews.prepare('session',0)
     assert reviews.status('session',0)['state'] == 'READY'
+    assert reviews.status('session',0)['recording_source'] == {'gateway':'sky2','path':str(cluster/'recording.pkl')}
     result=json.loads(reviews.artifact('session',0,'review.json').read_text())
     assert result['sha256']==hashlib.sha256(raw).hexdigest()
     assert len(result['episodes'][0]['frames'])==4

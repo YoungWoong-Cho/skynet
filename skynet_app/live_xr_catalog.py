@@ -4,6 +4,8 @@ from copy import deepcopy
 from .capture_processing.dexverse_runner import REVISION, TASK
 from .hand_bundles import DEFAULT_ROBOT as ROBOT
 from .hand_bundles import definitions
+from .retargeting import choices, DEFAULT
+from .dexverse_versions import collection_tasks
 
 HANDS = []
 
@@ -52,12 +54,16 @@ TASKS = [
 ]
 
 
+TASKS.extend(collection_tasks())
+
 def catalog():
     return deepcopy(
         {
             "source_revision": REVISION,
             "hands": HANDS,
             "tasks": TASKS,
+            "retargeters": choices(),
+            "default_retargeter": DEFAULT,
             "default_robot": ROBOT,
             "default_task": TASK,
             "verified_pairs": [],
@@ -68,6 +74,10 @@ def catalog():
 
 def selection(task, robot, *, historical=False):
     task_info = next((item for item in TASKS if item["key"] == task), None)
+    if task_info is None and historical:
+        # Published v0 baselines are reviewable without adding live choices.
+        from .dexverse_release import historical_task
+        task_info = historical_task(task)
     hand = next((item for item in HANDS if item["key"] == robot), None)
     if (
         hand is None
@@ -96,4 +106,8 @@ def selection(task, robot, *, historical=False):
                 else "Choose a hand listed in Live teleoperation."
             )
         )
+    required = task_info.get('required_hand')
+    if not historical and required and hand['side'] != required:
+        label = 'both hands' if required == 'both' else required + ' hand'
+        raise ValueError('This task requires ' + label)
     return deepcopy(task_info), deepcopy(hand)

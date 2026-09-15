@@ -20,6 +20,7 @@ from .cluster_runtime import (
 from .database import canonical_json, utc_now
 from .capture_processing.dexverse_runner import TASK, ROBOT, REVISION
 from .live_xr_catalog import selection
+from .dexverse_versions import environment_profile
 from .simulation_hands import build as build_hand, upload as upload_hand
 from .live_xr_workstation import LaunchRejected, WorkstationClient, validate_profile
 
@@ -46,6 +47,10 @@ class LiveXRService:
         self.lock = self.database.operation_lock("live-collection")
         self.active, self.refreshing = set(), set()
         self.refreshed = {}
+        self.status_pending = set()
+        self.status_lock = threading.Lock()
+        self.recording_locks = {}
+        self.recording_readers = threading.local()
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="live-xr")
         with database.transaction() as c:
             c.execute(
@@ -55,8 +60,18 @@ class LiveXRService:
                 "CREATE TABLE IF NOT EXISTS live_xr_consent (url TEXT PRIMARY KEY, accepted_at TEXT NOT NULL)"
             )
 
+    def recording_lock(self, identifier):
+        with self.status_lock:
+            if identifier not in self.recording_locks:
+                self.recording_locks[identifier] = self.database.operation_lock("recording:" + identifier)
+            return self.recording_locks[identifier]
+
+    def recording_guard(self, identifier):
+        from .recording_guard import recording_guard
+        return recording_guard(self, identifier)
+
     def consent(self, accept=False):
-        with self.database.transaction() as c:
+        with self.database.connection() as c:
             if accept:
                 c.execute(
                     "INSERT INTO live_xr_consent VALUES (?,?) ON CONFLICT(url) DO NOTHING",
@@ -105,7 +120,9 @@ class LiveXRService:
         return json.loads(row[0])
 
     def update(self, identifier, **changes):
-        with self.lock, self.database.transaction() as c:
+        # The live-collection lock already serializes these writes. Do not wait
+        # for unrelated training/archive repository transactions.
+        with self.lock, self.database.connection() as c, c.raw.transaction():
             job = self.get(identifier)
             if changes.get("state") == "FAILED" and "failed_stage" not in changes:
                 changes["failed_stage"] = job.get("startup_stage")
@@ -181,7 +198,12 @@ class LiveXRService:
         return self.cluster
 
     def create(
-        self, accepted_license=False, task=None, robot=None, image_capture=False
+        self,
+        accepted_license=False,
+        task=None,
+        robot=None,
+        image_capture=False,
+        retargeter="dexpilot",
     ):
         if not self.consent(accepted_license)["accepted"]:
             raise ValueError(
@@ -194,7 +216,13 @@ class LiveXRService:
             profile["task"] if task is None else task,
             profile["robot"] if robot is None else robot,
         )
+        profile = environment_profile(profile, task_info['key'],
+            cluster_root=WORK_ROOT if profile['execution'] == 'slurm' else None)
+        from .retargeting import configuration, validate_hand
+
+        retargeting = configuration(retargeter, profile.get("work_root", WORK_ROOT))
         profile.update(
+            retargeting=retargeting,
             image_capture=image_capture,
             task=task_info["key"],
             robot=hand["key"],
@@ -208,9 +236,15 @@ class LiveXRService:
 
         worker = (self.root / "ops/xr/native_session.py").read_text()
         sources = {
+            "trajectory.py": Path(__file__).with_name("trajectory.py").read_text(),
             "collection.py": (self.root / "ops/xr/collection.py").read_text(),
             "wrist.py": (self.root / "ops/xr/wrist.py").read_text(),
-            "scene_geometry.py": (Path(__file__).parent / "adapters/scene_geometry.py").read_text(),
+            "retargeting_runtime.py": (
+                self.root / "ops/xr/retargeting_runtime.py"
+            ).read_text(),
+            "scene_geometry.py": (
+                Path(__file__).parent / "adapters/scene_geometry.py"
+            ).read_text(),
             "images.py": (self.root / "ops/xr/images.py").read_text(),
             "render_images.py": (self.root / "ops/xr/render_images.py").read_text(),
             "arrays.py": "import pickle\nimport numpy as np\n"
@@ -220,7 +254,9 @@ class LiveXRService:
         worker = worker.replace(
             "COLLECTION_FILES = {}", "COLLECTION_FILES = " + repr(sources), 1
         )
-        with self.lock, self.database.transaction() as c:
+        # The live-collection lock already serializes these writes. Do not wait
+        # for unrelated training/archive repository transactions.
+        with self.lock, self.database.connection() as c, c.raw.transaction():
             for job in self.list():
                 if job["state"] not in TERMINAL:
                     if (job["profile"]["task"], job["profile"]["robot"]) != (
@@ -234,6 +270,13 @@ class LiveXRService:
                         raise ValueError(
                             "Stop the current session before changing image capture."
                         )
+                    if (
+                        job["profile"].get("retargeting", {}).get("key", "dexpilot")
+                        != retargeter
+                    ):
+                        raise ValueError(
+                            "Stop the current session before changing retargeting."
+                        )
                     return job
             hand_bundle_path = None
             if hand.get("imported"):
@@ -242,6 +285,7 @@ class LiveXRService:
                     raise ValueError(
                         "Prepared hand bundle differs from the selected hand"
                     )
+                validate_hand(retargeting, manifest)
                 hand_bundle_path = str(path)
                 profile["hand_bundle"] = {
                     key: manifest[key]
@@ -323,6 +367,25 @@ class LiveXRService:
                 raise ValueError(
                     "Simulation runtime check failed: " + str(exc)
                 ) from exc
+            if p.get("retargeting", {}).get("key") == "vector-wrist-joint":
+                transport.write_capsule_file(
+                    identifier,
+                    "retargeting-check.py",
+                    (self.root / "ops/xr/retargeting_runtime.py").read_text(),
+                    job["gateway"],
+                )
+                transport.ssh(
+                    job["gateway"],
+                    shlex.join(
+                        [
+                            p["runtime"] + "/bin/python",
+                            job["root"] + "/retargeting-check.py",
+                            "--check",
+                            p["retargeting"]["runtime_root"],
+                        ]
+                    ),
+                    timeout=30,
+                )
             self.update(
                 identifier,
                 runtime_checked_at=utc_now(),
@@ -385,7 +448,8 @@ class LiveXRService:
                 server_ready=False,
             )
         except Exception as exc:
-            self.update(identifier, state="FAILED", error=str(exc), server_ready=False)
+            self.update(identifier, state="FAILED", error=str(exc), detail=str(exc),
+                        failed_stage=self.get(identifier).get("startup_stage"), server_ready=False)
         finally:
             with self.lock:
                 self.active.discard(identifier)
@@ -430,6 +494,30 @@ class LiveXRService:
                 "",
             ]
         )
+
+    def status(self, identifier):
+        """Return durable progress immediately; remote checks never hold a HTTP request."""
+        job = self.get(identifier)
+        if job["state"] in TERMINAL and (
+            job.get("scheduler_final") or not job.get("job_id")
+        ):
+            return self.public(job)
+        with self.status_lock:
+            if identifier not in self.status_pending:
+                self.status_pending.add(identifier)
+                try:
+                    self.executor.submit(self._refresh_status, identifier)
+                except BaseException:
+                    self.status_pending.discard(identifier)
+                    raise
+        return self.public(job)
+
+    def _refresh_status(self, identifier):
+        try:
+            self.refresh(identifier)
+        finally:
+            with self.status_lock:
+                self.status_pending.discard(identifier)
 
     def refresh(self, identifier, force=False):
         with self.lock:

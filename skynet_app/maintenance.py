@@ -20,7 +20,7 @@ from .registry_dependencies import extend_graph, suite_removal_notices
 from .registry_policy import suppress_defaults
 
 KINDS = {"experiment": "experiments", "run": "runs", "evaluation": "evaluations",
-         "adapter": "adapters", "suite": "evaluation_suites"}
+         "adapter": "adapters", "suite": "evaluation_suites", "recording": "live_xr_sessions", "recording-file": "live_xr_sessions"}
 TERMINAL = frozenset(
     {
         "SUCCEEDED",

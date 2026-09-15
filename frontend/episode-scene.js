@@ -3,6 +3,7 @@ import URDFLoader from "urdf-loader";
 import { loadUrdfModel, disposeObject } from "./robot-visuals.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { sceneAsset } from "./scene-assets.js";
+import { recordedNameCandidates } from "./recorded-hand-names.js";
 
 const colors = {
   actual: 0x16835c,
@@ -79,20 +80,13 @@ export class EpisodeScene {
           disposeObject(base);
           return;
         }
-        const prefix =
-          sides.length === 2 && data.robot.startsWith("skynet_")
-            ? side[0] + "h_"
-            : "";
         for (const [name, link] of Object.entries(visual.links)) {
-          const safe = name.replace(/[^A-Za-z0-9_]/g, "_");
-          const legacy = data.robot.startsWith("floating_shadow_");
-          const bare = name.replace(/^[rl]h_/, "");
-          const target =
-            base.links[prefix + safe] ||
-            base.links[name] ||
-            (legacy
-              ? base.links[sides.length === 1 ? bare : side + "_" + bare]
-              : null);
+          const targetName = recordedNameCandidates(name, {
+            robot: data.robot,
+            side,
+            sourceNames: data.source_names,
+          }).find((candidate) => Object.hasOwn(base.links, candidate));
+          const target = base.links[targetName];
           if (target)
             for (const child of [...link.children])
               if (!child.isURDFJoint && !child.isURDFLink) target.add(child);
@@ -166,7 +160,9 @@ export class EpisodeScene {
     for (const [key, robot] of Object.entries(this.robots)) {
       const pose = frame?.hand_poses?.[key];
       robot.visible = Boolean(
-        geometry.hand && pose && ((keepHand && key === "actual") || enabled.has(key)),
+        geometry.hand &&
+          pose &&
+          ((keepHand && key === "actual") || enabled.has(key)),
       );
       if (pose) {
         robot.position.fromArray(pose.root);

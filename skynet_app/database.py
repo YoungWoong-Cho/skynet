@@ -135,8 +135,13 @@ class Database:
                     connection.execute("SELECT pg_advisory_xact_lock(?)", (lock_key("repository-write"),))
                 yield connection
                 connection.commit()
-            except Exception:
-                connection.rollback()
+            except BaseException as error:
+                try:
+                    connection.rollback()
+                except Exception as cleanup_error:
+                    # A broken transport can also prevent rollback. Preserve
+                    # the operation failure instead of replacing it.
+                    error.add_note(f"Database rollback also failed: {cleanup_error}")
                 raise
             finally:
                 connection.close()

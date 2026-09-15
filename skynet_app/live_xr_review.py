@@ -11,6 +11,7 @@ import threading
 
 import numpy as np
 
+from .recording_guard import guarded_recording
 from .database import canonical_json, utc_now
 from .live_xr_catalog import selection
 from .remote_artifacts import RemoteArtifact
@@ -28,13 +29,18 @@ class ArrayUnpickler(pickle.Unpickler):
             ("numpy", "ndarray"): np.ndarray,
             ("numpy", "dtype"): np.dtype,
         }
-        core = np._core if hasattr(np, "_core") else np.core
+        # NumPy 1.26 exposes an incomplete numpy._core compatibility package.
+        # Import constructors explicitly rather than relying on package attributes.
+        try:
+            from numpy._core import multiarray, numeric
+        except ImportError:
+            from numpy.core import multiarray, numeric
         for prefix in ("numpy.core", "numpy._core"):
             allowed[(prefix + ".multiarray", "_reconstruct")] = (
-                core.multiarray._reconstruct
+                multiarray._reconstruct
             )
-            allowed[(prefix + ".multiarray", "scalar")] = core.multiarray.scalar
-            allowed[(prefix + ".numeric", "_frombuffer")] = core.numeric._frombuffer
+            allowed[(prefix + ".multiarray", "scalar")] = multiarray.scalar
+            allowed[(prefix + ".numeric", "_frombuffer")] = numeric._frombuffer
         if (module, name) not in allowed:
             raise ValueError(f"Unsupported recording object: {module}.{name}")
         return allowed[(module, name)]
@@ -67,11 +73,13 @@ def inspect(path, profile):
     if (
         not isinstance(payload, dict)
         or payload.get("format") != "dexverse_trajectory"
-        or payload.get("schema_version") != 3
+        or payload.get("schema_version") not in {3, 4, 5}
     ):
         raise ValueError(
-            "Unsupported native recording format; expected DexVerse trajectory v3"
+            "Unsupported native recording format; expected DexVerse trajectory schema 3, 4 or 5"
         )
+    from .trajectory import validate_recorded_identity
+    validate_recorded_identity(payload, schema=profile.get("recording_schema_version"))
     task, hand = selection(profile["task"], profile["robot"], historical=True)
     if payload.get("task") != task["key"] or payload.get("robot_type") != hand["key"]:
         raise ValueError(
@@ -220,10 +228,18 @@ class LiveReviewService:
             return job, archive.resolve(job, str(path))[2]
         return job, job["root"] + "/output/" + str(path)
 
+    @staticmethod
+    def slot(job, index):
+        path = job["recordings"][index]
+        slot = job.get("recording_slots", {}).get(path, index)
+        if type(slot) is not int or slot < 0:
+            raise ValueError("Invalid recording storage slot")
+        return slot
+
     def directory(self, identifier, index):
         # source() validates the identifier via an existing session, not a filesystem path.
-        self.source(identifier, index)
-        return self.root / identifier / str(index)
+        job, _ = self.source(identifier, index)
+        return self.root / identifier / str(self.slot(job, index))
 
     def status(self, identifier, index=0):
         directory = self.directory(identifier, index)
@@ -259,6 +275,13 @@ class LiveReviewService:
                 "state": "FAILED",
                 "error": "The local copy is missing a file. Retry to download it again.",
             }
+        if result["state"] == "READY":
+            job, source_path = self.source(identifier, index)
+            gateway = job["gateway"]
+            archive = getattr(self.live, "archive", None)
+            if archive is not None:
+                _, gateway, source_path = archive.resolve(job, job["recordings"][index])
+            result = dict(result, recording_source={"path": source_path, "gateway": gateway})
         return result
 
     def publish(self, directory, **status):
@@ -267,6 +290,7 @@ class LiveReviewService:
         tmp.write_text(canonical_json(dict(status, updated_at=utc_now())))
         tmp.replace(directory / "status.json")
 
+    @guarded_recording
     def create(self, identifier, index=0):
         with self.lock:
             if (self.live.get(identifier).get("archive") or {}).get(
@@ -334,7 +358,7 @@ class LiveReviewService:
             transport, gateway = self.live.transport(job), job["gateway"]
             root = job["root"] + "/output"
         return RemoteArtifact(
-            transport, gateway, f"{root}/reviews/{index}/{name}", 50 * 1024 * 1024
+            transport, gateway, f"{root}/reviews/{self.slot(job, index)}/{name}", 50 * 1024 * 1024
         )
 
     def prepare_remote(self, identifier, index):
@@ -394,6 +418,7 @@ class LiveReviewService:
             "Recording storage changed during review. Retry after transfer completes."
         )
 
+    @guarded_recording
     def prepare(self, identifier, index):
         directory = self.directory(identifier, index)
         temp = directory / "download.part"

@@ -12,7 +12,7 @@ from .cluster_runtime import ClusterError
 from .maintenance import Maintenance
 
 router = APIRouter(prefix="/api/maintenance")
-Kind = Literal["experiment", "run", "evaluation", "adapter", "suite", "dataset", "prepared", "local-copy"]
+Kind = Literal["experiment", "run", "evaluation", "adapter", "suite", "dataset", "prepared", "local-copy", "recording", "recording-file"]
 
 
 class DeleteRequest(BaseModel):
@@ -33,6 +33,14 @@ def manager():
     return Maintenance(
         service.database, service.cluster, local_capsules=LOCAL_CAPSULE_ROOT
     )
+
+
+def recording_manager(kind="recording"):
+    from .live_xr_api import service, reviews, videos, episode_previews, conversions
+    from .recording_deletion import RecordingMaintenance
+    from .recording_file_deletion import RecordingFileMaintenance
+    implementation = RecordingFileMaintenance if kind == "recording-file" else RecordingMaintenance
+    return implementation(manager().db, service, reviews, videos, episode_previews, conversions)
 
 
 def invoke(operation):
@@ -56,6 +64,8 @@ def invoke(operation):
 
 @router.get("/history/{kind}/{identifier}")
 def preview(kind: Kind, identifier: str, gateway: str = "auto"):
+    if kind in {"recording", "recording-file"}:
+        return invoke(lambda: recording_manager(kind).preview(kind, identifier, gateway))
     if kind in {"dataset", "prepared", "local-copy"}:
         from . import prepared_deletion
         from .policy_exports_api import service
@@ -65,6 +75,8 @@ def preview(kind: Kind, identifier: str, gateway: str = "auto"):
 
 @router.delete("/history/{kind}/{identifier}")
 def delete(kind: Kind, identifier: str, request: DeleteRequest):
+    if kind in {"recording", "recording-file"}:
+        return invoke(lambda: recording_manager(kind).delete(kind, identifier, request.token, request.gateway))
     if kind in {"dataset", "prepared", "local-copy"}:
         from . import prepared_deletion
         from .policy_exports_api import service

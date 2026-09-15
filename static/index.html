@@ -3664,6 +3664,13 @@ Select a session.</pre
                             <option value="">Loading tasks…</option>
                           </select>
                         </div>
+                        <div class="field">
+                          <label for="live-xr-retargeter">Retargeting</label>
+                          <select id="live-xr-retargeter" required disabled>
+                            <option value="dexpilot">DexPilot</option>
+                          </select>
+                          <span id="live-xr-retargeter-description" class="secondary"></span>
+                        </div>
                       </div>
                       <label class="check-field"
                         ><input
@@ -3778,9 +3785,12 @@ Select a session.</pre
                 data-dialog-close-id="live-review-close"
               >
                 <section data-dialog-panel="">
-                  <div class="field">
-                    <label for="live-review-recording">Recording</label
-                    ><select id="live-review-recording"></select>
+                  <div class="section-heading">
+                    <div class="field">
+                      <label for="live-review-recording">Recording</label
+                      ><select id="live-review-recording"></select>
+                    </div>
+                    <button id="live-review-delete" type="button" class="button button-outline" data-delete-kind="recording-file" hidden>Delete</button>
                   </div>
                   <p id="live-review-status" role="status">
                     Loading recording…
@@ -3834,6 +3844,20 @@ Select a session.</pre
                         hidden=""
                         >Download video</a
                       >
+                    </div>
+                    <div id="live-review-source" class="field" hidden="">
+                      <span id="live-review-source-label">Path</span>
+                      <span class="copy-value">
+                        <code id="live-review-source-path"></code>
+                        <button
+                          id="live-review-source-copy"
+                          type="button"
+                          class="entity-link"
+                          aria-label="Copy recording path"
+                        >
+                          Copy
+                        </button>
+                      </span>
                     </div>
                     <details id="live-review-data">
                       <summary>Recorded values</summary>

@@ -24,8 +24,8 @@ def load_source(root, receipt, profile):
     if digest(path) != receipt["sha256"]:
         raise ValueError("Original recording checksum changed")
     payload = ArrayUnpickler(io.BytesIO(path.read_bytes())).load()
-    if (payload.get("format"), payload.get("schema_version"), payload.get("task"), payload.get("robot_type")) != ("dexverse_trajectory", 3, profile["task"], profile["robot"]):
-        raise ValueError("Recording task or hand differs from the session")
+    from trajectory import validate_identity
+    validate_identity(payload, profile["task"], profile["robot"], profile.get("recording_schema_version"))
     requested = payload.get("skynet_training_images", {})
     if requested != training_image_request(requested.get("recipe")):
         raise ValueError("Missing or invalid frozen training image recipe")
@@ -113,13 +113,15 @@ def render(config, root):
                 images.metadata["source_sha256"] = receipt["sha256"]
                 env.reset()
                 # Restore a saved task goal when the task has one; never replace it with a new random goal.
-                if "object_pose" in env.command_manager.active_terms:
+                if payload["schema_version"] == 3 and "object_pose" in env.command_manager.active_terms:
                     goal = np.asarray(ep.get("goal_pose"))
                     target = env.command_manager.get_command("object_pose")
                     if goal.shape != tuple(target.shape[1:]) or not np.isfinite(goal).all():
                         raise ValueError("Recording is missing its task goal")
                     target.copy_(torch.as_tensor(goal, device=env.device)[None])
                 restore_state(env, ep["states"][0])
+                from trajectory import restore_episode_conditions
+                restore_episode_conditions(env, payload, ep)
                 images.begin()
                 for frame, action in enumerate(ep["actions"]):
                     if not app.is_running() or app.is_exiting():

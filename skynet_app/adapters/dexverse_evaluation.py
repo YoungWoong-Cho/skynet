@@ -159,11 +159,13 @@ def main():
     capture = manifest["capture"]
     sources = context.get("recorded_episode_sources") or []
     initial_state = None
+    recorded_episode = None
     if context["suite"]["config"].get("initial_state") == "single_training_episode":
         if len(sources) != 1 or context["episodes_per_task"] != 1 or context["tasks"] != [capture["task"]]:
             raise ValueError("Recorded initial-state evaluation must use its single training episode and task")
-        from recorded_scene import load_initial_state
-        initial_state = load_initial_state(sources[0], capture)
+        from recorded_scene import load_recorded_episode
+        recorded_episode = load_recorded_episode(sources[0], capture)
+        initial_state = recorded_episode[1]["states"][0]
     task = context["tasks"][0]
     order = manifest["policy_to_source_indices"]
     import pinocchio  # Load before Isaac's plugins, as in collection.
@@ -296,6 +298,8 @@ def main():
                     if initial_state is not None:
                         from recorded_scene import restore_state
                         restore_state(env, initial_state)
+                        from trajectory import restore_episode_conditions
+                        restore_episode_conditions(env, *recorded_episode)
                     if isinstance(success_fn, ManagerTermBase):
                         success_fn.reset()
                     request({"command": "reset", "seed": first_seed})
@@ -343,6 +347,8 @@ def main():
                     if initial_state is not None:
                         from recorded_scene import restore_state
                         restore_state(env, initial_state)
+                        from trajectory import restore_episode_conditions
+                        restore_episode_conditions(env, *recorded_episode)
                     if isinstance(success_fn, ManagerTermBase):
                         success_fn.reset()
                     request({"command": "reset", "seed": effective_seed})

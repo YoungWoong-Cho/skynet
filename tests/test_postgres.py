@@ -308,3 +308,51 @@ def test_missing_configuration_does_not_create_local_database(tmp_path, monkeypa
     assert list(tmp_path.iterdir()) == []
     with pytest.raises(TypeError):
         Database(tmp_path / 'removed-local-database.db')
+
+
+def test_connection_loss_during_cleanup_preserves_the_original_failure(pg):
+    db, _ = pg
+    lock = db.operation_lock("failed-metadata-transfer")
+    failure = OSError("Central metadata transfer failed")
+    with pytest.raises(OSError) as caught:
+        with lock, db.transaction() as connection:
+            with db.backend.connect().raw as breaker:
+                for pid in (
+                    connection.raw.info.backend_pid,
+                    lock.state.connection.raw.info.backend_pid,
+                ):
+                    breaker.execute("SELECT pg_terminate_backend(%s)", (pid,))
+            raise failure
+    assert caught.value is failure
+    assert any("rollback also failed" in note for note in failure.__notes__)
+    assert any("lock release also failed" in note for note in failure.__notes__)
+    assert connection.raw.closed
+    assert lock.acquire(blocking=False)
+    lock.release()
+    assert db.list_projects() == []
+
+
+def test_interrupt_rolls_back_transaction(pg):
+    db, _ = pg
+    with pytest.raises(KeyboardInterrupt):
+        with db.transaction() as connection:
+            connection.execute(
+                "INSERT INTO projects(id,name,created_at) VALUES ('interrupted','interrupted','now')"
+            )
+            raise KeyboardInterrupt()
+    assert connection.raw.closed
+    assert db.list_projects() == []
+
+
+def test_lock_cleanup_failure_without_prior_error_still_raises(pg):
+    db, _ = pg
+    lock = db.operation_lock("lost-lock")
+    with pytest.raises(psycopg.OperationalError):
+        with lock:
+            with db.backend.connect().raw as breaker:
+                breaker.execute(
+                    "SELECT pg_terminate_backend(%s)",
+                    (lock.state.connection.raw.info.backend_pid,),
+                )
+    assert lock.acquire(blocking=False)
+    lock.release()

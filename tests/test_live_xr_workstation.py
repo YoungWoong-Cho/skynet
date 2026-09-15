@@ -26,6 +26,7 @@ def service(tmp_path, monkeypatch, prepared_hand_store):
         "collection.py",
         "hands/anatomy.py",
         "wrist.py",
+        "retargeting_runtime.py",
         "images.py",
         "render_images.py",
     ):
@@ -206,3 +207,45 @@ def test_image_capture_stop_requests_graceful_shutdown_and_rendering(
     monkeypatch.setattr(service, "transport", lambda _: Client())
     service.stop(job["id"])
     assert calls and "stop.request" in str(calls)
+
+
+@pytest.mark.parametrize("method", ["dexpilot", "vector-wrist-joint"])
+def test_prepare_uses_real_workstation_file_validation(service, monkeypatch, method):
+    from skynet_app.retargeting import configuration
+
+    job = service.create(True)
+    profile = dict(job["profile"])
+    profile["retargeting"] = configuration(method, profile["work_root"])
+    service.update(job["id"], profile=profile)
+    client = WorkstationClient(profile)
+    calls = []
+
+    def ssh(gateway, command, **kwargs):
+        calls.append((command, kwargs.get("stdin")))
+        return client.unit(job["id"])
+
+    # Keep write_capsule_file and submit_script intact so startup exercises
+    # the workstation allowlist, not only a mock transport's write method.
+    monkeypatch.setattr(client, "ssh", ssh)
+    monkeypatch.setattr(service, "transport", lambda _: client)
+    service.prepare(job["id"])
+
+    result = service.get(job["id"])
+    assert result["state"] == "STARTING_SERVER", result.get("error")
+    assert result["job_id"] == client.unit(job["id"])
+    writes = [command for command, body in calls if body is not None]
+    for name in ("runner.py", "request.json", "run.sh"):
+        assert any(job["root"] + "/" + name in command for command in writes)
+    checks = [command for command, _ in calls if " --check " in command]
+    assert bool(checks) == (method == "vector-wrist-joint")
+    if checks:
+        assert any(job["root"] + "/retargeting-check.py" in command for command in writes)
+        assert profile["retargeting"]["runtime_root"] in checks[0]
+
+
+@pytest.mark.parametrize("name", ["other.py", "../retargeting-check.py", "/retargeting-check.py", "output/retargeting-check.py"])
+def test_unknown_session_files_are_rejected_before_ssh(service, monkeypatch, name):
+    client = WorkstationClient(service.profile())
+    monkeypatch.setattr(client, "ssh", lambda *a, **k: pytest.fail("Unexpected file upload"))
+    with pytest.raises(ValueError, match="Unknown live session file"):
+        client.write_capsule_file(str(uuid4()), name, "unapproved", "test-workstation")

@@ -285,7 +285,7 @@ def metadata(job, raw):
     )
 
 
-def test_cluster_verified_result_registers_dataset_bundle_and_lineage_once(conversion, tmp_path):
+def test_cluster_verified_result_registers_dataset_and_lineage_once(conversion, tmp_path):
     service, _, _ = conversion
     job = service.create("session", "Shadow cube")
     raw = b"\x89HDF\r\n\x1a\n" + b"test download transport" * 10
@@ -311,14 +311,18 @@ def test_cluster_verified_result_registers_dataset_bundle_and_lineage_once(conve
     service.finish(job, result, transport)
     second = service.get(job["id"])
     assert first["state"] == "READY"
-    assert first["bundle_id"] == second["bundle_id"]
+    assert first["bundle_id"] is second["bundle_id"] is None
+    assert first["resource_id"] == second["resource_id"]
+    assert first["version_id"] == second["version_id"]
     version = service.database.get_data_resource_version(first["version_id"])
     assert version["format"] == FORMAT
     assert version["metadata"]["storage_location"] == "cluster"
     assert version["path"] == job["dataset_root"] + "/dataset.hdf5"
     assert version["derivation_id"]
     assert [item["kind"] for item in version["locations"]] == ["cluster"]
-    assert len(service.database.list_data_bundles()) == 1
+    # Conversion publishes a dataset; experiment input snapshots are selected
+    # later. Automatic user-managed bundles were removed from this workflow.
+    assert service.database.list_data_bundles() == []
     artifact = service.artifact(job["id"], "dataset.hdf5")
     assert artifact.path == job["dataset_root"] + "/dataset.hdf5"
     assert artifact.transport is transport
@@ -508,3 +512,22 @@ def test_hdf5_checks_episode_boundaries_and_observation_action_timing(tmp_path):
         del h5["data/demo_2"]
     with pytest.raises(ValueError, match="episode count"):
         worker.validate_hdf5(path, episodes, shapes)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_conversion_uses_pinned_hand_from_cache_or_legacy_path(conversion, tmp_path, monkeypatch, legacy):
+    from skynet_app import simulation_hands
+    service, session, _ = conversion
+    service.live.root = tmp_path / "app"
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(simulation_hands, "cache_root", lambda: cache)
+    local = (service.live.root / "data/simulation-hands" if legacy else cache) / "robot" / "digest"
+    local.mkdir(parents=True)
+    (local / "manifest.json").write_text("{}")
+    calls=[]
+    def upload(path, root, transport, gateway):
+        calls.append(path)
+        return "/cluster/hand/digest"
+    monkeypatch.setattr("skynet_app.live_conversion.upload_hand", upload)
+    service.ensure_hand({"robot":"robot", "hand_bundle":{"digest":"digest", "root":"/cluster/hand/digest"}}, object(), "sky2")
+    assert calls == [local]

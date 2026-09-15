@@ -68,7 +68,12 @@ def test_review_download_is_cached_and_has_correct_state_action_alignment(review
     directory = service.directory("session", 0)
     directory.mkdir(parents=True)
     service.prepare("session", 0)
-    assert service.status("session")["state"] == "READY"
+    status = service.status("session")
+    assert status["state"] == "READY"
+    assert status["recording_source"] == {
+        "path": "/workspace/sessions/session/output/recordings/live/demo.pkl",
+        "gateway": "test-host",
+    }
     result = json.loads(service.artifact("session", 0, "review.json").read_text())
     episode = result["episodes"][0]
     assert episode["frames"][0]["action"] is None
@@ -818,3 +823,12 @@ def test_review_preserves_and_validates_new_hand_identity(payload):
     header["action_joint_names"].pop()
     with pytest.raises(ValueError, match="dimension"):
         inspect(pickle.dumps(payload), profile)
+
+
+def test_array_unpickler_does_not_depend_on_numpy_core_package_attributes(monkeypatch):
+    import io
+    from skynet_app.live_xr_review import ArrayUnpickler
+    expected = np.arange(12, dtype=np.float32).reshape(3, 4)
+    raw = pickle.dumps(expected, protocol=4)
+    monkeypatch.setattr(np, "_core", SimpleNamespace(), raising=False)
+    assert ArrayUnpickler(io.BytesIO(raw)).load().tolist() == expected.tolist()

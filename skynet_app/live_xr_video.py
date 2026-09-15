@@ -7,13 +7,14 @@ import hashlib
 import inspect
 import json
 import math
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 import threading
 import time
 import uuid
 
+from .recording_guard import guarded_recording
 from .database import canonical_json, utc_now
 from .live_xr_review import ArrayUnpickler
 from .live_xr_video_worker import control
@@ -71,6 +72,7 @@ class LiveVideoService:
             name: (self.live.root / "ops/xr" / name).read_text()
             for name in ("render_recording.py", "video.py", "wrist.py")
         }
+        sources["trajectory.py"] = Path(__file__).with_name("trajectory.py").read_text()
         sources["arrays.py"] = (
             "import pickle\nimport numpy as np\n" + inspect.getsource(ArrayUnpickler)
         )
@@ -183,6 +185,7 @@ class LiveVideoService:
                 cluster_submission_started=generation.cluster_submission_started,
                 cluster_job_id=generation.cluster_job_id))
 
+    @guarded_recording
     def create(self, identifier, index, episode=0):
         with self.lock:
             if (self.live.get(identifier).get("archive") or {}).get("state") == "COPYING":
@@ -458,6 +461,7 @@ class LiveVideoService:
         finally:
             temp.unlink(missing_ok=True)
 
+    @guarded_recording
     def prepare(self, identifier, index, episode, generation=None):
         directory = None
         key = (identifier, index, episode)

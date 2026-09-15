@@ -322,6 +322,7 @@
         collection = false,
         episode = 0,
         robot = null,
+        sourceNames = null,
         timeline = [],
         onFrame = null,
       } = {},
@@ -330,7 +331,14 @@
       this.active = true;
       this.frameTime = null;
       this.retry.hidden = true;
-      this.options = { collection, episode, robot, timeline, onFrame };
+      this.options = {
+        collection,
+        episode,
+        robot,
+        sourceNames,
+        timeline,
+        onFrame,
+      };
       this.clockTime = 0;
       this.playRequest = 0;
       this.playing = false;
@@ -410,7 +418,9 @@
           this.base + `/viewer/viewer.json?episode=${this.episode}`,
         ));
       if (generation !== this.generation) return;
-      this.data = data;
+      this.data = this.options.sourceNames
+        ? { ...data, source_names: this.options.sourceNames }
+        : data;
       this.renderControls();
       await this.loadHand(data.robot, generation);
       if (generation !== this.generation) return;
@@ -673,6 +683,7 @@
             jointNames: this.data.joint_names || [],
             robot: this.data.robot,
             side: this.handSide,
+            sourceNames: this.data.source_names,
           });
         } catch (error) {
           this.handPlaybackError = error.message;

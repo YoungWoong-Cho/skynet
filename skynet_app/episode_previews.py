@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 import shlex
 import threading
 
+from .recording_guard import guarded_recording
 from .adapters import episode_geometry
 from . import episode_preview_worker
 from .cluster_config import CLUSTER
@@ -59,6 +60,7 @@ class EpisodePreviews:
                        hand_bundle=(profile.get("hand_bundle") or {}).get("root"))
         return transport, gateway, runtime + "/bin/python", request
 
+    @guarded_recording
     def status(self, identifier, index, episode=0, *, start=False):
         key = identifier, index, episode
         with self.lock:
@@ -75,6 +77,7 @@ class EpisodePreviews:
             self.executor.submit(self.prepare, key, location)
             return self.states[key]
 
+    @guarded_recording
     def prepare(self, key, location):
         transport, gateway, python, request = location
         code = self.program + "\nprint(json.dumps(prepare_preview(" + repr(request) + ")))\n"

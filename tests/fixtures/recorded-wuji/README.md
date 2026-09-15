@@ -1,0 +1,1 @@
+WUJI Hand 2 Beta 2 kinematic trees from the failing recording viewer and its pinned Hands catalog. Visual meshes are replaced by small boxes; joint/link names and transforms are preserved. No recorded trajectories or mesh payloads are included.

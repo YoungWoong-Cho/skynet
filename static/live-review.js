@@ -329,6 +329,7 @@
         collection: true,
         episode: Number(el("live-review-episode").value),
         robot: data.robot,
+        sourceNames: data.hand_metadata?.source_names,
         timeline: episode.frames,
         onFrame(index) {
           frame = index;
@@ -359,6 +360,14 @@
       if (ownToken !== token || !dialog.open) return;
       el("live-review-retry").hidden = true;
       if (result.state === "READY") {
+        const source = result.recording_source;
+        if (source?.path) {
+          el("live-review-source-label").textContent =
+            "Path" + (source.gateway ? " · " + source.gateway : "");
+          el("live-review-source-path").textContent = source.path;
+          el("live-review-source-copy").dataset.copyValue = source.path;
+          el("live-review-source").hidden = false;
+        }
         data = await request(base + "/review.json");
         if (ownToken !== token || !dialog.open) return;
         el("live-review-content").hidden = false;
@@ -395,11 +404,19 @@
   function selectRecording(index) {
     pause();
     clearVideo();
+    const path = reviewSession.recordings?.[index];
+    const remove = el("live-review-delete");
+    remove.hidden = !path;
+    if (path) remove.dataset.deleteId = `${reviewSession.id}:${btoa(encodeURIComponent(path).replace(/%([0-9A-F]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "")}`;
+    else delete remove.dataset.deleteId;
     el("live-review-data").open = false;
     clearTimeout(timer);
     const ownToken = ++token;
     base = `/api/collection/live/sessions/${reviewSession.id}/recordings/${index}`;
     data = episode = null;
+    el("live-review-source").hidden = true;
+    el("live-review-source-path").textContent = "";
+    delete el("live-review-source-copy").dataset.copyValue;
     el("live-review-content").hidden = true;
     el("live-review-retry").hidden = true;
     status("Checking the saved recording…");
@@ -414,7 +431,7 @@
     select.replaceChildren(
       ...Array.from(
         { length: count },
-        (_, i) => new Option(`Recording ${i + 1}`, i),
+        (_, i) => new Option(`Recording ${(session.recording_slots?.[session.recordings?.[i]] ?? i) + 1}`, i),
       ),
     );
     select.value = index >= 0 && index < count ? index : 0;
@@ -422,6 +439,15 @@
     SkynetDialog.open(dialog);
     selectRecording(Number(select.value));
   };
+  window.refreshLiveReviewAfterDeletion = async (identifier) => {
+    if (!dialog.open || reviewSession?.id !== identifier) return;
+    const selection = Number(el("live-review-recording").value);
+    const session = await request(`/api/collection/live/sessions/${identifier}`);
+    if (!dialog.open || reviewSession?.id !== identifier) return;
+    if (!session.recordings?.length) SkynetDialog.close(dialog);
+    else window.openLiveReview(session, Math.min(selection, session.recordings.length - 1));
+  };
+  el("live-review-delete").addEventListener("click", () => { pause(); video.pause(); });
   el("live-review-recording").onchange = (event) =>
     selectRecording(Number(event.target.value));
   document.addEventListener("visibilitychange", () => {

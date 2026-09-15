@@ -32,6 +32,7 @@ class StartRequest(BaseModel):
     task: str | None = None
     robot: str | None = None
     image_capture: bool = False
+    retargeter: str = "dexpilot"
 
 
 def checked(call, *args):
@@ -69,13 +70,13 @@ def overview():
 @router.post("/sessions", status_code=202)
 def start(request: StartRequest):
     return checked(
-        service.create, request.accepted_license, request.task, request.robot, request.image_capture
+        service.create, request.accepted_license, request.task, request.robot, request.image_capture, request.retargeter
     )
 
 
 @router.get("/sessions/{identifier}")
 def status(identifier: str):
-    return checked(service.refresh, identifier)
+    return checked(service.status, identifier)
 
 
 @router.post("/sessions/{identifier}/stop")

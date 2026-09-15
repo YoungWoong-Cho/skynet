@@ -7,6 +7,8 @@ changing a simulator or retargeter never changes the physical hand asset.
 from copy import deepcopy
 import hashlib
 import json
+import os
+import sys
 from pathlib import Path
 import shutil
 import threading
@@ -19,6 +21,32 @@ from .database import canonical_json
 __all__ = ["build", "definitions", "definition", "validate_tree", "upload"]
 
 _BUILD_LOCK = threading.RLock()
+
+
+def cache_root():
+    """Generated Python must stay outside the source tree watched by uvicorn."""
+    base = Path(
+        os.environ.get("XDG_CACHE_HOME")
+        or (
+            Path.home() / "Library/Caches"
+            if sys.platform == "darwin"
+            else Path.home() / ".cache"
+        )
+    )
+    # Checkouts share canonical content hashes, but not partially built folders.
+    checkout = hashlib.sha256(str(ROOT.resolve()).encode()).hexdigest()[:16]
+    return base / "skynet" / checkout / "simulation-hands"
+
+
+def find_bundle(robot, digest, *, app_root=ROOT):
+    """Keep old recordings pinned to their existing bundle; never rebuild a revision."""
+    for root in (cache_root(), Path(app_root) / "data/simulation-hands"):
+        path = root / robot / digest
+        if (path / "manifest.json").is_file():
+            return path
+    raise ValueError(
+        "The recording's original hand bundle is missing locally; a different model cannot be substituted"
+    )
 
 
 def build(robot, library=None, output_root=None):
@@ -38,7 +66,7 @@ def build(robot, library=None, output_root=None):
         "runtime": {k: hashlib.sha256(v).hexdigest() for k, v in runtime_files.items()},
     }
     digest = hashlib.sha256(canonical_json(recipe).encode()).hexdigest()
-    destination = Path(output_root or ROOT / "data/simulation-hands") / robot / digest
+    destination = Path(output_root or cache_root()) / robot / digest
     with _BUILD_LOCK:
         if (destination / "manifest.json").is_file():
             return destination, json.loads((destination / "manifest.json").read_text())

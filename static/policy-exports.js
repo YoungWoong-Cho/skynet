@@ -56,7 +56,7 @@
     ["READY", "FAILED", "DELETE_FAILED"].includes(job.state);
   const recipe = (id) => snapshot?.policies.find((p) => p.id === id);
   const splitLabel = (split) =>
-    !split?.validation?.length
+    typeof split === "string" ? split : !split?.validation?.length
       ? `${split?.train?.length || 0} train · no validation`
       : split?.mode === "single_episode_overfit"
         ? "1 train · same episode for validation (overfit)"
@@ -69,26 +69,29 @@
     const policy = recipe(el("policy-export-format").value);
     const source = snapshot?.sessions.find((s) => s.id === sourceSessionId);
     for (const id of ["preparation-validation", "preparation-seed"]) {
-      el(id).disabled = source?.episodes === 1;
-      el(id).closest(".field").hidden = source?.episodes === 1;
+      el(id).disabled = source?.episodes === 1 || policy?.split_mode === "upstream";
+      el(id).closest(".field").hidden = el(id).disabled;
     }
     const hint = el("policy-export-format-help");
     hint.textContent =
-      policy?.available && !policy.trainable ? policy.description : "";
+      policy?.available && (!policy.trainable || policy.split_mode === "upstream") ? policy.description : "";
     hint.hidden = !hint.textContent;
     const noValidation =
-      policy?.trainable &&
+      policy?.trainable && policy.split_mode !== "upstream" &&
       (source?.episodes < 2 ||
         Number(el("preparation-validation").value) === 0);
     const missingImages =
       policy?.observations?.includes("rgb") &&
       source?.images < source?.episodes;
+    const insufficientEpisodes = source && policy?.minimum_episodes && source.episodes < policy.minimum_episodes;
     const message = !source
       ? "Loading recordings…"
       : !source.eligible
         ? source.reason || "This session is not ready for preparation."
         : !policy?.available
           ? policy?.description || "Choose an available policy."
+          : insufficientEpisodes
+            ? "ACT Native needs two episodes for its original 80/20 split. Choose ACT · Skynet recordings for single-episode training."
           : missingImages
             ? "This format requires completed training images for every recording."
             : "";
@@ -109,6 +112,7 @@
       !source?.eligible ||
       !source.episodes ||
       !policy?.available ||
+      insufficientEpisodes ||
       missingImages;
   }
   const stageLabels = {
@@ -300,9 +304,11 @@
   }
   function resultSettings(result) {
     const metadata = result.metadata || {};
-    const split = result.split || metadata.split;
+    const upstream = recipe(result.format)?.split_mode === "upstream";
+    const split = upstream ? null : result.split || metadata.split;
     const pairs = [
       ["Recipe", result.contract || metadata.contract],
+      ["Training split", upstream ? "Original ACT random 80/20; conversion split and normalization files are not used." : null],
       ["Split seed", split?.seed],
       [
         "Validation",
@@ -441,7 +447,11 @@
       status: state,
       note: statusNote,
       episodes: job.episodes ?? job.sources?.length ?? "—",
-      split: job.split,
+      split: policy?.split_mode === "upstream"
+        ? job.loader_validation
+          ? `${job.loader_validation.train_episodes} train / ${job.loader_validation.validation_episodes} validation · original ACT`
+          : "Original ACT 80/20 split"
+        : job.split,
       createdAt: job.created_at,
       storage: locationHtml(copies),
       settings: resultSettings(job),

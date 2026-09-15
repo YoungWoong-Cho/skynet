@@ -17,6 +17,7 @@ RECORDED_POLICY_MODELS = {
     "egoverse-hpt-joints": ("egoverse_joints", {"hpt_joints"}),
     "egoverse-act": ("egoverse_joints", {"act"}),
     "xpolicylab-act": ("xpolicy_joints", None),
+    "xpolicylab-act-native": ("xpolicy_joints", None),
     "xpolicylab-dp": ("xpolicy_joints", None),
 }
 STATUS_LABELS = {"compatible": "Compatible", "mapping_required": "Mapping required", "unknown": "Missing information", "incompatible": "Incompatible"}
@@ -75,6 +76,8 @@ def inspect_compatibility(spec, manifest, suite, checkpoint=None):
             config = (spec.get("native") or {}).get("config") or {}
             binding = recorded_contract(metadata, images=not (loader == "xpolicy_joints" and config.get("observation_mode") == "state"))
             checks.extend(contract_issues(binding))
+            if spec.get("source", {}).get("adapter") == "xpolicylab-act-native" and metadata.get("contract") != "skynet.act-rgb-joints/v1":
+                check("dataset", "Native ACT simulator evaluation requires a recorded RGB/joint dataset.", "incompatible")
             if loader == "egoverse_joints" and metadata.get("contract") != "skynet.egoverse-rgb-joints/v1":
                 check("dataset", "The EgoVerse loader requires a recorded RGB/joint dataset.", "incompatible")
             if not config.get("dataset_path") or not config.get("dataset_manifest_sha256"):
@@ -122,7 +125,10 @@ def compose_evaluator(spec, manifest, suite):
         from .adapters.egoverse_manifest import support_files as egoverse_support
         files = egoverse_support()
     else:
-        files = support_files("act" if spec["source"]["adapter"] == "xpolicylab-act" else "dp")
+        files = support_files("act" if spec["source"]["adapter"] in {"xpolicylab-act", "xpolicylab-act-native"} else "dp")
+    if spec["source"]["adapter"] == "xpolicylab-act-native":
+        from .adapters.xpolicy_native_manifest import act_support_files
+        files.update(act_support_files())
     files.update(simulation_support_files())
     directory = Path(__file__).with_name("adapters")
     for name in ("recorded_policy_evaluation.py", "policy_loading.py", "policy_contract.py", "egoverse_simulation.py"):

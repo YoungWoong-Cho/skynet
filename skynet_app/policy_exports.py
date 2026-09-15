@@ -17,6 +17,7 @@ import threading
 from uuid import uuid4
 
 from ops.datasets.artifacts import digest
+from .recording_guard import guarded_recording
 from .database import canonical_json, utc_now
 from . import dataset_cleanup
 from .dataset_formats import RECIPES, XPL_COMMIT as COMMIT, XPL_REPOSITORY, catalog
@@ -392,6 +393,7 @@ class PolicyExportService(ClusterPolicyPreparation):
             ],
         )
 
+    @guarded_recording
     def create(
         self,
         session_id,
@@ -445,6 +447,10 @@ class PolicyExportService(ClusterPolicyPreparation):
             raise ValueError(
                 "The selection contains duplicate recordings; select each episode once"
             )
+        if format == "act-native":
+            if len(sources) < 2:
+                raise ValueError("The original ACT loader needs two episodes for its 80/20 split. Use ACT · Skynet recordings for single-episode training.")
+            validation_percent, seed = 20, 42
         split = self.split(sources, validation_percent, seed)
         if not split["validation"]:
             split["mode"] = "training_only"
@@ -464,6 +470,7 @@ class PolicyExportService(ClusterPolicyPreparation):
         runtime_lock = digest(self.live.root / "uv.lock")
         frozen_files = {
             "policy_export.py": worker,
+            "trajectory.py": Path(__file__).with_name("trajectory.py").read_text(),
             "arrays.py": arrays,
             "artifacts.py": (source_root / "artifacts.py").read_text(),
             "formats.json": canonical_json(
@@ -478,6 +485,9 @@ class PolicyExportService(ClusterPolicyPreparation):
                     "skynet_act_training.py": "act_training.py",
                     "xpolicy_runtime.py": "xpolicy_runtime.py",
                     "training_parallel.py": "training_parallel.py",
+                    "xpolicy_native.py": "xpolicy_native.py",
+                    "xpolicy_native_catalog.json": "xpolicy_native_catalog.json",
+                    "act_native_data.py": "act_native_data.py",
                 }.items()
             },
         }
@@ -617,6 +627,7 @@ class PolicyExportService(ClusterPolicyPreparation):
                 training_ready=False,
                 error=None,
                 detail="Retrying from verified files",
+                previous_cluster_root=job.get("previous_cluster_root") or job.get("cluster_root"),
             )
             self.dispatch(identifier)
             return job
@@ -735,7 +746,7 @@ class PolicyExportService(ClusterPolicyPreparation):
                 "Training cluster verification did not match the prepared dataset"
             )
         if RECIPES[job["format"]]["trainable"]:
-            kind = "egoverse" if job["format"] == "egoverse" else "act" if job["format"] == "act" else "dp"
+            kind = "egoverse" if job["format"] == "egoverse" else "act" if job["format"] in {"act", "act-native"} else "dp"
             expected_mode = (
                 "rgb" if "rgb" in RECIPES[job["format"]]["observations"] else "state"
             )

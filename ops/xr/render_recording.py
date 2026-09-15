@@ -37,6 +37,8 @@ try:
         or payload.get("robot_type") != profile["robot"]
     ):
         raise ValueError("Recording hand/task differs from its session")
+    from trajectory import validate_identity, restore_episode_conditions
+    validate_identity(payload, profile["task"], profile["robot"], profile.get("recording_schema_version"))
     episode = payload["episodes"][request["episode"]]
     states = episode["states"]
     if len(states) != episode["num_steps"] + 1:
@@ -88,6 +90,8 @@ try:
             np.asarray(value), device=env.device, dtype=torch.float32
         )
 
+    env.scene.reset_to(tensors(states[0]), is_relative=True)
+    restore_episode_conditions(env, payload, episode)
     for index in range(0, len(states), 2):
         env.scene.reset_to(tensors(states[index]), is_relative=True)
         # Refresh Fabric transforms after writing recorded poses; no physics is advanced.

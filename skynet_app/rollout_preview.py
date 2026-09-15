@@ -11,6 +11,8 @@ from .adapters import episode_geometry
 from .adapters.episode_geometry import recorded_urdf, replay_urdf, HandKinematics, camera_layout
 from .cluster_config import CLUSTER
 from .live_xr_review import ArrayUnpickler
+from .dexverse_versions import V1_REVISION, V1_REPOSITORY
+from .trajectory import validate_identity
 from .recorded_evaluation import recorded_episode_sources
 
 
@@ -29,9 +31,11 @@ def enrich_demonstration(database, cluster, spec, viewer, gateway, *, duration=0
     if runtime is None:
         return viewer
     repository = str(PurePosixPath(CLUSTER.paths.repositories) / "skynet-dexverse" / str(capture.get("source_revision", "")))
+    if capture.get("source_revision") == V1_REVISION:
+        repository = str(PurePosixPath(CLUSTER.paths.repositories).parent / V1_REPOSITORY)
     request = dict(source=sources[0], capture=capture, viewer=viewer, repository=repository, duration=duration)
     program = (Path(episode_geometry.__file__).read_text() + "\nimport pickle,io,json,hashlib\n"
-               + inspect.getsource(ArrayUnpickler) + "\n" + inspect.getsource(attach_demonstration)
+               + inspect.getsource(ArrayUnpickler) + "\n" + inspect.getsource(validate_identity) + "\n" + inspect.getsource(attach_demonstration)
                + "\nprint(json.dumps(attach_demonstration(" + repr(request) + "),allow_nan=False))\n")
     _, output = cluster.run_with_fallback(shlex.quote(runtime.environment_path + "/bin/python") + " -", gateway, stdin=program, timeout=45)
     return json.loads(output)
@@ -52,7 +56,8 @@ def attach_demonstration(request):
     if len(episodes) != 1:
         raise ValueError("Original demonstration is ambiguous")
     states = episodes[0]["states"]
-    if payload.get("format") != "dexverse_trajectory" or payload.get("schema_version") != 3 or len(states) != source["steps"] + 1 or len(states) > 6001:
+    validate_identity(payload, capture["task"], capture["robot"])
+    if len(states) != source["steps"] + 1 or len(states) > 6001:
         raise ValueError("Original demonstration has an unsupported recording layout")
     xml = recorded_urdf(capture, request["repository"])
     wrists = [capture["action_joint_names"][i] for g in capture.get("groups", []) for i in g["wrist_indices"]]

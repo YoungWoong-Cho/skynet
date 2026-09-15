@@ -63,6 +63,7 @@ const data = {
   size_bytes: 100,
   time_note: "60 Hz",
   value_note: "Saved order",
+  hand_metadata: { source_names: {r_wrist: "h_r_wrist"} },
   episodes: [
     {
       steps: 2,
@@ -87,7 +88,7 @@ try {
     ),
   );
   window.openLiveReview({ id: "first" }, 0);
-  requests[0].resolve({ state: "READY" });
+  requests[0].resolve({ state: "READY", recording_source: {gateway: "sky2", path: "/cluster/original/episode-1.pkl"} });
   await flush();
   requests[1].resolve(data);
   await flush();
@@ -126,6 +127,12 @@ try {
     /rendered from recorded states/,
   );
   assert.equal(get("live-review-data").open, false);
+  assert.equal(get("live-review-source").hidden, false);
+  assert.equal(get("live-review-source-label").textContent, "Path · sky2");
+  assert.equal(get("live-review-source-path").textContent, "/cluster/original/episode-1.pkl");
+  assert.equal(get("live-review-source-copy").dataset.copyValue, "/cluster/original/episode-1.pkl");
+  assert.equal(get("live-review-source").nextElementSibling, get("live-review-data"));
+  assert.deepEqual(viewerOptions.sourceNames, data.hand_metadata.source_names);
   get("live-review-video").dispatchEvent(new window.Event("error"));
   assert.equal(get("live-review-video-retry").hidden, false);
   get("live-review-video-retry").click();
@@ -167,6 +174,9 @@ try {
   get("live-review-close").click();
   assert.equal(watchdogs.size, 0);
   window.openLiveReview({ id: "stale" }, 0);
+  assert.equal(get("live-review-source").hidden, true);
+  assert.equal(get("live-review-source-path").textContent, "");
+  assert.equal(get("live-review-source-copy").dataset.copyValue, undefined);
   get("live-review-close").click();
   window.openLiveReview({ id: "current" }, 0);
   staleWatchdog();
@@ -210,7 +220,7 @@ try {
     beforeSwitchResponse,
     "Switching recording must ignore the previous download",
   );
-  selectedRecording.resolve({ state: "READY" });
+  selectedRecording.resolve({ state: "READY", recording_source: {gateway: "rl2-bonjour", path: "/workstation/episode-2.pkl"} });
   await flush();
   requests.at(-1).resolve(data);
   await flush();
@@ -223,6 +233,8 @@ try {
     .resolve({ state: "READY", kind: "replay", sha256: "second-video" });
   await flush();
   assert.match(get("live-review-video").src, /recordings\/1\/video.mp4/);
+  assert.equal(get("live-review-source-path").textContent, "/workstation/episode-2.pkl");
+  assert.equal(get("live-review-source-copy").dataset.copyValue, "/workstation/episode-2.pkl");
   window.openLiveReview({id: "explicit-preparation"});
   requests.at(-1).resolve({state: "READY"});
   await flush();
@@ -454,6 +466,29 @@ try {
   get("live-review-close").click();
   window.setTimeout = previousSetTimeout;
   window.clearTimeout = previousClearTimeout;
+  const session = {id:"recording-delete-test", recordings:["recordings/one.pkl", "recordings/two.pkl", "recordings/three.pkl"]};
+  window.openLiveReview(session, 1);
+  const remove = get("live-review-delete");
+  assert.equal(remove.hidden, false);
+  assert.equal(remove.dataset.deleteKind, "recording-file", "reuse the existing delegated deletion control");
+  const selectedIdentity = remove.dataset.deleteId;
+  assert.equal(window.atob(selectedIdentity.split(":")[1]), session.recordings[1]);
+  get("live-review-recording").value = "2";
+  get("live-review-recording").dispatchEvent(new window.Event("change"));
+  assert.notEqual(remove.dataset.deleteId, selectedIdentity);
+  const refresh = window.refreshLiveReviewAfterDeletion(session.id);
+  requests.at(-1).resolve({...session, recordings:[session.recordings[0],session.recordings[2]], recording_slots:{[session.recordings[0]]:0,[session.recordings[2]]:2}});
+  await refresh;
+  assert.equal(get("live-review-recording").options.length, 2);
+  assert.equal(get("live-review-recording").selectedOptions[0].textContent, "Recording 3");
+  assert.equal(window.atob(remove.dataset.deleteId.split(":")[1]), session.recordings[2], "deletion identity follows the file, not its shifting index");
+  const empty = window.refreshLiveReviewAfterDeletion(session.id);
+  requests.at(-1).resolve({...session, recordings:[]});
+  await empty;
+  assert.equal(dialog.open, false, "deleting the last recording closes its empty viewer");
+  window.openLiveReview({...session, recordings:[session.recordings[0]]});
+  assert.equal(remove.hidden, false, "a single recording still has Delete when the selector is hidden");
+  get("live-review-close").click();
   console.log(
     "Review UI: frame boundaries, values, close races, selected recording recovery, truthful video stages, GET-only polling and bounded retry passed.",
   );

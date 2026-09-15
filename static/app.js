@@ -4130,9 +4130,10 @@ function applySelectedAdapter({ loadSource = true } = {}) {
     elements.resourcePolicy,
     manifestDefault(manifest, "resources", "queue_policy"),
   );
+  const defaultGpuMode = manifestDefault(manifest, "resources", "gpu_mode");
   setManifestDefault(
     elements.gpuMode,
-    manifestDefault(manifest, "resources", "gpu_mode"),
+    defaultGpuMode === "explicit" ? "manual" : defaultGpuMode,
   );
   setManifestDefault(
     elements.experimentGpuCount,
@@ -5611,7 +5612,17 @@ async function loadEvaluationSuites(
   return result.suites;
 }
 
-async function refreshAfterDeletion(kind) {
+async function refreshAfterDeletion(kind, identifier) {
+  if (kind === "recording-file") {
+    await Promise.all([window.refreshRecordingsAfterDeletion?.(), loadDataRegistry(true), window.refreshPreparedDatasets?.()]);
+    await window.refreshLiveReviewAfterDeletion?.(identifier.split(":")[0]);
+    return;
+  }
+  if (kind === "recording") {
+    SkynetDialog.close(document.getElementById("live-review-dialog"));
+    await Promise.all([window.refreshRecordingsAfterDeletion?.(), loadDataRegistry(true), window.refreshPreparedDatasets?.()]);
+    return;
+  }
   if (["dataset", "prepared", "local-copy"].includes(kind)) {
     SkynetDialog.close(document.getElementById("prepared-dataset-dialog"));
     await Promise.all([
@@ -9570,10 +9581,10 @@ document.addEventListener("click", async (event) => {
       const job = await api(`/api/data/exports/${encodeURIComponent(id)}`);
       await activateTab("data", true, "registry");
       await window.openPreparedDataset((job.export || job).resource_id);
-    } else if (kind === "recording") {
+    } else if (kind === "recording" || kind === "recording-file") {
       await activateTab("data", true, "recording");
       const search = document.getElementById("simulation-recordings-search");
-      search.value = id;
+      search.value = kind === "recording-file" ? id.split(":")[0] : id;
       search.dispatchEvent(new Event("input", { bubbles: true }));
     }
   } catch (error) {

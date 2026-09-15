@@ -35,16 +35,18 @@ def load_recording(source, profile, unpickler):
     if (
         not isinstance(payload, dict)
         or payload.get("format") != "dexverse_trajectory"
-        or payload.get("schema_version") != 3
+        or payload.get("schema_version") not in {3, 5}
     ):
         raise ValueError(
-            "Unsupported recording format; expected DexVerse trajectory v3"
+            "Unsupported recording format; expected DexVerse trajectory schema 3 or 5"
         )
     if (payload.get("task"), payload.get("robot_type")) != (
         profile["task"],
         profile["robot"],
     ):
         raise ValueError("Recording hand/task differs from the collection session")
+    from trajectory import validate_identity
+    validate_identity(payload)
     episodes = payload.get("episodes")
     if (
         not isinstance(episodes, list)
@@ -276,7 +278,7 @@ def convert(request):
                         "Saved action dimensions differ from the original hand"
                     )
                 env.reset()
-                if "goal" in groups:
+                if "goal" in groups and payload["schema_version"] == 3:
                     goal = np.asarray(ep.get("goal_pose"), dtype=np.float32)
                     command = env.command_manager.get_command("object_pose")
                     if (
@@ -303,6 +305,9 @@ def convert(request):
                     ns["_refresh_after_set_state"](env)
 
                 restore(ep["states"][0])
+                from trajectory import restore_episode_conditions
+                restore_episode_conditions(env, payload, ep)
+                ns["_refresh_after_set_state"](env)
                 initial = previous = snapshot(capture)
                 shapes = {k: list(v.shape) for k, v in initial.items()}
                 if observation_shapes is not None and observation_shapes != shapes:

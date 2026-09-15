@@ -48,6 +48,11 @@ class RecordedPolicy:
             self.mode = cfg.task.dataset.observation_mode
             self.history = deque(maxlen=int(cfg.n_obs_steps))
             self.action_steps = int(cfg.n_action_steps)
+        elif self.kind == "xpolicylab-act-native":
+            from act_native_evaluation import load_native_act
+            self.model, self.stats, self.scenes, self.action_steps = load_native_act(context, source_dir, manifest)
+            self.history = deque(maxlen=1)
+            self.mode = "rgb"
         elif self.kind == "xpolicylab-act":
             from skynet_act_training import build_policy
 
@@ -69,6 +74,7 @@ class RecordedPolicy:
             }
             self.history = deque(maxlen=1)
             self.mode, self.action_steps = "rgb", payload["settings"]["action_steps"]
+            self.scenes = ["scene_front", "scene_left", "scene_right"]
         else:
             raise ValueError("Unsupported recorded-data policy")
         self.model.cuda().eval()
@@ -129,7 +135,7 @@ class RecordedPolicy:
                 frames = np.stack(
                     [
                         cv2.resize(observation["images"][scene], (640, 480))
-                        for scene in ["scene_front", "scene_left", "scene_right"]
+                        for scene in self.scenes
                     ]
                 )
                 image = (

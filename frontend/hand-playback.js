@@ -1,20 +1,23 @@
+import { recordedNameCandidates } from "./recorded-hand-names.js";
+
 // Map the recorded joint order to the catalog's palm subtree. Upstream wrist
 // and floating-base joints are deliberately outside this mapping.
-export function fingerJointBindings(model, { palm, jointNames, robot, side }) {
+export function fingerJointBindings(
+  model,
+  { palm, jointNames, robot, side, sourceNames },
+) {
   const root = model.links[palm];
   if (!root) throw new Error("The hand's palm frame is unavailable.");
   const source = new Map(jointNames.map((name, index) => [name, index]));
-  const legacy = robot.startsWith("floating_shadow_");
-  const bimanual = robot.endsWith("_bimanual");
   const bindings = [];
   root.traverse((joint) => {
     if (!joint.isURDFJoint || joint.jointType === "fixed" || joint.mimicJoint)
       return;
-    const safe = joint.name.replace(/[^A-Za-z0-9_]/g, "_");
-    const prefix = bimanual ? side[0] + "h_" : "";
-    const candidates = legacy
-      ? [(bimanual ? side + "_" : "") + joint.name.replace(/^[rl]h_/, "")]
-      : [prefix + "h_" + safe, prefix + safe, prefix + joint.name];
+    const candidates = recordedNameCandidates(joint.name, {
+      robot,
+      side,
+      sourceNames,
+    });
     const name = candidates.find((candidate) => source.has(candidate));
     const index = source.get(name);
     if (index === undefined)

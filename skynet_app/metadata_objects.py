@@ -79,6 +79,8 @@ class MetadataObjects:
                 "BatchMode=yes",
                 "-o",
                 "ConnectTimeout=8",
+                "-o",
+                "LogLevel=ERROR",
                 self.host,
                 shlex.join(["python3", "-c", _REMOTE]),
             ],
@@ -87,10 +89,20 @@ class MetadataObjects:
             capture_output=True,
             timeout=120,
             check=False,
+            # Uvicorn handles terminal signals; keep the in-flight transfer
+            # alive until its caller finishes or subprocess.run cleans it up.
+            start_new_session=True,
         )
         if result.returncode:
+            status = (
+                f"SSH terminated by signal {-result.returncode}"
+                if result.returncode < 0
+                else f"SSH exited with status {result.returncode}"
+            )
+            detail = result.stderr.strip()[-500:]
             raise OSError(
-                "Central metadata transfer failed: " + result.stderr.strip()[-500:]
+                f"Central metadata transfer failed ({self.host}; {status})"
+                + (f": {detail}" if detail else "")
             )
         return json.loads(result.stdout)
 

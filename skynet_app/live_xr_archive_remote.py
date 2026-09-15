@@ -229,10 +229,15 @@ def archive_control(value):
                 sync_directory(quarantine.parent)
             receipt.unlink(missing_ok=True)
             return dict(removed=True, manifest_sha256=checksum)
-        final = safe(base / checksum)
-        if operation == "verify":
+        storage_key = value.get("storage_key", checksum)
+        if not re.fullmatch(r"[a-f0-9]{64}", str(storage_key)) or (operation not in {"verify", "revise"} and storage_key != checksum):
+            raise ValueError("Invalid archive storage key")
+        final = safe(base / storage_key)
+        if operation in {"verify", "revise"}:
             if inventory(final) != manifest:
                 raise ValueError("The archived session is incomplete or changed")
+            if operation == "revise":
+                write_json(safe(base / "manifests" / (checksum + ".json")), manifest)
             return dict(verified=True, manifest_sha256=checksum, root=str(final / "output"))
         if operation != "receive":
             raise ValueError("Unknown archive operation")

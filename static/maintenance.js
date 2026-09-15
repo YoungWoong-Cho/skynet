@@ -18,6 +18,8 @@
     adapter: "adapter",
     suite: "evaluation suite",
     dataset: "dataset",
+    recording: "recording",
+    "recording-file": "recording",
     prepared: "prepared result",
     "local-copy": "local copy",
   };
@@ -179,7 +181,7 @@
       if (plan.kind !== "storage") {
         closeActiveDisclosure({ restoreFocus: false });
         try {
-          await refreshAfterDeletion(plan.kind);
+          await refreshAfterDeletion(plan.kind, plan.id);
         } catch (error) {
           refreshError = error;
         }
