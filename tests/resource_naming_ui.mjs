@@ -61,7 +61,8 @@ try {
     description: "Live DexVerse · Shadow · right hand · Pick up cube",
     metadata: { session_id: "recording-uuid" },
     versions: [],
-    updated_at: "2026-09-14T12:00:00Z",
+    created_at: "2026-09-14T12:00:00Z",
+    updated_at: "2026-09-16T12:00:00Z",
   };
   const latest = {
     ...dataset,
@@ -69,6 +70,7 @@ try {
     source_key: "other-recording",
     metadata: { session_id: "other-recording" },
     display_name: "Latest dataset",
+    created_at: "2026-09-15T12:00:00Z",
     updated_at: "2026-09-15T12:00:00Z",
   };
   const resources = [dataset, latest];
@@ -103,7 +105,7 @@ try {
   assert.deepEqual(
     rows().map((item) => item.dataset.resourceId),
     ["other-dataset", "dataset-id"],
-    "Datasets start in Updated descending order",
+    "Datasets start in Created at descending order even when an older dataset was updated later",
   );
   assert.equal(
     row().querySelector(".node-name").textContent,
@@ -175,8 +177,8 @@ try {
   );
   assert.equal(
     rows()[0].dataset.resourceId,
-    dataset.id,
-    "The renamed dataset moves to its new Updated position",
+    latest.id,
+    "Renaming does not change Created at ordering",
   );
   assert.equal(el("data-resource-form-dialog").open, false);
   await w.openDataResourceEditor(dataset.id);

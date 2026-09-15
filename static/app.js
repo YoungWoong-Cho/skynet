@@ -13943,6 +13943,8 @@ function refreshDataResourceTables() {
 
 function renderDataResources() {
   const showRecording = dataCatalogView !== "files";
+  document.getElementById("data-resource-date-column").textContent =
+    showRecording ? "Created at" : "Updated";
   document.getElementById("data-resource-recording-column").hidden =
     !showRecording;
   document.getElementById("data-resource-type-column").hidden = showRecording;
@@ -13982,8 +13984,8 @@ function renderDataResources() {
   if (showRecording) {
     rows.sort(
       (left, right) =>
-        (Date.parse(right.updated_at || right.created_at || "") || 0) -
-        (Date.parse(left.updated_at || left.created_at || "") || 0),
+        (Date.parse(right.created_at || "") || 0) -
+        (Date.parse(left.created_at || "") || 0),
     );
   }
   const unit = dataCatalogView === "files" ? "file set" : "dataset";
@@ -14001,7 +14003,7 @@ function renderDataResources() {
         ${showRecording ? "" : `<td>${escapeHtml(dataResourceTypeLabel(resource))}</td>`}
         <td>${formats ? `<button type="button" class="text-button" data-resource-action="dataset" data-id="${escapeHtml(id)}">${escapeHtml(formats)}</button>` : "—"}</td>
         <td>${escapeHtml(resource.provider || "—")}</td>
-        <td>${escapeHtml(formatDate(resource.updated_at || resource.created_at))}</td>
+        <td>${escapeHtml(formatDate(showRecording ? resource.created_at : resource.updated_at || resource.created_at))}</td>
         <td class="row-actions data-resource-row-actions"><button type="button" data-resource-action="dataset" data-id="${escapeHtml(id)}">View</button>${!resource.archived_at && resource.provider === "huggingface" ? `<button type="button" data-resource-action="import" data-id="${escapeHtml(id)}">Import</button>` : ""}${resource.archived_at ? "" : `<button type="button" data-resource-action="version" data-id="${escapeHtml(id)}">Add files</button>`}<button type="button" data-resource-action="edit" data-id="${escapeHtml(id)}">Edit</button><button type="button" data-resource-action="${resource.archived_at ? "restore" : "archive"}" data-id="${escapeHtml(id)}">${resource.archived_at ? "Restore" : "Archive"}</button>${showRecording ? `<button type="button" data-delete-kind="dataset" data-delete-id="${escapeHtml(id)}">Delete</button>` : ""}</td>
       </tr>`;
         })
