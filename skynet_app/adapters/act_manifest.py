@@ -5,7 +5,7 @@ from skynet_app.model_io import adapter_io_contract
 from skynet_app.dataset_formats import XPL_COMMIT, XPL_REPOSITORY
 from skynet_app.observation_contracts import rgb_requirements
 from skynet_app.training_contracts import (
-    RECORDING_DATASET_FORMAT, TrainingPreset, DatasetRequirement,
+    RECORDING_DATASET_FORMAT, TrainingPreset, DatasetRequirement, RecordingSampling,
     RecordingConversion, RecordingDataPreset, RecordingLoaderValidation,
 )
 from .xpolicy_manifest import support_files, progress_contract, evaluation
@@ -17,7 +17,7 @@ def recording_conversion(*, native=False):
         id="rgb", name="Three scene views and joints", contract="skynet.act-rgb-joints/v1",
         observations=["state", "rgb"], action_representation="raw_joint_position_command",
         observation_requirements=rgb_requirements(("scene_front", "scene_left", "scene_right")),
-        minimum_episodes=2 if native else 1, validation_required=native, split_mode="episode",
+        split_mode="episode",
         description="Episode splits are fixed during conversion; normalization uses training episodes only.",
         preprocessing=dict(image_size=[640, 480], image_interpolation="linear", image_layout="CHW", joint_order="policy_to_source_indices"),
         training_setup=dict(adapter=adapter, repository=XPL_REPOSITORY, revision=XPL_COMMIT,
@@ -43,6 +43,7 @@ def manifest():
         AdapterInputField,
         DataBundleInputBinding,
         CommandTemplate,
+        ArgumentBinding,
     )
 
     conversion = recording_conversion()
@@ -69,6 +70,9 @@ def manifest():
             ),
         ]
     ]
+    fields.append(AdapterInputField(path="native.config.control_hz", label="Control frequency (Hz)",
+        kind="number", minimum=0.000001,
+        help="Leave blank to use the recording frequency. Selects aligned frames during training without converting the dataset again."))
     settings = [
         ("epochs", "Epochs", "integer", 6000, 1, 100000),
         ("action_steps", "Action chunk", "integer", 50, 1, 200),
@@ -171,6 +175,7 @@ def manifest():
         train=CommandTemplate(
             model_io=adapter_io_contract("xpolicylab-act"),
             argv=argv,
+            parameter_flags={"native.config.control_hz": ArgumentBinding(flag="--control-hz", omit_if_none=True)},
             input_fields=fields,
             presets=[preset],
             default_preset=preset.id,
@@ -181,6 +186,7 @@ def manifest():
                 observations=["state", "rgb"],
                 action_representation="raw_joint_position_command",
                 recording_conversion=conversion,
+                recording_sampling=RecordingSampling(window_policy="pad", default_action_steps=50),
             ),
             supported_canonical_fields=[
                 *common,

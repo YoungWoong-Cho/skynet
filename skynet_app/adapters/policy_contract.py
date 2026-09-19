@@ -2,6 +2,11 @@
 
 import math
 
+try:
+    from .recording_time import frequency_stride
+except ImportError:  # Frozen worker capsules use standalone modules.
+    from recording_time import frequency_stride
+
 CAMERAS = ("scene_front", "scene_left", "scene_right")
 JOINT_SEMANTICS = "raw_joint_position_command; target = action * scale + offset"
 
@@ -19,8 +24,13 @@ def observation_camera_recipe_matches(expected, actual):
     return bool(expected) and set(expected) == set(actual) and matches(expected, actual)
 
 
-def recorded_contract(metadata, *, images=True):
+def recorded_contract(metadata, *, images=True, control_hz=None):
     capture = metadata.get("capture") or {}
+    source_dt = capture.get("step_dt")
+    if control_hz is not None:
+        if type(source_dt) not in (int, float) or not math.isfinite(source_dt) or source_dt <= 0:
+            raise ValueError("Recording control period is required to select a control frequency")
+        frequency_stride(1 / source_dt, control_hz)
     return {
         "schema_version": "skynet.policy-io/v1",
         "representation": metadata.get("contract"),
@@ -31,7 +41,8 @@ def recorded_contract(metadata, *, images=True):
         "action_semantics": capture.get("action_semantics"),
         "action_scale": capture.get("action_scale"),
         "action_offset": capture.get("action_offset"),
-        "step_dt": capture.get("step_dt"),
+        "source_step_dt": source_dt,
+        "step_dt": source_dt if control_hz is None else 1 / control_hz,
         "cameras": {name: (capture.get("cameras") or {}).get(name) for name in CAMERAS} if images else {},
         "color_space": capture.get("color_space") if images else None,
         "source_revision": capture.get("source_revision"),
@@ -72,6 +83,16 @@ def contract_issues(contract):
         issue("step_dt", "The training control period is missing.")
     elif type(dt) not in (int, float) or not math.isfinite(dt) or dt <= 0:
         issue("step_dt", "The training control period is invalid.", "incompatible")
+    source_dt = contract.get("source_step_dt", dt)
+    if source_dt is None:
+        issue("source_step_dt", "The recording control period is missing.")
+    elif type(source_dt) not in (int, float) or not math.isfinite(source_dt) or source_dt <= 0:
+        issue("source_step_dt", "The recording control period is invalid.", "incompatible")
+    elif source_dt and type(dt) in (int, float) and math.isfinite(dt) and dt > 0:
+        try:
+            frequency_stride(1 / source_dt, 1 / dt)
+        except ValueError as error:
+            issue("step_dt", str(error), "incompatible")
     for field in ("robot", "hand", "source_revision"):
         if not contract.get(field):
             issue(field, f"The recorded {field.replace('_', ' ')} is missing.")
@@ -83,6 +104,16 @@ def contract_issues(contract):
     if contract.get("cameras") and contract.get("color_space") != "RGB":
         issue("color_space", "RGB camera input is required.", "mapping_required")
     return issues
+
+
+def simulation_stride(contract, step_dt):
+    """Number of original simulator steps for each learned position command."""
+    if type(step_dt) not in (int, float) or not math.isfinite(step_dt) or step_dt <= 0:
+        raise ValueError("Simulator control period must be finite and positive")
+    source_dt = contract.get("source_step_dt", contract["step_dt"])
+    if not math.isclose(step_dt, source_dt, rel_tol=1e-6, abs_tol=1e-9):
+        raise ValueError("Simulator control frequency differs from the recording")
+    return frequency_stride(1 / step_dt, 1 / contract["step_dt"])
 
 
 def environment_mapping(contract, names, scales, offsets, step_dt):
@@ -99,8 +130,7 @@ def environment_mapping(contract, names, scales, offsets, step_dt):
         j = names.index(name)
         if not math.isclose(scales[j], contract["action_scale"][i], rel_tol=1e-6, abs_tol=1e-6) or not math.isclose(offsets[j], contract["action_offset"][i], rel_tol=1e-6, abs_tol=1e-6):
             raise ValueError(f"Simulator scale or offset differs for {name}; an action conversion is required")
-    if not math.isclose(step_dt, contract["step_dt"], rel_tol=1e-6, abs_tol=1e-9):
-        raise ValueError("Simulator control frequency differs from the policy; temporal conversion is required")
+    simulation_stride(contract, step_dt)
     return [names.index(expected[i]) for i in contract["policy_to_source_indices"]]
 
 

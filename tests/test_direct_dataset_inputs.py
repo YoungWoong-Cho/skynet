@@ -26,15 +26,15 @@ def test_direct_selection_is_pinned_and_has_no_bundle_row(tmp_path):
     frozen = data_selection.snapshot(db, [selection])
     assert db.list_data_bundles() == []
     assert frozen['assignments'][0]['config']['location']['path'] == '/cluster/prepared/a'
-    db.create_data_resource_version(resource['id'], revision='capture-b', format='hdf5', path='/cluster/prepared/b', manifest_sha256='b'*64)
+    sibling = db.create_data_resource_version(resource['id'], revision='capture-b', format='hdf5', path='/cluster/prepared/b', manifest_sha256='b'*64)
     assert frozen['assignments'][0]['version']['manifest_sha256'] == 'a'*64
     assert data_selection.snapshot(db, [selection]) == frozen
     with pytest.raises(ValueError, match='unique'):
         data_selection.snapshot(db, [selection, selection])
     with pytest.raises((KeyError, ValueError)):
         data_selection.snapshot(db, [{**selection, 'location_id': 'not-registered'}])
-    db.update_data_resource(resource['id'], archived=True)
-    assert data_selection.choices(db) == []
+    db.update_dataset(version['id'], archived=True)
+    assert [item['id'] for item in data_selection.choices(db)] == [sibling['id']]
     with pytest.raises(ValueError, match='archived'):
         data_selection.snapshot(db, [selection])
 

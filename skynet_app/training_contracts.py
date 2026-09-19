@@ -38,7 +38,6 @@ class RecordingDataPreset(CanonicalModel):
     minimum_episodes: int = Field(default=1, ge=1)
     validation_required: bool = False
     split_mode: Literal["episode"] = "episode"
-    temporal: dict[str, Any] = Field(default_factory=dict)
     preprocessing: dict[str, Any] = Field(default_factory=dict)
     supported_robots: list[str] = Field(default_factory=list)
 
@@ -62,6 +61,13 @@ class RecordingConversion(CanonicalModel):
         return self
 
 
+class RecordingSampling(CanonicalModel):
+    """Experiment loader behavior; never a conversion requirement."""
+    window_policy: Literal["complete", "pad"]
+    require_validation: bool = False
+    default_action_steps: int = Field(default=1, ge=1)
+
+
 class DatasetRequirement(CanonicalModel):
     description: str
     mode: Literal["dataset", "simulation", "custom"] = "dataset"
@@ -69,6 +75,7 @@ class DatasetRequirement(CanonicalModel):
     action_representation: str | None = None
     observation_requirements: dict[str, Any] | None = None
     recording_conversion: RecordingConversion | None = None
+    recording_sampling: RecordingSampling | None = None
 
     @model_validator(mode="after")
     def validate_observations(self):

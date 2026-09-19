@@ -89,7 +89,6 @@ class ClusterPolicyPreparation(RecordingPreflight):
                        observation_requirements=job["observation_contract"],
                        observations=job["requirements"].get("observations") or [],
                        adapter_data_preset=job["adapter_data_preset"],
-                       temporal=job["requirements"].get("temporal"),
                        preprocessing=job["requirements"].get("preprocessing") or {},
                        action_representation=job["requirements"].get("action_representation"),
                        output=root + "/output", prepared_root=f"{WORK_ROOT}/datasets/prepared",

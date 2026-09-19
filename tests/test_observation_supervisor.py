@@ -51,6 +51,7 @@ result=dict(schema=request['schema'],request_id=request['request_id'],attempt_to
 if case=='wrong_attempt':result['attempt_token']='other-attempt'
 if case=='failed_partial':result.update(state='FAILED',error='Explicit child failure',artifacts=artifacts[:1])
 write_json(a.result,result)
+if request.get('ready_marker'):write_json(request['ready_marker'],result)
 progress('closing')
 if case=='ready_then_hang':ctypes.CDLL(None).sleep(60)
 '''
@@ -122,6 +123,7 @@ def test_real_progress_extends_frame_deadline_and_success_is_preserved(child_req
 def test_ready_receipt_survives_stalled_native_shutdown(child_request):
     result=run(child_request,'ready_then_hang',frame_timeout=.2)
     assert result['state']=='READY' and len(result['artifacts'])==2
+    assert 'stalled during closing' in result['cleanup_warning']
     assert not running(json.loads(Path(child_request[1]['pids']).read_text())[0])
 
 
@@ -129,6 +131,44 @@ def test_valid_failed_receipt_keeps_partial_artifacts(child_request):
     result=run(child_request,'failed_partial')
     assert result['state']=='FAILED' and result['error']=='Explicit child failure'
     assert len(result['artifacts'])==1
+
+
+def test_ready_receipt_requires_confirmed_process_group_stop(child_request, monkeypatch):
+    stop = supervisor._stop_group
+    def unconfirmed(process, grace):
+        stop(process, grace)
+        return False
+    monkeypatch.setattr(supervisor, '_stop_group', unconfirmed)
+    result = run(child_request, 'ready')
+    assert result['state'] == 'FAILED'
+    assert 'confirm renderer process group stopped' in result['error']
+
+
+def test_interruption_after_data_commit_does_not_become_success(child_request):
+    worker, request, path, output = child_request
+    marker = output.parent / 'committed.json'
+    request.update(case='ready_then_hang', ready_marker=str(marker))
+    path.write_text(json.dumps(request))
+    script = ('import sys;sys.path.insert(0,'+repr(str(ROOT))+');'
+              'from ops.datasets.observation_supervisor import supervise;'
+              'import json;from pathlib import Path;'
+              f'supervise(json.loads(Path({str(path)!r}).read_text()),{str(path)!r},{str(output)!r},'
+              f'worker_path={str(worker)!r},termination_grace=.1,poll_interval=.01)')
+    process = subprocess.Popen([sys.executable, '-c', script], start_new_session=True)
+    try:
+        deadline = time.monotonic() + 5
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert marker.exists()
+        process.terminate()
+        process.wait(timeout=3)
+        result = json.loads(output.read_text())
+        assert result['state'] == 'FAILED' and 'interrupted by signal' in result['error']
+        assert len(result['artifacts']) == 2
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=2)
 
 
 def test_repeated_phase_notifications_cannot_hide_a_stall(child_request):
@@ -268,3 +308,54 @@ def test_valid_ready_receipt_preserves_published_output_inside_staging(child_req
     result = run(child_request, 'ready')
     assert result['state'] == 'READY' and len(result['artifacts']) == 2
     assert marker.read_bytes() == b'published arrays'
+
+
+@pytest.mark.parametrize('closing', ['clean', 'exception', 'exit', 'hang'])
+def test_actual_worker_commits_files_before_native_teardown(tmp_path, closing):
+    from test_observation_prepare import source, requests, request
+    from ops.datasets.observation_prepare import verify_artifact
+    from skynet_app.observation_contracts import rgb_requirements
+    src = source(tmp_path)
+    jobs = requests(tmp_path, src, rgb_requirements(['scene_front'], width=3, height=2))
+    req = request([src], jobs)
+    req['staging_root'] = str(tmp_path / 'staging')
+    req['closing'] = closing
+    path = tmp_path / 'request.json'; path.write_text(json.dumps(req))
+    output = tmp_path / 'result.json'
+    child = tmp_path / 'real_worker.py'
+    child.write_text('ROOT=' + repr(str(ROOT)) + '\n' + r'''
+import ctypes, json, os, signal, sys, types
+from pathlib import Path
+sys.path[:0] = [ROOT, ROOT + '/tests']
+from test_observation_prepare import FakeRenderer
+from ops.datasets import observation_prepare as worker
+request = json.loads(Path(sys.argv[sys.argv.index('--request') + 1]).read_text())
+result_path = Path(sys.argv[sys.argv.index('--result') + 1])
+class ClosingRenderer(FakeRenderer):
+ def __enter__(self):
+  residue = Path(request['staging_root']) / 'observation-hand-test' / 'robot.usd'
+  residue.parent.mkdir(parents=True); residue.write_text('private generated asset')
+  return super().__enter__()
+ def __exit__(self, *args):
+  saved = json.loads(result_path.read_text())
+  assert saved['state'] == 'READY' and len(saved['artifacts']) == 1
+  self.progress('closing_app')
+  if request['closing'] == 'exception': raise RuntimeError('native teardown failed')
+  if request['closing'] == 'exit': os._exit(0)
+  if request['closing'] == 'hang':
+   signal.signal(signal.SIGTERM, signal.SIG_IGN)
+   ctypes.CDLL(None).sleep(60)
+module = types.ModuleType('observation_render'); module.DexVerseRenderer = ClosingRenderer
+sys.modules['observation_render'] = module
+raise SystemExit(worker.main())
+''')
+    result = supervisor.supervise(req, path, output, worker_path=child,
+        initialization_timeout=5, frame_timeout=.3, termination_grace=.1, poll_interval=.01)
+    assert result['state'] == 'READY', result
+    assert len(result['artifacts']) == 1
+    verify_artifact(jobs[0]['output_dir'], request=jobs[0])
+    assert not Path(req['staging_root']).exists(), 'Supervisor removes private assets after child exit'
+    if closing in {'exception', 'hang'}:
+        assert result.get('cleanup_warning')
+    else:
+        assert not result.get('cleanup_warning')

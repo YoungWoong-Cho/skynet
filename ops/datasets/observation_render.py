@@ -7,7 +7,7 @@ version's defaults. Actual calibration is recorded for every control frame.
 from __future__ import annotations
 
 from copy import deepcopy
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 import math
@@ -243,12 +243,15 @@ def configure_cameras(cfg, jobs):
 
 
 class DexVerseRenderer:
-    def __init__(self, sources, jobs):
+    def __init__(self, sources, jobs, *, progress=None, staging_root=None):
         self.sources, self.jobs = sources, jobs
         self.env = self.app = None
         self.capture_metadata = {}
         self.hand_work = None
         self.generated_asset_root = None
+        self._contexts = ExitStack()
+        self.progress = progress or (lambda phase, **fields: None)
+        self.staging_root = staging_root
 
     def __enter__(self):
         selected_sources = [self.sources[key] for key in dict.fromkeys(j["episode_key"] for j in self.jobs)]
@@ -283,15 +286,14 @@ class DexVerseRenderer:
                     "--device", self.profile.get("device", "cuda:0"), "--teleop_retargeter", "absolute",
                     # Use the pinned kit's standard headless lifecycle while
                     # excluding mutable shared renderer preferences.
-                    "--kit_args=--/app/fastShutdown=false --/app/settings/loadUserConfig=false --/app/settings/persistent=false"]
+                    "--kit_args=--/app/settings/loadUserConfig=false --/app/settings/persistent=false"]
         try:
             self.ns = runpy.run_path(str(recorder), run_name="skynet_observation_prepare")
             self.app = self.ns["simulation_app"]
-            # Kit must return from close() so main can persist its result.
+            # Keep Isaac Sim's default fast shutdown. The worker commits its
+            # verified result before close(), which may terminate this process.
             import carb
-            self.app.config["fast_shutdown"] = False
             settings = carb.settings.get_settings()
-            settings.set_bool("/app/fastShutdown", False)
             # Freeze RTX's documented full-frame, no-overscan projection.
             # Calibration and exported pixels must use the same image extent.
             for index, value in enumerate((0.0, 0.0, 1.0, 1.0)):
@@ -304,6 +306,13 @@ class DexVerseRenderer:
             settings.set_bool("/exts/omni.replicator.core/Orchestrator/enabled", True)
             settings.set_bool("/omni/replicator/captureOnPlay", False)
             settings.set_bool("/omni/replicator/captureMotionBlur", False)
+            import torch
+            self.torch = torch
+            # Isaac Lab keeps tensors across episodes. Keep their creation,
+            # reset/restore, capture and cleanup in one inference context;
+            # a capture-only context makes the next reset mutate inference
+            # tensors outside that context.
+            self._contexts.enter_context(torch.inference_mode())
             self._create_environment()
             return self
         except BaseException as exc:
@@ -315,9 +324,7 @@ class DexVerseRenderer:
             sys.argv = self.previous_argv
 
     def _create_environment(self):
-        import torch
         from wrist import configure_virtual_wrist
-        self.torch = torch
         manifest = None
         bundle = self.profile.get("hand_bundle")
         if bundle:
@@ -329,7 +336,15 @@ class DexVerseRenderer:
                 raise ValueError("Renderer installed a different frozen hand bundle")
             # URDF conversion has a mutable USD cache. Build in this producer's
             # private workspace from verified originals, never a shared cache.
-            self.hand_work = tempfile.TemporaryDirectory(prefix="observation-hand-")
+            # Fast native shutdown may skip Python finally blocks. In a worker,
+            # keep generated USD assets under the supervisor-owned staging root
+            # so they can be removed after the entire process group has stopped.
+            if self.staging_root is not None:
+                staging = Path(self.staging_root)
+                if not staging.is_absolute() or staging.is_symlink():
+                    raise ValueError("Renderer staging root must be an absolute nonsymlink directory")
+                staging.mkdir(parents=True, exist_ok=True)
+            self.hand_work = tempfile.TemporaryDirectory(prefix="observation-hand-", dir=self.staging_root)
             hand_root = Path(self.hand_work.name)
             for name, receipt in manifest["files"].items():
                 source = (original / name).resolve()
@@ -486,56 +501,66 @@ class DexVerseRenderer:
         from recording_metadata import array
         if not self.app.is_running() or self.app.is_exiting():
             raise RuntimeError("Renderer exited before finishing requested observations")
-        with self.torch.inference_mode():
-            self.restore_state(self.env, state)
-            # Explicit capture pumps offscreen render products even at time 0.
-            # Replicator 1.12.27 documents delta_time=0 as no timeline advance;
-            # subframes settle rendering while physics remains paused.
-            import omni.replicator.core as rep
-            import omni.timeline
-            timeline = omni.timeline.get_timeline_interface()
-            before = timeline.get_current_time()
-            with capture_deadline():
-                rep.orchestrator.step(rt_subframes=4, pause_timeline=False,
-                                      delta_time=0.0, wait_for_render=True)
-            if not np.isclose(timeline.get_current_time(), before, rtol=0, atol=1e-12):
-                raise RuntimeError("Observation capture advanced the simulation timeline")
-            self.env.scene.update(dt=self.env.physics_dt)
-            result = {}
-            for camera_id in dict.fromkeys(j["camera_id"] for j in jobs):
-                sensor = self.env.scene[self.cameras[camera_id]["camera"]["sensor"]]
-                # Render products can initialize asynchronously. Do not pass
-                # an empty Replicator buffer into TiledCamera's Warp reshape.
-                for warmup in range(32):
-                    ready = True
-                    for annotator in sensor._annotators.values():
-                        output = annotator.get_data()
-                        if isinstance(output, dict):
-                            output = output["data"]
-                        ready = ready and bool(output.size)
-                    if ready:
-                        break
-                    self.env.sim.render()
-                else:
-                    raise RuntimeError("Camera render product stayed empty without physics stepping: "
-                                       + camera_id + "; render mode=" + str(self.env.sim.render_mode))
-                sensor.update(0.0, force_recompute=True)
-                data = sensor.data
-                item = {"intrinsics": array(data.intrinsic_matrices)[0].copy(),
-                        "world_from_camera": pose_from_ros(array(data.pos_w)[0], array(data.quat_w_ros)[0])}
-                for modality in {j["modality"] for j in jobs if j["camera_id"] == camera_id}:
-                    key = "rgb" if modality == "rgb" else "distance_to_image_plane"
-                    values = array(data.output[key])[0]
-                    item[modality] = values[:, :, :3].copy() if modality == "rgb" else values.reshape(values.shape[:2]).astype("float32")
-                result[camera_id] = item
-            return result
+        self.restore_state(self.env, state)
+        # Explicit capture pumps offscreen render products even at time 0.
+        # Replicator 1.12.27 documents delta_time=0 as no timeline advance;
+        # subframes settle rendering while physics remains paused.
+        import omni.replicator.core as rep
+        import omni.timeline
+        timeline = omni.timeline.get_timeline_interface()
+        before = timeline.get_current_time()
+        with capture_deadline():
+            rep.orchestrator.step(rt_subframes=4, pause_timeline=False,
+                                  delta_time=0.0, wait_for_render=True)
+        if not np.isclose(timeline.get_current_time(), before, rtol=0, atol=1e-12):
+            raise RuntimeError("Observation capture advanced the simulation timeline")
+        self.env.scene.update(dt=self.env.physics_dt)
+        result = {}
+        for camera_id in dict.fromkeys(j["camera_id"] for j in jobs):
+            sensor = self.env.scene[self.cameras[camera_id]["camera"]["sensor"]]
+            # Render products can initialize asynchronously. Do not pass
+            # an empty Replicator buffer into TiledCamera's Warp reshape.
+            for warmup in range(32):
+                ready = True
+                for annotator in sensor._annotators.values():
+                    output = annotator.get_data()
+                    if isinstance(output, dict):
+                        output = output["data"]
+                    ready = ready and bool(output.size)
+                if ready:
+                    break
+                self.env.sim.render()
+            else:
+                raise RuntimeError("Camera render product stayed empty without physics stepping: "
+                                   + camera_id + "; render mode=" + str(self.env.sim.render_mode))
+            sensor.update(0.0, force_recompute=True)
+            data = sensor.data
+            item = {"intrinsics": array(data.intrinsic_matrices)[0].copy(),
+                    "world_from_camera": pose_from_ros(array(data.pos_w)[0], array(data.quat_w_ros)[0])}
+            for modality in {j["modality"] for j in jobs if j["camera_id"] == camera_id}:
+                key = "rgb" if modality == "rgb" else "distance_to_image_plane"
+                values = array(data.output[key])[0]
+                item[modality] = values[:, :, :3].copy() if modality == "rgb" else values.reshape(values.shape[:2]).astype("float32")
+            result[camera_id] = item
+        return result
 
     def __exit__(self, *_):
-        if self.env is not None:
-            self.env.close()
         try:
-            if self.app is not None:
-                self.app.close(wait_for_replicator=False)
+            try:
+                if self.env is not None:
+                    self.progress("closing_env")
+                    self.env.close()
+            finally:
+                try:
+                    if self.app is not None:
+                        self.progress("closing_app")
+                        self.app.close(wait_for_replicator=False)
+                finally:
+                    if self.hand_work is not None:
+                        self.progress("closing_assets")
+                        self.hand_work.cleanup()
         finally:
-            if self.hand_work is not None:
-                self.hand_work.cleanup()
+            try:
+                self.progress("closing_context")
+            finally:
+                self._contexts.close()

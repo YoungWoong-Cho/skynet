@@ -121,7 +121,7 @@ def test_recording_delete_cascades_files_and_records_and_is_idempotent(recording
     assert service.delete("recording", identifier, plan["token"])["already_deleted"]
 
 
-def test_dataset_dependency_uses_all_recording_memberships(recording):
+def test_dataset_dependency_uses_exact_output_recording_membership(recording):
     service, live, job, folder, _, _ = recording
     resource = service.db.create_data_resource(
         category="dataset",
@@ -131,10 +131,21 @@ def test_dataset_dependency_uses_all_recording_memberships(recording):
         kind="demonstrations",
         metadata={"session_id": job["id"]},
     )
+    first = service.db.create_data_resource_version(
+        resource["id"], revision="first", format="skynet.recording-dataset/v1", path="/prepared/first",
+        manifest_sha256="a" * 64, metadata={"sources": [{"session_id": job["id"]}]},
+    )
+    second = service.db.create_data_resource_version(
+        resource["id"], revision="second", format="skynet.recording-dataset/v1", path="/prepared/second",
+        manifest_sha256="b" * 64, metadata={"sources": [{"session_id": "another-recording"}]},
+    )
+    service.db.update_dataset(first["id"], display_name="Renamed dataset", archived=True)
     plan = service.preview("recording", job["id"])
     assert any(
-        x["id"] == resource["id"] and x["kind"] == "dataset" for x in plan["blockers"]
+        x["id"] == first["id"] and x["kind"] == "dataset" and x["label"] == "Renamed dataset"
+        for x in plan["blockers"]
     )
+    assert not any(x["id"] in {resource["id"], second["id"]} for x in plan["blockers"])
     assert not plan["files"]
     with pytest.raises(ValueError, match="dependencies"):
         service.delete("recording", job["id"], plan["token"])
@@ -148,7 +159,7 @@ def test_changed_files_and_new_dependencies_invalidate_confirmation(recording):
     with pytest.raises(ValueError, match="changed"):
         service.delete("recording", job["id"], plan["token"])
     plan = service.preview("recording", job["id"])
-    service.db.create_data_resource(
+    resource = service.db.create_data_resource(
         category="dataset",
         provider="collection",
         namespace="datasets",
@@ -156,9 +167,63 @@ def test_changed_files_and_new_dependencies_invalidate_confirmation(recording):
         kind="demonstrations",
         metadata={"session_id": job["id"]},
     )
+    service.db.create_data_resource_version(
+        resource["id"], revision="new", format="skynet.recording-dataset/v1", path="/prepared/new",
+        manifest_sha256="a" * 64,
+    )
     with pytest.raises(ValueError, match="dependencies"):
         service.delete("recording", job["id"], plan["token"])
     assert folder.exists()
+
+
+def raw_source(service, job):
+    resource = service.db.create_data_resource(
+        category="dataset", provider="collection", namespace="datasets", source_key=job["id"],
+        kind="demonstrations", metadata={"session_id": job["id"]},
+    )
+    version = service.db.create_data_resource_version(
+        resource["id"], revision="raw", format="skynet.episodes/v1", path="/metadata/raw-manifest",
+        manifest_sha256="d" * 64, metadata={"sources": [{"session_id": job["id"], "path": job["recordings"][0]}]},
+    )
+    service.db.record_data_location(version["id"], kind="cluster", host="sky2",
+        path=job["archive"]["root"], manifest_sha256=version["manifest_sha256"])
+    return resource, version
+
+
+def test_unused_raw_provenance_is_removed_with_original_recording(recording):
+    service, _, job, folder, _, _ = recording
+    resource, version = raw_source(service, job)
+    plan = service.preview("recording", job["id"])
+    assert not plan["blockers"]
+    assert plan["records"]["data_resource_versions"] == [version["id"]]
+    assert plan["records"]["data_resources"] == [resource["id"]]
+    assert service.delete("recording", job["id"], plan["token"])["deleted"]
+    assert not folder.exists()
+    assert service.db.get_data_resource_version(version["id"]) is None
+    assert service.db.get_data_resource(resource["id"]) is None
+
+
+@pytest.mark.parametrize("consumer", ["experiment", "bundle", "preparation"])
+def test_raw_provenance_consumers_still_block_recording_removal(recording, consumer):
+    service, _, job, folder, _, _ = recording
+    _, version = raw_source(service, job)
+    if consumer == "experiment":
+        service.db.create_experiment(name="Pinned source", requested_spec={"version_id": version["id"]})
+    elif consumer == "bundle":
+        service.db.create_data_bundle(name="Pinned source", version="1",
+            assignments=[{"role": "training_data", "version_id": version["id"]}])
+    else:
+        identifier = str(uuid4())
+        with service.db.transaction() as c:
+            c.execute("INSERT INTO policy_exports VALUES (?,?)", (identifier, canonical_json(
+                dict(id=identifier, state="FAILED", source_version_id=version["id"], name="Failed conversion"))))
+    plan = service.preview("recording", job["id"])
+    assert plan["blockers"]
+    assert not plan["files"]
+    with pytest.raises(ValueError, match="dependencies"):
+        service.delete("recording", job["id"], plan["token"])
+    assert folder.exists()
+    assert service.db.get_data_resource_version(version["id"])
 
 
 def test_interrupted_delete_retains_intent_blocks_consumers_and_retries(

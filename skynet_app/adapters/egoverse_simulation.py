@@ -16,7 +16,7 @@ class RecordedPolicy:
 
     def __init__(self, context, repository, *, device="cuda"):
         import torch
-        from egoverse_runtime import JOINT_CONTRACT, register_joint_domain, validate_hpt_joint_inputs, validate_manifest, validate_checkpoint_receipt
+        from egoverse_runtime import JOINT_CONTRACT, register_joint_domain, validate_hpt_joint_inputs, validate_manifest, validate_checkpoint_receipt, experiment_sampling
 
         checkpoint = context["checkpoint"]
         if digest(checkpoint["path"]) != checkpoint["sha256"]:
@@ -30,8 +30,10 @@ class RecordedPolicy:
         if revision != receipt.get("revision") or revision != context["policy"]["source"]["revision"]:
             raise ValueError("Evaluation must use the checkpoint's exact EgoVerse revision")
         config = context["policy"]["native_config"]
-        validate_checkpoint_receipt(receipt, self.kind, config["dataset_manifest_sha256"])
         self.manifest = validate_manifest(config["dataset_path"], config["dataset_manifest_sha256"], self.kind)
+        sampling = experiment_sampling(self.manifest, self.kind, control_hz=config.get("control_hz"), action_steps=config.get("action_steps"))
+        validate_checkpoint_receipt(receipt, self.kind, config["dataset_manifest_sha256"], sampling=sampling)
+        self.control_hz = sampling["control_hz"]
         if self.manifest["contract"] != JOINT_CONTRACT:
             raise ValueError("Simulator evaluation requires the recorded-joint dataset contract")
         if self.kind == "hpt_joints":
@@ -50,6 +52,8 @@ class RecordedPolicy:
         self.stats = MultiDataset.from_state(saved["hyper_parameters"]["norm_stats_state"])
         self.dimension = len(self.manifest["policy_to_source_indices"])
         self.horizon = int(self.stats.key_shape("actions_joints", 100)[0])
+        if self.horizon != sampling["action_steps"]:
+            raise ValueError("Checkpoint normalization shape differs from its experiment action chunk")
         if self.horizon < 1 or self.dimension < 1:
             raise ValueError("Checkpoint action shape is invalid")
 

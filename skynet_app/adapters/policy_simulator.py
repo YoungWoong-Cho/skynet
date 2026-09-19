@@ -2,6 +2,7 @@
 
 from multiprocessing.connection import Listener
 import os
+import math
 from pathlib import Path
 import secrets
 import subprocess
@@ -71,6 +72,12 @@ def validate_simulation(context, manifest):
         raise ValueError("Evaluation source does not match collection")
 
 def run_simulator(context, context_path, policy):
+    control_hz = getattr(policy, "control_hz", None)
+    if type(control_hz) not in (int, float) or not math.isfinite(control_hz) or control_hz <= 0:
+        raise ValueError("The loaded checkpoint must declare its verified control frequency")
+    contract = context.get("compatibility", {}).get("io_contract")
+    if contract and not math.isclose(1 / control_hz, contract["step_dt"], rel_tol=1e-6, abs_tol=1e-9):
+        raise ValueError("Checkpoint control frequency differs from the submitted evaluation contract")
     runtime = context["evaluator_runtime"]
     source = Path(runtime["source_dir"])
     auth = secrets.token_bytes(32)
@@ -102,6 +109,7 @@ def run_simulator(context, context_path, policy):
     env["SKYNET_POLICY_AUTH"] = auth.hex()
     env["SKYNET_POLICY_PORT"] = str(listener.address[1])
     env["SKYNET_POLICY_IMAGES"] = "1" if policy.mode == "rgb" else "0"
+    env["SKYNET_POLICY_CONTROL_HZ"] = str(control_hz)
     temporary_root = Path(context["result_path"]).parent
     temporary_root.mkdir(parents=True, exist_ok=True)
     try:

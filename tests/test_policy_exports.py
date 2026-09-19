@@ -104,7 +104,7 @@ def install_adapters(service):
             service.test_adapters[manifest.slug] = adapter
 
 
-def create(service, session_id, kind, name, resource_id=None, **kwargs):
+def create(service, session_id, kind, name, **kwargs):
     # Test shorthand resolves real registry IDs; the production API accepts no recipe aliases.
     slug, preset = {
         'fixture-rgb':('test-recording-inputs','rgb'), 'fixture-state':('test-recording-inputs','state'),
@@ -112,7 +112,7 @@ def create(service, session_id, kind, name, resource_id=None, **kwargs):
         'egoverse':('egoverse-hpt','hpt_joints'),
     }[kind]
     adapter = service.test_adapters[slug]
-    return service.create(session_id,adapter['id'],name,resource_id,
+    return service.create(session_id,adapter['id'],name,
         adapter_version_id=adapter['latest_version']['id'],adapter_data_preset=preset,**kwargs)
 
 
@@ -137,17 +137,31 @@ def test_worker_failure_distinguishes_progress_from_termination():
     assert "leaked semaphore" not in message
     assert "ModuleNotFoundError: missing" in conversion_failure(1, log + '\nModuleNotFoundError: missing')
 
-def test_preparation_retries_never_rename_existing_dataset(setup):
+def test_conversion_results_keep_independent_names_and_source_identity(setup):
     service, session, _ = setup
-    first = create(service, session["id"], "fixture-rgb", "Original dataset")
+    first = create(service, session["id"], "fixture-rgb", "RGB demonstrations")
     before = service.database.get_data_resource(first["resource_id"])
-    service.update(first["id"], state="FAILED", error="Interrupted")
-    second = create(service, session["id"], "act", "Accidental rename", first["resource_id"])
+    second = create(service, session["id"], "act", "ACT demonstrations")
     after = service.database.get_data_resource(first["resource_id"])
     assert second["resource_id"] == first["resource_id"]
-    assert second["name"] == "Original dataset"
+    assert second["source_version_id"] == first["source_version_id"]
+    assert second["name"] == "ACT demonstrations"
+    assert service.get(first["id"])["name"] == "RGB demonstrations"
+    assert after["display_name"] == before["display_name"]
     assert after["metadata"] == before["metadata"]
     assert after["description"] == before["description"]
+
+
+def test_preparation_options_expose_recording_and_adapters_without_source_group(setup):
+    service, session, _ = setup
+    create(service, session["id"], "fixture-rgb", "Named conversion")
+    options = service.preparation_options(session["id"])
+    assert options["session"]["id"] == session["id"]
+    assert options["session"]["name"] == session["profile"]["display_name"]
+    assert options["session"]["eligible"]
+    assert options["adapters"]
+    assert "resource" not in options
+    assert "resource_id" not in options["session"]
 
 @pytest.mark.parametrize("mutation, message", [
     ("active", "End the collection"),
@@ -163,7 +177,7 @@ def test_rejects_ineligible_sources_before_dispatch(setup, mutation, message):
     with pytest.raises(ValueError, match=message):
         create(service, session["id"], "fixture-rgb", "Test")
     assert service.list() == []
-    assert not service.options()["sessions"][0]["eligible"]
+    assert not service.preparation_options(session["id"])["session"]["eligible"]
 
 def test_missing_images_queue_conversion_with_declared_observations(setup):
     service, session, _ = setup
@@ -172,7 +186,7 @@ def test_missing_images_queue_conversion_with_declared_observations(setup):
     assert job["state"] == "QUEUED"
     assert job["observation_contract"]["streams"]
     assert all("image_path" not in source for source in job["sources"])
-    assert service.options()["sessions"][0]["eligible"]
+    assert service.preparation_options(session["id"])["session"]["eligible"]
 
 def test_checksum_failure_does_not_register_a_version_and_can_retry(setup):
     service, session, source = setup
@@ -183,15 +197,6 @@ def test_checksum_failure_does_not_register_a_version_and_can_retry(setup):
     assert service.get(job["id"])["state"] == "FAILED"
     assert all(v["format"] == "skynet.episodes/v1" for r in service.database.list_data_resources() for v in service.database.get_data_resource(r["id"])["versions"])
     assert create(service, session["id"], "fixture-rgb", "Retry")["id"] != job["id"]
-
-def test_original_recording_locations_are_actual_directories(setup):
-    service, session, source = setup
-    locations = service.options()["sessions"][0]["locations"]
-    assert locations == [{"kind": "remote", "host": "test-host", "path": str(source / "recordings/live")}]
-    assert Path(locations[0]["path"]).is_dir()
-    assert service.recording_locations({}) == []
-    session["recordings"] = ["../../outside.pkl"]
-    assert service.recording_locations(session) == []
 
 def test_shared_preparation_redacts_other_workspace_experiment_details(setup, monkeypatch):
     from skynet_app.workspaces import WorkspaceDirectory
@@ -206,7 +211,7 @@ def test_shared_preparation_redacts_other_workspace_experiment_details(setup, mo
     private = service.database.create_experiment(name='Private name', requested_spec=spec)
     workspace, _ = WorkspaceDirectory(service.database).open('teammate@example.com')
     scoped = Database(service.database.path, workspace_id=workspace['id'])
-    result = service.options(workspace_database=scoped)
+    result = service.job_overview(workspace_database=scoped)
     assert result['exports'][0]['usage'] == [{'other_workspace': True}]
     assert 'Private name' not in json.dumps(result)
     # Internal deletion checks retain the actual dependency information.
@@ -219,4 +224,7 @@ def test_duplicate_preparation_does_not_scan_other_datasets_or_upload_metadata(s
         pytest.fail("Duplicate preparation must use its saved identity without registry scan or metadata upload")
     monkeypatch.setattr(service.database, "list_data_resources", unexpected)
     monkeypatch.setattr(service, "register_source", unexpected)
-    assert create(service, session["id"], "fixture-rgb", "Duplicate")["id"] == first["id"]
+    duplicate = create(service, session["id"], "fixture-rgb", "Duplicate")
+    assert duplicate["id"] == first["id"]
+    assert duplicate["name"] == "Saved dataset"
+    assert duplicate["source_version_id"] == first["source_version_id"]

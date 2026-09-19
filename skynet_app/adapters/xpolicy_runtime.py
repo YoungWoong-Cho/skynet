@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from recording_dataset import validate_manifest as validate_recording_manifest
+from recording_time import resolve_sampling
 
 
 def repository(root, revision, policy):
@@ -47,7 +48,7 @@ def validate_manifest(manifest):
     for episode in manifest["episodes"]:
         if episode.get("policy_to_source_indices") != order:
             raise ValueError("Recorded joint policies require the same joint mapping in every episode")
-        for key in ("robot", "hand", "action_joint_names", "action_semantics", "action_scale", "action_offset", "step_dt"):
+        for key in ("robot", "hand", "action_joint_names", "action_semantics", "action_scale", "action_offset"):
             if episode.get("capture", {}).get(key) != capture.get(key):
                 raise ValueError("Recorded joint policies require the same capture contract in every episode: " + key)
         for key in ("state", "action"):
@@ -62,3 +63,13 @@ def write_json(path, value):
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, indent=2, allow_nan=False))
     temporary.replace(path)
+
+
+def checkpoint_sampling(manifest, config, saved, *, require_validation=False):
+    """A checkpoint must execute the same frame grid and chunk used for training."""
+    expected = resolve_sampling(manifest, config.get("control_hz"),
+        action_steps=config.get("action_steps", 50), window_policy="pad",
+        require_validation=require_validation)
+    if saved != expected:
+        raise ValueError("ACT checkpoint sampling differs from the experiment frequency, action chunk or dataset")
+    return expected

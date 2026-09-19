@@ -3484,13 +3484,27 @@ class Database:
                 (new_id(), version_id, kind, host, path, manifest_sha256, status, utc_now()))
             return dict(connection.execute("SELECT * FROM data_locations WHERE version_id=? AND host=? AND path=?", (version_id, host, path)).fetchone())
 
-    def delete_prepared_dataset(self, resource_id, cleanup, *, identifier=None, preview=False):
-        """Delete a managed dataset only after its generated copies are removed.
+    def list_datasets(self, *, include_archived=False, include_presets=True):
+        from .dataset_catalog import list_datasets
+        return list_datasets(self, include_archived=include_archived, include_presets=include_presets)
 
-        One write transaction prevents an experiment pin racing cleanup. Immutable
-        delete triggers are restored in that same transaction; rollback restores
-        them too. Ordinary registry operations cannot use this exception.
+    def get_dataset(self, version_id):
+        from .dataset_catalog import get_dataset
+        return get_dataset(self, version_id)
+
+    def update_dataset(self, version_id, *, display_name=None, description=None, archived=None):
+        from .dataset_catalog import update_dataset
+        return update_dataset(self, version_id, display_name=display_name,
+                              description=description, archived=archived)
+
+    def delete_prepared_dataset(self, resource_id, cleanup, *, identifier=None, version_id=None, preview=False):
+        """Remove one published dataset or one conversion attempt, never its siblings.
+
+        The write transaction rechecks immutable references before file cleanup.
+        Internal source resources and original recording references are retained.
         """
+        if (identifier is None) == (version_id is None):
+            raise ValueError("Choose exactly one dataset or conversion attempt to delete")
         failure = None
         with self.transaction() as c:
             resource = c.execute(
@@ -3515,36 +3529,23 @@ class Database:
                     (resource_id,),
                 )
             ]
-            if collection_owned and (versions or jobs) and not json.loads(resource["metadata_json"]).get("managed_dataset"):
-                # Older collections can predate the display metadata flag. The
-                # preparation ledger and immutable version backlinks establish
-                # ownership without trusting a label or widening file access.
-                owned_versions = {
-                    (job["id"], job.get("version_id")) for job in jobs
-                }
-                if not jobs or any(
-                    version["format"] != "skynet.episodes/v1"
-                    and (
-                        json.loads(version["metadata_json"]).get("export_id"),
-                        version["id"],
-                    ) not in owned_versions
-                    for version in versions
-                ):
-                    raise ValueError(
-                        "Only prepared collection datasets can be deleted here"
-                    )
             if identifier is not None:
                 selected = next((j for j in jobs if j["id"] == identifier), None)
                 if selected is None:
-                    raise KeyError("Prepared format not found")
-                version_id = selected.get("version_id")
-                versions = [v for v in versions if v["id"] == version_id]
-                jobs = [
-                    j
-                    for j in jobs
-                    if j["id"] == identifier
-                    or (version_id and j.get("version_id") == version_id)
-                ]
+                    raise KeyError("Conversion attempt not found")
+                selected_version_id = selected.get("version_id")
+            else:
+                selected_version_id = version_id
+                if not any(v["id"] == selected_version_id and v["format"] != "skynet.episodes/v1" for v in versions):
+                    raise KeyError("Dataset not found")
+            versions = [v for v in versions if v["id"] == selected_version_id]
+            jobs = [j for j in jobs if (identifier is not None and j["id"] == identifier)
+                    or (selected_version_id and j.get("version_id") == selected_version_id)]
+            if collection_owned:
+                owned_versions = {(job["id"], job.get("version_id")) for job in jobs}
+                if any((json.loads(v["metadata_json"]).get("export_id"), v["id"])
+                       not in owned_versions for v in versions):
+                    raise ValueError("Only prepared collection datasets can be deleted here")
             if any(
                 j["state"] not in {"READY", "FAILED", "DELETE_FAILED"} for j in jobs
             ):
@@ -3556,7 +3557,7 @@ class Database:
             for v in c.execute(
                 "SELECT id, manifest_sha256 FROM data_resource_versions",
             ):
-                if v["id"] not in version_ids and v["manifest_sha256"] in checksums:
+                if collection_owned and v["id"] not in version_ids and v["manifest_sha256"] in checksums:
                     raise ValueError(
                         "These files are shared with another registered dataset"
                     )
@@ -3586,7 +3587,6 @@ class Database:
             references = (
                 version_ids
                 | checksums
-                | ({resource_id} if identifier is None else set())
                 | {b["id"] for b in bundles}
                 | {b["manifest_sha256"] for b in bundles}
             )
@@ -3631,8 +3631,7 @@ class Database:
                     raise ValueError("Another dataset was derived from this dataset")
             imports = []
             for row in c.execute("SELECT * FROM data_imports"):
-                if not ((identifier is None and row["resource_id"] == resource_id)
-                        or row["version_id"] in version_ids or row["bundle_id"] in {b["id"] for b in bundles}):
+                if not (row["version_id"] in version_ids or row["bundle_id"] in {b["id"] for b in bundles}):
                     continue
                 if row["resource_id"] != resource_id:
                     raise ValueError("Another dataset import uses this dataset")
@@ -3698,13 +3697,11 @@ class Database:
                     )
                 for job in jobs:
                     c.execute("DELETE FROM policy_exports WHERE id=?", (job["id"],))
-                if identifier is None:
-                    c.execute("DELETE FROM data_resources WHERE id=?", (resource_id,))
         if failure:
             raise ValueError(
                 f"Dataset deletion is incomplete. Retry Delete dataset. {failure}"
             ) from failure
-        return {"deleted": True, "resource_id": resource_id}
+        return {"deleted": True, "resource_id": resource_id, "version_id": selected_version_id}
 
     def dataset_preset_links(self):
         """Exact dataset results referenced by any saved preset revision in this workspace."""

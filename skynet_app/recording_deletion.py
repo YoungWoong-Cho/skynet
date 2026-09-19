@@ -8,7 +8,8 @@ from uuid import UUID
 
 from .cluster_config import CLUSTER
 from .cluster_runtime import WORK_ROOT
-from .data_resource_policy import resource_recording_ids
+from .dataset_catalog import recording_ids
+from .data_version_retirement import references
 from .live_xr_archive import archive_descriptor, TERMINAL_STATES
 from .maintenance import Maintenance, rows, in_ids
 
@@ -114,20 +115,7 @@ class RecordingMaintenance(Maintenance):
                 target["name"],
                 "Wait for active recording processing to finish",
             )
-        for resource in rows(c, "data_resources"):
-            versions = rows(
-                c, "data_resource_versions", "resource_id=?", (resource["id"],)
-            )
-            resource["metadata"] = json.loads(resource["metadata_json"])
-            for version in versions:
-                version["metadata"] = json.loads(version["metadata_json"])
-            if identifier in resource_recording_ids(resource, versions):
-                block(
-                    "dataset",
-                    resource["id"],
-                    resource["display_name"],
-                    "Delete this dataset first",
-                )
+        source_references = self._dataset_graph(c, identifier, graph, block)
         for record in rows(c, "live_conversions"):
             conversion = json.loads(record["payload_json"])
             if conversion.get("session_id") != identifier:
@@ -139,19 +127,6 @@ class RecordingMaintenance(Maintenance):
                     identifier,
                     conversion.get("name") or "Dataset conversion",
                     "Wait for this dataset conversion to finish",
-                )
-            resource_id = conversion.get("resource_id")
-            if (
-                resource_id
-                and c.execute(
-                    "SELECT 1 FROM data_resources WHERE id=?", (resource_id,)
-                ).fetchone()
-            ):
-                block(
-                    "dataset",
-                    resource_id,
-                    conversion.get("name") or resource_id,
-                    "Delete the converted dataset first",
                 )
         for record in rows(c, "live_xr_sessions", "id<>?", (identifier,)):
             if mentions(json.loads(record["payload_json"]), identifier):
@@ -170,7 +145,7 @@ class RecordingMaintenance(Maintenance):
         ):
             for record in rows(c, table):
                 if any(
-                    mentions(json.loads(v), identifier)
+                    mentions(json.loads(v), identifier) or references(json.loads(v), source_references)
                     for k, v in record.items()
                     if k.endswith("_json") and v
                 ):
@@ -198,6 +173,80 @@ class RecordingMaintenance(Maintenance):
         self._observation_graph(c, job, selected_path, graph, blockers)
         return target, graph, blockers
 
+    def _dataset_graph(self, c, identifier, graph, block):
+        """Block on output versions; collect only unused internal source metadata."""
+        resources = {row["id"]: row for row in rows(c, "data_resources")}
+        versions = {row["id"]: row for row in rows(c, "data_resource_versions")}
+        labels = {row["version_id"]: row["display_name"]
+                  for row in rows(c, "data_dataset_presentations")}
+        for resource in resources.values():
+            resource["metadata"] = json.loads(resource["metadata_json"])
+        for version in versions.values():
+            version["metadata"] = json.loads(version["metadata_json"])
+        source_versions = []
+        for version in versions.values():
+            resource = resources[version["resource_id"]]
+            if resource["category"] != "dataset":
+                continue
+            source = versions.get(version["metadata"].get("source_version_id"))
+            if identifier not in recording_ids(resource, version, source):
+                continue
+            if version["format"] != "skynet.episodes/v1":
+                block("dataset", version["id"], labels.get(version["id"], resource["display_name"]),
+                      "Delete this dataset first")
+            elif (resource["provider"], resource["namespace"]) == ("collection", "datasets"):
+                source_versions.append(version)
+            else:
+                block("storage", None, resource["display_name"],
+                      "A retained source registration references this recording; remove that dependency first")
+        source_ids = {version["id"] for version in source_versions}
+        locations = [row for row in rows(c, "data_locations") if row["version_id"] in source_ids]
+        needles = {value for version in source_versions
+                   for value in (version["id"], version["manifest_sha256"], version["path"])}
+        needles.update(row["path"] for row in locations)
+        # These rows have real foreign keys or immutable JSON receipts. A raw
+        # source can be hidden from the catalog and still have retained consumers.
+        derivations = {row["id"]: row for row in rows(c, "data_derivations")}
+        for row in rows(c, "data_derivation_inputs"):
+            if row["input_version_id"] in source_ids:
+                output = derivations[row["derivation_id"]]["output_version_id"]
+                block("dataset", output, labels.get(output, "Derived dataset"), "Delete this dataset first")
+        for table, columns in (
+            ("data_bundle_assignments", ("version_id",)),
+            ("data_derivations", ("output_version_id",)),
+            ("collection_sessions", ("registered_version_id",)),
+            ("data_imports", ("version_id",)),
+            ("data_version_retirements", ("version_id", "replacement_version_id")),
+        ):
+            if any(any(row.get(column) in source_ids for column in columns) for row in rows(c, table)):
+                block("storage", None, "Recording source metadata",
+                      "A retained registry item references this recording source; remove that dependency first")
+        for row in rows(c, "policy_exports"):
+            export = json.loads(row["payload_json"])
+            if mentions(export, identifier) or references(export, needles):
+                if export.get("version_id") in versions:
+                    output = export["version_id"]
+                    block("dataset", output, labels.get(output, export.get("name", "Dataset")),
+                          "Delete this dataset first")
+                else:
+                    block("prepared", row["id"], export.get("name", "Dataset conversion"),
+                          "Delete this conversion attempt first")
+        if source_versions:
+            graph["data_resource_versions"] = source_versions
+            graph["data_locations"] = locations
+        # Keep groups used by any other versions or import/collection records.
+        retained_resources = {row["resource_id"] for row in versions.values() if row["id"] not in source_ids}
+        retained_resources.update(row["resource_id"] for row in rows(c, "data_imports"))
+        retained_resources.update(row["registered_resource_id"] for row in rows(c, "collection_sessions"))
+        removable = [resource for resource in resources.values()
+                     if (resource["provider"], resource["namespace"], resource["category"]) == ("collection", "datasets", "dataset")
+                     and resource["id"] not in retained_resources
+                     and identifier in recording_ids(resource, {})]
+        if removable:
+            graph["data_resources"] = removable
+            needles.update(resource["id"] for resource in removable)
+        return needles
+
     def _observation_graph(self, c, job, selected_path, graph, blockers):
         """Plan observation ownership before any remote bytes can be removed."""
         sources = rows(c, "observation_sources")
@@ -212,8 +261,9 @@ class RecordingMaintenance(Maintenance):
         candidates = affected - shared
         artifacts = {row["artifact_key"]: row for row in rows(c, "observation_artifacts")}
         inputs = rows(c, "observation_artifact_inputs")
+        removed_versions = {row["id"] for row in graph.get("data_resource_versions", [])}
         consumers = [("dataset version", row["version_id"], row["artifact_key"])
-                     for row in rows(c, "observation_version_inputs")]
+                     for row in rows(c, "observation_version_inputs") if row["version_id"] not in removed_versions]
         consumers += [("dataset preparation", row["job_id"], row["artifact_key"])
                       for row in rows(c, "observation_job_inputs")]
         producers = {row["id"]: row for row in rows(c, "observation_producers")}
@@ -469,8 +519,19 @@ class RecordingMaintenance(Maintenance):
             lock.release()
 
     def _delete_rows(self, c, kind, identifier, graph):
+        self._delete_source_provenance(c, graph)
         self._delete_observations(c, graph)
         # The parent engine removes metadata bodies, events and the durable intent.
         query, params = in_ids("id", [r["id"] for r in graph["live_conversions"]])
         c.execute("DELETE FROM live_conversions WHERE " + query, params)
         super()._delete_rows(c, kind, identifier, graph)
+
+    @staticmethod
+    def _delete_source_provenance(c, graph):
+        if not graph.get("data_resource_versions") and not graph.get("data_resources"):
+            return
+        c.execute("SET LOCAL skynet.delete_history='on'")
+        c.execute("SET LOCAL skynet.allow_dataset_delete='on'")
+        for table in ("data_locations", "data_resource_versions", "data_resources"):
+            query, params = in_ids("id", [row["id"] for row in graph.get(table, [])])
+            c.execute(f"DELETE FROM {table} WHERE " + query, params)

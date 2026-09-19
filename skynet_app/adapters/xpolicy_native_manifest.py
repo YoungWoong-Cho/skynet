@@ -6,7 +6,7 @@ from .xpolicy_manifest import progress_contract
 from pathlib import Path
 
 from skynet_app.dataset_formats import XPL_COMMIT, XPL_REPOSITORY
-from skynet_app.training_contracts import DatasetRequirement, RECORDING_DATASET_FORMAT
+from skynet_app.training_contracts import DatasetRequirement, RECORDING_DATASET_FORMAT, RecordingSampling
 from .act_manifest import recording_conversion
 
 
@@ -17,7 +17,7 @@ def catalog():
 def act_support_files():
     root = Path(__file__).parent
     return {"adapter-support/" + name: (root / name).read_text() for name in (
-        "act_native_data.py", "act_native_checkpoint.py", "act_native_evaluation.py", "recording_dataset.py",
+        "act_native_data.py", "act_native_checkpoint.py", "act_native_evaluation.py", "recording_dataset.py", "recording_time.py",
     )}
 
 
@@ -41,7 +41,7 @@ def manifests():
         AdapterCapabilities, AdapterCheckpointDefaults, AdapterDefaults, AdapterHyperparameterDefaults,
         AdapterInputField, AdapterManifest, AdapterPrerequisite,
         AdapterResourceDefaults, AdapterRuntimePolicy, CommandTemplate,
-        DataBundleInputBinding,
+        DataBundleInputBinding, ArgumentBinding,
     )
 
     root = Path(__file__).parent
@@ -51,6 +51,7 @@ def manifests():
     capsules = {
         "adapter-support/xpolicy_native.py": (root / "xpolicy_native.py").read_text(),
         "adapter-support/recording_dataset.py": (root / "recording_dataset.py").read_text(),
+        "adapter-support/recording_time.py": (root / "recording_time.py").read_text(),
         "adapter-support/xpolicy_native_catalog.json": (root / "xpolicy_native_catalog.json").read_text(),
         "adapter-support/artifacts.py": (root.parents[1] / "ops/datasets/artifacts.py").read_text(),
     }
@@ -79,6 +80,12 @@ def manifests():
             fields.append(AdapterInputField(path="native.config.epochs", label="Epochs",
                 kind="integer", default=6000, minimum=1, maximum=100000,
                 canonical_path="train.max_epochs"))
+            fields.extend([
+                AdapterInputField(path="native.config.control_hz", label="Control frequency (Hz)", kind="number", minimum=0.000001,
+                    help="For recorded datasets: leave blank to use the recording frequency; otherwise select aligned frames during training."),
+                AdapterInputField(path="native.config.action_steps", label="Action chunk", kind="integer", default=50, minimum=1, maximum=200,
+                    help="Predicted command count. The default is the native ACT chunk of 50; changing it explicitly overrides that setting."),
+            ])
         # EventVLA/Hy-VLA have no seed argument in their upstream shell API.
         seed_supported = record["entry_kind"] == "standard"
         argv = [
@@ -120,7 +127,12 @@ def manifests():
                     description="Install this policy's own dependencies and required pretrained weights before submission. Source inspection and launcher tests do not establish GPU training compatibility."),
             ],
             train=CommandTemplate(
-                argv=argv, input_fields=fields, capsule_files={**capsules, **(act_support_files() if name == "ACT" else {})},
+                argv=argv, input_fields=fields,
+                parameter_flags={
+                    "native.config.control_hz": ArgumentBinding(flag="--control-hz", omit_if_none=True),
+                    "native.config.action_steps": ArgumentBinding(flag="--action-steps", omit_if_none=True),
+                } if name == "ACT" else {},
+                capsule_files={**capsules, **(act_support_files() if name == "ACT" else {})},
                 resume_argv=["--resume", "{{tokens.resume_checkpoint}}"] if name == "ACT" else [],
                 progress=act_progress() if name == "ACT" else None,
                 strict_native_config=True, strict_canonical_inputs=True,
@@ -130,6 +142,7 @@ def manifests():
                         if name == "ACT" else f"{name} native prepared inputs ({data_format}). Skynet ACT/EgoVerse exports are not this format."),
                     observations=["policy_specific"], action_representation="policy_specific",
                     recording_conversion=conversion,
+                    recording_sampling=RecordingSampling(window_policy="pad", require_validation=True, default_action_steps=50) if name == "ACT" else None,
                 ),
                 checkpoint_globs=["artifacts/checkpoints/last.ckpt"] if name == "ACT" else [],
             ),
@@ -137,7 +150,7 @@ def manifests():
             warnings=[
                 ("Recorded inputs use the registered episode split, training-only normalization and recorded command timing. The native ACT model and loss are preserved."
                  if name == "ACT" else "Requires this policy's native prepared dataset, weights and Runtime; current Shadow conversion outputs are not automatically compatible."),
-                ("Original ACT defaults are preserved. Epochs can be configured; checkpoint hooks save optimizer, RNG, split and normalization for automatic recovery. Recorded RGB/joint inputs support Isaac Lab evaluation."
+                ("Native ACT defaults are preserved unless experiment settings override epochs, action chunk or recorded-data frequency; checkpoint hooks save optimizer, RNG, split and normalization for automatic recovery. Recorded RGB/joint inputs support Isaac Lab evaluation."
                  if name == "ACT" else "Hyperparameters come from the upstream recipe and registered native configuration. Automatic resume and simulator evaluation are not implemented for this native adapter."),
                 ("The shared recording loader requires conversion-time validation. Full GPU training quality is not established by that check." if name == "ACT" else "GPU training has not been validated for this adapter. Native logs and outputs are retained under the run's artifacts/native-workspace."),
             ],

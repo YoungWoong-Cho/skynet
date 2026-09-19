@@ -32,7 +32,7 @@ def cloud_contract(cameras=("scene_front",), *, channels="XYZ", count=6, frame="
 
 
 def source(tmp_path, *, index=0):
-    payload = dict(format="dexverse_trajectory", schema_version=3, task=profile()["task"], robot_type=profile()["robot"],
+    payload = dict(format="dexverse_trajectory", schema_version=3, episode_name=f"episode-{index}", task=profile()["task"], robot_type=profile()["robot"],
                    num_episodes=1, skynet_step_dt=1/60, episodes=[dict(num_steps=2, actions=np.zeros((2, 7), dtype="f4"),
                    states=[{"n": np.array([n], dtype="f4")} for n in range(3)], success=True)])
     path = tmp_path / f"episode-{index}.pkl"
@@ -56,8 +56,9 @@ def request(srcs, jobs, mode="render"):
 
 class FakeRenderer:
     starts, frames, episodes = 0, [], []
-    def __init__(self, sources, jobs):
+    def __init__(self, sources, jobs, *, progress=None, staging_root=None):
         self.sources, self.jobs = sources, jobs
+        self.progress = progress or (lambda phase, **fields: None)
         self.capture_metadata = dict(task=profile()["task"], robot=profile()["robot"], action_joint_names=["x"]*7, step_dt=1/60)
     def __enter__(self):
         type(self).starts += 1
@@ -83,6 +84,50 @@ class FakeRenderer:
 @pytest.fixture(autouse=True)
 def reset_fake():
     FakeRenderer.starts, FakeRenderer.frames, FakeRenderer.episodes = 0, [], []
+
+
+def test_batch_receipt_is_committed_before_renderer_exit(tmp_path):
+    srcs = [source(tmp_path, index=n) for n in range(2)]
+    jobs = [job for src in srcs for job in requests(tmp_path, src, rgb_requirements(['scene_front'], width=3, height=2))]
+    receipts = []
+    class ClosingFailure(FakeRenderer):
+        def __exit__(self, *_):
+            assert len(receipts) == 1
+            assert receipts[0]['state'] == 'READY'
+            assert {item['artifact_key'] for item in receipts[0]['artifacts']} == {job['artifact_key'] for job in jobs}
+            for job in jobs:
+                worker.verify_artifact(job['output_dir'], request=job)
+            raise RuntimeError('native close failed')
+    result = worker.run_request(request(srcs, jobs), renderer_factory=ClosingFailure,
+                                publish_result=lambda value: receipts.append(deepcopy(value)))
+    assert result['state'] == 'READY' and 'native close failed' in result['cleanup_warning']
+    assert len(result['artifacts']) == 2 and 'error' not in result
+
+
+def test_partial_capture_never_commits_success(tmp_path):
+    srcs = [source(tmp_path, index=n) for n in range(2)]
+    jobs = [job for src in srcs for job in requests(tmp_path, src, rgb_requirements(['scene_front'], width=3, height=2))]
+    receipts = []
+    class SecondEpisodeFailure(FakeRenderer):
+        def begin_episode(self, src, *args):
+            if src['episode_key'] == srcs[1]['episode_key']:
+                raise RuntimeError('second episode failed')
+            return super().begin_episode(src, *args)
+    result = worker.run_request(request(srcs, jobs), renderer_factory=SecondEpisodeFailure,
+                                publish_result=receipts.append)
+    assert result['state'] == 'FAILED' and not receipts
+    assert len(result['artifacts']) == 1
+    assert 'second episode failed' in result['error']
+
+
+def test_commit_failure_cannot_report_ready(tmp_path):
+    src = source(tmp_path)
+    jobs = requests(tmp_path, src, rgb_requirements(['scene_front'], width=3, height=2))
+    def cannot_commit(_):
+        raise OSError('receipt write failed')
+    result = worker.run_request(request([src], jobs), renderer_factory=FakeRenderer, publish_result=cannot_commit)
+    assert result['state'] == 'FAILED' and 'receipt write failed' in result['error']
+    assert len(result['artifacts']) == 1  # The immutable file remains reusable.
 
 
 def test_unprojection_metric_z_skew_and_pixel_color_pairing():

@@ -23,7 +23,7 @@ def main():
         config = context["policy"]["native_config"]
         manifest = verify_dataset(config["dataset_path"], config["dataset_manifest_sha256"])
         expected = context["compatibility"]["io_contract"]
-        actual = recorded_contract(manifest, images=bool(expected["cameras"]))
+        actual = recorded_contract(manifest, images=bool(expected["cameras"]), control_hz=config.get("control_hz"))
         if actual != expected:
             raise ValueError("The dataset I/O contract differs from the submitted compatibility report")
         issues = contract_issues(actual)

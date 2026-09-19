@@ -90,7 +90,7 @@ def test_pure_options_do_not_schedule_or_read_remote_payloads(preparation,monkey
     options=service.preparation_options(session['id'])
     assert 'policies' not in options and 'formats' not in options
     assert options['adapters'][0]['available']
-    assert service.options()['sessions'][0]['eligible']
+    assert service.preparation_options(session['id'])['session']['eligible']
 
 
 def test_legacy_job_is_not_resumed_and_cannot_be_retried(preparation):

@@ -35,7 +35,7 @@ def test_single_episode_export_preserves_source_and_separate_dataset(setup):
 
 @pytest.mark.parametrize('changes', [
     {'overfit_episode': 99}, {'overfit_episode': True},
-    {'resource_id': 'existing'}, {'selections': [{'session_id': 'session-1', 'indices': [0]}]},
+    {'selections': [{'session_id': 'session-1', 'indices': [0]}]},
 ])
 def test_invalid_overfit_is_rejected_before_registration(setup, changes):
     service, session, _ = setup
@@ -66,23 +66,26 @@ def test_held_out_suite_rejects_overfit_before_submission():
         bind_suite_to_dataset(suite, spec)
 
 
-def test_recording_links_follow_resource_ownership_not_source_membership(setup, monkeypatch):
+def test_recording_links_follow_exact_result_and_copied_episode_ownership(setup, monkeypatch):
     import copy
     service, original, _ = setup
     full = create(service, original['id'], 'egoverse', 'All recordings')
     subset = create(service, original['id'], 'egoverse', 'Episode 1', overfit_episode=0)
-    before = {j['id']: j['recording_session_id'] for j in service.options()['exports']}
-    assert before[full['id']] == original['id']
-    assert before[subset['id']] is None
+    service.prepare(full['id'])
+    service.prepare(subset['id'])
+    full, subset = service.get(full['id']), service.get(subset['id'])
+    assert full['state'] == subset['state'] == 'READY'
+    before = {row['id']: row['recording_ids'] for row in service.database.list_datasets()}
+    assert before[full['version_id']] == [original['id']]
+    assert before[subset['version_id']] == [original['id']]
     derived = copy.deepcopy(original)
     derived.update(id='derived', recordings=original['recordings'][:1])
     resource = service.database.get_data_resource(subset['resource_id'])
     service.database.update_data_resource(resource['id'], metadata={**resource['metadata'], 'recording_session_id': derived['id']})
     monkeypatch.setattr(service.live, 'list', lambda **_: [derived, original])
     monkeypatch.setattr(service.live, 'get', lambda identifier: derived if identifier == derived['id'] else original)
-    options = service.options()
-    links = {j['id']: j['recording_session_id'] for j in options['exports']}
-    assert links == {full['id']: original['id'], subset['id']: derived['id']}
+    links = {row['id']: row['recording_ids'] for row in service.database.list_datasets()}
+    assert links == {full['version_id']: [original['id']], subset['version_id']: [derived['id']]}
     assert service.dataset(derived, create=False)['id'] == subset['resource_id']
     assert service.get(subset['id'])['sources'][0]['session_id'] == original['id'], 'immutable source lineage is unchanged'
 
@@ -92,7 +95,10 @@ def test_overfit_of_a_one_episode_recording_keeps_its_dataset_link(setup):
     session['recordings'] = session['recordings'][:1]
     job = create(service, session['id'], 'egoverse', 'One episode', overfit_episode=0)
     assert service.dataset(session, create=False)['id'] == job['resource_id']
-    assert service.options()['exports'][0]['recording_session_id'] == session['id']
+    service.prepare(job['id'])
+    job = service.get(job['id'])
+    assert job['state'] == 'READY'
+    assert service.database.get_dataset(job['version_id'])['recording_ids'] == [session['id']]
 
 
 @pytest.mark.parametrize("format", ["egoverse", "act", "fixture-rgb"])

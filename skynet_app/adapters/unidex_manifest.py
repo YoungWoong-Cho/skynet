@@ -5,7 +5,7 @@ from pathlib import Path
 from skynet_app.observation_contracts import CONTRACT_SCHEMA
 from skynet_app.training_contracts import (
     RECORDING_DATASET_FORMAT, DatasetRequirement, RecordingConversion,
-    RecordingDataPreset, RecordingLoaderValidation,
+    RecordingDataPreset, RecordingLoaderValidation, RecordingSampling,
 )
 
 REPOSITORY = "https://github.com/unidex-ai/UniDex"
@@ -25,7 +25,7 @@ def recording_conversion():
     return RecordingConversion(default_preset="pointcloud-faas", presets=[RecordingDataPreset(
         id="pointcloud-faas", name="Scene-front point cloud and FAAS actions",
         description="1,024 colored points from the fixed front scene camera and native UniDex FAAS82 actions.",
-        contract=CONTRACT, observations=["state", "point_cloud"], minimum_episodes=2, validation_required=True,
+        contract=CONTRACT, observations=["state", "point_cloud"],
         action_representation=dict(id="skynet.unidex-faas/v1", frame="camera_opengl", action_semantics="controller_targets"),
         observation_requirements={
             "schema": CONTRACT_SCHEMA, "timing": {"alignment": "pre_action_state", "stride": 1},
@@ -36,7 +36,6 @@ def recording_conversion():
                 "depth_range": [0.01, 5.0], "processing_order": ["unproject", "world_transform", "merge", "crop", "sample"],
                 "insufficient_points": "repeat_with_mask"}],
         },
-        temporal=dict(source_fps=60, control_hz=15, frame_stride=4, action_horizon=30, execution_horizon=1),
         preprocessing=dict(pointcloud_frame="camera_ros_optical", pointcloud_native_frame="camera_opengl"),
         supported_robots=verified_robots(),
         training_setup=dict(adapter="unidex", repository=REPOSITORY, revision=REVISION, runtime="existing", runtime_profile=RUNTIME),
@@ -52,7 +51,7 @@ def recording_conversion():
 def support_files():
     root = Path(__file__).parent
     files = {"adapter-support/" + name: (root / name).read_text() for name in (
-        "unidex_data.py", "unidex_runtime.py", "unidex_weights.py", "recording_dataset.py",
+        "unidex_data.py", "unidex_runtime.py", "unidex_weights.py", "recording_dataset.py", "recording_time.py",
     )}
     codecs = root.parents[1] / "ops/datasets/action_codecs"
     files.update({"adapter-support/action_codecs/" + name: (codecs / name).read_text() for name in (
@@ -91,9 +90,16 @@ def manifest():
         fields.append(AdapterInputField(path="native.config." + key, label=label, kind="string", required=required))
     fields.append(AdapterInputField(path="native.config.epochs", label="Epochs", kind="integer", default=32,
                                     minimum=1, maximum=100000, canonical_path="train.max_epochs"))
+    fields.extend([
+        AdapterInputField(path="native.config.control_hz", label="Training frequency (Hz)", kind="number",
+                          help="Leave blank to use the recording frequency. Lower frequencies must divide each recording's frequency exactly."),
+        AdapterInputField(path="native.config.action_steps", label="Action chunk length", kind="integer", default=30,
+                          minimum=1, help="Number of controller targets predicted per observation. Only complete chunks are used."),
+    ])
     flags = {
         **{"native.config."+key:key.replace("_", "-") for key in (
-            "base_weights", "pointcloud_weights", "weights_provenance", "initialize_checkpoint", "initialize_checkpoint_sha", "epochs")},
+            "base_weights", "pointcloud_weights", "weights_provenance", "initialize_checkpoint", "initialize_checkpoint_sha", "epochs",
+            "control_hz", "action_steps")},
         "train.batch.value":"batch-size", "train.learning_rate":"learning-rate", "train.seed":"seed",
         "train.precision":"precision", "train.num_workers_per_rank":"num-workers",
         "train.batch.gradient_accumulation_steps":"gradient-accumulation",
@@ -119,6 +125,7 @@ def manifest():
             checkpoint_globs=["artifacts/checkpoints/last.ckpt"], capsule_files=support_files(),
             data_requirements=DatasetRequirement(
                 description="Fixed scene-front XYZRGB and FAAS82, restricted to verified asset-bound hand mappings.",
+                recording_sampling=RecordingSampling(window_policy="complete", require_validation=True, default_action_steps=30),
                 observations=["state", "point_cloud"], action_representation="skynet.unidex-faas/v1", recording_conversion=conversion),
             batch_compatibility=AdapterBatchCompatibility(allowed_semantics=["per_device"],
                 multi_gpu_allowed_semantics=["per_device"], supports_gradient_accumulation=True),

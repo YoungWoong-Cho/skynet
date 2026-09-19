@@ -8,6 +8,11 @@ import math
 
 import numpy as np
 
+try:
+    from .recording_time import resolve_sampling
+except ImportError:
+    from recording_time import resolve_sampling
+
 FORMAT = "skynet.recording-dataset/v1"
 CONTRACT = "skynet.unidex-pointcloud-faas/v1"
 
@@ -74,6 +79,9 @@ def validate_manifest(root, sha):
         if representation.get("codec_sha256") != codec.digest or representation.get("frame") != "camera_opengl":
             raise ValueError("UniDex episode must pin the exact verified asset-bound FAAS codec")
         count = int(episode["steps"])
+        step_dt = float(episode.get("capture", {}).get("step_dt", 0))
+        if count < 1 or not math.isfinite(step_dt) or step_dt <= 0:
+            raise ValueError("UniDex requires nonempty recordings with explicit positive source timing")
         streams = episode["streams"]
         for name in ("faas_state_absolute", "faas_action_absolute"):
             if name not in streams or streams[name]["shape"] != [count, 82] or streams[name]["dtype"] != "float32":
@@ -81,18 +89,10 @@ def validate_manifest(root, sha):
         cloud = streams.get("scene_front_pointcloud", {})
         if cloud.get("shape") != [count, 1024, 6] or cloud.get("dtype") != "float32":
             raise ValueError("UniDex requires 1024 aligned scene-front XYZRGB points per frame")
-    temporal = manifest.get("temporal", {})
-    stride, horizon, execute = (temporal.get(k) for k in ("frame_stride", "action_horizon", "execution_horizon"))
-    if any(type(v) is not int or v < 1 for v in (stride, horizon, execute)) or execute > horizon:
-        raise ValueError("Explicit positive frame stride, action horizon and execution horizon are required")
-    source_hz, control_hz = (float(temporal.get(k, 0)) for k in ("source_fps", "control_hz"))
-    if not all(math.isfinite(v) and v > 0 for v in (source_hz, control_hz)) or not math.isclose(source_hz / stride, control_hz, rel_tol=1e-6):
-        raise ValueError("UniDex control frequency must equal source frequency / stride")
-    if any(not math.isclose(float(ep.get("capture", {}).get("step_dt", 0)) * source_hz, 1.0, rel_tol=1e-6) for ep in episodes):
-        raise ValueError("UniDex temporal settings differ from recorded control timing")
     split = manifest["split"]
     train, valid = split["train"], split["validation"]
-    if not train or not valid or sorted(train + valid) != list(range(len(episodes))):
+    if (not episodes or any(type(i) is not int for i in train + valid)
+            or sorted(train + valid) != list(range(len(episodes)))):
         raise ValueError("UniDex requires disjoint complete source-episode splits before creating windows")
     preprocessing = manifest.get("preprocessing", {})
     if preprocessing.get("pointcloud_frame") != "camera_ros_optical" or preprocessing.get("pointcloud_native_frame") != "camera_opengl":
@@ -103,10 +103,26 @@ def validate_manifest(root, sha):
     return manifest
 
 
+def validate_recorded_values(root, manifest):
+    """Inspect native frame values without imposing any experiment chunk length."""
+    _, RecordingDataset, _ = _portable_imports()
+    dataset = RecordingDataset(root)
+    if dataset.manifest != manifest:
+        raise ValueError("Dataset changed after verification")
+    for index in range(len(manifest["episodes"])):
+        reader = dataset.episode(index)
+        values = [np.asarray(reader.read(name, 0)) for name in (
+            "faas_state_absolute", "faas_action_absolute", "scene_front_pointcloud")]
+        if not all(np.isfinite(value).all() for value in values):
+            raise ValueError("Non-finite UniDex recorded values")
+        if np.any(values[-1][..., 3:] < 0) or np.any(values[-1][..., 3:] > 1):
+            raise ValueError("UniDex pointcloud colors must be in [0, 1]")
+
+
 class UniDexDataset:
     """Pure reading of the immutable shared recording store, no random fallback."""
 
-    def __init__(self, root, manifest, split, normalizer):
+    def __init__(self, root, manifest, split, normalizer, *, sampling=None, control_hz=None, action_steps=30):
         if split not in {"train", "validation"}:
             raise ValueError("Unknown UniDex split")
         _, RecordingDataset, _ = _portable_imports()
@@ -114,14 +130,17 @@ class UniDexDataset:
         if self.dataset.manifest != manifest:
             raise ValueError("Dataset changed after verification")
         self.normalizer = normalizer
-        self.temporal = manifest["temporal"]
-        self.stride = self.temporal["frame_stride"]
-        self.horizon = self.temporal["action_horizon"]
+        self.sampling = sampling if sampling is not None else resolve_sampling(
+            manifest, control_hz=control_hz, action_steps=action_steps,
+            window_policy="complete", require_validation=True)
+        self.horizon = self.sampling["action_steps"]
+        self.strides = {episode["index"]: episode["stride"] for episode in self.sampling["episodes"]}
         self.windows = []
         for index in manifest["split"][split]:
             count = int(manifest["episodes"][index]["steps"])
+            stride = self.strides[index]
             # No padded labels or masked-loss variant: retain complete chunks.
-            self.windows.extend((index, start) for start in range(0, count - (self.horizon - 1) * self.stride, self.stride))
+            self.windows.extend((index, start) for start in range(0, count - (self.horizon - 1) * stride, stride))
         if not self.windows:
             raise ValueError(f"No complete {self.horizon}-step UniDex windows in {split} episodes")
 
@@ -130,10 +149,11 @@ class UniDexDataset:
 
     def __getitem__(self, index):
         episode_index, start = self.windows[index]
+        stride = self.strides[episode_index]
         reader = self.dataset.episode(episode_index)
         _, _, anchor = _portable_imports()
         state = np.asarray(reader.read("faas_state_absolute", start), dtype=np.float32)
-        actions = np.asarray(reader.read("faas_action_absolute", slice(start, start + self.horizon * self.stride, self.stride)), dtype=np.float32)
+        actions = np.asarray(reader.read("faas_action_absolute", slice(start, start + self.horizon * stride, stride)), dtype=np.float32)
         cloud = np.asarray(reader.read("scene_front_pointcloud", slice(start, start + 1)), dtype=np.float32)
         if not all(np.isfinite(x).all() for x in (state, actions, cloud)):
             raise ValueError("Non-finite UniDex data; refusing random replacement samples")

@@ -14,24 +14,33 @@ def prepared(setup, kind="fixture-rgb"):
     assert job["state"] == "READY", job.get("error")
     return service, session, source, job
 
-def test_archive_prevents_new_preparation_without_deleting_files(setup):
-    service, session, _, job = prepared(setup)
-    service.database.update_data_resource(job["resource_id"], archived=True)
-    with pytest.raises(ValueError, match="active collection dataset"):
-        create(service, session["id"], "act", "Archived", job["resource_id"])
-    with pytest.raises(ValueError, match="Restore"):
-        service.retry(job["id"])
-    assert manifest_path(service, job).exists()
-    assert not service.options()["sessions"][0]["eligible"]
+def test_archiving_one_dataset_keeps_siblings_and_new_conversions_available(setup):
+    service, session, _, first = prepared(setup)
+    second = create(service, session["id"], "act", "ACT demonstrations")
+    service.prepare(second["id"])
+    second = service.get(second["id"])
+    assert second["state"] == "READY", second.get("error")
+    service.database.update_dataset(first["version_id"], archived=True)
+    visible = {dataset["id"] for dataset in service.database.list_datasets()}
+    assert first["version_id"] not in visible
+    assert second["version_id"] in visible
+    assert manifest_path(service, first).exists()
+    assert manifest_path(service, second).exists()
+    assert not service.database.get_data_resource(first["resource_id"])["archived_at"]
+    assert service.preparation_options(session["id"])["session"]["eligible"]
+    third = create(service, session["id"], "fixture-state", "State demonstrations")
+    assert third["state"] == "QUEUED"
+    assert third["resource_id"] == first["resource_id"]
+    assert third["source_version_id"] == first["source_version_id"]
 
 def test_catalog_reads_do_not_wait_for_dataset_mutations(setup):
-    service, _, _, _ = prepared(setup)
+    service, session, _, _ = prepared(setup)
     with ThreadPoolExecutor(max_workers=1) as pool:
         with service.lock:
-            pending = pool.submit(service.options)
+            pending = pool.submit(service.preparation_options, session["id"])
             # The catalog reads committed registry snapshots; deletion holds this
             # mutation lock while cleaning remote files and must not hide the form.
-            assert pending.result(timeout=2)["sessions"][0]["eligible"]
+            assert pending.result(timeout=2)["session"]["eligible"]
 
 def test_selection_rejects_duplicates_but_allows_training_without_validation(setup):
     service, session, _ = setup
@@ -51,18 +60,35 @@ def test_selection_rejects_duplicates_but_allows_training_without_validation(set
     assert all_training["split"]["train"] == [0, 1]
     assert all_training["split"]["validation"] == []
 
-def test_other_session_resource_is_rejected(setup):
+def test_source_group_is_derived_from_the_selected_recording(setup):
     service, session, _ = setup
     resource = service.database.create_data_resource(
         category="dataset",
         provider="collection",
-        namespace="sessions",
+        namespace="datasets",
         source_key="another",
         kind="demonstrations",
         metadata={"session_id": "another"},
     )
-    with pytest.raises(ValueError, match="belonging to the selected session"):
-        create(service, session["id"], "fixture-rgb", "Invalid resource", resource["id"])
+    job = create(service, session["id"], "fixture-rgb", "Selected recording")
+    group = service.database.get_data_resource(job["resource_id"])
+    assert group["id"] != resource["id"]
+    assert group["source_key"] == session["id"]
+    assert group["metadata"]["session_id"] == session["id"]
+
+
+def test_conversion_request_rejects_explicit_source_group(setup):
+    from pydantic import ValidationError
+    from skynet_app.policy_exports_api import ExportRequest
+
+    service, session, _ = setup
+    adapter = service.test_adapters["test-recording-inputs"]
+    with pytest.raises(ValidationError, match="resource_id"):
+        ExportRequest(
+            session_id=session["id"], adapter_id=adapter["id"],
+            adapter_version_id=adapter["latest_version"]["id"],
+            name="Selected recording", resource_id="another-group",
+        )
 
 def test_declarative_act_plan_includes_frozen_training_files():
     from test_experiments import make_spec
@@ -108,13 +134,15 @@ def test_declarative_act_plan_includes_frozen_training_files():
 def test_adapters_share_original_streams_without_copies(setup):
     service, session, source, first = prepared(setup)
     before = {str(p):p.stat().st_mtime_ns for p in source.rglob('*') if p.is_file()}
-    second = create(service, session['id'], 'act', 'Hand demonstrations', first['resource_id'])
+    second = create(service, session['id'], 'act', 'ACT demonstrations')
     service.prepare(second['id'])
     second = service.get(second['id'])
     assert second['state'] == 'READY', second.get('error')
     assert second['source_version_id'] == first['source_version_id']
     assert second['resource_id'] == first['resource_id']
     assert second['split'] == first['split']
+    assert second['name'] == 'ACT demonstrations'
+    assert first['name'] == 'Hand demonstrations'
     a=json.loads(manifest_path(service,first).read_text())
     b=json.loads(manifest_path(service,second).read_text())
     assert [episode['streams'] for episode in a['episodes']] == [episode['streams'] for episode in b['episodes']]

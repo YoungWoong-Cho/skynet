@@ -221,6 +221,7 @@ class RecordingFileMaintenance(RecordingMaintenance):
                 job[field].pop(name, None)
         job.pop("recording_summary", None)
         job.update(archive=archive, updated_at=utc_now())
+        self._delete_source_provenance(c, graph)
         self._delete_observations(c, graph)
         c.execute("SET LOCAL skynet.delete_history='on'")
         children = [row["id"] for row in graph["live_conversions"]]

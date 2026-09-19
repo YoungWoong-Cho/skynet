@@ -8,21 +8,25 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
 import sys
 
 try:
-    from .unidex_data import FORMAT, NativeNormalizer, UniDexDataset, validate_manifest
+    from .unidex_data import FORMAT, NativeNormalizer, UniDexDataset, validate_manifest, validate_recorded_values
+    from .recording_time import resolve_sampling
     from .unidex_weights import digest, verify_weight_provenance, initialize_pretrained, load_policy_state
 except ImportError:
-    from unidex_data import FORMAT, NativeNormalizer, UniDexDataset, validate_manifest
+    from unidex_data import FORMAT, NativeNormalizer, UniDexDataset, validate_manifest, validate_recorded_values
+    from recording_time import resolve_sampling
     from unidex_weights import digest, verify_weight_provenance, initialize_pretrained, load_policy_state
 
 REVISION = "97d869e0f2d1ec0372cd3cdf28dde66b4e3f216d"
 TRAIN_TARGET = "src.unidex.unidex.PointCloudUniDexTrain"
 INFERENCE_TARGET = "src.unidex.unidex.PointCloudUniDexInference"
+RUN_SCHEMA = "skynet.unidex-run/v2"
 
 
 def verify_repository(repository):
@@ -32,7 +36,7 @@ def verify_repository(repository):
         raise ValueError("UniDex requires the exact unmodified pinned source revision " + REVISION)
 
 
-def load_native_config(repository, manifest, base_weights=None, pointcloud_weights=None):
+def load_native_config(repository, action_steps, base_weights=None, pointcloud_weights=None):
     """Load published model/training defaults; correct only the broken targets."""
     import yaml
     from omegaconf import OmegaConf
@@ -49,7 +53,7 @@ def load_native_config(repository, manifest, base_weights=None, pointcloud_weigh
         if model[key]["_target_"] != old:
             raise ValueError("Pinned UniDex config differs from the audited target correction")
         model[key]["_target_"] = new
-    model["horizon_steps"] = manifest["temporal"]["action_horizon"]
+    model["horizon_steps"] = action_steps
     if base_weights:
         model["pretrained_model_path"] = str(Path(base_weights).resolve())
         model["tokenizer_path"] = str(Path(base_weights).resolve())
@@ -66,11 +70,11 @@ def stable_digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
-def training_identity(args, model_config, normalizer, manifest, provenance=None):
-    return {"schema": "skynet.unidex-run/v1", "dataset_format": FORMAT,
+def training_identity(args, model_config, normalizer, sampling, provenance=None):
+    return {"schema": RUN_SCHEMA, "dataset_format": FORMAT,
             "manifest_sha256": args.manifest_sha, "revision": REVISION,
             "model_config": model_config, "normalizer": normalizer,
-            "temporal": manifest["temporal"], "pretrained_assets": provenance,
+            "sampling": sampling, "pretrained_assets": provenance,
             "training": {key: getattr(args, key) for key in (
                 "batch_size", "learning_rate", "num_workers", "seed", "precision",
                 "gpu_count", "gradient_accumulation")}}
@@ -78,7 +82,7 @@ def training_identity(args, model_config, normalizer, manifest, provenance=None)
 
 def validate_resume(saved, identity):
     receipt = saved.get("skynet", {})
-    if receipt.get("dataset_format") != FORMAT or receipt.get("schema") != "skynet.unidex-run/v1":
+    if receipt.get("dataset_format") != FORMAT or receipt.get("schema") != RUN_SCHEMA:
         raise ValueError("Old or foreign checkpoints cannot resume the new UniDex recording dataset; use an explicit weights-only initialization")
     if receipt.get("identity_sha256") != stable_digest(identity):
         raise ValueError("Resume requires identical dataset, source, model, normalization and training configuration")
@@ -154,6 +158,8 @@ def parser():
     p.add_argument("--learning-rate", type=float, default=1e-4)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--precision", choices=["bf16", "fp16", "fp32"], default="fp32")
+    p.add_argument("--control-hz", type=float, help="Training frequency; omitted uses the recording frequency")
+    p.add_argument("--action-steps", type=int, default=30, help="Controller targets predicted per observation")
     p.add_argument("--verify-only", action="store_true")
     p.add_argument("--config-only", action="store_true")
     return p
@@ -163,21 +169,28 @@ def main():
     args = parser().parse_args()
     verify_repository(args.repository)
     manifest = validate_manifest(args.dataset, args.manifest_sha)
-    model_config, norm_config, train_config = load_native_config(
-        args.repository, manifest, args.base_weights, args.pointcloud_weights)
-    normalizer = NativeNormalizer(norm_config)
-    datasets = {split: UniDexDataset(args.dataset, manifest, split, normalizer) for split in ("train", "validation")}
-    for dataset in datasets.values():
-        dataset[0]
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     if args.verify_only:
+        validate_recorded_values(args.dataset, manifest)
         report = {"schema": "skynet.unidex-loader-validation/v1", "status": "PASSED",
                   "manifest_sha256": args.manifest_sha, "observation_mode": "pointcloud",
-                  "windows": {split: len(dataset) for split, dataset in datasets.items()}}
+                  "validation_scope": "recorded_streams", "episodes": len(manifest["episodes"]),
+                  "steps": sum(episode["steps"] for episode in manifest["episodes"])}
         (output / "loader-validation.json").write_text(json.dumps(report, indent=2))
         print(json.dumps(report))
         return
+    sampling = resolve_sampling(manifest, control_hz=args.control_hz, action_steps=args.action_steps,
+                                window_policy="complete", require_validation=True)
+    (output / "sampling.json").write_text(json.dumps(sampling, indent=2, allow_nan=False))
+    print(json.dumps({"sampling": sampling}, allow_nan=False), flush=True)
+    model_config, norm_config, train_config = load_native_config(
+        args.repository, sampling["action_steps"], args.base_weights, args.pointcloud_weights)
+    normalizer = NativeNormalizer(norm_config)
+    datasets = {split: UniDexDataset(args.dataset, manifest, split, normalizer, sampling=sampling)
+                for split in ("train", "validation")}
+    for dataset in datasets.values():
+        dataset[0]
     if args.config_only:
         (output / "native-config.json").write_text(json.dumps(model_config, indent=2))
         return
@@ -202,7 +215,7 @@ def main():
     if not torch.cuda.is_available() or torch.cuda.device_count() < args.gpu_count:
         raise ValueError("Native UniDex training requires the requested CUDA runtime and GPUs")
     lightning.seed_everything(args.seed, workers=True)
-    identity = training_identity(args, model_config, norm_config, manifest, provenance)
+    identity = training_identity(args, model_config, norm_config, sampling, provenance)
     saved = None
     if args.resume_checkpoint:
         saved = torch.load(args.resume_checkpoint, map_location="cpu", weights_only=False)
@@ -241,6 +254,17 @@ def main():
     trainer.fit(wrapper, loaders["train"], loaders["validation"], ckpt_path=args.resume_checkpoint)
 
 
+def checkpoint_sampling(receipt):
+    """Expose the learned physical time scale to the execution controller."""
+    sampling = receipt.get("sampling", {})
+    control_hz, horizon = sampling.get("control_hz"), sampling.get("action_steps")
+    if (receipt.get("schema") != RUN_SCHEMA or type(control_hz) not in (int, float)
+            or not math.isfinite(control_hz) or control_hz <= 0 or type(horizon) is not int or horizon < 1
+            or receipt.get("model_config", {}).get("horizon_steps") != horizon):
+        raise ValueError("UniDex checkpoint lacks valid experiment sampling and model horizon")
+    return sampling
+
+
 class UniDexPolicy:
     """Native tensor inference; returns physical FAAS chunks for a separate decoder."""
     def __init__(self, repository, checkpoint, checkpoint_sha, *, device="cuda"):
@@ -255,6 +279,10 @@ class UniDexPolicy:
         receipt = saved.get("skynet", {})
         if receipt.get("dataset_format") != FORMAT or receipt.get("revision") != REVISION:
             raise ValueError("Select a checkpoint from the current native UniDex adapter")
+        self.sampling = checkpoint_sampling(receipt)
+        self.control_hz = self.sampling["control_hz"]
+        self.action_dt = 1.0 / self.control_hz
+        self.horizon = self.sampling["action_steps"]
         cfg = copy.deepcopy(receipt["model_config"])
         cfg["_target_"] = INFERENCE_TARGET
         os.environ["HF_HUB_OFFLINE"] = "1"
@@ -264,7 +292,6 @@ class UniDexPolicy:
         self.device = torch.device(device)
         self.model.to(self.device).eval()
         self.normalizer = NativeNormalizer(receipt["normalizer"])
-        self.horizon = receipt["temporal"]["action_horizon"]
 
     def predict(self, pointcloud_ros, state_absolute, prompt):
         import numpy as np

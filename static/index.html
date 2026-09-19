@@ -1576,6 +1576,7 @@ trainer.deterministic=true"
                       aria-label="Preview warnings"
                       hidden=""
                     ></ul>
+                    <div id="experiment-preview-sampling" class="preview-meta" hidden=""></div>
                     <div id="experiment-preview-variant-field" hidden="">
                       <label for="experiment-preview-variant"
                         >Script variant</label
@@ -3913,6 +3914,24 @@ Select a session.</pre
                       archived</label
                     >
                     <button
+                      id="show-data-import-history"
+                      class="button button-outline"
+                      type="button"
+                      hidden=""
+                    >
+                      Import history
+                    </button>
+                    <button
+                      id="show-data-conversion-history"
+                      class="button button-outline"
+                      type="button"
+                      aria-haspopup="dialog"
+                      aria-controls="prepared-dataset-dialog"
+                      hidden=""
+                    >
+                      Conversion history
+                    </button>
+                    <button
                       id="show-data-resource-form"
                       class="button button-accent disclosure-launcher"
                       type="button"
@@ -3930,37 +3949,23 @@ Select a session.</pre
                         <th>Name</th>
                         <th id="data-resource-recording-column">Recordings</th>
                         <th id="data-resource-type-column" hidden="">Type</th>
-                        <th>Formats</th>
-                        <th>Source</th>
+                        <th id="data-resource-formats-column" hidden="">Formats</th>
+                        <th id="data-resource-source-column" hidden="">Source</th>
+                        <th id="data-resource-adapter-column">Adapter</th>
+                        <th id="data-resource-modalities-column">Input modalities</th>
+                        <th id="data-resource-episodes-column">Episodes</th>
+                        <th id="data-resource-presets-column">Experiment presets</th>
                         <th id="data-resource-date-column">Created at</th>
                         <th>Actions</th>
                       </tr>
                     </thead>
                     <tbody id="data-resources-body">
                       <tr class="empty-row">
-                        <td colspan="6">Open this tab to load datasets.</td>
+                        <td colspan="8">Open this tab to load datasets.</td>
                       </tr>
                     </tbody>
                   </table>
                 </div>
-                <section
-                  id="policy-export-history"
-                  class="dense-form"
-                  hidden=""
-                  aria-label="Dataset preparation"
-                >
-                  <div class="panel-heading">
-                    <h3>Dataset preparation</h3>
-                    <button
-                      id="refresh-policy-exports"
-                      type="button"
-                      class="text-button"
-                    >
-                      Refresh
-                    </button>
-                  </div>
-                  <div id="policy-export-jobs" role="status"></div>
-                </section>
                 <dialog
                   id="data-resource-form-dialog"
                   class="app-dialog"
@@ -5169,34 +5174,20 @@ Select a session.</pre
     </div>
 
     <dialog
-      id="data-inspection-dialog"
+      id="data-import-history-dialog"
       class="app-dialog"
       data-panel-dialog=""
-      aria-labelledby="data-inspection-title"
-      data-dialog-title="Dataset files and history"
-      data-dialog-title-id="data-inspection-title"
+      aria-labelledby="data-import-history-title"
+      data-dialog-title="Import history"
+      data-dialog-title-id="data-import-history-title"
     >
       <section data-dialog-panel="">
         <section class="panel table-panel registry-section">
           <div class="panel-heading">
-            <div>
-              <h2>Import history</h2>
-            </div>
             <span id="data-import-count" class="quiet-label">Not loaded</span>
           </div>
-          <div class="table-scroll identity-table">
+          <div id="data-import-history-table" class="table-scroll identity-table">
             <table>
-              <thead>
-                <tr>
-                  <th>Resource / subset</th>
-                  <th>Revision</th>
-                  <th>State</th>
-                  <th>Slurm</th>
-                  <th>Prepared data</th>
-                  <th>Updated</th>
-                  <th></th>
-                </tr>
-              </thead>
               <tbody id="data-imports-body">
                 <tr class="empty-row">
                   <td colspan="7">No import jobs loaded.</td>
@@ -5205,6 +5196,18 @@ Select a session.</pre
             </table>
           </div>
         </section>
+      </section>
+    </dialog>
+
+    <dialog
+      id="data-inspection-dialog"
+      class="app-dialog"
+      data-panel-dialog=""
+      aria-labelledby="data-inspection-title"
+      data-dialog-title="Dataset files and history"
+      data-dialog-title-id="data-inspection-title"
+    >
+      <section data-dialog-panel="">
         <section class="panel table-panel registry-section">
           <div class="panel-heading">
             <div>

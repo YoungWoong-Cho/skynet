@@ -24,25 +24,30 @@ try {
   const copy = {...original, id: copyId, recordings: ['a']};
   const empty = {...original, id: 'unregistered'};
   let resources = [
-    {id: 'original-data', category: 'dataset', provider: 'collection', display_name: 'Full dataset', source_key: 'Full dataset', metadata: {session_id: originalId}, versions: [{id:'v1'}, {id:'v2'}, {id:'v3'}]},
-    {id: 'second-data', category: 'dataset', provider: 'collection', display_name: 'Another dataset', source_key: 'Another dataset', metadata: {session_id: originalId}, versions: []},
-    {id: 'archived-data', category: 'dataset', provider: 'collection', display_name: 'Archived dataset', source_key: 'Archived dataset', metadata: {session_id: originalId}, archived_at: '2026-09-10', versions: []},
-    {id: 'copy-data', category: 'dataset', provider: 'collection', display_name: 'One episode', source_key: 'One episode', metadata: {session_id: originalId, recording_session_id: copyId}, versions: []},
-    {id: 'external', category: 'dataset', provider: 'huggingface', display_name: '<b>External</b>', source_key: '<b>External</b>', metadata: {session_id: originalId}, versions: []},
+    {id: 'original-data', category: 'dataset', provider: 'collection', display_name: 'Full dataset', source_key: 'Full dataset', resource_id:'shared-source', recording_ids:[originalId], status:'READY', created_at:'2026-09-19', metadata:{num_episodes:51, adapter:{name:'UniDex'}, observations:['state','pointcloud']}},
+    {id: 'second-data', category: 'dataset', provider: 'collection', display_name: 'Another dataset', source_key: 'Another dataset', resource_id:'shared-source', recording_ids:[originalId], status:'READY', created_at:'2026-09-18', metadata:{num_episodes:51, adapter:{name:'HPT'}, observations:['state','rgb']}},
+    {id: 'archived-data', category: 'dataset', provider: 'collection', display_name: 'Archived dataset', source_key: 'Archived dataset', resource_id:'shared-source', recording_ids:[originalId], status:'READY', created_at:'2026-09-17', archived_at:'2026-09-10'},
+    {id: 'copy-data', category: 'dataset', provider: 'collection', display_name: 'One episode', source_key: 'One episode', resource_id:'copy-source', recording_ids:[copyId], status:'READY', created_at:'2026-09-16'},
+    {id: 'external', category: 'dataset', provider: 'huggingface', display_name: '<b>External</b>', source_key: '<b>External</b>', resource_id:'external-source', recording_ids:[], status:'READY', created_at:'2026-09-15'},
   ];
   const requests = [];
   w.api = async path => {
     requests.push(path);
-    if (path.startsWith('/api/data/resources?')) return {resources};
+    if (path.startsWith('/api/data/datasets?')) return {datasets:resources.filter(row=>row.category==='dataset')};
+    if (path.startsWith('/api/data/resources?')) return {resources:resources.filter(row=>row.category==='file')};
     return {items: []};
   };
+  // Replace the bootstrap coordinator whose initial requests intentionally never settle.
+  w.stopSkynetLiveRefresh();
+  w.initializeLiveRefresh();
+  w.SkynetDatasetUI = {adapterLabel:row=>row.metadata?.adapter?.name || '—',inputModalities:metadata=>`<ul class=adapter-input-modalities>${(metadata?.observations||[]).map(item=>`<li>${item}</li>`).join('')}</ul>`};
   w.renderSimulationRecordings([original, copy, empty]);
   assert.equal(el('simulation-recordings-body').rows[0].cells[3].textContent, '—', 'unknown counts must not appear as zero');
   await w.loadDataRegistry(true);
   const recordingRows = () => [...el('simulation-recordings-body').rows];
   const registered = index => recordingRows()[index].cells[3].querySelector('button');
-  assert.equal(registered(0).textContent, '3 datasets', 'count Registry resources, not their versions; include archived resources');
-  assert.equal(registered(1).textContent, '1 dataset', 'copy ownership overrides original source membership');
+  assert.equal(registered(0).textContent, '3 datasets', 'count individual dataset versions even when all share one internal resource; include archived versions');
+  assert.equal(registered(1).textContent, '1 dataset', 'exact source membership belongs to the dataset version');
   assert.equal(registered(2).textContent, '0 datasets');
   assert.equal(recordingRows()[0].cells[2].textContent, w.formatDate(original.created_at));
   assert.equal(recordingRows()[0].cells[0].textContent.includes(w.formatDate(original.created_at)), false);
@@ -60,14 +65,25 @@ try {
   assert.deepEqual(resourceIds(), ['original-data', 'second-data', 'archived-data']);
   assert.equal(el('data-resources-body').rows[0].cells[1].textContent, '1 recording');
   assert.equal(el('data-resources-body').rows[0].cells[1].querySelector('button').dataset.resourceAction, 'recordings');
+  assert.deepEqual([...el('data-resources-body').closest('table').querySelectorAll('th')].filter(th=>!th.hidden).map(th=>th.textContent), ['Name','Recordings','Adapter','Input modalities','Episodes','Experiment presets','Created at','Actions']);
+  const firstDataset = el('data-resources-body').rows[0];
+  assert.equal(firstDataset.cells[2].textContent,'UniDex');
+  assert.equal(firstDataset.cells[4].textContent,'51');
+  assert.ok(firstDataset.cells[3].querySelector('.adapter-input-modalities'));
+  assert.deepEqual([...firstDataset.querySelectorAll('.row-actions button')].map(button=>button.textContent), ['View','Use in experiment','Edit','Archive','Delete']);
+  assert.equal(firstDataset.querySelector('[data-delete-kind=dataset]').dataset.deleteId,'original-data');
+  let viewed;
+  w.openPreparedDataset=async id=>{viewed=id;};
+  firstDataset.querySelector('[data-resource-action=dataset]').click();await flush();
+  assert.equal(viewed,'original-data','View receives exact version, never its shared source group');
   await w.loadDataRegistry(true);
   assert.deepEqual(resourceIds(), ['original-data', 'second-data', 'archived-data'], 'refresh preserves the recording filter');
   registered(1).click(); await flush();
   assert.deepEqual(resourceIds(), ['copy-data']);
   assert.equal(el('data-show-archived').checked, false);
   registered(2).click(); await flush();
-  assert.match(el('data-resources-body').textContent, /No datasets or file sets match/);
-  assert.equal(el('data-resources-body').rows[0].cells[0].colSpan, 6);
+  assert.match(el('data-resources-body').textContent, /No datasets match/);
+  assert.equal(el('data-resources-body').rows[0].cells[0].colSpan, 8);
   el('data-resource-search').value = 'HUGGINGFACE';
   el('data-resource-search').dispatchEvent(new w.Event('input'));
   assert.deepEqual(resourceIds(), ['external'], 'typing replaces the exact recording filter with case-insensitive search');
@@ -83,6 +99,53 @@ try {
   assert.equal(el('data-resource-form-dialog').open, true);
   el('close-data-resource-form').click();
   assert.equal(el('show-data-resource-form').textContent.trim(), 'New', 'closing the common modal does not restore the old label');
+  // Editing and archiving target only one published version, never its source group.
+  const registryApi = w.api, writes = [];
+  let preparedSelection, registeredSelection;
+  const readyJob = {id:'conversion',version_id:'original-data',state:'READY',training_ready:true};
+  w.api = async (path, options={}) => {
+    if (path === '/api/data/exports/jobs') return {exports:[readyJob]};
+    if (path === '/api/data/datasets/original-data') {
+      writes.push({path,...options});
+      return {dataset:resources.find(row=>row.id==='original-data')};
+    }
+    return registryApi(path, options);
+  };
+  w.usePreparedDataset=async job=>{preparedSelection=job;};
+  w.useRegisteredDataset=async id=>{registeredSelection=id;};
+  await w.useDataset('original-data');
+  assert.equal(preparedSelection.version_id,'original-data');
+  await assert.rejects(w.useDataset('archived-data'),/archived/);
+  await w.useDataset('external');
+  assert.equal(registeredSelection,'external');
+  await w.openDataResourceEditor('original-data');
+  assert.equal(writes.at(-1).path,'/api/data/datasets/original-data');
+  assert.equal(el('data-resource-source-details').hidden,true,'internal source identity is absent from dataset editing');
+  el('data-resource-name').value='Renamed exact dataset';
+  await w.updateDataResource('original-data');
+  assert.equal(writes.at(-1).method,'PATCH');
+  assert.equal(JSON.parse(writes.at(-1).body).display_name,'Renamed exact dataset');
+  w.askUserDialog=async()=>true;
+  await w.archiveDataResource('original-data');
+  assert.equal(writes.at(-1).method,'PATCH');
+  assert.deepEqual(JSON.parse(writes.at(-1).body),{archived:true});
+  await w.restoreDataResource('original-data');
+  assert.deepEqual(JSON.parse(writes.at(-1).body),{archived:false});
+  assert.equal(writes.some(row=>row.path.includes('shared-source')),false);
+  w.api = registryApi;
+  const newVersion={id:'newly-published',category:'dataset',recording_ids:[],status:'READY',display_name:'New result'};
+  resources.push(newVersion);
+  const readsBefore=requests.filter(path=>path.startsWith('/api/data/datasets?')).length;
+  const publication=new w.CustomEvent('dataset-preparation-changed',{detail:[{state:'READY',version_id:newVersion.id}]});
+  w.document.dispatchEvent(publication);await flush();
+  assert.equal(requests.filter(path=>path.startsWith('/api/data/datasets?')).length,readsBefore+1,'new READY version refreshes the open dataset table');
+  w.document.dispatchEvent(publication);await flush();
+  assert.equal(requests.filter(path=>path.startsWith('/api/data/datasets?')).length,readsBefore+1,'polling the same publication does not repeat list reads');
+  resources=resources.filter(row=>row.id!==newVersion.id);
+  w.document.dispatchEvent(new w.CustomEvent('dataset-preparation-changed',{detail:[{state:'READY',version_id:'original-data',training_ready:false}]}));
+  assert.equal(el('data-resources-body').querySelector('[data-resource-id=original-data] [data-resource-action=train]'),null,'A known non-trainable conversion does not offer Use in experiment');
+  await assert.rejects(w.useDataset('original-data'),/not currently available/);
+  w.document.dispatchEvent(new w.CustomEvent('dataset-preparation-changed',{detail:[]}));
   resources = resources.filter(x => x.id !== 'second-data');
   await w.loadDataRegistry(true);
   assert.equal(registered(0).textContent, '2 datasets', 'deletion refreshes Registered without reloading the page');
@@ -109,7 +172,7 @@ try {
   assert.equal(el('data-resources-body').rows[0].cells[0].colSpan, 6);
   await w.activateTab('data', true, 'registry'); await flush();
   assert.equal(el('data-resource-recording-column').hidden, false);
-  assert.equal(el('data-resources-body').rows[0].cells.length, 6);
+  assert.equal(el('data-resources-body').rows[0].cells.length, 8);
   assert.equal(el('data-resource-count').hidden, true);
   resources.push({id:'multi',category:'dataset',provider:'collection',display_name:'Combined recordings', source_key:'Combined recordings',kind:'demonstrations',recording_ids:[originalId,copyId],metadata:{session_id:originalId},versions:[]});
   await w.loadDataRegistry(true);
@@ -160,5 +223,5 @@ try {
   assert.equal(el('maintenance-dialog').open, false);
   assert.deepEqual(refreshes.sort(), ['datasets','recordings']);
   assert.deepEqual(recordingRows().map(r => r.dataset.sessionId), [copyId]);
-  console.log('Recording / Registry: resource counts, source ownership, archive visibility, navigation, filtering, refresh and failure recovery passed.');
+  console.log('Recording / Registry: exact dataset counts, source ownership, archive visibility, navigation, filtering, refresh and failure recovery passed.');
 } finally { for (const observer of observers) observer.disconnect(); await flush(); w.close(); }

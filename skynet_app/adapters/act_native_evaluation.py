@@ -4,7 +4,7 @@ import os
 
 from act_native_checkpoint import SCHEMA
 from act_native_data import CAMERAS
-from xpolicy_runtime import repository
+from xpolicy_runtime import repository, checkpoint_sampling
 
 
 def load_native_act(context, source_dir, manifest):
@@ -21,6 +21,9 @@ def load_native_act(context, source_dir, manifest):
         raise ValueError("Evaluation requires a Native ACT checkpoint saved with model, configuration and normalization; weights-only legacy .ckpt files cannot be used automatically")
     if manifest.get("contract") != "skynet.act-rgb-joints/v1":
         raise ValueError("Native ACT simulator evaluation requires recorded RGB/joint data")
+    sampling = checkpoint_sampling(manifest, config, identity.get("recording_sampling"), require_validation=True)
+    if identity["policy_config"].get("num_queries") != sampling["action_steps"]:
+        raise ValueError("Native ACT checkpoint chunk differs from its sampling receipt")
     dimension = len(manifest["policy_to_source_indices"])
     if identity.get("state_dim") != dimension or identity["policy_config"]["camera_names"] != CAMERAS:
         raise ValueError("Native ACT checkpoint camera/joint layout differs from the recording")

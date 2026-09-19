@@ -559,3 +559,86 @@ def test_observation_tick_batches_statuses_and_preserves_attempts_on_outage(cont
     assert not service.observations.store.producers()
     assert all(row['state'] == 'READY' for row in service.observations.store.for_job(job['id']).values())
     assert len(cluster.submissions) == 2
+
+
+@pytest.mark.parametrize('warning', [
+    'Renderer shutdown timed out after verified publication',
+    'Renderer teardown diagnostic: ' + 'x' * 2500,
+], ids=['cleanup-timeout', 'bounded-diagnostic'])
+def test_committed_observations_wait_for_scheduler_completion_and_preserve_cleanup_warning(context, warning):
+    service, cluster = context.service, context.cluster
+    job = create(service, 'first', 'fixture-rgb', 'Published data during shutdown')
+    service.prepare(job['id'])
+    producer = service.observations.store.producers()[0]
+    cluster.publish(producer)
+    result_path = producer['root'] + '/result.json'
+    result = json.loads(cluster.files[result_path])
+    result['cleanup_warning'] = warning
+    cluster.files[result_path] = canonical_json(result)
+    # A data receipt may exist before native cleanup ends. It cannot release
+    # dependent CPU conversion while Slurm still owns the running producer.
+    cluster.states[producer['cluster_job_id']] = 'RUNNING'
+    service.observations.tick()
+    service.prepare(job['id'])
+    waiting = service.observations.store.producers()[0]
+    assert waiting['id'] == producer['id'] and waiting['attempt_token'] == producer['attempt_token']
+    assert waiting['state'] == 'RUNNING'
+    assert not any(row['state'] == 'READY' for row in service.observations.store.for_job(job['id']).values())
+    assert len(cluster.submissions) == 1
+    assert service.get(job['id'])['stage'] == 'OBSERVATIONS'
+
+    cluster.states[producer['cluster_job_id']] = 'COMPLETED'
+    service.observations.tick()
+    assert all(row['state'] == 'READY' for row in service.observations.store.for_job(job['id']).values())
+    assert not service.observations.store.producers()
+    with context.db.connection() as connection:
+        stored = connection.execute('SELECT state,payload_json FROM observation_producers WHERE id=?', (producer['id'],)).fetchone()
+        payload = json.loads(stored['payload_json'])
+    assert stored['state'] == 'READY' and payload['error'] is None
+    assert payload['cleanup_warning'] == warning[:2000]
+    assert payload['attempt_token'] == producer['attempt_token']
+    service.prepare(job['id'])
+    assert service.get(job['id'])['state'] == 'PENDING'
+    assert len(cluster.submissions) == 2, 'Only confirmed publication can submit the dependent converter'
+
+
+@pytest.mark.parametrize('scheduler_state', ['CANCELLED', 'FAILED', 'TIMEOUT'])
+def test_ready_observation_receipt_never_overrides_scheduler_cancellation_or_failure(context, scheduler_state):
+    service, cluster = context.service, context.cluster
+    job = create(service, 'first', 'fixture-rgb', 'Stopped observation attempt')
+    service.prepare(job['id'])
+    producer = service.observations.store.producers()[0]
+    cluster.publish(producer)
+    result_path = producer['root'] + '/result.json'
+    result = json.loads(cluster.files[result_path])
+    result['cleanup_warning'] = 'All data published before cleanup was interrupted'
+    cluster.files[result_path] = canonical_json(result)
+    published = {path: cluster.files[path] for path in [
+        node['output_dir'] + '/manifest.json' for node in producer['request']['requests']]}
+    cluster.states[producer['cluster_job_id']] = scheduler_state
+    service.observations.tick()
+    service.prepare(job['id'])
+    failed = service.get(job['id'])
+    assert failed['state'] == 'FAILED' and f'Observation job ended as {scheduler_state}' in failed['error']
+    assert not failed.get('version_id')
+    assert len(cluster.submissions) == 1 and not service.observations.store.producers()
+    assert all(row['state'] == 'FAILED' for row in service.observations.store.for_job(job['id']).values())
+    assert {path: cluster.files[path] for path in published} == published, 'Verified files remain reusable by an explicit retry'
+
+
+def test_cleanup_warning_cannot_bypass_observation_attempt_identity(context):
+    service, cluster = context.service, context.cluster
+    job = create(service, 'first', 'fixture-rgb', 'Stale shutdown receipt')
+    service.prepare(job['id'])
+    producer = service.observations.store.producers()[0]
+    cluster.publish(producer, corrupt='attempt')
+    result_path = producer['root'] + '/result.json'
+    result = json.loads(cluster.files[result_path])
+    result['cleanup_warning'] = 'Native cleanup failed after publication'
+    cluster.files[result_path] = canonical_json(result)
+    service.observations.tick()
+    service.prepare(job['id'])
+    failed = service.get(job['id'])
+    assert failed['state'] == 'FAILED' and 'different producer attempt' in failed['error']
+    assert not failed.get('version_id') and len(cluster.submissions) == 1
+    assert all(row['state'] == 'FAILED' for row in service.observations.store.for_job(job['id']).values())

@@ -105,10 +105,10 @@ try {
  assert.equal(el('experiment-data-bundle').value,'old');assert.equal(el('experiment-name').value,'My unsaved experiment');
  assert.equal(registryReads,0,'hidden registry is only marked dirty');
  assert.equal(selectionReads,2);
- // On navigation the dirty registry needs exactly its 3 list requests, no N GETs.
+ // On navigation the dirty registry uses four batched lists, never one GET per row.
  w.testPage('datasets');fetchCalls=[];await w.SkynetRefresh.flush();
  assert.equal(registryReads,1);
- assert.equal(fetchCalls.filter(([path])=>path.startsWith('/api/data/')).length,3);
+ assert.equal(fetchCalls.filter(([path])=>path.startsWith('/api/data/')).length,4);
  assert.equal(fetchCalls.some(([path])=>/^\/api\/data\/resources\//.test(path)),false);
  // Changes while the browser is hidden make no request, then focus catches up.
  Object.defineProperty(w.document,'visibilityState',{configurable:true,value:'hidden'});

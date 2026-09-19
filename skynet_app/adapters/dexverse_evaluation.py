@@ -254,6 +254,13 @@ def main():
             ids, order = validate_layout(env, capture, order, contract)
         else:
             ids = validate_layout(env, capture, order)
+        from recording_time import frequency_stride
+        control_hz = float(os.environ["SKYNET_POLICY_CONTROL_HZ"])
+        control_stride = frequency_stride(1 / env.step_dt, control_hz)
+        if contract:
+            from policy_contract import simulation_stride
+            if control_stride != simulation_stride(contract, env.step_dt):
+                raise ValueError("Checkpoint frequency differs from the evaluation contract")
         success_fn = success_term.func
         if inspect.isclass(success_fn) and issubclass(success_fn, ManagerTermBase):
             success_fn = success_fn(success_term, env)
@@ -294,6 +301,12 @@ def main():
                 action[order] = packed
                 return env.step(torch.as_tensor(action, device=env.device)[None])
 
+            def advance_control(packed):
+                result = None
+                for _ in range(control_stride):
+                    result = advance(packed)
+                return result
+
             if contract:
                 from evaluation_preflight import verify_cycle
                 first_seed = context["seeds"][0] * 1000003
@@ -319,7 +332,7 @@ def main():
                 with torch.no_grad():
                     verify_cycle(contract, reset=reset_probe, observe=observation,
                                  predict=lambda obs: request({"command": "step", "observation": obs, "predict": True}),
-                                 advance=advance, report=report_probe)
+                                 advance=advance_control, report=report_probe)
 
             assignments = assigned_episodes(context)
             for seed in context["seeds"]:
@@ -386,28 +399,21 @@ def main():
                                 video_views = (images if os.environ["SKYNET_POLICY_IMAGES"] == "1"
                                                else {"scene_front": images["scene_front"]})
                                 writer.append_data(compose_camera_views(video_views))
-                            if contract:
-                                from policy_contract import validate_observation, validate_actions
-                                validate_observation(contract, obs)
-                            predicted = request(
-                                {
-                                    "command": "step",
-                                    "observation": {
-                                        "state": obs["state"],
-                                        "images": (
-                                            images
-                                            if os.environ["SKYNET_POLICY_IMAGES"] == "1"
-                                            else {}
-                                        ),
-                                    },
-                                    "predict": not pending,
-                                }
-                            )
-                            if not pending:
+                            # Simulator timing stays at collection rate. A learned
+                            # position target is held between selected control ticks.
+                            if step % control_stride == 0:
                                 if contract:
-                                    validate_actions(contract, predicted)
-                                pending = list(predicted)
-                            packed = pending.pop(0)
+                                    from policy_contract import validate_observation, validate_actions
+                                    validate_observation(contract, obs)
+                                predicted = request({"command": "step", "observation": {
+                                    "state": obs["state"],
+                                    "images": images if os.environ["SKYNET_POLICY_IMAGES"] == "1" else {},
+                                }, "predict": not pending})
+                                if not pending:
+                                    if contract:
+                                        validate_actions(contract, predicted)
+                                    pending = list(predicted)
+                                packed = pending.pop(0)
                             if step % 2 == 0:
                                 trace.append(step, packed)
                             _, reward, terminated, truncated, _ = advance(packed)
@@ -437,6 +443,8 @@ def main():
                         metrics={
                             "effective_seed": float(effective_seed),
                             "success_hold_steps": float(streak),
+                            "control_hz": control_hz,
+                            "simulator_steps_per_command": control_stride,
                             **worker_metrics,
                         },
                         video_path=str(video),

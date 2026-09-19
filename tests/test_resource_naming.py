@@ -83,7 +83,7 @@ def test_rename_preserves_v1_receipts_and_legacy_links_in_each_workspace(databas
         "provider": "collection", "namespace": "datasets", "name": resource["source_key"],
         "kind": "demonstrations",
     }
-    assert selection["name"] == resource["source_key"]
+    assert selection["name"] == "Historical preparation label"
     directory = WorkspaceDirectory(database)
     alice = database.for_workspace(directory.open("alice@example.com")[0]["id"])
     bob = database.for_workspace(directory.open("bob@example.com")[0]["id"])
@@ -94,13 +94,14 @@ def test_rename_preserves_v1_receipts_and_legacy_links_in_each_workspace(databas
     bob.create_experiment(name="Bob private preset", requested_spec=legacy)
     immutable_tables = ("data_resource_versions", "data_bundles", "experiment_revisions")
     before = stored_rows(database, immutable_tables)
-    database.update_data_resource(resource["id"], display_name="New visible label", description="New description")
+    database.update_dataset(version["id"], display_name="New visible label", description="New description")
     assert stored_rows(database, immutable_tables) == before
-    assert data_selection.snapshot(database, [{"version_id": version["id"]}]) == selection
+    assert selection["name"] == "Historical preparation label"
     choice = data_selection.choices(database)[0]
     assert choice["name"] == "New visible label"
-    assert choice["manifest_sha256"] == selection["manifest_sha256"]
-    assert choice["assignments"] == selection["assignments"]
+    assert choice["assignments"][0]["version"]["manifest_sha256"] == version["manifest_sha256"]
+    assert choice["assignments"][0]["version"]["metadata"]["display_name"] == "New visible label"
+    assert data_selection.snapshot(database, [{"version_id": version["id"]}])["assignments"] == choice["assignments"]
     assert alice.dataset_preset_links() == [{
         "experiment_id": alice_experiment["id"], "experiment_name": "Alice preset",
         "revision_number": 1, "resource_id": resource["id"], "version_id": version["id"],
@@ -111,7 +112,9 @@ def test_rename_preserves_v1_receipts_and_legacy_links_in_each_workspace(databas
 
 
 def test_resource_patch_updates_requested_fields_and_rejects_identity_changes(database, monkeypatch):
-    resource = dataset(database)
+    resource = database.create_data_resource(category="file", provider="local", namespace="assets",
+        source_key="robot", kind="simulation_assets", display_name="Robot assets",
+        description="Asset files", metadata={"license":"upstream"})
     app = FastAPI()
     app.include_router(pipeline_api.router)
     app.dependency_overrides[pipeline_api.require_workspace_records] = lambda: None

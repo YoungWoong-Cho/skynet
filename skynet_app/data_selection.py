@@ -54,10 +54,11 @@ def snapshot(database, selections):
             ).fetchone():
                 raise ValueError("This converted dataset has been retired; select its replacement")
             row = connection.execute(
-                "SELECT r.* FROM data_resources r JOIN data_resource_versions v "
-                "ON v.resource_id=r.id WHERE v.id=?", (version_id,),
+                "SELECT r.*, p.archived_at AS dataset_archived_at, p.display_name AS dataset_display_name "
+                "FROM data_resources r JOIN data_resource_versions v ON v.resource_id=r.id "
+                "LEFT JOIN data_dataset_presentations p ON p.version_id=v.id WHERE v.id=?", (version_id,),
             ).fetchone()
-            if row is None or row["archived_at"]:
+            if row is None or (row["dataset_archived_at"] if row["category"] == "dataset" else row["archived_at"]):
                 raise ValueError("The selected dataset is missing or archived")
             if role == "training_data" and row["category"] != "dataset":
                 raise ValueError("Choose a dataset for training data; files belong to other inputs")
@@ -70,9 +71,10 @@ def snapshot(database, selections):
             assignment["version"]["metadata"] = {
                 **assignment["version"].get("metadata", {}),
                 "registered_version_id": version_id,
+                "display_name": row["dataset_display_name"] or row["display_name"],
             }
             assignments.append(assignment)
-            names.append(row["source_key"])
+            names.append(row["dataset_display_name"] or row["display_name"])
     return _manifest(assignments, names)
 
 
@@ -89,32 +91,30 @@ def _manifest(assignments, names):
 def choices(database):
     """List actual prepared results, including incompatible formats for explanation."""
     result = []
-    for resource in database.list_data_resources(category="dataset", include_versions=True):
-        for version in resource["versions"]:
-            if version["format"] == "skynet.episodes/v1":
-                continue
-            locations = [loc for loc in version.get("locations", [])
-                         if loc["kind"] == "cluster" and loc["status"] == "AVAILABLE"
-                         and loc["manifest_sha256"] == version["manifest_sha256"]]
-            if not locations and version["status"] != "READY":
-                continue
-            # One deterministic cluster location per result; a saved experiment keeps its receipt.
-            location = min(locations, key=lambda loc: str(loc["id"])) if locations else None
-            selection = {"version_id": version["id"], "location_id": location["id"] if location else None}
-            assignment = database.bundle_manifest_assignment({
-                "role": "training_data", "position": 0, "version_id": version["id"],
-                "config": {"location_id": selection["location_id"]},
-            }, resource, version)
-            assignment["version"]["metadata"] = {
-                **assignment["version"]["metadata"], "registered_version_id": version["id"],
-            }
-            frozen = _manifest([assignment], [resource["source_key"]])
-            result.append({
-                **frozen, "id": version["id"], "selection": selection,
-                "name": resource["display_name"],
-                "format": version["format"], "created_at": version["created_at"],
-                "resource_id": resource["id"],
-            })
+    for version in database.list_datasets(include_presets=False):
+        locations = [loc for loc in version.get("locations", [])
+                     if loc["kind"] == "cluster" and loc["status"] == "AVAILABLE"
+                     and loc["manifest_sha256"] == version["manifest_sha256"]]
+        if not locations and version["status"] != "READY":
+            continue
+        # One deterministic cluster location per result; saved experiments retain theirs.
+        location = min(locations, key=lambda loc: str(loc["id"])) if locations else None
+        selection = {"version_id": version["id"], "location_id": location["id"] if location else None}
+        assignment = database.bundle_manifest_assignment({
+            "role": "training_data", "position": 0, "version_id": version["id"],
+            "config": {"location_id": selection["location_id"]},
+        }, version, version)
+        assignment["version"]["metadata"] = {
+            **assignment["version"]["metadata"], "registered_version_id": version["id"],
+            "display_name": version["display_name"],
+        }
+        frozen = _manifest([assignment], [version["display_name"]])
+        result.append({
+            **frozen, "id": version["id"], "selection": selection,
+            "name": version["display_name"],
+            "format": version["format"], "created_at": version["created_at"],
+            "resource_id": version["resource_id"],
+        })
     return result
 
 

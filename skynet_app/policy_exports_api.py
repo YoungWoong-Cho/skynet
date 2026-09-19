@@ -21,7 +21,6 @@ class ExportRequest(BaseModel):
     adapter_version_id: str
     adapter_data_preset: str | None = None
     name: str
-    resource_id: str | None = None
     gateway: str = "auto"
     validation_percent: int = Field(default=20, ge=0, le=50)
     seed: int = Field(default=42, ge=0, lt=2**31)
@@ -30,15 +29,6 @@ class ExportRequest(BaseModel):
 
 class RetryRequest(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
-
-
-@router.get("")
-def overview():
-    from .workspaces import CURRENT_WORKSPACE
-    if CURRENT_WORKSPACE.get() is not None:
-        from .pipeline_api import service as pipeline_service
-        return checked(lambda: service.options(workspace_database=pipeline_service.database))
-    return checked(service.options)
 
 
 @router.get("/jobs")
@@ -68,7 +58,6 @@ def create(request: ExportRequest):
             request.session_id,
             request.adapter_id,
             request.name,
-            request.resource_id,
             target="cluster",
             validation_percent=request.validation_percent,
             seed=request.seed,
@@ -78,11 +67,6 @@ def create(request: ExportRequest):
             adapter_data_preset=request.adapter_data_preset,
         )
     )
-
-
-@router.delete("/datasets/{resource_id}")
-def delete_dataset(resource_id: str):
-    return checked(service.delete_dataset, resource_id)
 
 
 @router.delete("/{identifier}")

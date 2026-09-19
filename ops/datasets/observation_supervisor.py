@@ -22,7 +22,8 @@ except ImportError:
 PROGRESS_SCHEMA = "skynet.observation-progress/v1"
 INITIALIZATION_TIMEOUT = 300
 FRAME_TIMEOUT = 120
-PHASES = {"initializing", "episode", "capturing", "frame", "publishing", "closing"}
+PHASES = {"initializing", "episode", "capturing", "frame", "publishing", "closing",
+          "closing_env", "closing_app", "closing_assets", "closing_context"}
 
 
 def write_json(path, value):
@@ -195,6 +196,7 @@ def supervise(request, request_path, result_path, *, worker_path, initialization
     output = Path(result_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     started, process, outcome, problem = time.monotonic(), None, None, None
+    stopped = False
     interrupted, previous_handlers = [], {}
     if threading.current_thread() is threading.main_thread():
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGUSR1):
@@ -240,12 +242,26 @@ def supervise(request, request_path, result_path, *, worker_path, initialization
                 outcome = _receipt(child_result, request)
             except Exception as exc:
                 problem = f"{problem + '; ' if problem else ''}{exc}"
+            if interrupted or (outcome and outcome['state'] == 'READY' and not stopped):
+                # A receipt cannot override cancellation or an unconfirmed live
+                # writer. Keep published artifacts for a later verified retry.
+                outcome = dict(schema=PREPARE_SCHEMA, request_id=request.get("request_id"),
+                    attempt_token=request.get("attempt_token"), state="FAILED",
+                    artifacts=outcome.get('artifacts', []) if outcome else [],
+                    error=problem or "Could not confirm renderer process group stopped")
             if outcome is None:
                 code = process.returncode if process is not None else None
                 outcome = dict(schema=PREPARE_SCHEMA, request_id=request.get("request_id"),
                     attempt_token=request.get("attempt_token"), state="FAILED", artifacts=[],
                     error=problem or f"Observation renderer exited with code {code} without a result receipt")
-            outcome.setdefault("duration_seconds", round(time.monotonic() - started, 6))
+            if outcome['state'] == 'READY':
+                warning = problem or (f"Renderer exited with code {process.returncode} after artifact publication"
+                    if process is not None and process.returncode else None)
+                if warning:
+                    outcome['cleanup_warning'] = warning
+                if outcome.get('cleanup_warning'):
+                    print(outcome['cleanup_warning'], file=sys.stderr, flush=True)
+            outcome['duration_seconds'] = round(time.monotonic() - started, 6)
             write_json(output, outcome)
             return outcome
     finally:

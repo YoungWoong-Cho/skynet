@@ -12,10 +12,10 @@ import subprocess
 import sys
 
 try:
-    from .egoverse_models import model_algorithm, NATIVE_TARGETS
+    from .egoverse_models import model_algorithm, NATIVE_TARGETS, RECORDING_ACTION_STEPS
     from .egoverse_splits import OVERFIT_MODE, validate_split
 except ImportError:  # Frozen run capsule modules live beside the entrypoint.
-    from egoverse_models import model_algorithm, NATIVE_TARGETS
+    from egoverse_models import model_algorithm, NATIVE_TARGETS, RECORDING_ACTION_STEPS
     from egoverse_splits import OVERFIT_MODE, validate_split
 
 REVISION = "e17cf98fe4bc234c564b37abc9e155f25e76d566"
@@ -85,7 +85,7 @@ def make_act(norm_stats, **kwargs):
     return ACT(data_schematic=ACTDataInterface(norm_stats), **kwargs)
 
 
-def joint_data(root, batch, workers, horizon=100, reject_outliers=True, *, overfit=False, validation=True, manifest_sha=None):
+def joint_data(root, batch, workers, horizon=100, reject_outliers=True, *, overfit=False, validation=True, manifest_sha=None, control_hz=None):
     datasets = {}
     for split in ("train", "validation"):
         datasets[split] = {
@@ -95,6 +95,7 @@ def joint_data(root, batch, workers, horizon=100, reject_outliers=True, *, overf
                     "_target_": "egoverse_data.RecordingResolver",
                     "root": str(root),
                     "manifest_sha": manifest_sha,
+                    "control_hz": control_hz,
                     "split": "train" if overfit else split,
                     "key_map": {
                         "_target_": "egoverse_runtime.joint_keymap",
@@ -214,11 +215,60 @@ def validate_manifest(root, sha, model):
     return manifest
 
 
-def validate_checkpoint_receipt(receipt, model, manifest_sha):
+def validate_checkpoint_receipt(receipt, model, manifest_sha, *, sampling=None):
     if model in JOINT_MODELS and receipt.get("dataset_format") != DATASET_FORMAT:
         raise ValueError("This checkpoint predates the shared recording dataset format. Its history and weights are preserved; start a new run with the current adapter. Old-checkpoint resume/evaluation is not supported.")
     if receipt.get("model") != model or receipt.get("manifest_sha256") != manifest_sha:
         raise ValueError("Checkpoint model or dataset differs from the selected native configuration")
+    if sampling is not None and receipt.get("sampling") != sampling:
+        raise ValueError("Checkpoint training frequency or action chunk differs from this experiment. Start a new run; changed sampling cannot resume or evaluate this checkpoint.")
+
+
+def experiment_sampling(manifest, model, *, control_hz=None, action_steps=None):
+    """Skynet experiment sampling; source streams and native padding stay unchanged."""
+    if model not in JOINT_MODELS:
+        if control_hz is not None or action_steps is not None:
+            raise ValueError("Training frequency and action chunk controls apply to shared recording datasets only. External native EgoVerse Zarr datasets keep their native reader configuration.")
+        return None
+    try:
+        from .recording_time import resolve_sampling
+    except ImportError:
+        from recording_time import resolve_sampling
+    return resolve_sampling(
+        manifest, control_hz=control_hz,
+        action_steps=RECORDING_ACTION_STEPS[model] if action_steps is None else action_steps,
+        window_policy="pad",
+    )
+
+
+def reject_sampling_overrides(overrides, model):
+    """There is exactly one experiment control for the output action horizon."""
+    if model not in JOINT_MODELS:
+        return
+    def paths(value, prefix=""):
+        for key, child in value.items():
+            path = (prefix + "." if prefix else "") + key
+            yield path
+            if isinstance(child, dict):
+                yield from paths(child, path)
+    for path in paths(overrides):
+        act_horizon = path in {"robomimic_model.chunk_size", "robomimic_model.style_encoder.act_len"}
+        hpt_horizon = path.startswith("robomimic_model.head_specs.") and path.endswith((".action_horizon", ".model.act_seq"))
+        if act_horizon or hpt_horizon:
+            raise ValueError("Set Action chunk with native.config.action_steps; model_overrides must not define a second action horizon")
+
+
+def apply_recording_horizon(model, name, horizon):
+    """Wire one chunk value to the native model's dependent output dimensions."""
+    native = model["robomimic_model"]
+    if name == "act":
+        native["chunk_size"] = horizon
+        # Keep resolved configurations and the original ACT YAML interpolation aligned.
+        native["style_encoder"]["act_len"] = horizon
+    else:
+        head = native["head_specs"]["skynet_joints"]
+        head["action_horizon"] = horizon
+        head["model"]["act_seq"] = horizon
 
 
 def model_settings(value):
@@ -247,6 +297,9 @@ def build_config(args, manifest):
     algorithm = model_algorithm(args.model)
     if getattr(args, "algorithm", None) not in {None, algorithm}:
         raise ValueError("Model preset does not belong to the selected native EgoVerse algorithm")
+    sampling = experiment_sampling(manifest, args.model, control_hz=getattr(args, "control_hz", None), action_steps=getattr(args, "action_steps", None))
+    overrides = model_settings(args.model_overrides)
+    reject_sampling_overrides(overrides, args.model)
     from hydra import compose, initialize_config_dir
     from omegaconf import OmegaConf, open_dict
 
@@ -310,6 +363,8 @@ def build_config(args, manifest):
                 overfit=manifest["split"].get("mode") == OVERFIT_MODE,
                 validation=bool(manifest["split"]["validation"]),
                 manifest_sha=args.manifest_sha,
+                control_hz=sampling["control_hz"],
+                horizon=sampling["action_steps"],
             )
             if args.model == "act":
                 cfg.model.robomimic_model._target_ = "egoverse_runtime.make_act"
@@ -400,7 +455,7 @@ def build_config(args, manifest):
                     "π0.5 pretrained weights are missing from the selected cluster directory"
                 )
             cfg.model.robomimic_model.config.pytorch_weight_path = args.weights
-        for key, value in model_settings(args.model_overrides).items():
+        for key, value in overrides.items():
             OmegaConf.update(cfg.model, key, value, merge=False)
         expected_target = (
             "egoverse_runtime.make_act"
@@ -412,11 +467,8 @@ def build_config(args, manifest):
         if manifest["contract"] == JOINT_CONTRACT:
             if args.model == "hpt_joints":
                 validate_hpt_joint_inputs(cfg.model)
-            horizon = (
-                cfg.model.robomimic_model.chunk_size
-                if args.model == "act"
-                else cfg.model.robomimic_model.head_specs.skynet_joints.action_horizon
-            )
+            horizon = sampling["action_steps"]
+            apply_recording_horizon(cfg.model, args.model, horizon)
             for split in ("train_datasets", "valid_datasets"):
                 if "skynet_joints" in cfg.data[split]:
                     cfg.data[split].skynet_joints.resolver.key_map.horizon = horizon
@@ -519,6 +571,8 @@ def parser():
     p.add_argument("--checkpoint")
     p.add_argument("--weights")
     p.add_argument("--model-overrides", default="{}")
+    p.add_argument("--control-hz", type=float)
+    p.add_argument("--action-steps", type=int)
     p.add_argument(
         "--reject-outliers",
         type=lambda v: {"true": True, "false": False}[v.lower()],
@@ -541,17 +595,26 @@ def main():
         raise ValueError("EgoVerse repository revision differs from the pinned adapter")
     sys.path.insert(0, args.repository)
     os.chdir(args.repository)
+    manifest = validate_manifest(args.dataset, args.manifest_sha, args.model)
+    if args.verify_only:
+        # Conversion verifies physical source streams, not experiment horizons.
+        # No model window, resampling or minimum chunk length belongs here.
+        print(json.dumps({
+            "schema": "skynet.egoverse-loader-validation/v1",
+            "manifest_sha256": args.manifest_sha, "observation_mode": "rgb",
+        }))
+        return
+    sampling = experiment_sampling(manifest, args.model, control_hz=args.control_hz, action_steps=args.action_steps)
     register_joint_domain()
     # Import the native entrypoint before resolving its registered Hydra resolvers.
     from egomimic.trainHydra import train
 
-    manifest = validate_manifest(args.dataset, args.manifest_sha, args.model)
     cfg = build_config(args, manifest)
     if args.checkpoint:
         import torch
         saved = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
         receipt = saved.get("skynet") or {}
-        validate_checkpoint_receipt(receipt, args.model, args.manifest_sha)
+        validate_checkpoint_receipt(receipt, args.model, args.manifest_sha, sampling=sampling)
         if args.model == "hpt_joints":
             validate_hpt_joint_inputs(receipt.get("config", {}).get("model", {}), checkpoint=True)
     from omegaconf import OmegaConf
@@ -568,29 +631,11 @@ def main():
                     dataset_format=manifest["format"],
                     model=args.model,
                     revision=REVISION,
+                    sampling=sampling,
                 )
             )
         )
     if args.config_only:
-        return
-    if args.verify_only:
-        import hydra
-
-        for split in ("train_datasets", "valid_datasets"):
-            for config in cfg.data[split].values():
-                dataset = hydra.utils.instantiate(config)
-                if len(dataset) < 1:
-                    raise ValueError("Empty " + split)
-                dataset[0]
-        print(
-            json.dumps(
-                {
-                    "schema": "skynet.egoverse-loader-validation/v1",
-                    "manifest_sha256": args.manifest_sha,
-                    "observation_mode": "rgb",
-                }
-            )
-        )
         return
     # Skynet owns Slurm retries; Lightning owns the processes inside this allocation.
     # A one-task sbatch allocation must not be interpreted as one DDP worker.

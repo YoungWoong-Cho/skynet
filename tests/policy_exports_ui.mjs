@@ -1,696 +1,146 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { JSDOM } from "jsdom";
-const dom = new JSDOM(
-  await readFile(new URL("../static/index.html", import.meta.url), "utf8"),
-  {
-    runScripts: "outside-only",
-    url: "http://localhost:8080/#datasets",
-    pretendToBeVisual: true,
-  },
-);
-const w = dom.window,
-  el = (id) => w.document.getElementById(id),
-  calls = [];
-let exportSubscription;
-w.activeTab = "cluster";
-w.SkynetRefresh = {connected: true, register(_key, topics, visible, refresh, invalidate) {
-  exportSubscription = {topics, visible, refresh, invalidate};
-}};
-const catalogEvents = [];
-w.document.addEventListener("dataset-preparation-status", event => catalogEvents.push(event.detail));
-w.HTMLDialogElement.prototype.showModal = function () {
-  this.open = true;
-};
-w.HTMLDialogElement.prototype.close = function () {
-  if (this.open) {
-    this.open = false;
-    this.dispatchEvent(new w.Event("close"));
-  }
-};
-w.HTMLElement.prototype.scrollIntoView = () => {};
-// Shared app helpers are loaded from their actual definitions.
-const app = await readFile(
-  new URL("../static/app.js", import.meta.url),
-  "utf8",
-);
-for (const name of [
-  "escapeHtml",
-  "formatDataBytes",
-  "formatDate",
-  "stateClass",
-  "statusPill",
-  "dataVersionStatus",
-  "dataFormatLabel",
-  "dataFormatsLabel",
-  "datasetBindingValue",
-  "adapterDataContracts",
-  "experimentBundleCompatibility",
-]) {
-  const start = app.indexOf(`function ${name}(`),
-    end = app.indexOf("\nfunction ", start + 1);
-  let text = app.slice(start, end);
-  // Only the first function; subsequent top-level declarations are not needed.
-  const brace = text.indexOf("\n}\n");
-  if (brace >= 0) text = text.slice(0, brace + 3);
-  w.eval(text);
-}
-assert.equal(w.dataFormatsLabel({versions:[
-  {format:"skynet.episodes/v1"},
-  {format:"skynet.recording-dataset/v1"},
-  {format:"skynet.recording-dataset/v1"},
-]}), "Shared recording data × 2");
-w.declaredAdapterInputFields = adapter => adapter.fields;
-const nativeAdapter = {fields:[{data_binding:{role:'training_data',formats:['egoverse-episodes-zarr/v1'],contracts:['egoverse.native-pi0.5_bc_aria/v1'],value_path:'location.path'}}]};
-const registered = {assignments:[{role:'training_data',version:{format:'egoverse-episodes-zarr/v1',manifest_sha256:'sha',metadata:{contract:'skynet.egoverse-rgb-joints/v1',validation:{status:'PASSED'}}},config:{location:{kind:'cluster',status:'AVAILABLE',manifest_sha256:'sha',path:'/prepared'}}}]};
-assert.equal(w.experimentBundleCompatibility(registered,nativeAdapter).compatible,false,'matching file formats cannot substitute for matching model observations');
-registered.assignments[0].version.metadata.contract='egoverse.native-pi0.5_bc_aria/v1';
-assert.equal(w.experimentBundleCompatibility(registered,nativeAdapter).compatible,true,'verified native model data remains selectable');
-registered.assignments[0].version.metadata.validation.status='FAILED';
-assert.equal(w.experimentBundleCompatibility(registered,nativeAdapter).compatible,false,'failed validation cannot appear as compatible');
-const registryRefreshes = [];
-w.loadDataRegistry = async (force) => { registryRefreshes.push(force); };
-w.askUserDialog = async () => true;
-const copied=[];
-w.navigator.clipboard={writeText:async path=>copied.push(path)};
-w.showToast=()=>{};
-w.resourceRecordingIds=r=>[r.metadata?.recording_session_id || r.metadata?.session_id].filter(Boolean);
-w.dataResourceTypeLabel=r=>r.kind || 'Dataset';
-w.activateTab=async()=>{};w.refreshDataResourceTables=()=>{};
-const makeAdapter = (id, name, preset = {}, extra = {}) => ({
-  id, adapter_id:id, adapter_version_id:`${id}-v1`, adapter_version_number:1,
-  adapter_manifest_sha256:"a".repeat(64), name, available:true, trainable:true,
-  default_data_preset:"rgb", data_presets:[{
-    id:"rgb", name:"Three scene views and joints", observations:["state", "rgb"],
-    observation_requirements:{streams:[{name:"scene_front", camera_ids:["scene_front"], modality:"rgb"},{name:"scene_left", camera_ids:["scene_left"], modality:"rgb"},{name:"scene_right", camera_ids:["scene_right"], modality:"rgb"}]},
-    split_mode:"episode", minimum_episodes:1, ...preset,
-  }], ...extra,
+import {readFile} from "node:fs/promises";
+import {JSDOM} from "jsdom";
+const dom = new JSDOM(await readFile(new URL('../static/index.html', import.meta.url), 'utf8'), {
+  runScripts:'outside-only', url:'http://localhost:8080/#data', pretendToBeVisual:true,
 });
-const options = {
-  adapters: [
-    makeAdapter("recording-act", "ACT recordings"),
-    makeAdapter("act", "ACT"),
-    makeAdapter("openpi", "openpi", {}, {available:false, reason:"Requires a wrist camera", data_presets:[]}),
-  ],
-  sessions: [
-    {
-      id: "old",
-      name: "Old",
-      created_at: "2026-09-01",
-      eligible: false,
-      reason: "Images unavailable",
-      episodes: 2,
-    },
-    {
-      id: "new",
-      name: "New",
-      created_at: "2026-09-08",
-      eligible: true,
-      episodes: 3,
-      resource_id: "dataset",
-    },
-  ],
-  exports: [],
-};
-const resource = {
-  id: "dataset",
-  category: "dataset",
-  source_key: "new",
-  display_name: "Hand demos",
-  metadata: { managed_dataset: true, session_id: "new" },
-  versions: [],
-};
-w.api = async (path, request = {}) => {
-  calls.push([path, request]);
-  if (request.method === "POST") return { id: "job", resource_id: "dataset", state: "QUEUED", stage: "QUEUED", format: "recording-act", detail: "Waiting for conversion worker" };
-  if (path.startsWith("/api/data/resources/")) return { resource };
-  if (path.startsWith("/api/data/exports/options/")) {
-    const session = options.sessions.find(item => item.id === decodeURIComponent(path.split("/").at(-1)));
-    return structuredClone({session, adapters: options.adapters, resource: session?.resource_id ? resource : null});
-  }
-  if (path === "/api/data/exports/jobs") return structuredClone({adapters: options.adapters, exports: options.exports});
-  return structuredClone(options);
-};
-const flush = async () => {
-  for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r));
-};
-try {
-  w.eval(await readFile(new URL("../static/dialogs.js", import.meta.url), "utf8"));
-  w.eval(
-    await readFile(
-      new URL("../static/policy-exports.js", import.meta.url),
-      "utf8",
-    ),
-  );
-  await flush();
-  assert.equal(calls.length, 0, "Other tabs do not eagerly load the export catalog or registry");
-  assert.equal(w.stateClass("SUCCEEDED"), "is-running");
-  assert.equal(w.stateClass("ON CLUSTER"), "is-running");
-  assert.equal(w.stateClass("LOCAL"), "is-local");
-  assert.equal(w.stateClass("COPY UNAVAILABLE"), "is-failed");
-  assert.equal(el("policy-export-title").textContent, "Convert to a dataset");
-  assert.match(el("policy-export-title").parentElement.textContent, /Datasets.*experiment/);
-  assert.equal(w.document.querySelector('label[for="policy-export-name"]').textContent, "Dataset name");
-  assert.equal(el("create-policy-export").textContent.trim(), "Convert");
-  await w.openPolicyExport("old");
-  assert.equal(el("create-policy-export").disabled, true);
-  assert.match(
-    el("policy-export-compatibility").textContent,
-    /Images unavailable/,
-  );
-  const beforeOpenCalls = calls.length, beforeOpenRegistry = registryRefreshes.length;
-  await w.openPolicyExport("new", "dataset");
-  assert.deepEqual(calls.slice(beforeOpenCalls).map(([path]) => path), ["/api/data/exports/options/new"], "Opening Convert requests only the selected recording's settings");
-  assert.equal(registryRefreshes.length, beforeOpenRegistry, "Convert does not reload the dataset registry");
-  assert.equal(el("create-policy-export").disabled, false);
-  el("policy-export-adapter").value = "openpi";
-  el("policy-export-adapter").dispatchEvent(new w.Event("change"));
-  assert.equal(el("create-policy-export").disabled, true);
-  assert.match(el("policy-export-compatibility").textContent, /wrist camera/);
-  el("policy-export-adapter").value = "recording-act";
-  el("policy-export-adapter").dispatchEvent(new w.Event("change"));
-  assert.equal(el("policy-export-compatibility").hidden, true);
-  for (const id of ["preparation-select-none", "preparation-episodes", "preparation-add-session", "preparation-revision", "policy-export-session", "policy-export-target", "show-policy-export", "prepared-dataset-prepare"])
-    assert.equal(el(id), null, id);
-  el("preparation-validation").value = 0;
-  el("preparation-validation").dispatchEvent(new w.Event("input"));
-  assert.equal(el("create-policy-export").disabled, false);
-  assert.match(el("policy-export-compatibility").textContent,/without validation/);
-  el("preparation-validation").value = 20;
-  el("preparation-validation").dispatchEvent(new w.Event("input"));
-  assert.equal(el("create-policy-export").disabled, false);
-  el("policy-export-name").value = "Hand demos";
-  el("policy-export-form").dispatchEvent(
-    new w.Event("submit", { cancelable: true }),
-  );
-  await flush();
-  const post = calls.find(([, r]) => r.method === "POST");
-  assert.deepEqual(JSON.parse(post[1].body), {
-    session_id: "new",
-    adapter_id: "recording-act",
-    adapter_version_id: "recording-act-v1",
-    adapter_data_preset: "rgb",
-    name: "Hand demos",
-    resource_id: "dataset",
-    gateway: "auto",
-    validation_percent: 20,
-    seed: 42,
-  });
-  assert.equal(el("policy-export-dialog").open, false);
-  assert.equal(el("prepared-dataset-dialog").open, true);
-  assert.doesNotMatch(el("prepared-dataset-content").textContent, /Loading dataset details/, "The first accepted job advances to dataset details without a previously loaded catalog");
-  options.adapters.push(makeAdapter('egoverse','EgoVerse'));
-  await w.openPolicyExport('new');
-  el('policy-export-adapter').value='egoverse';
-  el('policy-export-adapter').dispatchEvent(new w.Event('change'));
-  assert.equal(el('preparation-mode'),null);
-  assert.equal(el('preparation-episode'),null);
-  const datasetName = el('policy-export-name').value;
-  el('policy-export-form').dispatchEvent(new w.Event('submit',{cancelable:true}));
-  await flush();
-  const submission=JSON.parse(calls.filter(([,r])=>r.method==='POST').at(-1)[1].body);
-  assert.equal(submission.session_id,'new');
-  assert.equal(submission.resource_id,'dataset');
-  assert.equal(submission.name,datasetName);
-  assert.ok(!('overfit_episode' in submission));
-  assert.ok(!('selections' in submission));
-
-  options.adapters.push(makeAdapter('act-native','XPolicyLab · ACT · Native', {
-    split_mode:'episode',minimum_episodes:2,description:'Episode splits are fixed during conversion.'}));
-  await w.openPolicyExport('new');
-  el('policy-export-adapter').value='act-native';
-  el('policy-export-adapter').dispatchEvent(new w.Event('change'));
-  assert.equal(el('create-policy-export').disabled,false);
-  assert.equal(el('preparation-validation').closest('.field').hidden,false);
-  assert.equal(el('policy-export-adapter-help'), null);
-  options.sessions.find(s=>s.id==='new').episodes=1;
-  await w.openPolicyExport('new');
-  el('policy-export-adapter').value='act-native';
-  el('policy-export-adapter').dispatchEvent(new w.Event('change'));
-  assert.equal(el('create-policy-export').disabled,true);
-  assert.match(el('policy-export-compatibility').textContent,/at least 2 episodes/);
-  options.sessions.find(s=>s.id==='new').episodes=1;
-  await w.openPolicyExport('new');
-  el('policy-export-adapter').value='egoverse';
-  el('policy-export-adapter').dispatchEvent(new w.Event('change'));
-  assert.equal(el('create-policy-export').disabled,false);
-  assert.match(el('policy-export-compatibility').textContent,/without validation steps/);
-  assert.equal(el('preparation-validation').disabled,true);
-
-  options.exports = [{id:'native',resource_id:'dataset',adapter:options.adapters.find(a=>a.id==='act-native'),split_mode:'episode',state:'READY',episodes:51,
-    split:{train:Array(41).fill(0),validation:Array(10).fill(0)},
-    loader_validation:{train_episodes:40,validation_episodes:11}}];
-  await w.openPreparedDataset('dataset');
-  assert.match(el('prepared-dataset-content').textContent,/41 train \/ 10 validation/);
-  assert.doesNotMatch(el('prepared-dataset-content').textContent,/original ACT/);
-
-  options.exports = [
-    {
-      id: "job",
-      resource_id: "dataset",
-      name: "<img src=x onerror=alert(1)>",
-      session_id: "new",
-      format: "recording-act",
-      state: "FAILED",
-      stage: "TRANSFERRING",
-      error: "Gateway unavailable",
-      version_id: "v",
-      locations: [{ kind: "local", status: "AVAILABLE", path: "/prepared/data <&>" }],
-      split: { train: [0], validation: [1] },
-      source_revision: "abc",
-      sources: [{}, {}],
-      usage: [],
-    },
-  ];
-  await w.openPreparedDataset("dataset");
-  assert.equal(
-    el("prepared-dataset-content").querySelectorAll("img").length,
-    0,
-  );
-  assert.match(
-    el("prepared-dataset-content").textContent,
-    /This computer/,
-  );
-  el("prepared-dataset-content").querySelector("[data-dataset-copy-path]").click();
-  await flush();
-  assert.equal(copied.at(-1), "/prepared/data <&>");
-  assert.equal(
-    el("prepared-dataset-content").querySelector("[data-preparation-train]"),
-    null,
-  );
-  assert.ok(el("prepared-dataset-content").querySelector("a[download]"));
-  const savedLocations = options.exports[0].locations;
-  options.exports[0].locations = [{kind: "cluster", host: "skynet", status: "AVAILABLE", path: "/cluster/prepared"}];
-  options.exports[0].remote_archive = "/cluster/preparation/dataset.zip";
-  await w.openPreparedDataset("dataset");
-  assert.equal(el("prepared-dataset-content").querySelector('a[download][href$="/dataset.zip"]'), null, "Shared recording datasets do not expose a duplicate ZIP archive");
-  assert.ok(el("prepared-dataset-content").querySelector('a[download][href$="/manifest.json"]'));
-  assert.doesNotMatch(el("prepared-dataset-content").textContent, /This computer/);
-  options.exports[0].locations = savedLocations;
-  delete options.exports[0].remote_archive;
-  await w.openPreparedDataset("dataset");
-  assert.deepEqual([...el("prepared-dataset-content").querySelectorAll("[data-dataset-results] th")].map(n=>n.textContent), ["Format", "Episodes", "Experiments presets", "Created", "Actions"]);
-  assert.equal(el("prepared-dataset-content").querySelector('[data-delete-kind="dataset"]'), null);
-  el("prepared-dataset-content")
-    .querySelector("[data-preparation-retry]")
-    .click();
-  await flush();
-  assert.ok(calls.some(([p]) => p === "/api/data/exports/job/retry"));
-  resource.versions = [
-    {
-      id: "source-two",
-      format: "skynet.episodes/v1",
-      revision: "abc123",
-      metadata: {
-        episodes: 2,
-        sources: [
-          { session_id: "new", index: 0 },
-          { session_id: "new", index: 2 },
-        ],
-        split: { train: [1], validation: [0], seed: 7, validation_percent: 30 },
-      },
-    },
-  ];
-  options.sessions[1].locations = [{kind:"remote", host:"sky2", path:"/recording/output/recordings/live"}];
-  await w.openPreparedDataset("dataset");
-  const content = el("prepared-dataset-content");
-  assert.equal(content.querySelector('[data-dataset-recordings]').textContent, 'View source recordings');
-  assert.doesNotMatch(content.textContent, /Original recording files|\/recording\/output/, 'Source information has a single entry point in Recordings');
-  const history = el('prepared-dataset-dialog').querySelector('[data-data-history]');
-  assert.equal(history.dataset.dataHistory, 'dataset', 'Files and history stays scoped to this dataset');
-  assert.ok(history.compareDocumentPosition(content.querySelector('[data-dataset-results]')) & w.Node.DOCUMENT_POSITION_FOLLOWING, 'Dataset-wide history appears above the result table');
-  assert.deepEqual([...content.querySelector('[data-dataset-metadata]').querySelectorAll('.key-value span')].map(n => n.textContent), ['Type', 'Source', 'Conversion attempts']);
-  options.exports[0].source_version_id = "source-two";
-  await w.openPolicyExport("new");
-  assert.equal(el("preparation-validation").value, "20");
-  assert.equal(el("preparation-seed").value, "42");
-  el("policy-export-form").dispatchEvent(new w.Event("submit", {cancelable: true}));
-  await flush();
-  const latest = calls.filter(([, r]) => r.method === "POST" && !r.body.includes("target")).at(-1);
-  assert.equal(JSON.parse(latest[1].body).session_id, "new");
-  assert.ok(!("selections" in JSON.parse(latest[1].body)), "older partial revisions cannot override all recordings");
-  options.sessions[1].episodes = 1;
-  await w.openPolicyExport("new");
-  assert.equal(el("create-policy-export").disabled, false);
-  el("close-policy-export").click();
-  assert.equal(el("policy-export-dialog").open, false);
-  assert.equal(el("policy-export-dialog").querySelector("details"), null);
-  const beforeReady = registryRefreshes.length;
-  options.exports[0].state = "READY";
-  options.exports[0].bundle_id = "new-cluster-bundle";
-  await w.openPreparedDataset("dataset");
-  assert.equal(registryRefreshes.length, beforeReady, "Detail refresh does not reload the whole registry; the shared data invalidation owns it");
-  await w.openPreparedDataset("dataset");
-  assert.equal(registryRefreshes.length, beforeReady, "unchanged data does not reload the registry");
-  options.exports = [];
-  resource.metadata = {};
-  resource.versions = [{id: "imported", format: "lerobot-v2.0", status: "READY", path: "/cluster/imported", revision: "abc123", metadata: {episodes: 42}}];
-  await w.openPreparedDataset("dataset");
-  assert.match(el("prepared-dataset-content").textContent, /lerobot-v2.0/);
-  assert.match(el("prepared-dataset-content").textContent, /42/);
-  assert.match(el("prepared-dataset-content").textContent, /cluster\/imported/);
-  assert.equal(el("prepared-dataset-content").querySelector(".state-pill.is-running"), null, "Usable results do not need a redundant READY badge");
-  assert.equal(el("prepared-dataset-content").querySelector('[data-delete-kind="dataset"]'), null);
-  options.sessions[1].episodes = 3;
-  await w.openPolicyExport("new");
-  assert.equal(el("policy-export-name").readOnly, true, "Preparing another version cannot rename the dataset");
-  assert.match(el("policy-export-name-help").textContent, /prepared result to this dataset/);
-  const normalApi = w.api;
-  const normalRegistry = w.loadDataRegistry, normalActivation = w.activateTab;
-  const existingExports = options.exports;
-  options.exports = [{id: "accepted-refresh", resource_id: "dataset", state: "QUEUED", format: "recording-act"}];
-  let finishAcceptedRegistry;
-  w.loadDataRegistry = () => assert.fail("Job status refresh must not reload the registry");
-  w.api = (path, request = {}) => path === "/api/data/exports/jobs"
-    ? new Promise(resolve => { finishAcceptedRegistry = () => resolve({exports: structuredClone(options.exports)}); })
-    : normalApi(path, request);
-  w.activateTab = () => assert.fail("Acknowledging a conversion must not wait for tab-wide loading");
-  const beforeAcceptedCalls = calls.length;
-  el("policy-export-form").dispatchEvent(new w.Event("submit", {cancelable: true}));
-  await flush();
-  assert.equal(typeof finishAcceptedRegistry, "function");
-  assert.equal(el("policy-export-dialog").open, false);
-  assert.equal(el("prepared-dataset-dialog").open, true);
-  assert.equal(el("prepared-dataset-context").textContent, "Conversion request accepted");
-  assert.match(el("prepared-dataset-content").textContent, /QUEUED.*Waiting for conversion worker/s);
-  assert.equal(calls.slice(beforeAcceptedCalls).filter(([path]) => path.startsWith("/api/data/resources/")).length, 0,
-    "Acknowledgment appears before any dataset detail or full registry response");
-  assert.equal(calls.slice(beforeAcceptedCalls).filter(([, request]) => request.method === "POST").length, 1);
-  el("close-prepared-dataset").click();
-  finishAcceptedRegistry();
-  await flush();
-  assert.equal(el("prepared-dataset-dialog").open, false, "Delayed background enrichment cannot reopen a dismissed acknowledgment");
-  w.loadDataRegistry = normalRegistry;
-  w.activateTab = normalActivation;
-  w.api = normalApi;
-  options.exports = existingExports;
-  await w.openPolicyExport("new");
-  let finishSubmission;
-  w.api = (path, request = {}) => request.method === "POST"
-    ? new Promise(resolve => { finishSubmission = resolve; }) : normalApi(path, request);
-  el("policy-export-form").dispatchEvent(new w.Event("submit", {cancelable: true}));
-  await flush();
-  assert.equal(typeof finishSubmission, "function");
-  el("close-policy-export").click();
-  finishSubmission({id: "late-job", resource_id: "dataset"});
-  await flush();
-  assert.equal(el("policy-export-dialog").open, false);
-  assert.equal(el("prepared-dataset-dialog").open, false, "A late submission response cannot reopen the dismissed workflow");
-  w.api = normalApi;
-  w.api = async (path, request = {}) => {
-    if (path === "/api/data/resources/dataset") throw new Error("Dataset detail temporarily unavailable");
-    return normalApi(path, request);
-  };
-  await w.openPreparedDataset("dataset");
-  assert.equal(el("prepared-dataset-error").hidden, false, "The active resource-detail failure must not be mistaken for a stale response");
-  assert.equal(catalogEvents.at(-1).state, "ready", "A resource-detail failure must not mark the independent preparation catalog unavailable");
-  assert.match(el("prepared-dataset-error").textContent, /temporarily unavailable/);
-  assert.doesNotMatch(el("prepared-dataset-content").textContent, /Loading dataset/);
-  const retryDetail = el("prepared-dataset-content").querySelector("[data-prepared-resource]");
-  assert.equal(retryDetail.textContent, "Try again", "Recovery must be available inside the modal");
-  w.api = normalApi;
-  retryDetail.click();
-  await flush();
-  assert.equal(el("prepared-dataset-error").hidden, true, "Successful retry clears the matching detail error");
-  assert.match(el("prepared-dataset-content").textContent, /lerobot-v2.0/);
-  w.api = async (path, request = {}) => {
-    if (path === "/api/data/exports/jobs") throw new Error("Preparation catalog temporarily unavailable");
-    return normalApi(path, request);
-  };
-  await w.openPreparedDataset("dataset");
-  assert.match(el("prepared-dataset-error").textContent, /catalog temporarily unavailable/);
-  assert.equal(catalogEvents.at(-1).state, "unavailable");
-  assert.match(catalogEvents.at(-1).error, /catalog temporarily unavailable/);
-  assert.ok(el("prepared-dataset-content").querySelector("[data-prepared-resource]"), "An initial catalog failure also has in-modal recovery");
-  w.api = normalApi;
-  el("prepared-dataset-content").querySelector("[data-prepared-resource]").click();
-  await flush();
-  assert.equal(el("prepared-dataset-error").hidden, true);
-  assert.equal(catalogEvents.at(-1).state, "ready", "Retry broadcasts recovery to the recording table");
-  w.api = async (path, request = {}) => {
-    if (path === "/api/data/exports/jobs") throw new Error("Later catalog outage");
-    return normalApi(path, request);
-  };
-  w.document.dispatchEvent(new w.CustomEvent("collection-recordings-changed"));
-  await flush();
-  assert.match(el("prepared-dataset-error").textContent, /Later catalog outage/);
-  assert.match(el("prepared-dataset-content").textContent, /lerobot-v2.0/, "A later outage retains the already displayed dataset rows");
-  assert.ok(el("prepared-dataset-content").querySelector("[data-prepared-resource]"), "Retained rows still provide in-modal retry");
-  w.api = normalApi;
-  el("prepared-dataset-content").querySelector("[data-prepared-resource]").click();
-  await flush();
-  assert.equal(el("prepared-dataset-error").hidden, true);
-  w.api = async (path, request = {}) => {
-    if (path === "/api/data/exports/options/new") throw new Error("Initial preparation options outage");
-    return normalApi(path, request);
-  };
-  await w.openPolicyExport("new");
-  const retryPreparation = el("policy-export-dialog").querySelector("[data-preparation-load-retry]");
-  assert.equal(retryPreparation.hidden, false);
-  assert.equal(el("create-policy-export").disabled, true);
-  w.api = normalApi;
-  retryPreparation.click();
-  await flush();
-  assert.equal(retryPreparation.hidden, true);
-  assert.equal(el("policy-export-error").hidden, true);
-  assert.equal(el("policy-export-name").value, "Hand demos");
-  assert.equal(el("create-policy-export").disabled, false, "The same eligible source becomes preparable after catalog recovery");
-  let failOldDetail;
-  w.api = (path, request = {}) => path === "/api/data/resources/old-dataset"
-    ? new Promise((_resolve, reject) => { failOldDetail = reject; }) : normalApi(path, request);
-  const oldDetail = w.openPreparedDataset("old-dataset");
-  await flush();
-  assert.equal(typeof failOldDetail, "function");
-  await w.openPreparedDataset("dataset");
-  failOldDetail(new Error("Old dataset unavailable"));
-  await oldDetail;
-  assert.equal(el("prepared-dataset-error").hidden, true, "A late failure cannot contaminate the replacement dataset");
-  assert.match(el("prepared-dataset-content").textContent, /lerobot-v2.0/);
-  w.api = normalApi;
-  let finishOldPreparation;
-  w.api = (path, request = {}) => path === "/api/data/exports/options/old"
-    ? new Promise(resolve => { finishOldPreparation = resolve; }) : normalApi(path, request);
-  options.sessions[0].resource_id = "older-resource";
-  const oldPreparation = w.openPolicyExport("old");
-  await flush();
-  assert.equal(typeof finishOldPreparation, "function");
-  await w.openPolicyExport("new");
-  assert.equal(el("create-policy-export").disabled, false);
-  finishOldPreparation({session: options.sessions[0], adapters: options.adapters, resource: {id: "older-resource", source_key: "old", display_name: "Old"}});
-  await oldPreparation;
-  el("policy-export-form").dispatchEvent(new w.Event("submit", {cancelable: true}));
-  await flush();
-  const currentPreparation = calls.filter(([path, request]) => path === "/api/data/exports" && request.method === "POST").at(-1);
-  assert.equal(JSON.parse(currentPreparation[1].body).session_id, "new");
-  assert.equal(JSON.parse(currentPreparation[1].body).resource_id, "dataset", "A late response for an earlier dialog cannot replace the current dataset binding");
-  w.api = normalApi;
-  let finishBackgroundCatalog;
-  w.api = (path, request = {}) => path === "/api/data/exports/jobs" && !request.method
-    ? new Promise(resolve => { finishBackgroundCatalog = resolve; }) : normalApi(path, request);
-  w.document.dispatchEvent(new w.CustomEvent("collection-recordings-changed"));
-  await flush();
-  assert.equal(typeof finishBackgroundCatalog, "function");
-  await w.openPolicyExport("new");
-  assert.equal(el("create-policy-export").disabled, false, "A pending background catalog cannot delay Convert settings");
-  finishBackgroundCatalog(structuredClone({adapters: options.adapters, exports: options.exports}));
-  await flush();
-  assert.equal(el("create-policy-export").disabled, false, "Background catalog updates cannot disable a prepared Convert dialog");
-  w.api = async (path, request = {}) => {
-    if (path === "/api/data/exports/jobs") throw new Error("Unrelated catalog outage");
-    return normalApi(path, request);
-  };
-  w.document.dispatchEvent(new w.CustomEvent("collection-recordings-changed"));
-  await flush();
-  assert.equal(el("create-policy-export").disabled, false, "A catalog outage does not invalidate the selected recording's successful settings response");
-  assert.equal(el("policy-export-error").hidden, true);
-  w.api = normalApi;
-  resource.metadata = {managed_dataset: true};
-  for (const [state, expected, jobId] of [
-    ["QUEUED", "QUEUED", null],
-    ["STAGING", "PREPARING SUBMISSION", null],
-    ["SUBMITTING", "SUBMITTING", null],
-    ["SUBMISSION_UNKNOWN", "CHECKING SUBMISSION", null],
-    ["PENDING", "QUEUED", "42"],
-    ["RUNNING", "RUNNING", "42"],
-  ]) {
-    options.exports = [{id: "cluster-preparation", resource_id: "dataset", format: "recording-act", state,
-      stage: state === "PENDING" ? "QUEUED" : state, execution: "cluster", gateway: "sky2",
-      cluster_partition: "rl2-lab", cluster_cpus: 4, cluster_job_id: jobId}];
-    await w.openPreparedDataset("dataset");
-    const cell = el("prepared-dataset-content").querySelector("tbody tr td:nth-child(1)");
-    assert.equal(cell.querySelector(".state-pill").textContent.trim(), expected);
-    assert.match(cell.textContent, /sky2 · rl2-lab/);
-    assert.match(cell.textContent, /4 CPUs/);
-    assert.match(cell.textContent, jobId ? /Slurm job 42/ : /Not yet assigned a Slurm job/);
-  }
-  options.exports[0].state = "FAILED";
-  options.exports[0].error = "Invalid run ID";
-  options.exports[0].cluster_job_id = null;
-  await w.openPreparedDataset("dataset");
-  assert.equal(el("prepared-dataset-content").querySelector('a[href$="/export.log"]'), null,
-    "A submission failure has no Slurm log to download");
-  options.exports[0].cluster_job_id = "42";
-  await w.openPreparedDataset("dataset");
-  assert.ok(el("prepared-dataset-content").querySelector('a[href$="/export.log"]'));
-  options.exports = [
-    {id: "published-recording-act", resource_id: "dataset", format: "recording-act", state: "READY", version_id: "version-recording-act"},
-    {id: "published-act", resource_id: "dataset", format: "act", state: "READY", version_id: "version-act"},
-    {id: "failed-recording-act", resource_id: "dataset", format: "recording-act", state: "FAILED", error: "Conversion interrupted"},
-  ];
-  resource.versions = [
-    {id:"version-recording-act",format:"zarr",revision:"one",metadata:{}},
-    {id:"version-act",format:"hdf5",revision:"two",metadata:{}},
-  ];
-  await w.openPreparedDataset("dataset");
-  assert.equal(el("prepared-dataset-context").textContent, "2 results", "Failed unpublished preparations count as attempts, not published versions");
-  assert.equal(el("prepared-dataset-content").querySelectorAll("[data-dataset-results] tbody > tr[data-dataset-result]").length, 3, "Each preparation attempt remains available in the detail rows");
-  const mainRow=el('prepared-dataset-content').querySelector('[data-dataset-result="job-published-recording-act"]');
-  assert.doesNotMatch(mainRow.textContent,/Download|Manifest|Delete|Storage|Settings/,'Summary keeps technical and destructive actions out of the main row');
-  const toggle=mainRow.querySelector('[data-dataset-result-toggle]');
-  const detailId=toggle.getAttribute('aria-controls');
-  assert.equal(el(detailId).hidden,true,'Per-result details start collapsed');
-  toggle.focus();toggle.click();await flush();
-  assert.equal(el(detailId).hidden,false);
-  assert.equal(toggle.getAttribute('aria-expanded'),'true');
-  const meta=el(detailId).querySelector('[data-dataset-metadata]');
-  assert.ok(meta, 'Dataset metadata is in the same expanded result Details');
-  assert.equal(el('prepared-dataset-content').querySelector('details[data-dataset-metadata]'), null, 'No duplicate Dataset details accordion');
-  await w.openPreparedDataset('dataset');
-  assert.equal(el(detailId).hidden,false,'Refreshing preserves the expanded result');
-  assert.ok(el(detailId).querySelector('[data-dataset-metadata]'), 'Refreshing keeps metadata inside result Details');
-  assert.equal(w.document.activeElement.dataset.datasetResultToggle,'job-published-recording-act','Refreshing preserves the Details button focus');
-  const newToggle=el('prepared-dataset-content').querySelector('[data-dataset-result-toggle="job-published-recording-act"]');
-  newToggle.click();assert.equal(el(detailId).hidden,true,'Details can be collapsed again');
-  assert.equal(el('prepared-dataset-content').querySelector('[data-delete-kind]'),null,'All deletion starts from the catalog Actions column');
-  resource.experiment_presets = [
-    {experiment_id:'experiment', version_id:'version-recording-act', revision_number:1},
-    {experiment_id:'experiment', version_id:'version-recording-act', revision_number:2},
-    {experiment_id:'another', version_id:'version-act', revision_number:1},
-  ];
-  await w.openPreparedDataset('dataset');
-  const presets = el('prepared-dataset-content').querySelector('[data-dataset-result="job-published-recording-act"] [data-dataset-presets]');
-  assert.equal(presets.textContent, '1 preset', 'Multiple revisions count as one preset');
-  assert.deepEqual(JSON.parse(presets.dataset.presetIds), ['experiment'], 'Each result links to only presets using that exact result');
-  resource.versions.push({id:"unlinked",format:"lerobot-v3",revision:"external-import",metadata:{}});
-  await w.openPreparedDataset('dataset');
-  assert.match(el('prepared-dataset-content').textContent,/lerobot-v3/, 'A conversion failure cannot hide an earlier result lacking a conversion job');
-  assert.equal(el('prepared-dataset-context').textContent,'3 results');
-  resource.category='file';
-  w.api=async (path, request={})=>{
-    if(path==='/api/data/exports/jobs') throw new Error('Collection backend unavailable');
-    return normalApi(path, request);
-  };
-  await w.openPreparedDataset('dataset');
-  assert.equal(el('prepared-dataset-error').hidden,true,'Files do not depend on collection availability');
-  assert.equal(el('prepared-dataset-content').querySelector('[data-registered-train]'),null,'Files cannot be offered as training datasets');
-  // Page navigation hides disclosure panels; reopening restores the shared body.
-  w.SkynetDialog.close(el('prepared-dataset-dialog'));
-  el('prepared-dataset-detail').hidden = true;
-  await w.openPreparedDataset(resource.id);
-  assert.equal(el('prepared-dataset-detail').hidden, false);
-  assert.equal(el('prepared-dataset-dialog').querySelector('[data-dialog-close]').textContent.trim(), 'Close');
-  // Server readiness wins over an earlier browser policy snapshot.
-  w.api = normalApi;
-  resource.category = 'dataset';
-  options.exports = [{id:'availability', resource_id:'dataset', format:'recording-act', state:'READY',
-    version_id:'version-recording-act', training_ready:true, training_setup:{adapter:'current-policy'},
-    locations:[{kind:'cluster',status:'AVAILABLE',path:'/prepared'}]}];
-  await w.openPreparedDataset('dataset');
-  assert.ok(el('prepared-dataset-content').querySelector('[data-preparation-train]'));
-  options.exports[0].training_ready = false;
-  await exportSubscription.refresh();
-  assert.equal(el('prepared-dataset-content').querySelector('[data-preparation-train]'),null,
-    'A freshly archived adapter cannot remain trainable through cached policy fields');
-  options.exports[0].training_ready = true;
-  options.exports[0].training_setup = {adapter:'restored-policy'};
-  await exportSubscription.refresh();
-  let selectedJob;
-  w.usePreparedDataset = async job => {selectedJob=job;};
-  el('prepared-dataset-content').querySelector('[data-preparation-train]').click();await flush();
-  assert.equal(selectedJob.training_setup.adapter,'restored-policy');
-  // Availability updates in an open Convert form retain the user's fields.
-  options.sessions[1].resource_id = null;
-  await w.openPolicyExport('new');
-  el('policy-export-adapter').value='recording-act';
-  el('policy-export-name').value='Unsaved dataset title';
-  el('preparation-seed').value='17';
-  options.adapters[0].available=false;
-  exportSubscription.invalidate(['adapters']);await exportSubscription.refresh();
-  assert.equal(el('create-policy-export').disabled,true);
-  assert.equal(el('policy-export-adapter').value,'recording-act');
-  assert.equal(el('policy-export-name').value,'Unsaved dataset title');
-  assert.equal(el('preparation-seed').value,'17');
-  options.adapters[0].available=true;
-  exportSubscription.invalidate(['adapters']);await exportSubscription.refresh();
-  assert.equal(el('create-policy-export').disabled,false);
-  // Adapter edits cannot silently upgrade the version selected in an open form.
-  options.adapters[0].adapter_version_id='recording-act-v2';
-  options.adapters[0].adapter_version_number=2;
-  exportSubscription.invalidate(['adapters']);await exportSubscription.refresh();
-  assert.equal(el('policy-export-adapter').value,'');
-  assert.equal(el('create-policy-export').disabled,true);
-  assert.equal(el('policy-export-name').value,'Unsaved dataset title');
-  el('policy-export-adapter').value='recording-act';
-  el('policy-export-adapter').dispatchEvent(new w.Event('change'));
-  assert.equal(el('create-policy-export').disabled,false);
-  const modality = id => el('policy-export-modalities').querySelector(`[data-input-modality="${id}"]`);
-  assert.deepEqual([...el('policy-export-modalities').children].map(item => item.dataset.inputModality), ['state', 'rgb', 'depth', 'point_cloud']);
-  assert.equal(modality('state').getAttribute('aria-label'), 'State: Used');
-  assert.equal(modality('rgb').classList.contains('is-used'), true);
-  assert.equal(modality('depth').classList.contains('is-used'), false);
-  assert.equal(modality('point_cloud').getAttribute('aria-label'), 'Point cloud: Not used');
-  assert.equal(el('policy-export-modalities').querySelector('input, select, button'), null, 'Input requirements are read-only');
-  assert.equal(el('policy-export-preset'), null, 'The adapter data selector is removed');
-  assert.equal(el('policy-export-requirements'), null, 'The redundant requirements and reuse prose is removed');
-  assert.equal(el('policy-export-modalities-detail'), null, 'Separate camera and point details are removed');
-  assert.deepEqual([...el('policy-export-modalities').children].map(item => item.textContent.trim()), ['State', 'RGB', 'Depth', 'Point cloud'], 'Only modality names are visible');
-  assert.doesNotMatch(el('policy-export-dialog').textContent, /Required:|Reuse \/ missing:|Checked when conversion starts|prepares missing observations/);
-  options.adapters[0].default_data_preset='state';
-  options.adapters[0].data_presets=[{id:'state', name:'Joint states', observations:['state'], observation_requirements:{streams:[]}, split_mode:'episode'}];
-  exportSubscription.invalidate(['adapters']);await exportSubscription.refresh();
-  assert.equal(modality('state').classList.contains('is-used'), true);
-  assert.equal(modality('rgb').classList.contains('is-used'), false);
-  assert.equal(el('policy-export-modalities-detail'),null);
-  el('policy-export-form').dispatchEvent(new w.Event('submit',{cancelable:true}));await flush();
-  const stateSubmission=JSON.parse(calls.filter(([,r])=>r.method==='POST').at(-1)[1].body);
-  assert.equal(stateSubmission.adapter_version_id,'recording-act-v2');
-  assert.equal(stateSubmission.adapter_data_preset,'state', 'Submission resolves the declared default without a data selector');
-  assert.equal(stateSubmission.format,undefined);
-  options.adapters.push(makeAdapter('unidex','UniDex', {
-    id:'pointcloud-faas', observations:['state','point_cloud'], action_representation:'skynet.unidex-faas/v1',
-    observation_requirements:{streams:[{name:'scene_front_pointcloud',camera_ids:['scene_front'],modality:'point_cloud',num_points:1024,channels:'XYZRGB'}]},
-  }, {default_data_preset:'pointcloud-faas'}));
-  await w.openPolicyExport('new');
-  el('policy-export-adapter').value='unidex';
-  el('policy-export-adapter').dispatchEvent(new w.Event('change'));
-  assert.equal(modality('point_cloud').classList.contains('is-used'),true);
-  assert.equal(modality('state').classList.contains('is-used'),true);
-  assert.equal(modality('rgb').classList.contains('is-used'),false,'RGB needed to construct a colored point cloud is not a separate model input');
-  assert.equal(modality('depth').classList.contains('is-used'),false,'Depth rendering dependency is not a separate model input');
-  assert.doesNotMatch(el('policy-export-dialog').textContent,/Point cloud: Front|1,024 points|XYZRGB/);
-  assert.doesNotMatch(el('policy-export-modalities').textContent,/Used|Not used/,'Usage status remains accessible without visible status text');
-  assert.doesNotMatch(el('policy-export-modalities').textContent,/FAAS|action|commands/,'Action targets are not labeled as model input modalities');
-  options.adapters.at(-1).default_data_preset='missing';
-  exportSubscription.invalidate(['adapters']);await exportSubscription.refresh();
-  assert.equal(el('create-policy-export').disabled,true,'An invalid default cannot silently use another preset');
-  assert.equal(el('policy-export-modalities-field').hidden,true);
-  // Live SSE replaces polling; disconnected fallback remains jobs-only.
-  w.SkynetDialog.close(el('policy-export-dialog'));w.activeTab='datasets';
-  options.exports[0].state='RUNNING';
-  let fallbackTimers=0;
-  const originalTimer=w.setTimeout.bind(w);
-  w.setTimeout=(callback,delay,...args)=>{
-    if(delay===3000){fallbackTimers++;return -123;}
-    return originalTimer(callback,delay,...args);
-  };
-  await exportSubscription.refresh();assert.equal(fallbackTimers,0);
-  w.SkynetRefresh.connected=false;
-  await exportSubscription.refresh();assert.equal(fallbackTimers,1);
-  assert.equal(calls.some(([path,request])=>path==='/api/data/exports' && !request.method),false,
-    'Current UI never downloads the full export catalog');
-  assert.equal(registryRefreshes.length,0,'Export state changes never fan out to whole-registry reads');
-  console.log('Dataset registration, source selection, recovery, shared deletion entry points and direct data use passed.');
-
-} finally {
-  w.close();
+const w=dom.window, el=id=>w.document.getElementById(id), calls=[];
+let subscription;
+w.activeTab='cluster';
+w.SkynetRefresh={connected:true,register(key,topics,visible,refresh,invalidate){subscription={topics,visible,refresh,invalidate};}};
+w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
+w.HTMLDialogElement.prototype.close=function(){if(this.open){this.open=false;this.dispatchEvent(new w.Event('close'));}};
+w.HTMLElement.prototype.scrollIntoView=()=>{};
+const app=await readFile(new URL('../static/app.js', import.meta.url),'utf8');
+for(const name of ['escapeHtml','formatDate','stateClass','statusPill','setHtmlIfChanged','emptyRow','patchTableRow','reconcileTableSequence','valueHtml','keyValueHtml','datasetEpisodeCount','datasetCanTrain']){
+  const start=app.indexOf(`function ${name}(`), text=app.slice(start);
+  w.eval(text.slice(0,text.indexOf('\n}\n')+3));
 }
+const sharedHistoryStart=app.indexOf('window.SkynetJobHistory =');
+w.eval(app.slice(sharedHistoryStart,app.indexOf('\nfunction renderDataImports()',sharedHistoryStart)));
+w.dataPreparationRows=[];
+w.document.addEventListener('dataset-preparation-changed',event=>{w.dataPreparationRows=event.detail;});
+let inspectedResource;
+w.openDataInspection=id=>{inspectedResource=id;};
+w.showToast=()=>{};
+const copied=[];w.navigator.clipboard={writeText:async value=>copied.push(value)};
+let selectedDataset;
+w.useDataset=async id=>{selectedDataset=id;};
+const adapter=(id,name,observations=['state','rgb'])=>({id,adapter_id:id,name,adapter_version_id:id+'-v1',adapter_version_number:1,
+  available:true,trainable:true,default_data_preset:'default',data_presets:[{id:'default',observations,observation_requirements:{streams:[]},minimum_episodes:1}]});
+const adapters=[adapter('hpt','EgoVerse HPT'),adapter('unidex','UniDex',['state','point_cloud'])];
+const datasets={
+  hpt:{id:'hpt',resource_id:'source',category:'dataset',display_name:'Shadow HPT',description:'Joint observations',created_at:'2026-09-19',format:'skynet.recording-dataset/v1',metadata:{adapter:{name:'EgoVerse HPT'},observations:['state','rgb'],episodes:[{},{}],split:{train:[0],validation:[1],seed:42}},locations:[{kind:'cluster',status:'AVAILABLE',host:'sky2',path:'/shared/hpt'}]},
+  unidex:{id:'unidex',resource_id:'source',category:'dataset',display_name:'Shadow UniDex',created_at:'2026-09-20',format:'skynet.recording-dataset/v1',metadata:{adapter:{name:'UniDex'},observations:['state','point_cloud'],episodes:[{},{}]},locations:[{kind:'cluster',status:'AVAILABLE',path:'/shared/unidex'}]},
+};
+let jobs=[
+  {id:'hpt-job',version_id:'hpt',resource_id:'source',name:'Shadow HPT',session_id:'recording',adapter:{name:'EgoVerse HPT'},state:'READY',training_ready:true,execution:'cluster',locations:datasets.hpt.locations},
+  {id:'unidex-job',version_id:'unidex',resource_id:'source',name:'Shadow UniDex',session_id:'recording',adapter:{name:'UniDex'},state:'READY',training_ready:true,execution:'cluster',locations:datasets.unidex.locations},
+  {id:'failed-job',resource_id:'source',name:'Failed earlier attempt',session_id:'recording',adapter:{name:'UniDex'},state:'FAILED',error:'Rendering failed',execution:'cluster',cluster_job_id:'12'},
+];
+const sessions={recording:{id:'recording',name:'Shadow Pick up cube',eligible:true,episodes:51},one:{id:'one',name:'One episode',eligible:true,episodes:1}};
+const api=async(path,request={})=>{
+  calls.push([path,request]);
+  if(path.startsWith('/api/data/exports/options/'))return structuredClone({session:sessions[path.split('/').at(-1)],adapters});
+  if(path==='/api/data/exports/jobs')return structuredClone({exports:jobs});
+  if(path.startsWith('/api/data/datasets/'))return {dataset:structuredClone(datasets[path.split('/').at(-1)])};
+  if(path.startsWith('/api/data/resources/'))return {resource:{id:'file-group',display_name:'Robot assets',category:'file',versions:[{format:'URDF',locations:[{host:'sky2',path:'/assets/robot'}]}]}};
+  if(path.endsWith('/retry')){jobs.find(j=>j.id==='failed-job').state='QUEUED';return {};}
+  if(path==='/api/data/exports' && request.method==='POST'){
+    const body=JSON.parse(request.body);
+    const job={id:'new-job',name:body.name,resource_id:'source',adapter:{name:'UniDex'},session_id:'recording',state:'QUEUED',detail:'Waiting for worker'};
+    jobs.push(job);return structuredClone(job);
+  }
+  throw new Error('Unexpected API '+path);
+};
+w.api=api;
+const flush=async()=>{for(let i=0;i<8;i++)await new Promise(r=>setImmediate(r));};
+try{
+  w.eval(await readFile(new URL('../static/dialogs.js',import.meta.url),'utf8'));
+  w.eval(await readFile(new URL('../static/policy-exports.js',import.meta.url),'utf8'));
+  await flush();
+  assert.equal(calls.length,0,'Unrelated tabs do not load conversion history');
+  await w.openPolicyExport('recording');
+  assert.deepEqual(calls.map(([path])=>path),['/api/data/exports/options/recording']);
+  assert.equal(el('policy-export-name').readOnly,false,'Each output has an independent editable name');
+  assert.equal(el('policy-export-name').value,'Shadow Pick up cube · EgoVerse HPT');
+  assert.doesNotMatch(el('policy-export-name-help').textContent,/Adds a prepared result/);
+  el('policy-export-adapter').value='unidex';el('policy-export-adapter').dispatchEvent(new w.Event('change'));
+  assert.equal(el('policy-export-name').value,'Shadow Pick up cube · UniDex');
+  const modality=id=>el('policy-export-modalities').querySelector(`[data-input-modality="${id}"]`);
+  assert.equal(modality('point_cloud').classList.contains('is-used'),true);
+  assert.equal(modality('rgb').classList.contains('is-used'),false);
+  assert.equal(modality('depth').classList.contains('is-used'),false);
+  assert.doesNotMatch(el('policy-export-modalities').textContent,/Used|Not used|1,024|XYZRGB/);
+  el('policy-export-name').value='My named dataset';
+  el('policy-export-adapter').value='hpt';el('policy-export-adapter').dispatchEvent(new w.Event('change'));
+  assert.equal(el('policy-export-name').value,'My named dataset','Changing adapter preserves an edited name');
+  el('preparation-seed').value='17';
+  adapters[0].available=false;subscription.invalidate(['adapters']);await subscription.refresh();
+  assert.equal(el('create-policy-export').disabled,true);
+  assert.equal(el('policy-export-name').value,'My named dataset');
+  assert.equal(el('preparation-seed').value,'17');
+  adapters[0].available=true;adapters[0].adapter_version_id='hpt-v2';adapters[0].adapter_version_number=2;
+  subscription.invalidate(['adapters']);await subscription.refresh();
+  assert.equal(el('policy-export-adapter').value,'','Changed adapter versions require explicit reselection');
+  el('policy-export-adapter').value='hpt';el('policy-export-adapter').dispatchEvent(new w.Event('change'));
+  el('policy-export-form').dispatchEvent(new w.Event('submit',{cancelable:true}));await flush();
+  const submitted=JSON.parse(calls.find(([path,options])=>path==='/api/data/exports' && options.method==='POST')[1].body);
+  assert.equal(submitted.name,'My named dataset');assert.equal(submitted.resource_id,undefined);
+  assert.equal(submitted.adapter_version_id,'hpt-v2');
+  assert.equal(el('policy-export-dialog').open,false);
+  assert.equal(el('prepared-dataset-dialog').open,true);
+  assert.match(el('prepared-dataset-content').textContent,/Waiting for worker/);
+  assert.equal(el('prepared-dataset-content').querySelectorAll('tbody tr').length,1);
+  jobs.find(j=>j.id==='new-job').state='READY';jobs.find(j=>j.id==='new-job').version_id='hpt';jobs.find(j=>j.id==='new-job').training_ready=true;
+  await subscription.refresh();
+  assert.equal(el('prepared-dataset-title').textContent,'Shadow HPT','Completed conversion opens its exact published result');
+  assert.doesNotMatch(el('prepared-dataset-content').textContent,/Shadow UniDex|Failed earlier attempt/);
+  assert.equal(el('prepared-dataset-content').querySelector('table'),null,'Dataset details contain no nested dataset table');
+  assert.equal(el('prepared-dataset-content').querySelector('[data-data-history]'),null,'Hidden provenance groups are not exposed');
+  assert.equal(el('prepared-dataset-actions').querySelector('[data-use-dataset]').dataset.useDataset,'hpt');
+  assert.equal(el('prepared-dataset-content').querySelector('[data-input-modality="rgb"]').classList.contains('is-used'),true);
+  el('prepared-dataset-actions').querySelector('[data-use-dataset]').click();await flush();assert.equal(selectedDataset,'hpt');
+  await w.openPreparedDataset('unidex');
+  assert.equal(el('prepared-dataset-title').textContent,'Shadow UniDex');
+  assert.equal(el('prepared-dataset-content').querySelector('[data-input-modality="rgb"]').classList.contains('is-used'),false);
+  assert.equal(el('prepared-dataset-content').querySelector('[data-input-modality="point_cloud"]').classList.contains('is-used'),true);
+  el('prepared-dataset-content').querySelector('[data-dataset-copy-path]').click();await flush();assert.deepEqual(copied,['/shared/unidex']);
+  datasets.unidex.archived_at='2026-09-20';await subscription.refresh();
+  assert.equal(el('prepared-dataset-actions').querySelector('[data-use-dataset]'),null);
+  datasets.unidex.archived_at=null;jobs.find(j=>j.id==='unidex-job').training_ready=false;await subscription.refresh();
+  assert.equal(el('prepared-dataset-actions').querySelector('[data-use-dataset]'),null,'Archived adapter cannot remain trainable');
+  await w.openDatasetConversionHistory({versionId:'hpt'});
+  assert.equal(el('prepared-dataset-title').textContent,'Conversion history');
+  assert.doesNotMatch(el('prepared-dataset-content').textContent,/Failed earlier attempt|Shadow UniDex/);
+  await w.openDatasetConversionHistory();
+  assert.match(el('prepared-dataset-content').textContent,/Failed earlier attempt/);
+  const failedRow=el('prepared-dataset-content').querySelector('[data-history-id="failed-job"]');
+  const retryButton=failedRow.querySelector('[data-preparation-retry]');
+  retryButton.focus();
+  await subscription.refresh();
+  assert.equal(el('prepared-dataset-content').querySelector('[data-history-id="failed-job"]'),failedRow,'Shared table preserves rows during background refresh');
+  assert.equal(w.document.activeElement,retryButton,'Unchanged history controls keep focus');
+  assert.equal(el('prepared-dataset-content').querySelector('.policy-export-job'),null);
+  assert.ok(el('prepared-dataset-content').querySelector('a[href$="/export.log"]'));
+  el('prepared-dataset-content').querySelector('[data-preparation-retry]').click();await flush();
+  assert.ok(calls.some(([path,options])=>path==='/api/data/exports/failed-job/retry' && options.method==='POST'));
+  assert.equal(failedRow.querySelector('[data-preparation-retry]'),null,'Changed state updates shared row actions');
+  assert.equal(el('policy-export-history'),null,'Conversion history has no separate inline panel');
+  assert.equal(el('policy-export-jobs'),null);
+  w.api=async(path,request={})=>{if(path==='/api/data/exports/jobs')throw new Error('History down');return api(path,request);};
+  await w.openPreparedDataset('hpt');assert.equal(el('prepared-dataset-title').textContent,'Shadow HPT','Published data details are independent of history availability');
+  await w.openFileResource('file-group');assert.equal(inspectedResource,'file-group','Files reuse the existing inspection controller');
+  assert.equal(el('prepared-dataset-dialog').open,false);
+  w.api=api;await w.openPolicyExport('one');assert.equal(el('preparation-validation').disabled,true);assert.equal(el('create-policy-export').disabled,false);
+  let resolveOld;
+  w.api=(path,request={})=>path.endsWith('/options/one')?new Promise(resolve=>{resolveOld=resolve;}):api(path,request);
+  const old=w.openPolicyExport('one');await flush();await w.openPolicyExport('recording');resolveOld({session:sessions.one,adapters});await old;
+  assert.match(el('policy-export-name').value,/Shadow/,'Late options cannot overwrite a newer form');
+  w.api=api;
+  w.SkynetDialog.close(el('policy-export-dialog'));w.activeTab='datasets';
+  let fallback=0;const setTimeout=w.setTimeout.bind(w);w.setTimeout=(fn,delay,...args)=>delay===3000?(fallback++,-1):setTimeout(fn,delay,...args);
+  await subscription.refresh();assert.equal(fallback,0);w.SkynetRefresh.connected=false;await subscription.refresh();assert.equal(fallback,1);
+  assert.equal(calls.some(([path,request])=>path==='/api/data/exports' && !request.method),false,'Never fetch full legacy export catalog');
+  console.log('Flat dataset details, conversion names, exact-result actions, history, stale requests and modality UI passed.');
+}finally{w.close();}

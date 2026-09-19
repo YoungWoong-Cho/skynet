@@ -114,12 +114,13 @@ def test_external_registration_preserves_source_and_blocks_active_import(prepara
     version=db.create_data_resource_version(resource['id'],revision='1',format='zarr',path=str(source),manifest_sha256='e'*64)
     db.record_data_location(version['id'],kind='cluster',host='test',path=str(source),manifest_sha256='e'*64)
     job=db.create_data_import(resource['id'],request={'revision':'1'})
+    db.update_data_import(job['id'],version_id=version['id'])
     workspace=SimpleNamespace(owns=lambda *_:True)
-    blocked=prepared_deletion.preview(service,workspace,'dataset',resource['id'])
+    blocked=prepared_deletion.preview(service,workspace,'dataset',version['id'])
     assert 'import to finish' in blocked['blockers'][0]['reason']
     db.update_data_import(job['id'],state='FAILED',version_id=version['id'])
-    plan=prepared_deletion.preview(service,workspace,'dataset',resource['id'])
+    plan=prepared_deletion.preview(service,workspace,'dataset',version['id'])
     assert not plan['blockers'] and not plan['files']
-    with pytest.raises(ValueError,match='changed'):prepared_deletion.delete(service,workspace,'dataset',resource['id'],blocked['token'])
-    assert prepared_deletion.delete(service,workspace,'dataset',resource['id'],plan['token'])['deleted']
+    with pytest.raises(ValueError,match='changed'):prepared_deletion.delete(service,workspace,'dataset',version['id'],blocked['token'])
+    assert prepared_deletion.delete(service,workspace,'dataset',version['id'],plan['token'])['deleted']
     assert source.read_bytes()==b'Externally owned dataset'

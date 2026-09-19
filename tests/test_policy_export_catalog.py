@@ -57,7 +57,7 @@ def save_sessions(service, sessions):
             )
 
 
-def test_catalog_queries_do_not_scale_with_sessions_or_recordings(setup, monkeypatch):
+def test_selected_options_queries_do_not_scale_with_library_size(setup, monkeypatch):
     service, original, _ = setup
     live = persisted_sessions(service)
     original["recording_images"] = {}
@@ -69,7 +69,6 @@ def test_catalog_queries_do_not_scale_with_sessions_or_recordings(setup, monkeyp
         return execute(connection, statement, parameters)
 
     monkeypatch.setattr(PostgresConnection, "execute", counted)
-    monkeypatch.setattr(live, "get", lambda _: pytest.fail("Catalog reread a session"))
     counts = []
     for session_count, episode_count in [(1, 2), (8, 250)]:
         sessions = []
@@ -81,30 +80,25 @@ def test_catalog_queries_do_not_scale_with_sessions_or_recordings(setup, monkeyp
             sessions.append(session)
         save_sessions(service, sessions)
         queries.clear()
-        options = service.options()
-        assert len(options["sessions"]) == session_count
-        assert all(item["eligible"] and item["episodes"] == episode_count for item in options["sessions"])
+        options = service.preparation_options(sessions[0]["id"])
+        assert options["session"]["eligible"] and options["session"]["episodes"] == episode_count
         assert sum("FROM live_xr_sessions" in query for query in queries) == 1
-        assert sum("FROM data_resources" in query for query in queries) == 1
+        assert all("FROM data_resources" not in query for query in queries)
+        assert "sessions" not in options and "resource" not in options
         counts.append(len(queries))
     assert counts[0] == counts[1]
 
 
-def test_catalog_preserves_dataset_links_and_archived_eligibility(setup, monkeypatch):
+def test_selected_options_ignore_existing_result_archive_state(setup, monkeypatch):
     service, original, _ = setup
-    sessions = [dict(original, id=f"session-{i}") for i in range(3)]
-    monkeypatch.setattr(service.live, "list", lambda **_: sessions)
-    archived = service.dataset(sessions[0])
-    service.database.update_data_resource(archived["id"], archived=True)
-    overfit = service.dataset(dict(sessions[1], recordings=sessions[1]["recordings"][:1]), overfit_episode=0)
-    options = {item["id"]: item for item in service.options()["sessions"]}
-    assert options["session-0"]["resource_id"] == archived["id"]
-    assert options["session-0"]["reason"] == "Dataset is archived"
-    assert not options["session-0"]["eligible"]
-    assert options["session-1"]["resource_id"] == overfit["id"]
-    assert options["session-1"]["eligible"]
-    assert options["session-2"]["resource_id"] is None
-    assert options["session-2"]["eligible"]
+    group = service.dataset(original)
+    output = service.database.create_data_resource_version(group["id"], revision="first", format="zarr",
+        path="/dataset/first", manifest_sha256="b"*64)
+    service.database.update_dataset(output["id"], archived=True)
+    options = service.preparation_options(original["id"])
+    assert options["session"]["eligible"]
+    assert "resource" not in options and "resource_id" not in options["session"]
+    assert service.database.get_dataset(output["id"])["archived_at"]
 
 
 @pytest.mark.parametrize("mutation, reason", [
@@ -140,7 +134,7 @@ def test_catalog_keeps_archive_and_recording_validation(setup, mutation, reason)
     live.archive.live, live.archive.cluster = live, ClusterClient()
     save_sessions(service, [session])
     assert "manifest" not in live.list()[0]["archive"]
-    options = service.options()["sessions"][0]
+    options = service.preparation_options(session["id"])["session"]
     assert options["eligible"] is (reason is None)
     if reason:
         assert reason in options["reason"]
@@ -166,10 +160,8 @@ def test_preparation_options_reads_only_selected_recording(setup, monkeypatch):
     result = service.preparation_options(session["id"])
     assert result["session"]["eligible"]
     assert result["session"]["episodes"] == 2
-    assert result["resource"]["id"] == resource["id"]
-    assert result["resource"]["display_name"] == "Existing dataset"
-    assert "versions" not in result["resource"]
-    assert len(queries) == 3, queries
+    assert "resource" not in result and "resource_id" not in result["session"]
+    assert len(queries) == 2, queries
     assert "WHERE id=?" in queries[0]
     assert all("policy_exports" not in query for query in queries)
 
@@ -177,12 +169,7 @@ def test_preparation_options_reads_only_selected_recording(setup, monkeypatch):
 def test_preparation_options_uses_current_source_and_archival_state(setup, monkeypatch):
     service, session, _ = setup
     result = service.preparation_options(session["id"])
-    assert result["session"]["eligible"] and result["resource"] is None
-    resource = service.dataset(session)
-    service.database.update_data_resource(resource["id"], archived=True)
-    result = service.preparation_options(session["id"])
-    assert not result["session"]["eligible"]
-    assert result["session"]["reason"] == "Dataset is archived"
+    assert result["session"]["eligible"] and "resource" not in result
     session["state"] = "RUNNING"
     result = service.preparation_options(session["id"])
     assert not result["session"]["eligible"]
@@ -251,4 +238,6 @@ def test_focused_preparation_endpoint_and_missing_session(setup, monkeypatch):
         assert response.status_code == 200
         assert response.json()["session"]["id"] == session["id"]
         assert "exports" not in response.json()
+        assert "resource" not in response.json()
         assert client.get("/api/data/exports/options/missing").status_code == 404
+        assert client.get("/api/data/exports").status_code == 405

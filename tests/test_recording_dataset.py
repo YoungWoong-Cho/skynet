@@ -224,7 +224,7 @@ def test_native_act_bridge_reads_shared_payload_and_preserves_native_alignment(t
     np.testing.assert_allclose(images[:,0,0,0].numpy(),np.array([13,33,23])/255)
     expected=(data.read(0,'action',slice(2,None))-stats['action_mean'])/stats['action_std']
     np.testing.assert_allclose(actions[:2].numpy(),expected)
-    assert mask.tolist()==[False,False,True,True]
+    assert mask.tolist()==[False,False]+[True]*48
     workspace=tmp_path/'native'
     directory=workspace/'XPolicyLab/policy/ACT'
     directory.mkdir(parents=True)
@@ -232,7 +232,8 @@ def test_native_act_bridge_reads_shared_payload_and_preserves_native_alignment(t
     prepare_recorded_act(tmp_path/'a',manifest,workspace,validate_recorded_act(tmp_path/'a',manifest))
     namespace={};exec((directory/'utils.py').read_text(),namespace)
     from act_native_data import load_data
-    assert namespace['load_data'] is load_data
+    assert namespace['load_data'].func is load_data
+    assert namespace['load_data'].keywords['action_steps'] == 50
     assert not list(workspace.rglob('*.hdf5'))
     config=json.loads((directory/'TASK_CONFIGS.json').read_text())
     assert next(iter(config.values()))['dataset_dir']==str(tmp_path/'a')
@@ -302,6 +303,7 @@ def test_evaluation_entrypoints_verify_reference_only_manifest_before_policy_loa
     module.main()
     assert calls[-1]=='simulate' and calls.count('policy')==1
     calls.clear()
+    close_handles()
     with h5py.File(src['images'],'r+') as file:
         file['action'][0,0] += 1
     with pytest.raises(ValueError,match='checksum'):

@@ -1331,6 +1331,21 @@ class DataResourceEditRequest(BaseModel):
         return value.strip()
 
 
+class DatasetEditRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=512)
+    description: str | None = Field(default=None, max_length=4096)
+    archived: bool | None = None
+
+    @field_validator("display_name")
+    @classmethod
+    def validate_display_name(cls, value):
+        if value is None or not value.strip():
+            raise ValueError("display_name cannot be blank or null")
+        return value.strip()
+
+
 class DataVersionCreateRequest(BaseModel):
     revision: str = Field(min_length=1, max_length=512)
     format: str = Field(min_length=1, max_length=128)
@@ -2305,10 +2320,13 @@ class PipelineService:
 
     @classmethod
     def _validate_sweep_inputs(cls, spec: ExperimentSpec, manifest: AdapterManifest) -> ExperimentSpec:
+        from .recording_sampling import experiment_sampling
         for variant in expand_sweep(spec):
+            document = variant.resolved_spec.model_dump(mode="python")
             cls._validate_manifest_input_fields(
-                variant.resolved_spec.model_dump(mode="python"), manifest
+                document, manifest
             )
+            experiment_sampling(document, manifest)
         return spec
 
     @staticmethod
@@ -3907,6 +3925,7 @@ class PipelineService:
         return experiment
 
     def preview(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        from .recording_sampling import experiment_sampling
         spec = self.normalize_spec(payload)
         self._validate_tracking_requirements(spec)
         variants = expand_sweep(spec)
@@ -3914,8 +3933,15 @@ class PipelineService:
         warnings: list[str] = []
         blockers: list[dict[str, Any]] = []
         argument_validations: list[dict[str, Any]] = []
+        sampling_summaries = []
         for variant in variants:
             resolved = variant.resolved_spec
+            sampling = experiment_sampling(resolved.model_dump(mode="python"))
+            if sampling:
+                sampling_summaries.append(dict(variant=variant.name, **sampling))
+                excluded = sum(len(value["excluded_episodes"]) for value in sampling["splits"].values())
+                if excluded:
+                    warnings.append(f"{variant.name}: {excluded} recording(s) are too short for the selected frequency and action chunk and will be excluded.")
             plan = resolve_adapter_plan(resolved)
             if not plan.blockers:
                 resolved, _ = self._auto_queue(resolved, plan, resolved.resources.gateway, record_snapshot=False)
@@ -3968,6 +3994,7 @@ class PipelineService:
             "warnings": list(dict.fromkeys(warnings)),
             "blockers": blockers,
             "argument_validations": argument_validations,
+            "recording_sampling": sampling_summaries,
             "resolved_revision": spec.source.revision,
         }
 
@@ -4093,6 +4120,9 @@ class PipelineService:
                     ExperimentSpec.model_validate(run_detail["resolved_spec_json"])
                 )
                 candidate_run_ids.add(run_detail["id"])
+            from .recording_sampling import experiment_sampling
+            for candidate in candidate_specs:
+                experiment_sampling(candidate.model_dump(mode="python"))
             self._preflight_repository_arguments(candidate_specs, gateway)
             self._preflight_live_auto_queue(candidate_specs, gateway)
 
@@ -4659,6 +4689,9 @@ class PipelineService:
                     [adapter_compatibility] if adapter_compatibility else []
                 ),
             }
+        if not is_evaluation_stage:
+            from .recording_sampling import experiment_sampling
+            experiment_sampling(spec.model_dump(mode="python"))
         from .adapters.egoverse_models import execution_compatibility_error
         compatibility_error = execution_compatibility_error(spec.source.model_dump(mode="python"), spec.native.config)
         if compatibility_error:
@@ -9668,8 +9701,31 @@ def _http_error(error: Exception) -> HTTPException:
     return HTTPException(status_code=500, detail=str(error))
 
 
+@router.get("/data/datasets")
+def list_datasets(include_archived: bool = Query(default=False)) -> dict[str, Any]:
+    return {"datasets": service.database.list_datasets(include_archived=include_archived)}
+
+
+@router.get("/data/datasets/{version_id}")
+def get_dataset(version_id: str) -> dict[str, Any]:
+    dataset = service.database.get_dataset(version_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return {"dataset": dataset}
+
+
+@router.patch("/data/datasets/{version_id}")
+def edit_dataset(version_id: str, request: DatasetEditRequest) -> dict[str, Any]:
+    try:
+        return {"dataset": service.database.update_dataset(
+            version_id, **request.model_dump(mode="python", exclude_unset=True))}
+    except Exception as error:
+        raise _http_error(error) from error
+
+
 @router.get("/data/resources")
 def list_data_resources(
+    category: str | None = Query(default=None, pattern=r"^(dataset|file)$"),
     provider: str | None = Query(default=None),
     namespace: str | None = Query(default=None),
     kind: str | None = Query(default=None),
@@ -9679,6 +9735,7 @@ def list_data_resources(
     return {
         "resource_types": RESOURCE_TYPES,
         "resources": service.database.list_data_resources(
+            category=category,
             provider=provider,
             namespace=namespace,
             kind=kind,
@@ -9715,6 +9772,11 @@ def edit_data_resource(
     resource_id: str, request: DataResourceEditRequest
 ) -> dict[str, Any]:
     try:
+        resource = service.database.get_data_resource(resource_id)
+        if resource is None:
+            raise KeyError("Data resource not found")
+        if resource["category"] == "dataset":
+            raise ValueError("Select an individual dataset to edit or archive")
         return {
             "resource": service.database.update_data_resource(
                 resource_id,
@@ -9728,6 +9790,11 @@ def edit_data_resource(
 @router.delete("/data/resources/{resource_id}")
 def archive_data_resource(resource_id: str) -> dict[str, Any]:
     try:
+        resource = service.database.get_data_resource(resource_id)
+        if resource is None:
+            raise KeyError("Data resource not found")
+        if resource["category"] == "dataset":
+            raise ValueError("Select an individual dataset to edit or archive")
         return {
             "resource": service.database.update_data_resource(resource_id, archived=True)
         }
@@ -10492,7 +10559,7 @@ def list_experiments() -> dict[str, Any]:
     records = service.database.list_experiments(limit=1000)
     dataset_links = service.database.dataset_preset_links()
     for record in records:
-        record["dataset_ids"] = sorted({link["resource_id"] for link in dataset_links
+        record["dataset_ids"] = sorted({link["version_id"] for link in dataset_links
                                         if link["experiment_id"] == record["id"]})
         runs = service.database.list_runs(
             experiment_revision_id=record["latest_revision_id"], limit=10000

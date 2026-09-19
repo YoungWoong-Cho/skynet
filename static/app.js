@@ -1520,7 +1520,9 @@ async function apiRequest(path, options = {}) {
           ? payload.detail || payload.message
           : payload;
       const message = apiErrorMessage(detail);
-      throw new Error(message || `Request failed (${response.status})`);
+      const error = new Error(message || `Request failed (${response.status})`);
+      error.status = response.status;
+      throw error;
     }
     return payload;
   } catch (error) {
@@ -7314,6 +7316,15 @@ async function previewExperiment() {
       warningList.append(item);
     });
     warningList.hidden = !warnings.length;
+    const samplingSummary = document.querySelector("#experiment-preview-sampling");
+    const sampling = result.recording_sampling || [];
+    samplingSummary.hidden = !sampling.length;
+    samplingSummary.replaceChildren();
+    sampling.forEach((plan) => {
+      const row = document.createElement("div");
+      row.textContent = `${sampling.length > 1 ? `${plan.variant} · ` : ""}${Number(plan.control_hz.toFixed(4))} Hz · Chunk ${plan.action_steps} · Train ${plan.splits.train.windows.toLocaleString()} · Validation ${plan.splits.validation.windows.toLocaleString()} windows`;
+      samplingSummary.append(row);
+    });
     elements.experimentPreviewMeta.textContent = `${variantCount} variant${variantCount === 1 ? "" : "s"} / ${runnableScripts.length} runnable / ${blockers.length} blocked${warnings.length ? ` / ${warnings.length} warning(s)` : ""}`;
     elements.experimentPreviewBlockerList.replaceChildren();
     blockers.forEach((blocker) => {
@@ -9595,7 +9606,7 @@ function trainingDataValue(run) {
   return (run.training_data || []).map((item) =>
     linkedValue(
       "dataset",
-      item.resource_id,
+      item.version_id,
       [
         item.name,
         item.format,
@@ -9717,7 +9728,9 @@ document.addEventListener("click", async (event) => {
     } else if (kind === "prepared") {
       const job = await api(`/api/data/exports/${encodeURIComponent(id)}`);
       await activateTab("data", true, "registry");
-      await window.openPreparedDataset((job.export || job).resource_id);
+      const conversion = job.export || job;
+      if (conversion.version_id) await window.openPreparedDataset(conversion.version_id);
+      else await window.openDatasetConversionHistory({ jobId: conversion.id });
     } else if (kind === "recording" || kind === "recording-file") {
       await activateTab("data", true, "recording");
       const search = document.getElementById("simulation-recordings-search");
@@ -13766,15 +13779,7 @@ function dataResourceActivity(resourceId) {
     "CANCELLED",
     "DELETED",
   ]);
-  const imports = dataImportRows.map((job) => ({
-    ...job,
-    activityKind: "Import",
-  }));
-  const conversions = dataPreparationRows.map((job) => ({
-    ...job,
-    activityKind: "Conversion",
-  }));
-  return [...imports, ...conversions]
+  return dataImportRows
     .filter((job) => job.resource_id === resourceId && !finished.has(job.state))
     .sort((a, b) =>
       String(b.created_at || "").localeCompare(String(a.created_at || "")),
@@ -13782,21 +13787,29 @@ function dataResourceActivity(resourceId) {
     .map((job) => {
       const failed = ["FAILED", "DELETE_FAILED"].includes(job.state);
       const label = failed
-        ? `${job.activityKind} failed`
-        : `${job.activityKind}: ${String(job.state || "pending")
+        ? "Import failed"
+        : `Import: ${String(job.state || "pending")
             .toLowerCase()
             .replaceAll("_", " ")}`;
-      const action =
-        job.activityKind === "Import" ? "import-detail" : "dataset";
-      const id = job.activityKind === "Import" ? job.id : resourceId;
+      const action = "import-detail";
+      const id = job.id;
       return `<span class="secondary"><button type="button" class="text-button${failed ? " danger-text" : ""}" data-resource-action="${action}" data-id="${escapeHtml(id)}"${job.error ? ` title="${escapeHtml(job.error)}"` : ""}>${escapeHtml(label)}</button></span>`;
     })
     .join("");
 }
 
+let publishedDatasetRefreshSignature = "";
 document.addEventListener("dataset-preparation-changed", (event) => {
   dataPreparationRows = Array.isArray(event.detail) ? event.detail : [];
   renderDataResources();
+  const missing = [...new Set(dataPreparationRows
+    .filter(job => job.state === "READY" && job.version_id &&
+      !dataResourceRows.some(row => row.id === job.version_id))
+    .map(job => job.version_id))].sort().join(",");
+  if (missing && missing !== publishedDatasetRefreshSignature) {
+    publishedDatasetRefreshSignature = missing;
+    window.SkynetRefresh?.invalidate(["data"], { reads: false });
+  }
 });
 
 function dataVersionPath(version) {
@@ -13812,26 +13825,9 @@ function dataVersionPath(version) {
   );
 }
 
-// Explicit recording ownership takes precedence over the original source session
-// for resources made from a separate single-episode recording entry.
-function resourceRecordingId(resource) {
-  if (resource.category !== "dataset") return "";
-  const metadata = resource.metadata || {};
-  return String(
-    metadata.recording_session_id ||
-      (resource.provider === "collection" || metadata.managed_dataset
-        ? metadata.session_id
-        : "") ||
-      "",
-  );
-}
-
 function resourceRecordingIds(resource) {
   if (resource.category !== "dataset") return [];
-  if (Array.isArray(resource.recording_ids))
-    return [...new Set(resource.recording_ids)];
-  const id = resourceRecordingId(resource);
-  return id ? [id] : [];
+  return [...new Set((resource.recording_ids || []).map(String))];
 }
 
 async function showDatasetRecordings(resourceId) {
@@ -13933,119 +13929,142 @@ function visibleDataResources() {
 
 function refreshDataResourceTables() {
   dataVersionRows = visibleDataResources().flatMap((resource) =>
-    (resource.versions || []).map((version) => ({
-      ...version,
-      _resource: resource,
-    })),
+    resource.category === "dataset"
+      ? [resource]
+      : (resource.versions || []).map((version) => ({
+          ...version,
+          _resource: resource,
+        })),
   );
   renderDataResources();
   renderDataVersions();
 }
 
-function renderDataResources() {
-  const showRecording = dataCatalogView !== "files";
-  document.getElementById("data-resource-date-column").textContent =
-    showRecording ? "Created at" : "Updated";
-  document.getElementById("data-resource-recording-column").hidden =
-    !showRecording;
-  document.getElementById("data-resource-type-column").hidden = showRecording;
-  const search = document.getElementById("data-resource-search");
-  search.placeholder = showRecording
-    ? "Filter name, recording or source"
-    : "Filter name or source";
-  const query = search.value.trim().toLowerCase();
-  const recordingId = showRecording ? search.dataset.recordingId : null;
-  const presetIds =
-    showRecording && search.dataset.resourceIds
-      ? JSON.parse(search.dataset.resourceIds)
-      : null;
-  const available = visibleDataResources();
-  const rows = available.filter((resource) => {
-    if (presetIds) return presetIds.includes(resource.id);
-    if (recordingId)
-      return resourceRecordingIds(resource).includes(recordingId);
-    return (
-      !query ||
-      [
-        resource.id,
-        resource.resource_id,
-        resource.display_name,
-        resource.namespace,
-        resource.source_key,
-        resource.kind,
-        resource.provider,
-        ...resourceRecordingIds(resource),
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase()
-        .includes(query)
-    );
-  });
-  if (showRecording) {
-    rows.sort(
-      (left, right) =>
-        (Date.parse(right.created_at || "") || 0) -
-        (Date.parse(left.created_at || "") || 0),
-    );
-  }
-  const unit = dataCatalogView === "files" ? "file set" : "dataset";
-  elements.dataResourceCount.hidden = showRecording;
-  elements.dataResourceCount.textContent = `${query || recordingId ? rows.length + " of " : ""}${available.length} ${unit}${available.length === 1 ? "" : "s"}`;
-  elements.dataResourcesBody.innerHTML = rows.length
-    ? rows
-        .map((resource) => {
-          const id = resource.id || resource.resource_id;
-          const recordingCount = resourceRecordingIds(resource).length;
-          const formats = dataFormatsLabel(resource);
-          return `<tr data-resource-id="${escapeHtml(id)}">
-        <td><span class="node-name">${escapeHtml(resource.display_name)}</span>${resource.archived_at ? `<span class="secondary">Archived</span>` : ""}${dataResourceActivity(id)}</td>
-        ${showRecording ? `<td><button type="button" class="text-button" data-resource-action="recordings" data-id="${escapeHtml(id)}">${recordingCount} recording${recordingCount === 1 ? "" : "s"}</button></td>` : ""}
-        ${showRecording ? "" : `<td>${escapeHtml(dataResourceTypeLabel(resource))}</td>`}
-        <td>${formats ? `<button type="button" class="text-button" data-resource-action="dataset" data-id="${escapeHtml(id)}">${escapeHtml(formats)}</button>` : "—"}</td>
-        <td>${escapeHtml(resource.provider || "—")}</td>
-        <td>${escapeHtml(formatDate(showRecording ? resource.created_at : resource.updated_at || resource.created_at))}</td>
-        <td class="row-actions data-resource-row-actions"><button type="button" data-resource-action="dataset" data-id="${escapeHtml(id)}">View</button>${!resource.archived_at && resource.provider === "huggingface" ? `<button type="button" data-resource-action="import" data-id="${escapeHtml(id)}">Import</button>` : ""}${resource.archived_at ? "" : `<button type="button" data-resource-action="version" data-id="${escapeHtml(id)}">Add files</button>`}<button type="button" data-resource-action="edit" data-id="${escapeHtml(id)}">Edit</button><button type="button" data-resource-action="${resource.archived_at ? "restore" : "archive"}" data-id="${escapeHtml(id)}">${resource.archived_at ? "Restore" : "Archive"}</button>${showRecording ? `<button type="button" data-delete-kind="dataset" data-delete-id="${escapeHtml(id)}">Delete</button>` : ""}</td>
-      </tr>`;
-        })
-        .join("")
-    : emptyRow(
-        6,
-        query
-          ? "No datasets or file sets match your filter."
-          : "No datasets or files have been registered.",
-      );
+function datasetEpisodeCount(dataset) {
+  const episodes = dataset.metadata?.episodes;
+  return Array.isArray(episodes)
+    ? episodes.length
+    : dataset.metadata?.num_episodes ?? episodes ?? "—";
 }
 
-function renderDataImports() {
-  const imports = inspectedDataResourceId
-    ? dataImportRows.filter(
-        (row) => String(row.resource_id) === inspectedDataResourceId,
-      )
-    : dataImportRows;
-  elements.dataImportCount.textContent = `${imports.length} import job${imports.length === 1 ? "" : "s"}`;
-  if (!imports.length) {
-    elements.dataImportsBody.innerHTML = emptyRow(
-      7,
-      "No dataset import jobs have been submitted.",
-    );
-    return;
-  }
-  elements.dataImportsBody.innerHTML = imports
-    .map((item) => {
-      const request = item.request || {};
-      const row = `<tr>
-      <td><span class="node-name">${escapeHtml(request.subset || "-")}</span><span class="secondary">${escapeHtml(item.resource_id)}</span></td>
-      <td><code>${escapeHtml(shortId(request.revision, 16))}</code><span class="secondary">${escapeHtml(request.format || "-")}</span></td>
-      <td>${statusPill(item.state || "UNKNOWN")}</td>
-      <td>${escapeHtml(item.slurm_job_id || "-")}<span class="secondary">${escapeHtml([item.gateway, item.node_list].filter(Boolean).join(" / ") || item.slurm_state || "-")}</span></td>
-      <td>${escapeHtml(item.version_id ? "Registered" : "—")}</td>
-      <td>${escapeHtml(formatDate(item.updated_at || item.created_at))}</td>
-      <td class="row-actions"><button type="button" data-import-action="detail" data-id="${escapeHtml(item.id)}">Detail</button>${dataImportCancelButton(item)}</td>
+function datasetCanTrain(dataset) {
+  if (dataset.archived_at) return false;
+  const jobs = dataPreparationRows.filter(job => job.version_id === dataset.id);
+  if (jobs.length && !jobs.some(job => job.training_ready)) return false;
+  const locations = dataset.locations || [];
+  return !locations.length || locations.some(location => location.status === "AVAILABLE" && location.path);
+}
+
+function renderDataResources() {
+  const datasets = dataCatalogView !== "files";
+  document.getElementById("show-data-conversion-history").hidden = !datasets;
+  for (const id of ["recording", "adapter", "modalities", "episodes", "presets"])
+    document.getElementById(`data-resource-${id}-column`).hidden = !datasets;
+  for (const id of ["type", "formats", "source"])
+    document.getElementById(`data-resource-${id}-column`).hidden = datasets;
+  document.getElementById("data-resource-date-column").textContent = datasets ? "Created at" : "Updated";
+  const search = document.getElementById("data-resource-search");
+  search.placeholder = datasets ? "Filter name, recording or adapter" : "Filter name or source";
+  const query = search.value.trim().toLowerCase();
+  const recordingId = datasets ? search.dataset.recordingId : null;
+  const datasetIds = datasets && search.dataset.resourceIds
+    ? JSON.parse(search.dataset.resourceIds) : null;
+  const available = visibleDataResources();
+  const rows = available.filter((resource) => {
+    if (datasetIds) return datasetIds.includes(resource.id);
+    if (recordingId) return resourceRecordingIds(resource).includes(recordingId);
+    return !query || [
+      resource.id, resource.display_name, resource.namespace, resource.source_key,
+      resource.kind, resource.provider,
+      datasets ? window.SkynetDatasetUI?.adapterLabel(resource) : "",
+      ...resourceRecordingIds(resource),
+    ].filter(Boolean).join(" ").toLowerCase().includes(query);
+  });
+  if (datasets) rows.sort((left, right) =>
+    (Date.parse(right.created_at || "") || 0) - (Date.parse(left.created_at || "") || 0));
+  const unit = datasets ? "dataset" : "file set";
+  elements.dataResourceCount.hidden = datasets;
+  elements.dataResourceCount.textContent = `${query || recordingId ? rows.length + " of " : ""}${available.length} ${unit}${available.length === 1 ? "" : "s"}`;
+  elements.dataResourcesBody.innerHTML = rows.length ? rows.map((resource) => {
+    const id = resource.id;
+    const escapedId = escapeHtml(id);
+    const recordingCount = resourceRecordingIds(resource).length;
+    const formats = dataFormatsLabel(resource);
+    const presetIds = [...new Set((resource.experiment_presets || []).map(item => item.experiment_id))];
+    const viewAction = datasets ? "dataset" : "files";
+    const useAction = datasets && datasetCanTrain(resource)
+      ? `<button type="button" data-resource-action="train" data-id="${escapedId}">Use in experiment</button>` : "";
+    const sourceActions = !datasets && !resource.archived_at
+      ? `${resource.provider === "huggingface" ? `<button type="button" data-resource-action="import" data-id="${escapedId}">Import</button>` : ""}<button type="button" data-resource-action="version" data-id="${escapedId}">Add files</button>` : "";
+    return `<tr data-resource-id="${escapedId}">
+      <td><span class="node-name">${escapeHtml(resource.display_name)}</span>${resource.archived_at ? '<span class="secondary">Archived</span>' : ""}${datasets ? "" : dataResourceActivity(id)}</td>
+      ${datasets ? `<td><button type="button" class="text-button" data-resource-action="recordings" data-id="${escapedId}">${recordingCount} recording${recordingCount === 1 ? "" : "s"}</button></td>
+      <td class="wrap-cell">${escapeHtml(window.SkynetDatasetUI?.adapterLabel(resource) || "—")}</td>
+      <td class="wrap-cell">${window.SkynetDatasetUI?.inputModalities(resource.metadata) || "—"}</td>
+      <td>${escapeHtml(datasetEpisodeCount(resource))}</td>
+      <td><button type="button" class="text-button" data-dataset-presets="${escapedId}" data-dataset-label="${escapeHtml(resource.display_name)}" data-preset-ids="${escapeHtml(JSON.stringify(presetIds))}">${presetIds.length} preset${presetIds.length === 1 ? "" : "s"}</button></td>`
+      : `<td>${escapeHtml(dataResourceTypeLabel(resource))}</td><td>${formats ? `<button type="button" class="text-button" data-resource-action="files" data-id="${escapedId}">${escapeHtml(formats)}</button>` : "—"}</td><td>${escapeHtml(resource.provider || "—")}</td>`}
+      <td>${escapeHtml(formatDate(datasets ? resource.created_at : resource.updated_at || resource.created_at))}</td>
+      <td class="row-actions data-resource-row-actions"><button type="button" data-resource-action="${viewAction}" data-id="${escapedId}">View</button>${useAction}${sourceActions}<button type="button" data-resource-action="edit" data-id="${escapedId}">Edit</button><button type="button" data-resource-action="${resource.archived_at ? "restore" : "archive"}" data-id="${escapedId}">${resource.archived_at ? "Restore" : "Archive"}</button>${datasets ? `<button type="button" data-delete-kind="dataset" data-delete-id="${escapedId}">Delete</button>` : ""}</td>
     </tr>`;
+  }).join("") : emptyRow(datasets ? 8 : 6,
+    query || recordingId || datasetIds ? `No ${datasets ? "datasets" : "file sets"} match your filter.`
+      : datasets ? "No datasets have been prepared. Convert a recording or register dataset files." : "No file sets have been registered.");
+}
+
+window.SkynetJobHistory = {
+  render(target, { columns, rows, empty, bodyId }) {
+    target.classList.add("table-scroll", "identity-table");
+    let table = target.querySelector(":scope > table");
+    if (!table) {
+      table = document.createElement("table");
+      target.replaceChildren(table);
+    }
+    const head = table.tHead || table.createTHead();
+    setHtmlIfChanged(head, `<tr>${columns.map(column => `<th>${escapeHtml(column)}</th>`).join("")}</tr>`);
+    const body = table.tBodies[0] || table.createTBody();
+    if (bodyId) body.id = bodyId;
+    if (!rows.length) {
+      setHtmlIfChanged(body, emptyRow(columns.length, empty));
+      return body;
+    }
+    const existing = new Map([...body.rows].map(row => [row.dataset.historyId, row]));
+    const next = rows.map(item => {
+      const id = String(item.id);
+      const row = existing.get(id) || document.createElement("tr");
+      row.dataset.historyId = id;
+      patchTableRow(row, item.cells.map(cell => typeof cell === "string" ? { html: cell } : cell));
       return row;
-    })
-    .join("");
+    });
+    const retained = new Set(next);
+    for (const row of [...body.rows]) if (!retained.has(row)) row.remove();
+    reconcileTableSequence(body, next);
+    return body;
+  },
+};
+
+function renderDataImports() {
+  const imports = [...dataImportRows].sort((left, right) =>
+    (Date.parse(right.created_at || "") || 0) - (Date.parse(left.created_at || "") || 0));
+  document.getElementById("show-data-import-history").hidden = imports.length === 0;
+  elements.dataImportCount.textContent = `${imports.length} import job${imports.length === 1 ? "" : "s"}`;
+  window.SkynetJobHistory.render(document.getElementById("data-import-history-table"), {
+    columns: ["Dataset directory", "Revision", "State", "Slurm", "Dataset", "Updated", "Actions"],
+    bodyId: "data-imports-body",
+    empty: "No dataset import jobs have been submitted.",
+    rows: imports.map(item => {
+      const request = item.request || {};
+      return { id: item.id, cells: [
+        `<span class="node-name">${escapeHtml(request.subset || "Dataset import")}</span>`,
+        `<code>${escapeHtml(shortId(request.revision, 16))}</code><span class="secondary">${escapeHtml(request.format || "-")}</span>`,
+        statusPill(item.state || "UNKNOWN"),
+        `${escapeHtml(item.slurm_job_id || "-")}<span class="secondary">${escapeHtml([item.gateway, item.node_list].filter(Boolean).join(" / ") || item.slurm_state || "-")}</span>`,
+        item.version_id ? `<button type="button" class="text-button" data-import-action="dataset" data-id="${escapeHtml(item.version_id)}">View dataset</button>` : "—",
+        escapeHtml(formatDate(item.updated_at || item.created_at)),
+        { className: "row-actions", html: `<button type="button" data-import-action="detail" data-id="${escapeHtml(item.id)}">Detail</button>${dataImportCancelButton(item)}` },
+      ] };
+    }),
+  });
   renderDataImportDetail();
 }
 
@@ -14111,8 +14130,8 @@ async function cancelDataImport(id, button) {
   }
 }
 
-function selectDataResourceForImport(id, launcher = null) {
-  const resource = dataResourceRows.find(
+function selectDataResourceForImport(id, launcher = null, registeredResource = null) {
+  const resource = registeredResource || dataResourceRows.find(
     (candidate) => String(candidate.id || candidate.resource_id) === String(id),
   );
   if (!resource || resource.provider !== "huggingface") {
@@ -14223,7 +14242,7 @@ function openDataInspection(resourceId) {
     (r) => String(r.id) === inspectedDataResourceId,
   );
   document.getElementById("data-inspection-title").textContent =
-    (resource?.display_name || "Dataset") +
+    (resource?.display_name || "Files") +
     " · Files and history";
   SkynetDialog.open(document.getElementById("data-inspection-dialog"));
 }
@@ -14383,7 +14402,7 @@ window.openConvertedDataset = async (job) => {
   const search = document.getElementById("data-resource-search");
   delete search.dataset.recordingId;
   delete search.dataset.resourceIds;
-  search.value = job.resource_id;
+  search.value = job.version_id || "";
   refreshDataResourceTables();
   const row = elements.dataResourcesBody.querySelector("[data-resource-id]");
   row?.querySelector("button")?.focus({ preventScroll: true });
@@ -14395,18 +14414,19 @@ async function loadDataRegistry(force = false) {
   elements.refreshDataRegistry.disabled = true;
   clearNotice(elements.dataRegistryError);
   try {
-    const [resourcePayload, importPayload, derivationPayload] =
+    const [datasetPayload, resourcePayload, importPayload, derivationPayload] =
       await Promise.all([
-        api("/api/data/resources?include_archived=true&include_versions=true"),
+        api("/api/data/datasets?include_archived=true"),
+        api("/api/data/resources?category=file&include_archived=true&include_versions=true"),
         api("/api/data/imports"),
         api("/api/data/derivations"),
       ]);
     if (generation !== dataRegistryGeneration) return;
-    const resources = listFrom(resourcePayload, ["resources"]);
+    const resources = listFrom(resourcePayload, ["resources"]).filter(resource => resource.category === "file");
     if (resources.some(resource => !Array.isArray(resource.versions)))
       throw new Error("Resource registry response is missing version summaries. Refresh after the server update.");
     dataResourceTypes = resourcePayload.resource_types || {};
-    dataResourceRows = resources;
+    dataResourceRows = [...listFrom(datasetPayload, ["datasets"]), ...resources];
     dataResourceCatalogState = "ready";
     notifyRecordingRegistryChanged();
     dataImportRows = listFrom(importPayload, ["imports"]);
@@ -14429,7 +14449,7 @@ async function loadDataRegistry(force = false) {
     dataResourceCatalogState = "unavailable";
     notifyRecordingRegistryChanged();
     elements.dataResourcesBody.innerHTML = emptyRow(
-      6,
+      dataCatalogView === "files" ? 6 : 8,
       "Dataset registry could not be loaded.",
     );
     elements.dataImportsBody.innerHTML = emptyRow(
@@ -14465,8 +14485,8 @@ function parseDataJson(element, label, fallback) {
   }
 }
 
-function selectDataResourceForVersion(id, launcher = null) {
-  const resource = dataResourceRows.find(
+function selectDataResourceForVersion(id, launcher = null, registeredResource = null) {
+  const resource = registeredResource || dataResourceRows.find(
     (candidate) => String(candidate.id || candidate.resource_id) === String(id),
   );
   if (!resource) {
@@ -14498,21 +14518,36 @@ async function createDataResource(event) {
   if (!elements.dataResourceForm.reportValidity()) return;
   elements.createDataResource.disabled = true;
   try {
-    const result = await api("/api/data/resources", {
-      method: "POST",
-      body: JSON.stringify({
-        provider: elements.dataResourceProvider.value.trim(),
-        namespace: elements.dataResourceNamespace.value.trim(),
-        source_key: elements.dataResourceSourceKey.value.trim(),
-        display_name: elements.dataResourceName.value.trim() || undefined,
-        category: document.getElementById("data-resource-category").value,
-        kind: elements.dataResourceKind.value.trim(),
-        description: elements.dataResourceDescription.value.trim(),
-      }),
-    });
-    const resource = entityFrom(result, "resource");
-    const id = resource.id || resource.resource_id;
-    showToast(`Resource ${dataResourceIdentity(resource)} registered.`);
+    const registration = {
+      provider: elements.dataResourceProvider.value.trim(),
+      namespace: elements.dataResourceNamespace.value.trim(),
+      source_key: elements.dataResourceSourceKey.value.trim(),
+      display_name: elements.dataResourceName.value.trim() || undefined,
+      category: document.getElementById("data-resource-category").value,
+      kind: elements.dataResourceKind.value.trim(),
+      description: elements.dataResourceDescription.value.trim(),
+    };
+    let resource, reused = false;
+    try {
+      const result = await api("/api/data/resources", {
+        method: "POST", body: JSON.stringify(registration),
+      });
+      resource = entityFrom(result, "resource");
+    } catch (error) {
+      if (registration.category !== "dataset" || error.status !== 409) throw error;
+      const query = new URLSearchParams({
+        category: "dataset", provider: registration.provider, namespace: registration.namespace,
+      });
+      const existing = await api(`/api/data/resources?${query}`);
+      resource = listFrom(existing, ["resources"]).find(row =>
+        row.category === "dataset" && row.source_key === registration.source_key &&
+        row.provider === registration.provider && row.namespace === registration.namespace &&
+        row.kind === registration.kind && !row.archived_at);
+      if (!resource) throw error;
+      reused = true;
+    }
+    const id = resource.id;
+    showToast(reused ? "Using the existing source registration." : `Source ${dataResourceIdentity(resource)} registered.`);
     closeDisclosurePanel(
       elements.dataResourceForm,
       elements.showDataResourceForm,
@@ -14524,8 +14559,8 @@ async function createDataResource(event) {
     elements.dataResourceForm.reset();
     await loadDataRegistry(true);
     if (id) {
-      if (resource.provider === "huggingface") selectDataResourceForImport(id);
-      else selectDataResourceForVersion(id);
+      if (resource.provider === "huggingface") selectDataResourceForImport(id, null, resource);
+      else selectDataResourceForVersion(id, null, resource);
     }
   } catch (error) {
     showToast(`Resource registration failed: ${error.message}`, true);
@@ -15779,51 +15814,18 @@ const tutorialTours = {
   datasets: {
     title: "Datasets",
     steps: [
-      {
-        selector: "#data-resources-body",
-        title: "Resources are named data items",
-        instruction:
-          "Browse registered datasets, simulator assets, and other sources here. Exact contents live in immutable versions.",
-      },
-      {
-        selector: "#data-resource-provider",
-        title: "Describe a missing source",
-        instruction:
-          "Normal imports register resources automatically. This manual form needs the real provider, owner, name, kind, and purpose.",
-        reveal: ["#data-resource-form"],
-      },
-      {
-        selector: "#data-versions-body",
-        title: "Versions pin exact contents",
-        instruction:
-          "Each version identifies one unchanged set of files, revision, format, path, and inventory hash.",
-      },
-      {
-        selector: "#data-version-revision",
-        title: "Publish only verified files",
-        instruction:
-          "Use the actual upstream revision, existing canonical path, computed SHA-256, and READY state only after inventory verification. This form is normally opened from a resource row.",
-        reveal: ["#data-version-form"],
-      },
-      {
-        selector: "#data-derivations-body",
-        title: "Read processing receipts",
-        instruction:
-          "Derivation rows show which immutable inputs and converter produced each processed output.",
-      },
-      {
-        selector: "#data-derivation-inputs",
-        title: "Pin every derivation input",
-        instruction:
-          "List real version IDs and their roles. Conversion workflows normally record this receipt automatically.",
-        reveal: ["#data-derivation-form"],
-      },
-      {
-        selector: "#data-converter-commit",
-        title: "Pin the converter",
-        instruction:
-          "Record the exact converter repository and commit so the processed output can be reproduced.",
-      },
+      { id: "results", selector: "#data-resources-body", title: "One row is one dataset",
+        instruction: "Each row is one prepared result. Different adapters or conversion settings produce separate datasets, even when they share recording files." },
+      { id: "inputs", selector: "#data-resource-modalities-column", title: "Review the inputs",
+        instruction: "Input modalities show which recorded values and rendered observations this dataset contains for its adapter." },
+      { id: "recordings", selector: "#data-resource-recording-column", title: "Open the source recordings",
+        instruction: "The recording count links to the recordings used by this exact dataset." },
+      { id: "presets", selector: "#data-resource-presets-column", title: "Track experiment use",
+        instruction: "Experiment presets link to the saved experiments that reference this exact dataset." },
+      { id: "actions", selector: "#data-resources-body", title: "Manage individual datasets",
+        instruction: "View inspects one dataset. Use in experiment selects it for training. Edit, Archive and Delete apply only to that dataset." },
+      { id: "register", selector: "#show-data-resource-form", title: "Register existing files",
+        instruction: "Use New to register an external source, then import or add its verified files. A dataset appears here after its files are ready." },
     ],
   },
   collection: {
@@ -16180,174 +16182,6 @@ const interactiveTutorialTours = {
         title: "Saving is outside this tutorial",
         instruction:
           "The verified preview is the safe endpoint. Saving creates a permanent experiment with no cleanup API, and submitting can launch Slurm, so neither action is part of this tutorial.",
-      },
-    ],
-  },
-  datasets: {
-    title: "Datasets",
-    steps: [
-      {
-        id: "open-resource",
-        selector: "#show-data-resource-form",
-        gate: "action",
-        title: "Open a clean resource draft",
-        instruction:
-          "Click until the clean resource form is open. The canonical Show/Hide control resets edit state only when opening and makes no API request.",
-        localPredicate: () =>
-          !document.querySelector("#data-resource-form")?.hidden,
-      },
-      {
-        id: "provider",
-        selector: "#data-resource-provider",
-        gate: "field",
-        title: "Choose the source provider",
-        instruction:
-          "This lifecycle creates a disposable named resource only. Exact file versions remain separate and immutable.",
-        useValue: () => "local",
-        validate: tutorialNonEmpty,
-      },
-      {
-        id: "namespace",
-        selector: "#data-resource-namespace",
-        gate: "field",
-        title: "Use the tutorial namespace",
-        instruction:
-          "Keep the disposable resource isolated from production names.",
-        useValue: () => "tutorial",
-        validate: tutorialNonEmpty,
-      },
-      {
-        id: "name",
-        selector: "#data-resource-source-key",
-        gate: "field",
-        title: "Give the resource a unique source key",
-        instruction: "The generated source key carries this tutorial session token.",
-        useValue: ({ token }) => `${token}-resource`,
-        validate: tutorialNonEmpty,
-      },
-      {
-        id: "kind",
-        selector: "#data-resource-kind",
-        gate: "field",
-        title: "Declare the data kind",
-        instruction:
-          "Choose the role that matches the source. This example is only a demonstrations registry record, not uploaded data.",
-        useValue: () => "demonstrations",
-        validate: tutorialNonEmpty,
-      },
-      {
-        id: "description",
-        selector: "#data-resource-description",
-        gate: "field",
-        title: "Tag ownership",
-        instruction:
-          "The token in this description lets the tutorial verify the exact record before editing or archiving it.",
-        useValue: ({ token }) => `Disposable tutorial resource ${token}`,
-      },
-      {
-        id: "create",
-        selector: "#create-data-resource",
-        gate: "action",
-        risk: "persistent",
-        confirmVerb: "CREATE",
-        title: "Create the resource",
-        instruction:
-          "Click Register once, type the confirmation, then click it again. Advancement requires a successful POST returning resource.id.",
-        request: {
-          method: "POST",
-          path: "/api/data/resources",
-          bind: "resourceId",
-          entity: "resource",
-          establishBinding: true,
-          identity: tutorialResourceIdentity,
-          preflight: tutorialResourceFormIdentity,
-          record: { kind: "data-resource", cleanup: "archive" },
-          render: ({ bindings }) =>
-            tutorialBoundSelector(
-              "resource-id",
-              bindings.resourceId,
-              '[data-resource-action="edit"]',
-            ),
-        },
-      },
-      {
-        id: "read",
-        selector: ({ bindings }) =>
-          tutorialBoundSelector(
-            "resource-id",
-            bindings.resourceId,
-            '[data-resource-action="edit"]',
-          ),
-        gate: "action",
-        waitForTarget: true,
-        title: "Read the exact created resource",
-        instruction:
-          "Click View / edit on the bound row. The exact GET response must match the bound ID and immutable tutorial name.",
-        request: {
-          method: "GET",
-          path: ({ bindings }) =>
-            `/api/data/resources/${encodeURIComponent(bindings.resourceId)}`,
-          bind: "resourceId",
-          entity: "resource",
-          identity: tutorialResourceIdentity,
-        },
-      },
-      {
-        id: "edit-description",
-        selector: "#data-resource-description",
-        reveal: ["#data-resource-form"],
-        gate: "field",
-        title: "Edit the description",
-        instruction:
-          "Change the description while retaining the token so ownership remains verifiable.",
-        useValue: ({ token }) =>
-          `Updated disposable tutorial resource ${token}`,
-        validate: tutorialContainsToken,
-      },
-      {
-        id: "update",
-        selector: "#create-data-resource",
-        gate: "action",
-        risk: "persistent",
-        confirmVerb: "UPDATE",
-        requiresOwned: "resourceId",
-        title: "Save the real update",
-        instruction:
-          "Click Save once, type the confirmation, then click again. Advancement requires a matching PATCH and the same resource ID.",
-        request: {
-          method: "PATCH",
-          path: ({ bindings }) =>
-            `/api/data/resources/${encodeURIComponent(bindings.resourceId)}`,
-          bind: "resourceId",
-          entity: "resource",
-          identity: tutorialResourceIdentity,
-        },
-      },
-      {
-        id: "archive",
-        selector: ({ bindings }) =>
-          tutorialBoundSelector(
-            "resource-id",
-            bindings.resourceId,
-            '[data-resource-action="archive"]',
-          ),
-        gate: "action",
-        risk: "cleanup",
-        confirmVerb: "ARCHIVE",
-        requiresOwned: "resourceId",
-        waitForTarget: true,
-        title: "Archive the tutorial resource",
-        instruction:
-          "Archiving is the supported cleanup; it does not delete payload bytes. Confirm and click the bound Archive control again.",
-        request: {
-          method: "DELETE",
-          path: ({ bindings }) =>
-            `/api/data/resources/${encodeURIComponent(bindings.resourceId)}`,
-          bind: "resourceId",
-          entity: "resource",
-          identity: tutorialResourceIdentity,
-          cleanupBinding: "resourceId",
-        },
       },
     ],
   },
@@ -16981,10 +16815,6 @@ function tutorialHasExperimentPreview(payload) {
   );
 }
 
-function tutorialResourceIdentity({ token }) {
-  return [{ paths: ["source_key"], value: `${token}-resource` }];
-}
-
 function tutorialAdapterSlug(token, suffix) {
   // Legacy saved tutorials used uppercase timestamp characters. Keep their
   // ownership token intact while generating a valid adapter identifier.
@@ -17008,12 +16838,6 @@ function tutorialExperimentAdapterIdentity({ token }) {
       value: tutorialAdapterSlug(token, "adapter"),
     },
   ];
-}
-
-function tutorialResourceFormIdentity({ token }) {
-  return (
-    document.querySelector("#data-resource-source-key")?.value === `${token}-resource`
-  );
 }
 
 function tutorialCollectionAdapterFormIdentity({ token }) {
@@ -17128,21 +16952,6 @@ function loadTutorialSession(page) {
             : record.cleanupState,
       }));
     }
-    // Existing resource tutorial receipts refer to the same immutable key under
-    // its former API field. Preserve ownership checks when resuming cleanup.
-    saved.ownedRecords = (saved.ownedRecords || []).map((record) =>
-      record.kind === "data-resource"
-        ? {
-            ...record,
-            expectedIdentity: (record.expectedIdentity || []).map((rule) => ({
-              ...rule,
-              paths: rule.paths.map((path) =>
-                path === "name" ? "source_key" : path,
-              ),
-            })),
-          }
-        : record,
-    );
     return saved.definitionVersion === 3 ? saved : null;
   } catch {
     return null;
@@ -18179,6 +17988,8 @@ function resetDataResourceEditor(hide = true) {
   document.querySelector("#data-resource-visible-id").value = "";
   document.querySelector("#data-resource-identity-field").hidden = true;
   document.querySelector("#data-resource-source-details").open = true;
+  document.querySelector("#data-resource-source-details").hidden = false;
+  delete form.dataset.editingDataset;
   elements.dataResourceName.disabled = false;
   elements.dataResourceName.required = false;
   elements.dataResourceSourceKey.readOnly = false;
@@ -18201,10 +18012,12 @@ async function openDataResourceEditor(id, launcher = null) {
     revealLauncher,
   );
   try {
-    const payload = await api(`/api/data/resources/${encodeURIComponent(id)}`);
+    const dataset = dataResourceRows.some(row => row.id === id && row.category === "dataset");
+    const payload = await api(`/api/data/${dataset ? "datasets" : "resources"}/${encodeURIComponent(id)}`);
     if (!disclosureTokenIsCurrent(elements.dataResourceForm, requestToken))
       return;
-    const resource = entityFrom(payload, "resource");
+    const resource = entityFrom(payload, dataset ? "dataset" : "resource");
+    elements.dataResourceForm.dataset.editingDataset = String(dataset);
     if (String(resource.id || "") !== String(id))
       throw new Error("Resource detail ID did not match the requested record.");
     document.querySelector("#data-resource-id").value = resource.id || id;
@@ -18216,11 +18029,12 @@ async function openDataResourceEditor(id, launcher = null) {
     elements.dataResourceName.disabled = false;
     elements.dataResourceName.required = true;
     elements.dataResourceSourceKey.value = resource.source_key || "";
-    elements.dataResourceSourceKey.disabled = false;
+    elements.dataResourceSourceKey.disabled = dataset;
     elements.dataResourceSourceKey.readOnly = true;
     document.querySelector("#data-resource-visible-id").value = resource.id || id;
     document.querySelector("#data-resource-identity-field").hidden = false;
     document.querySelector("#data-resource-source-details").open = false;
+    document.querySelector("#data-resource-source-details").hidden = dataset;
     document.querySelector("#data-resource-name-help").hidden = true;
     setDataResourceTypes(resource.category, resource.kind);
     document.querySelector("#data-resource-description").value =
@@ -18250,7 +18064,7 @@ async function updateDataResource(id) {
   elements.dataResourceName.value = elements.dataResourceName.value.trim();
   if (!form.reportValidity()) return;
   try {
-    await api(`/api/data/resources/${encodeURIComponent(id)}`, {
+    await api(`/api/data/${form.dataset.editingDataset === "true" ? "datasets" : "resources"}/${encodeURIComponent(id)}`, {
       method: "PATCH",
       body: JSON.stringify({
         display_name: elements.dataResourceName.value.trim(),
@@ -18263,51 +18077,44 @@ async function updateDataResource(id) {
     resetDataResourceEditor(false);
     loadedTabs.delete("datasets");
     await loadDataRegistry(true);
-    showToast("Registration updated.");
+    showToast("Saved.");
   } catch (error) {
     showToast(`Resource update failed: ${error.message}`, true);
   }
 }
 
 async function restoreDataResource(id) {
+  const dataset = dataResourceRows.some(row => row.id === id && row.category === "dataset");
   try {
-    await api(`/api/data/resources/${encodeURIComponent(id)}`, {
-      method: "PATCH",
-      body: JSON.stringify({ archived: false }),
+    await api(`/api/data/${dataset ? "datasets" : "resources"}/${encodeURIComponent(id)}`, {
+      method: "PATCH", body: JSON.stringify({ archived: false }),
     });
     await loadDataRegistry(true);
-    showToast("Resource restored, including its existing versions.");
+    showToast(dataset ? "Dataset restored." : "File set restored.");
   } catch (error) {
-    showToast(`Resource restore failed: ${error.message}`, true);
+    showToast(`Restore failed: ${error.message}`, true);
   }
 }
 
 async function archiveDataResource(id) {
-  if (
-    !(await askUserDialog(
-      "Archive this resource record? Payload files are not deleted.",
-    ))
-  ) {
-    resetTutorialAttempt(
-      "Archive cancelled; type the tutorial confirmation again before retrying",
-    );
+  const dataset = dataResourceRows.some(row => row.id === id && row.category === "dataset");
+  if (!(await askUserDialog(`Archive this ${dataset ? "dataset" : "file set"}? Payload files are not deleted.`))) {
+    resetTutorialAttempt("Archive cancelled; type the tutorial confirmation again before retrying");
     return;
   }
   try {
-    await api(`/api/data/resources/${encodeURIComponent(id)}`, {
-      method: "DELETE",
-    });
+    await api(`/api/data/${dataset ? "datasets" : "resources"}/${encodeURIComponent(id)}`,
+      dataset ? { method: "PATCH", body: JSON.stringify({ archived: true }) } : { method: "DELETE" });
     loadedTabs.delete("datasets");
     await loadDataRegistry(true);
-    showToast("Resource archived; payload files were not deleted.");
+    showToast(`${dataset ? "Dataset" : "File set"} archived; payload files were not deleted.`);
   } catch (error) {
-    showToast(`Resource archive failed: ${error.message}`, true);
+    showToast(`Archive failed: ${error.message}`, true);
   }
 }
 
 function stampTutorialRecordRows() {
   const configs = [
-    ["data-resources-body", "data-resource-action", "resourceId"],
     [
       "collection-adapters-body",
       "data-collection-adapter-action",
@@ -20217,6 +20024,10 @@ elements.dataResourcesBody.addEventListener("click", (event) => {
     showDatasetRecordings(button.dataset.id);
   if (button.dataset.resourceAction === "dataset")
     window.openPreparedDataset?.(button.dataset.id);
+  if (button.dataset.resourceAction === "files")
+    window.openFileResource?.(button.dataset.id);
+  if (button.dataset.resourceAction === "train")
+    window.useDataset(button.dataset.id).catch(error => showToast(error.message, true));
   if (button.dataset.resourceAction === "import-detail")
     openDataImportDetail(button.dataset.id, button);
   if (button.dataset.resourceAction === "import")
@@ -20236,10 +20047,22 @@ elements.dataImportForm.addEventListener("input", renderDataImportBudget);
 elements.closeDataImportForm.addEventListener("click", () =>
   hideRevealedPanel(elements.dataImportForm),
 );
+document.getElementById("show-data-import-history").addEventListener("click", (event) => {
+  renderDataImports();
+  SkynetDialog.open(document.getElementById("data-import-history-dialog"), { launcher: event.currentTarget });
+});
+document.getElementById("show-data-conversion-history").addEventListener("click", (event) => {
+  void window.openDatasetConversionHistory?.({}, { launcher: event.currentTarget });
+});
+
 elements.dataImportsBody.addEventListener("click", (event) => {
   const button = event.target.closest("[data-import-action]");
   if (button?.dataset.importAction === "detail")
     openDataImportDetail(button.dataset.id, button);
+  if (button?.dataset.importAction === "dataset") {
+    SkynetDialog.close(document.getElementById("data-import-history-dialog"));
+    window.openPreparedDataset?.(button.dataset.id);
+  }
   if (button?.dataset.importAction === "cancel")
     cancelDataImport(button.dataset.id, button);
 });
@@ -20448,6 +20271,22 @@ activateTab(
   false,
 );
 
+window.useDataset = async (versionId) => {
+  const dataset = dataResourceRows.find(row => row.id === versionId && row.category === "dataset");
+  if (dataset?.archived_at)
+    throw new Error("This dataset is archived. Restore it before using it in an experiment.");
+  if (dataset && !datasetCanTrain(dataset))
+    throw new Error("This dataset is not currently available for training.");
+  let job = dataPreparationRows.find(row => row.version_id === versionId && row.training_ready);
+  if (!job) {
+    const payload = await api("/api/data/exports/jobs");
+    dataPreparationRows = listFrom(payload, ["exports", "jobs"]);
+    job = dataPreparationRows.find(row => row.version_id === versionId && row.training_ready);
+  }
+  if (job) return window.usePreparedDataset(job);
+  return window.useRegisteredDataset(versionId);
+};
+
 window.useRegisteredDataset = async (versionId) => {
   void activateTab("experiments", true, "submit");
   await loadTrainingInputs();
@@ -20467,6 +20306,8 @@ window.useRegisteredDataset = async (versionId) => {
 window.usePreparedDataset = async (job) => {
   void activateTab("experiments", true, "submit");
   await loadTrainingInputs();
+  if (!trainingDatasetRows.some(dataset => dataset.id === job.version_id))
+    throw new Error("This dataset is no longer available for training. Refresh Datasets.");
   const setup = job.training_setup;
   const identity = job.adapter;
   if (!identity?.adapter_id || !identity?.adapter_version_id || !identity?.adapter_version_number)

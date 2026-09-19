@@ -380,6 +380,8 @@ class ObservationPreparation:
                     manifest = json.loads(content)
                     if manifest.get('artifact_key') != key or manifest.get('spec') != expected[key]['spec']:
                         raise ValueError('Observation manifest identity differs from the requested specification')
+                if receipt.get('cleanup_warning'):
+                    producer = self.store.update(producer, cleanup_warning=str(receipt['cleanup_warning'])[:2000])
                 self.store.finish(producer, artifacts=artifacts)
             except (ClusterError, SubmissionOutcomeUnknown):
                 # Preserve the same attempt after network/submission uncertainty.

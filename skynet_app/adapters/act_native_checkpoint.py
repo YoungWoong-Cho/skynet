@@ -24,7 +24,7 @@ def instrument(directory):
         raise ValueError("ACT checkpoint hooks require the audited upstream training source")
     source = path.read_text()
     changes = [
-        ("def main(args):\n", "def main(args):\n    args['num_epochs'] = int(os.environ['SKYNET_ACT_EPOCHS'])\n"),
+        ("def main(args):\n", "def main(args):\n    args['num_epochs'] = int(os.environ['SKYNET_ACT_EPOCHS'])\n    args['chunk_size'] = int(os.environ['SKYNET_ACT_ACTION_STEPS'])\n"),
         ('    best_ckpt_info = train_bc(train_dataloader, val_dataloader, config)',
          '    config["native_args"] = args\n    config["normalization"] = stats\n    best_ckpt_info = train_bc(train_dataloader, val_dataloader, config)'),
         ('    for epoch in tqdm(range(num_epochs)):',
@@ -40,7 +40,7 @@ def instrument(directory):
         source = source.replace(before, after)
     path.write_text(source)
     return {"path": "imitate_episodes.py", "source_sha256": ENTRY_SHA256,
-            "runtime_sha256": digest(path), "purpose": "epoch checkpoint, resume and metrics"}
+            "runtime_sha256": digest(path), "purpose": "epoch checkpoint, resume, metrics and explicit experiment epoch/chunk overrides"}
 
 
 def cpu(value):
@@ -72,7 +72,7 @@ def atomic_save(payload, path):
 
 def identity(config, train, validation):
     args = {k: v for k, v in config["native_args"].items() if k not in {"ckpt_dir", "num_epochs"}}
-    return {
+    result = {
         "source_revision": os.environ["SKYNET_ACT_REVISION"],
         "dataset_manifest_sha256": os.environ["SKYNET_ACT_MANIFEST_SHA"],
         "native_args": args,
@@ -81,6 +81,12 @@ def identity(config, train, validation):
         "split": {"train": list(map(int, train.dataset.episode_ids)),
                   "validation": list(map(int, validation.dataset.episode_ids))},
     }
+    sampling = getattr(train.dataset, "recording_sampling", None)
+    if sampling is not None:
+        if getattr(validation.dataset, "recording_sampling", None) != sampling:
+            raise ValueError("ACT training and validation sampling must agree")
+        result["recording_sampling"] = sampling
+    return result
 
 
 def trim_progress(path, next_epoch):

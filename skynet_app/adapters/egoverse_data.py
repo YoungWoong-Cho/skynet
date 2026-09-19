@@ -23,7 +23,7 @@ class RecordingEpisode:
     def __init__(self, episode, reader, key_map, root):
         self.episode_id = episode["id"]
         self.episode_path = Path(root) / "episodes" / self.episode_id
-        self.total_frames = int(episode["steps"])
+        self.total_frames = int(reader.steps)
         self.metadata = {"total_frames": self.total_frames, "embodiment": 100}
         self.reader = reader
         self.key_map = key_map
@@ -59,14 +59,15 @@ class RecordingEpisode:
 
 
 class RecordingResolver:
-    def __init__(self, root, split, key_map, manifest_sha=None):
+    def __init__(self, root, split, key_map, manifest_sha=None, control_hz=None):
         self.root, self.split, self.key_map = root, split, key_map
         self.manifest_sha = manifest_sha
+        self.control_hz = control_hz
 
     def resolve(self, filters=None):
         if filters is not None:
             raise ValueError("Recording membership is frozen in the dataset manifest")
-        dataset = RecordingDataset(self.root, self.manifest_sha)
+        dataset = RecordingDataset(self.root, self.manifest_sha, control_hz=self.control_hz)
         return {
             dataset.manifest["episodes"][i]["id"]: RecordingEpisode(
                 dataset.manifest["episodes"][i], dataset.episode(i), self.key_map, self.root)

@@ -228,11 +228,15 @@ def configure_act_lifecycle(args, directory, output, environment):
     epochs = getattr(args, "epochs", 6000)
     if not 1 <= epochs <= 100000:
         raise ValueError("ACT epochs must be between 1 and 100000")
+    action_steps = getattr(args, "action_steps", 50)
+    if type(action_steps) is not int or not 1 <= action_steps <= 200:
+        raise ValueError("ACT action chunk must be between 1 and 200")
     stop_request = output / ("act-stop-" + uuid.uuid4().hex)
     environment.update(
         SKYNET_ACT_OUTPUT=str(output), SKYNET_ACT_STOP_REQUEST=str(stop_request),
         SKYNET_ACT_MANIFEST_SHA=args.manifest_sha, SKYNET_ACT_REVISION=args.revision,
         SKYNET_ACT_EPOCHS=str(epochs), SKYNET_ACT_RESUME=getattr(args, "resume", None) or "",
+        SKYNET_ACT_ACTION_STEPS=str(action_steps),
         PYTHONPATH=str(Path(__file__).parent) + os.pathsep + environment["PYTHONPATH"],
     )
     return patch, stop_request
@@ -281,6 +285,8 @@ def run(args):
         from act_native_data import validate_recorded_act
         dimensions = validate_recorded_act(dataset, manifest)
     else:
+        if getattr(args, "control_hz", None) is not None:
+            raise ValueError("Control frequency selection requires a recording dataset with source timing")
         if manifest.get("format") != f"xpolicylab-native-{args.policy.lower()}/v1" or manifest.get("policy") != args.policy:
             raise ValueError("Dataset was not prepared for the selected native policy")
         if manifest.get("source_revision") != args.revision or manifest.get("contract") != "skynet.xpolicylab-native/v1":
@@ -298,7 +304,10 @@ def run(args):
     export_source(Path(args.repository), args.revision, args.policy, workspace / "XPolicyLab")
     if recorded_act:
         from act_native_data import prepare_recorded_act
-        launch = prepare_recorded_act(dataset, manifest, workspace, dimensions)
+        launch = prepare_recorded_act(dataset, manifest, workspace, dimensions,
+            control_hz=None if verify_only else getattr(args, "control_hz", None),
+            action_steps=1 if verify_only else getattr(args, "action_steps", 50),
+            structural_only=verify_only)
     else:
         copy_inputs(dataset, manifest, workspace)
         launch = manifest.get("launch", {})
@@ -322,6 +331,11 @@ def run(args):
                "dataset_manifest_sha256": args.manifest_sha,
                "argv": command, "cwd": str(directory), "gpu_count": args.gpu_count,
                "infrastructure_patches": patches, "status": "prepared"}
+    if args.policy == "ACT":
+        receipt["experiment_overrides"] = {"epochs": getattr(args, "epochs", 6000),
+            "action_steps": getattr(args, "action_steps", 50), "control_hz": getattr(args, "control_hz", None)}
+        if recorded_act:
+            receipt["recording_sampling"] = json.loads((directory / "skynet-recording-mapping.json").read_text())["recording_sampling"]
     receipt_path = output / "native-launch.json"
     receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
     # EOF prevents upstream prompts from hanging an unattended Slurm job.
@@ -341,6 +355,8 @@ def main():
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--epochs", type=int, default=6000)
+    parser.add_argument("--control-hz", type=float)
+    parser.add_argument("--action-steps", type=int, default=50)
     parser.add_argument("--resume")
     args = parser.parse_args()
     try:

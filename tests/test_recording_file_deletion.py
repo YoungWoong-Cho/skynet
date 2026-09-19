@@ -189,14 +189,35 @@ def test_dataset_dependency_and_shared_camera_files_block_removal(files):
         kind="demonstrations",
         metadata={"session_id": session},
     )
+    version = service.db.create_data_resource_version(
+        resource["id"], revision="training", format="skynet.recording-dataset/v1",
+        path="/prepared/training", manifest_sha256="a" * 64,
+    )
     selector = identity(session, names[0])
     plan = service.preview("recording-file", selector)
     assert any(
-        b["kind"] == "dataset" and b["id"] == resource["id"] for b in plan["blockers"]
+        b["kind"] == "dataset" and b["id"] == version["id"] for b in plan["blockers"]
     )
     with pytest.raises(ValueError, match="dependencies"):
         service.delete("recording-file", selector, plan["token"])
     assert (final / "output" / names[0]).exists()
+
+
+def test_unused_source_provenance_does_not_block_selected_recording_removal(files):
+    from tests.test_recording_deletion import raw_source
+
+    service, live, session, names, final, _ = files
+    resource, version = raw_source(service, live.get(session))
+    sibling = (final / "output" / names[1]).read_bytes()
+    selector = identity(session, names[0])
+    plan = service.preview("recording-file", selector)
+    assert not plan["blockers"]
+    assert service.delete("recording-file", selector, plan["token"])["deleted"]
+    assert service.db.get_data_resource_version(version["id"]) is None
+    assert service.db.get_data_resource(resource["id"]) is None
+    assert not (final / "output" / names[0]).exists()
+    assert (final / "output" / names[1]).read_bytes() == sibling
+    assert live.get(session)["recordings"] == names[1:]
 
 
 @pytest.mark.parametrize(

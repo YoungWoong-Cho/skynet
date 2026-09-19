@@ -14,8 +14,8 @@ from ops.datasets.action_codecs.unidex import (
     load_codec, supported_robots, validate_source,
 )
 from skynet_app.adapters.recording_dataset import FORMAT, canonical, digest, stream_reference, close_handles
-from skynet_app.adapters.unidex_data import CONTRACT, NativeNormalizer, UniDexDataset, validate_manifest
-from skynet_app.adapters.unidex_runtime import stable_digest, validate_resume
+from skynet_app.adapters.unidex_data import CONTRACT, NativeNormalizer, UniDexDataset, validate_manifest, validate_recorded_values
+from skynet_app.adapters.unidex_runtime import RUN_SCHEMA, checkpoint_sampling, stable_digest, training_identity, validate_resume
 from skynet_app.adapters.unidex_weights import verify_weight_provenance
 
 
@@ -24,14 +24,13 @@ def normalizer():
                              "norm_stats": {k: {"min": [-2.] * 82, "max": [2.] * 82} for k in ("state", "action")}})
 
 
-def recording_fixture(tmp_path, robots=("floating_shadow_right", "floating_shadow_right")):
+def recording_fixture(tmp_path, robots=("floating_shadow_right", "floating_shadow_right"), count=128):
     root = tmp_path / "prepared"
     root.mkdir()
     store = tmp_path / "recordings"
     store.mkdir()
     episodes = []
     for index, robot in enumerate(robots):
-        count = 128
         state = np.zeros((count, 82), dtype=np.float32)
         state[:, :9] = IDENTITY_POSE
         state[:, 9:18] = IDENTITY_POSE
@@ -53,11 +52,9 @@ def recording_fixture(tmp_path, robots=("floating_shadow_right", "floating_shado
                          "action_representation": {"codec_sha256": load_codec(robot).digest, "frame": "camera_opengl"},
                          "streams": {k: stream_reference(path, k) for k in (
                              "faas_state_absolute", "faas_action_absolute", "scene_front_pointcloud")}})
-    split_at = len(episodes) // 2
+    split_at = max(1, len(episodes) // 2)
     manifest = {"format": FORMAT, "contract": CONTRACT, "episodes": episodes, "steps": count * len(episodes),
                 "split": {"train": list(range(split_at)), "validation": list(range(split_at, len(episodes)))},
-                "temporal": {"source_fps": 60., "control_hz": 15., "frame_stride": 4,
-                             "action_horizon": 30, "execution_horizon": 1},
                 "preprocessing": {"pointcloud_frame": "camera_ros_optical", "pointcloud_native_frame": "camera_opengl"},
                 "action_representation": {"id": "skynet.unidex-faas/v1", "frame": "camera_opengl", "action_semantics": "controller_targets"}}
     (root / "manifest.json").write_bytes(canonical(manifest))
@@ -69,8 +66,8 @@ def test_shared_loader_fixes_episode_split_before_windows_and_one_action_anchor(
     manifest = validate_manifest(root, digest(root / "manifest.json"))
     assert manifest == expected
     norm = normalizer()
-    train = UniDexDataset(root, manifest, "train", norm)
-    valid = UniDexDataset(root, manifest, "validation", norm)
+    train = UniDexDataset(root, manifest, "train", norm, control_hz=15, action_steps=30)
+    valid = UniDexDataset(root, manifest, "validation", norm, control_hz=15, action_steps=30)
     assert {i for i, _ in train.windows} == {0}
     assert {i for i, _ in valid.windows} == {1}
     sample = train[1]  # source frame 4, all future actions anchored there.
@@ -84,9 +81,94 @@ def test_shared_loader_fixes_episode_split_before_windows_and_one_action_anchor(
     close_handles()
 
 
-def test_mixed_shadow_wuji2_loader_preserves_native_commands_and_camera_frames(tmp_path):
+def test_one_frame_conversion_verification_is_independent_of_training_windows(tmp_path, monkeypatch):
+    import sys
+    from skynet_app.adapters import unidex_runtime
+
+    root, expected = recording_fixture(tmp_path, robots=("skynet_wuji_2_right",), count=1)
+    original = (root / "manifest.json").read_bytes()
+    manifest = validate_manifest(root, digest(root / "manifest.json"))
+    assert manifest == expected and manifest["split"]["validation"] == []
+    validate_recorded_values(root, manifest)
+    monkeypatch.setattr(unidex_runtime, "verify_repository", lambda _: None)
+    monkeypatch.setattr(unidex_runtime, "resolve_sampling", lambda *a, **k: pytest.fail("Conversion must not select training windows"))
+    monkeypatch.setattr(unidex_runtime, "load_native_config", lambda *a, **k: pytest.fail("Conversion must not instantiate model configuration"))
+    output = tmp_path / "validation"
+    monkeypatch.setattr(sys, "argv", ["unidex_runtime.py", "--repository", "/unused-pinned-source",
+        "--dataset", str(root), "--manifest-sha", digest(root / "manifest.json"), "--output", str(output), "--verify-only"])
+    try:
+        unidex_runtime.main()
+        report = json.loads((output / "loader-validation.json").read_text())
+        assert report["status"] == "PASSED" and report["validation_scope"] == "recorded_streams"
+        assert report["episodes"] == report["steps"] == 1 and "windows" not in report
+        assert (root / "manifest.json").read_bytes() == original
+        with pytest.raises(ValueError):
+            UniDexDataset(root, manifest, "train", normalizer(), control_hz=15, action_steps=30)
+    finally:
+        close_handles()
+
+
+@pytest.mark.parametrize("control_hz,action_steps,stride", [(None, 30, 1), (30, 30, 2), (15, 10, 4)])
+def test_experiment_sampling_reuses_the_same_recording_artifacts(tmp_path, control_hz, action_steps, stride):
+    root, manifest = recording_fixture(tmp_path, count=90)
+    before = {path: digest(path) for path in tmp_path.rglob("*") if path.is_file()}
+    norm = normalizer()
+    try:
+        dataset = UniDexDataset(root, manifest, "train", norm, control_hz=control_hz, action_steps=action_steps)
+        assert dataset.sampling["control_hz"] == (60 if control_hz is None else control_hz)
+        assert dataset.horizon == action_steps and dataset.strides[0] == stride
+        assert dataset.windows[0] == (0, 0) and dataset.windows[1] == (0, stride)
+        sample = dataset[1]
+        actions = norm.unnormalize("action", sample["action"])
+        np.testing.assert_allclose(actions[:, 0], .03 + np.arange(action_steps) * stride / 10, atol=2e-6)
+        # Targets begin with the command at the observation frame, never future measured joints.
+        assert actions[0, 0] == pytest.approx(.03, abs=2e-6)
+        assert len(dataset) == len(range(0, 90 - (action_steps - 1) * stride, stride))
+        assert {path: digest(path) for path in before} == before
+        assert "temporal" not in manifest
+    finally:
+        close_handles()
+
+
+def test_sampling_short_clips_only_block_experiment_windows(tmp_path):
+    root, _ = recording_fixture(tmp_path, count=90)
+    manifest = validate_manifest(root, digest(root / "manifest.json"))
+    try:
+        with pytest.raises(ValueError):
+            UniDexDataset(root, manifest, "train", normalizer(), control_hz=15, action_steps=30)
+        dataset = UniDexDataset(root, manifest, "train", normalizer(), control_hz=30, action_steps=30)
+        assert len(dataset) == 16
+    finally:
+        close_handles()
+
+
+def test_experiment_sampling_is_pinned_for_resume_and_inference():
+    args = SimpleNamespace(manifest_sha="a" * 64, batch_size=4, learning_rate=.0001, num_workers=1,
+                           seed=42, precision="fp32", gpu_count=1, gradient_accumulation=4)
+    sampling = {"schema": "skynet.recording-sampling/v1", "control_hz": 30, "action_steps": 30,
+                "episodes": [{"index": 0, "source_hz": 60, "stride": 2}]}
+    identity = training_identity(args, {"horizon_steps": 30}, {}, sampling)
+    assert identity["sampling"] == sampling and "temporal" not in identity
+    saved = {"skynet": {**identity, "identity_sha256": stable_digest(identity)},
+             "optimizer_states": [{}], "lr_schedulers": [{}]}
+    validate_resume(saved, identity)
+    for field, value in (("control_hz", 60), ("action_steps", 15)):
+        changed = copy.deepcopy(identity)
+        changed["sampling"][field] = value
+        with pytest.raises(ValueError, match="identical"):
+            validate_resume(saved, changed)
+    assert checkpoint_sampling(identity)["control_hz"] == 30
+    bad = copy.deepcopy(identity)
+    bad["sampling"]["action_steps"] = 15
+    with pytest.raises(ValueError, match="model horizon"):
+        checkpoint_sampling(bad)
+    with pytest.raises(ValueError):
+        checkpoint_sampling({**identity, "schema": "skynet.unidex-run/v1"})
+
+
+def test_all_registered_hands_loader_preserves_native_commands_and_camera_frames(tmp_path):
     """Exercise real codecs with synthetic commands/clouds, not simulator rendering."""
-    robots = ("floating_shadow_right", "skynet_wuji_2_right") * 2
+    robots = tuple(supported_robots()) * 2
     root, manifest = recording_fixture(tmp_path, robots)
     native = []
     for index, episode in enumerate(manifest["episodes"]):
@@ -127,9 +209,9 @@ def test_mixed_shadow_wuji2_loader_preserves_native_commands_and_camera_frames(t
     norm = normalizer()
     try:
         for split in ("train", "validation"):
-            dataset = UniDexDataset(root, manifest, split, norm)
+            dataset = UniDexDataset(root, manifest, split, norm, control_hz=15, action_steps=30)
             assert {manifest["episodes"][i]["hand_id"] for i, _ in dataset.windows} == set(robots)
-            assert len(dataset) == 6  # Three complete 30-step/stride-4 windows per episode.
+            assert len(dataset) == 3 * len(set(robots))  # Three complete windows per hand.
             for episode_index in manifest["split"][split]:
                 sample = dataset[dataset.windows.index((episode_index, 4))]
                 codec, q, actions, arrays = native[episode_index]
@@ -155,9 +237,9 @@ def test_loader_refuses_leakage_unsupported_hands_or_implicit_geometry(tmp_path,
     if defect == "split":
         manifest["split"]["validation"] = [0]
     elif defect == "hand":
-        manifest["episodes"][0]["hand_id"] = "skynet_wuji_1_right"
+        manifest["episodes"][0]["hand_id"] = "unregistered_hand_right"
     elif defect == "rate":
-        manifest["temporal"]["control_hz"] = 30
+        manifest["episodes"][0]["capture"]["step_dt"] = 0
     elif defect == "representation":
         manifest["action_representation"]["action_semantics"] = "future_measured_state"
     else:
@@ -219,14 +301,30 @@ def test_exact_hand_codec_roundtrip_fk_and_root_camera_frames(robot):
         validate_source(bad, capture)
 
 
-@pytest.mark.parametrize("robot", ["skynet_wuji_1_right", "skynet_sharpa_right"])
-def test_unverified_mappings_fail_before_render(robot):
-    with pytest.raises(ValueError, match="blocked"):
-        load_codec(robot)
+def test_unregistered_mapping_fails_before_render():
+    with pytest.raises(ValueError, match="No exact asset-bound FAAS contract"):
+        load_codec("unregistered_hand_right")
+
+
+def test_unverified_mapping_still_fails_before_render(tmp_path):
+    import hashlib
+    import shutil
+
+    from ops.datasets.action_codecs.hand_contract import DEFAULT_SPEC_ROOT
+    spec_root = tmp_path / "specs"
+    shutil.copytree(DEFAULT_SPEC_ROOT, spec_root)
+    path = spec_root / "skynet_sharpa_right.json"
+    spec = json.loads(path.read_text())
+    spec["mapping_status"] = "BLOCKED"
+    spec["blocked_reason"] = "Deliberately unverified test asset"
+    spec["spec_hash"] = hashlib.sha256(canonical({k: v for k, v in spec.items() if k != "spec_hash"})).hexdigest()
+    path.write_bytes(canonical(spec))
+    with pytest.raises(ValueError, match="Deliberately unverified test asset"):
+        load_codec("skynet_sharpa_right", spec_root=spec_root)
 
 
 def test_resume_refuses_old_format_changed_inputs_and_weights_only_state():
-    identity = {"schema": "skynet.unidex-run/v1", "dataset_format": FORMAT, "manifest_sha256": "a" * 64}
+    identity = {"schema": RUN_SCHEMA, "dataset_format": FORMAT, "manifest_sha256": "a" * 64}
     saved = {"skynet": {**identity, "identity_sha256": stable_digest(identity)}, "optimizer_states": [{}], "lr_schedulers": [{}]}
     validate_resume(saved, identity)
     with pytest.raises(ValueError, match="identical"):

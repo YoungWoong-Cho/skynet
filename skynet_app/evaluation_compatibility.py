@@ -73,8 +73,11 @@ def inspect_compatibility(spec, manifest, suite, checkpoint=None):
             check("loader", f"Policy loader: {loader}.")
             metadata = dataset_metadata(spec)
             config = (spec.get("native") or {}).get("config") or {}
-            binding = recorded_contract(metadata)
-            checks.extend(contract_issues(binding))
+            try:
+                binding = recorded_contract(metadata, control_hz=config.get("control_hz"))
+                checks.extend(contract_issues(binding))
+            except ValueError as error:
+                check("timing", str(error), "incompatible")
             if spec.get("source", {}).get("adapter") == "xpolicylab-act-native" and metadata.get("contract") != "skynet.act-rgb-joints/v1":
                 check("dataset", "Native ACT simulator evaluation requires a recorded RGB/joint dataset.", "incompatible")
             if loader == "egoverse_joints" and metadata.get("contract") != "skynet.egoverse-rgb-joints/v1":

@@ -265,7 +265,8 @@ def test_invalid_recorded_act_rejected_before_launch(recorded_act, problem):
     elif problem == "camera":
         manifest['episodes'][0]['streams']['scene_front']['dtype'] = 'float32'
     else:
-        from recording_dataset import verify_dataset
+        from recording_dataset import verify_dataset, close_handles
+        close_handles()
         reference = manifest['episodes'][0]['streams']['action']
         with h5py.File(reference['path'],'r+') as file:
             file[reference['dataset']][0,0] = float('nan')
@@ -287,7 +288,8 @@ def test_native_act_declares_recording_conversion_and_existing_formats():
     assert native['available'] and native['trainable']
     preset, = native['data_presets']
     assert preset['training_setup']['adapter'] == 'xpolicylab-act-native'
-    assert preset['split_mode'] == 'episode' and preset['validation_required']
+    assert preset['split_mode'] == 'episode' and not preset['validation_required']
+    assert next(m for m in records if m.slug == native['id']).train.data_requirements.recording_sampling.require_validation
     assert native['format'] == 'skynet.recording-dataset/v1'
     assert not any(p['available'] for p in options if p['id'] != native['id'])
 

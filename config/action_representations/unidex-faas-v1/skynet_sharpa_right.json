@@ -380,7 +380,7 @@
     "skynet_pitch",
     "skynet_yaw"
   ],
-  "frame_link": "skynet_palm",
+  "frame_link": "h_right_hand_C_MC",
   "link_to_frame": [
     [
       1.0,
@@ -414,20 +414,218 @@
     "h_right_ring_fingertip",
     "h_right_pinky_fingertip"
   ],
-  "frame_convention": "Official UniDex named wrist link and HAND_TRANSFORMS; exported in camera OpenGL coordinates.",
+  "frame_convention": "Skynet Sharpa anatomical extension of UniDex FAAS: own physical palm origin, +X palmar, +Y radial, +Z distal; exported in camera OpenGL coordinates.",
   "pose_convention": "position3 + first_two_rotation_rows6",
   "reference_frame": "fixed_robot_base",
-  "state_semantics": "Measured pre-action independent joints, physical URDF mimic coordinates, native UniDex wrist.",
+  "state_semantics": "Measured pre-action independent joints, physical URDF coordinates, Skynet Sharpa anatomical wrist frame.",
   "action_semantics": "q_target = action * action_scale + action_offset; all chunk targets relative to one anchor",
-  "mapping_status": "BLOCKED",
-  "mapping": [],
+  "mapping_status": "VERIFIED",
+  "mapping": [
+    {
+      "joint": "h_right_thumb_CMC_FE",
+      "source_joint": "right_thumb_CMC_FE",
+      "slot": 1,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Wuji",
+      "upstream_slot_reference": "F1J1"
+    },
+    {
+      "joint": "h_right_thumb_CMC_AA",
+      "source_joint": "right_thumb_CMC_AA",
+      "slot": 2,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Wuji",
+      "upstream_slot_reference": "F1J2"
+    },
+    {
+      "joint": "h_right_thumb_MCP_FE",
+      "source_joint": "right_thumb_MCP_FE",
+      "slot": 3,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Wuji",
+      "upstream_slot_reference": "F1J3"
+    },
+    {
+      "joint": "h_right_thumb_MCP_AA",
+      "source_joint": "right_thumb_MCP_AA",
+      "slot": 26,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Shadow",
+      "upstream_slot_reference": "THJ3"
+    },
+    {
+      "joint": "h_right_thumb_IP",
+      "source_joint": "right_thumb_IP",
+      "slot": 4,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Wuji",
+      "upstream_slot_reference": "F1J4"
+    },
+    {
+      "joint": "h_right_index_MCP_FE",
+      "source_joint": "right_index_MCP_FE",
+      "slot": 7,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Shadow",
+      "upstream_slot_reference": "FFJ3"
+    },
+    {
+      "joint": "h_right_index_MCP_AA",
+      "source_joint": "right_index_MCP_AA",
+      "slot": 6,
+      "scale": -1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Shadow",
+      "upstream_slot_reference": "FFJ4"
+    },
+    {
+      "joint": "h_right_index_PIP",
+      "source_joint": "right_index_PIP",
+      "slot": 8,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Shadow",
+      "upstream_slot_reference": "FFJ2"
+    },
+    {
+      "joint": "h_right_index_DIP",
+      "source_joint": "right_index_DIP",
+      "slot": 9,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Shadow",
+      "upstream_slot_reference": "FFJ1"
+    },
+    {
+      "joint": "h_right_middle_MCP_FE",
+      "source_joint": "right_middle_MCP_FE",
+      "slot": 12,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Shadow",
+      "upstream_slot_reference": "MFJ3"
+    },
+    {
+      "joint": "h_right_middle_MCP_AA",
+      "source_joint": "right_middle_MCP_AA",
+      "slot": 11,
+      "scale": -1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Shadow",
+      "upstream_slot_reference": "MFJ4"
+    },
+    {
+      "joint": "h_right_middle_PIP",
+      "source_joint": "right_middle_PIP",
+      "slot": 13,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Shadow",
+      "upstream_slot_reference": "MFJ2"
+    },
+    {
+      "joint": "h_right_middle_DIP",
+      "source_joint": "right_middle_DIP",
+      "slot": 14,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Shadow",
+      "upstream_slot_reference": "MFJ1"
+    },
+    {
+      "joint": "h_right_ring_MCP_FE",
+      "source_joint": "right_ring_MCP_FE",
+      "slot": 17,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Shadow",
+      "upstream_slot_reference": "RFJ3"
+    },
+    {
+      "joint": "h_right_ring_MCP_AA",
+      "source_joint": "right_ring_MCP_AA",
+      "slot": 16,
+      "scale": -1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Shadow",
+      "upstream_slot_reference": "RFJ4"
+    },
+    {
+      "joint": "h_right_ring_PIP",
+      "source_joint": "right_ring_PIP",
+      "slot": 18,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Shadow",
+      "upstream_slot_reference": "RFJ2"
+    },
+    {
+      "joint": "h_right_ring_DIP",
+      "source_joint": "right_ring_DIP",
+      "slot": 19,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Shadow",
+      "upstream_slot_reference": "RFJ1"
+    },
+    {
+      "joint": "h_right_pinky_CMC",
+      "source_joint": "right_pinky_CMC",
+      "slot": 25,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Shadow",
+      "upstream_slot_reference": "LFJ5"
+    },
+    {
+      "joint": "h_right_pinky_MCP_FE",
+      "source_joint": "right_pinky_MCP_FE",
+      "slot": 22,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Shadow",
+      "upstream_slot_reference": "LFJ3"
+    },
+    {
+      "joint": "h_right_pinky_MCP_AA",
+      "source_joint": "right_pinky_MCP_AA",
+      "slot": 21,
+      "scale": -1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Shadow",
+      "upstream_slot_reference": "LFJ4"
+    },
+    {
+      "joint": "h_right_pinky_PIP",
+      "source_joint": "right_pinky_PIP",
+      "slot": 23,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Shadow",
+      "upstream_slot_reference": "LFJ2"
+    },
+    {
+      "joint": "h_right_pinky_DIP",
+      "source_joint": "right_pinky_DIP",
+      "slot": 24,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_hand_reference": "Shadow",
+      "upstream_slot_reference": "LFJ1"
+    }
+  ],
   "upstream": {
     "repository": "https://github.com/unidex-ai/UniDex",
     "revision": "97d869e0f2d1ec0372cd3cdf28dde66b4e3f216d",
     "mapping_file": "src/assets/utils/hand_utils.json",
     "mapping_sha256": "d79907a33331d30a87fc7c17106095786e454b9ec0897bf0c811abc370ac3172"
   },
-  "blocked_reason": "Sharpa is absent from pinned upstream FAAS tables. Anatomy-named joints do not alone establish FAAS slot sign/zero alignment.",
   "runtime_controller": {
     "source_file": "ops/xr/wrist.py",
     "source_sha256": "8e6b6edb6c06f7817fada5196e6a38c374f14408abb8b51db22f6c6d41bd02c8",
@@ -448,5 +646,96 @@
     },
     "reason": "Exact collection/evaluator virtual rotation limit override; physical finger limits preserved"
   },
-  "spec_hash": "25d51beb24a55ee3bb8db03777ba4cdd71e32be10d5b9e5c4d405cd496b1d8b9"
+  "spec_hash": "608e119c0a14c84afd114c9c9fc8455d843a206cd907ddf42400cd72da3d3889",
+  "native_wrist": {
+    "upstream_hand": null,
+    "kind": "anatomical_extension",
+    "functional_reference_hands": [
+      "Wuji",
+      "Shadow"
+    ],
+    "local_physical_link": "h_right_hand_C_MC",
+    "local_wrist_link": "h_right_hand_C_MC",
+    "physical_link_to_wrist": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "hand_transform": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "evidence": "Sharpa is absent from pinned UniDex. Use its own palm origin and native +X palmar, +Y radial, +Z distal axes. No upstream wrist translation, link geometry or camera pose is copied."
+  },
+  "mapping_validation": {
+    "kind": "anatomical_extension",
+    "exact_upstream_asset_equivalence": false,
+    "rest_reference": "native_urdf_zero",
+    "offset_policy": "All offsets are zero relative to the registered Sharpa native URDF rest. Its oblique thumb mounting and pinky metacarpal geometry are retained, not fitted to an upstream hand or demonstration.",
+    "scope": [
+      "named functional slots",
+      "positive anatomical motion",
+      "local rest convention",
+      "wrist frame",
+      "codec reversibility"
+    ],
+    "does_not_establish": [
+      "identical upstream fingertip poses",
+      "pretrained checkpoint calibration",
+      "cross-embodiment generalization performance"
+    ],
+    "reference_geometry": {
+      "Wuji": {
+        "path": "HandAdapter/urdf/H2o/Wuji/right/main.urdf",
+        "sha256": "94c06247d1b0250e9c12c43ed9957233c414c765903f08a00c8a883186fd7c66"
+      },
+      "Shadow": {
+        "path": "HandAdapter/urdf/H2o/Shadow/right/main.urdf",
+        "sha256": "e6babdde077203603e1492ea6e82651a3bec457c477b6f4d4697774a51b63145"
+      }
+    }
+  }
 }

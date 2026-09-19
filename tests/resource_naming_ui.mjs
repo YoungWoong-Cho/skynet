@@ -52,6 +52,8 @@ try {
     );
   const dataset = {
     id: "dataset-id",
+    resource_id: "internal-source",
+    recording_ids: ["recording-uuid"],
     category: "dataset",
     kind: "demonstrations",
     provider: "collection",
@@ -68,6 +70,7 @@ try {
     ...dataset,
     id: "other-dataset",
     source_key: "other-recording",
+    recording_ids: ["other-recording"],
     metadata: { session_id: "other-recording" },
     display_name: "Latest dataset",
     created_at: "2026-09-15T12:00:00Z",
@@ -77,21 +80,22 @@ try {
   const requests = [];
   w.api = async (path, request = {}) => {
     requests.push([path, request]);
+    if (path.startsWith("/api/data/datasets?")) return {datasets: structuredClone(resources)};
     if (path.startsWith("/api/data/resources?"))
       return {
-        resources: structuredClone(resources),
+        resources: [],
         resource_types: {
           dataset: { demonstrations: "Demonstrations" },
           file: { model: "Model" },
         },
       };
-    if (path === "/api/data/resources/dataset-id") {
+    if (path === "/api/data/datasets/dataset-id") {
       if (request.method === "PATCH") {
         Object.assign(dataset, JSON.parse(request.body), {
           updated_at: "2026-09-16T12:00:00Z",
         });
       }
-      return { resource: structuredClone(dataset) };
+      return { dataset: structuredClone(dataset) };
     }
     return { items: [] };
   };
@@ -145,6 +149,7 @@ try {
   assert.equal(el("data-resource-visible-id").value, dataset.id);
   assert.equal(el("data-resource-visible-id").readOnly, true);
   assert.equal(el("data-resource-source-details").open, false);
+  assert.equal(el("data-resource-source-details").hidden, true);
 
   el("data-resource-name").value = "   ";
   const beforeEmpty = requests.length;
@@ -191,6 +196,7 @@ try {
 
   el("show-data-resource-form").click();
   assert.equal(el("data-resource-source-details").open, true);
+  assert.equal(el("data-resource-source-details").hidden, false);
   assert.equal(el("data-resource-identity-field").hidden, true);
   assert.equal(el("data-resource-source-key").disabled, false);
   assert.equal(el("data-resource-source-key").readOnly, false);
@@ -219,22 +225,14 @@ try {
   await w.createDataResource({ preventDefault() {} });
   assert.equal(created.display_name, "External demo");
 
-  // Old tutorial receipts must still verify the exact immutable source key.
-  w.eval(`window.testLegacyResourceReceipt = () => {
-    const saved = newTutorialSession("datasets");
-    saved.ownedRecords = [{ kind: "data-resource", expectedIdentity: [{ paths: ["name"], value: "recording-uuid" }] }];
-    localStorage.setItem(tutorialProgressKey("datasets"), JSON.stringify(saved));
-    return loadTutorialSession("datasets").ownedRecords[0].expectedIdentity;
-  };`);
-  const rules = w.testLegacyResourceReceipt();
-  assert.equal(rules[0].paths[0], "source_key");
-  assert.equal(w.tutorialIdentityMatches(dataset, rules), true);
-  assert.equal(
-    w.tutorialIdentityMatches({ ...dataset, source_key: "different" }, rules),
-    false,
-  );
+  // Training run links identify the selected immutable result, not its shared source.
+  const trainingLinks = w.trainingDataValue({training_data:[{resource_id:'internal-source',version_id:'dataset-id',name:'Training dataset',format:'test/v1',episodes:51}]});
+  assert.equal(trainingLinks[0].id,'dataset-id');
+  assert.equal(trainingLinks[0].kind,'dataset');
+  const missingVersion = w.trainingDataValue({training_data:[{resource_id:'internal-source',name:'Legacy unpinned input'}]});
+  assert.doesNotMatch(w.valueHtml(missingVersion[0]), /data-entity-id/);
   console.log(
-    "Resource names: table/edit consistency, immutable source identity, trimmed updates, immediate refresh/sort, creation defaults and tutorial receipt compatibility passed.",
+    "Resource names: table/edit consistency, immutable source identity, trimmed updates, immediate refresh/sort, creation defaults and exact training-result links passed.",
   );
 } finally {
   for (const observer of observers) observer.disconnect();

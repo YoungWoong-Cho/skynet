@@ -80,9 +80,9 @@ def test_choices_keep_exact_frozen_receipt_and_location_selection(db):
             "revision", "format", "path", "source_uri", "manifest_sha256", "status", "size_bytes", "metadata",
         )},
     }
-    expected_assignment["version"]["metadata"] = {**version["metadata"], "registered_version_id": version["id"]}
+    expected_assignment["version"]["metadata"] = {**version["metadata"], "registered_version_id": version["id"], "display_name": "Label 0"}
     expected = {
-        "schema_version": "skynet.data-bundle/v1", "name": resource["source_key"],
+        "schema_version": "skynet.data-bundle/v1", "name": "Label 0",
         "version": "experiment-inputs", "metadata": {"direct_selection": True},
         "assignments": [expected_assignment],
     }
@@ -101,7 +101,7 @@ def test_catalog_snapshot_is_coherent_and_next_read_is_fresh(db, monkeypatch):
     def execute(connection, statement, parameters=None):
         nonlocal changed
         cursor = original(connection, statement, parameters)
-        if not changed and statement.startswith("SELECT * FROM data_resources WHERE archived_at"):
+        if not changed and statement.startswith("SELECT v.*, p.display_name"):
             changed = True
             with db.transaction() as writer:
                 writer.execute("UPDATE data_locations SET status='MISSING' WHERE version_id=?", (version["id"],))
@@ -113,10 +113,11 @@ def test_catalog_snapshot_is_coherent_and_next_read_is_fresh(db, monkeypatch):
     assert data_selection.choices(db) == []
     db.record_data_location(version["id"], kind="cluster", host=locations[0]["host"], path=locations[0]["path"], manifest_sha256=version["manifest_sha256"])
     assert len(data_selection.choices(db)) == 1
-    db.update_data_resource(resource["id"], archived=True)
+    db.update_dataset(version["id"], archived=True)
     assert data_selection.choices(db) == []
-    assert db.list_data_resources() == []
-    assert db.list_data_resources(include_archived=True)[0]["archived_at"]
+    assert db.list_datasets() == []
+    assert db.list_datasets(include_archived=True)[0]["archived_at"]
+    assert db.get_data_resource(resource["id"])["archived_at"] is None
 
 
 def test_bulk_versions_preserve_lineage_and_bundle_links_with_six_reads(db, reads):

@@ -9,6 +9,11 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 
+try:
+    from .recording_time import frequency_stride, source_frequency
+except ImportError:
+    from recording_time import frequency_stride, source_frequency
+
 FORMAT = "skynet.recording-dataset/v1"
 _HANDLES = OrderedDict()
 _PID = None
@@ -117,6 +122,15 @@ def verify_dataset(root, sha=None, *, verify_files=True):
     for episode in manifest["episodes"]:
         for reference in episode["streams"].values():
             verify_reference(reference, steps=episode["steps"], verified=verified, verify_files=verify_files)
+        if "timestamps" in episode["streams"]:
+            import h5py
+            import numpy as np
+            reference = episode["streams"]["timestamps"]
+            with h5py.File(reference["path"], "r") as file:
+                timestamps = _array(file, reference["dataset"])[...]
+            dt = 1.0 / source_frequency(episode, manifest)
+            if timestamps.ndim != 1 or not np.isfinite(timestamps).all() or not np.allclose(np.diff(timestamps), dt, rtol=1e-5, atol=1e-6):
+                raise ValueError("Recording timestamps must be regular and match capture.step_dt")
     return manifest
 
 
@@ -144,9 +158,11 @@ def close_handles():
 
 
 class EpisodeReader:
-    def __init__(self, episode, preprocessing=None, order=None):
+    def __init__(self, episode, preprocessing=None, order=None, *, stride=1):
         self.metadata = episode
-        self.steps = episode["steps"]
+        self.source_steps = episode["steps"]
+        self.stride = stride
+        self.steps = (self.source_steps + stride - 1) // stride
         self.streams = episode["streams"]
         self.preprocessing = preprocessing or {}
         self.order = order
@@ -155,13 +171,27 @@ class EpisodeReader:
         import numpy as np
         reference = self.streams[name]
         array = _array(_handle(reference["path"]), reference["dataset"])
+        if isinstance(selection, slice):
+            start, stop, step = selection.indices(self.steps)
+            selection = (slice(start * self.stride, stop * self.stride, step * self.stride)
+                         if step > 0 else np.arange(start, stop, step))
+        elif isinstance(selection, (int, np.integer)):
+            index = int(selection)
+            if index < 0:
+                index += self.steps
+            if index < 0 or index >= self.steps:
+                raise IndexError("Frame selection is outside the recording")
+            selection = index * self.stride
         if isinstance(selection, (list, tuple, np.ndarray)):
-            indices = np.asarray(selection, dtype=np.int64)
+            indices = np.asarray(selection)
+            if indices.size and indices.dtype.kind not in "iu":
+                raise IndexError("Frame indices must be integers")
+            indices = indices.astype(np.int64)
             if indices.ndim != 1 or np.any(indices < 0) or np.any(indices >= self.steps):
                 raise IndexError("Frame selection is outside the recording")
             if not len(indices):
                 return np.empty((0, *array.shape[1:]), dtype=array.dtype)
-            unique, inverse = np.unique(indices, return_inverse=True)
+            unique, inverse = np.unique(indices * self.stride, return_inverse=True)
             values = array[unique.tolist()][inverse]
         else:
             values = array[selection]
@@ -190,10 +220,12 @@ class EpisodeReader:
 
 
 class RecordingDataset:
-    def __init__(self, root, sha=None, *, verify_files=False, manifest=None):
+    def __init__(self, root, sha=None, *, verify_files=False, manifest=None, control_hz=None):
         self.root = str(root)
         self.manifest = (validate_manifest(manifest) if manifest is not None else
                          verify_dataset(root, sha, verify_files=verify_files))
+        self.strides = [frequency_stride(source_frequency(e, self.manifest), control_hz)
+                        if control_hz is not None else 1 for e in self.manifest["episodes"]]
 
     def __len__(self):
         return len(self.manifest["episodes"])
@@ -201,7 +233,11 @@ class RecordingDataset:
     def episode(self, index):
         episode = self.manifest["episodes"][index]
         return EpisodeReader(episode, self.manifest.get("preprocessing"),
-                             episode.get("policy_to_source_indices", self.manifest.get("policy_to_source_indices")))
+                             episode.get("policy_to_source_indices", self.manifest.get("policy_to_source_indices")),
+                             stride=self.strides[index])
+
+    def episode_steps(self, index):
+        return (self.manifest["episodes"][index]["steps"] + self.strides[index] - 1) // self.strides[index]
 
     def read(self, episode_index, name, selection=slice(None)):
         return self.episode(episode_index).read(name, selection)

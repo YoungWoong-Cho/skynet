@@ -14,6 +14,7 @@ def support_files(policy):
             SUPPORT / "xpolicy_runtime.py"
         ).read_text(),
         "adapter-support/recording_dataset.py": (SUPPORT / "recording_dataset.py").read_text(),
+        "adapter-support/recording_time.py": (SUPPORT / "recording_time.py").read_text(),
         "adapter-support/artifacts.py": (
             SUPPORT.parents[1] / "ops/datasets/artifacts.py"
         ).read_text(),
@@ -90,7 +91,7 @@ def simulation_support_files():
             "evaluation_workers.py", "dexverse_readiness.py", "xpolicy_evaluation.py",
             "dexverse_evaluation.py", "evaluation_video.py", "policy_simulator.py",
             "recorded_scene.py", "xpolicy_runtime.py", "policy_transport.py",
-            "policy_contract.py", "evaluation_preflight.py", "episode_geometry.py", "episode_trace.py", "scene_geometry.py",
+            "policy_contract.py", "recording_time.py", "evaluation_preflight.py", "episode_geometry.py", "episode_trace.py", "scene_geometry.py",
         )
     }
     files.update({

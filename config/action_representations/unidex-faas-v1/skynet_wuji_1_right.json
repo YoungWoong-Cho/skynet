@@ -350,7 +350,7 @@
     "skynet_pitch",
     "skynet_yaw"
   ],
-  "frame_link": "skynet_palm",
+  "frame_link": "h_right_palm_link",
   "link_to_frame": [
     [
       1.0,
@@ -384,20 +384,182 @@
     "h_right_finger4_tip_link",
     "h_right_finger5_tip_link"
   ],
-  "frame_convention": "Official UniDex named wrist link and HAND_TRANSFORMS; exported in camera OpenGL coordinates.",
+  "frame_convention": "WUJI1 anatomical wrist at h_right_palm_link: +X palmar, +Y radial, +Z distal; native UniDex camera OpenGL and row-6D representation.",
   "pose_convention": "position3 + first_two_rotation_rows6",
   "reference_frame": "fixed_robot_base",
-  "state_semantics": "Measured pre-action independent joints, physical URDF mimic coordinates, native UniDex wrist.",
+  "state_semantics": "Measured pre-action native joints, mapped into UniDex functional slots with the WUJI1 local URDF rest reference.",
   "action_semantics": "q_target = action * action_scale + action_offset; all chunk targets relative to one anchor",
-  "mapping_status": "BLOCKED",
-  "mapping": [],
+  "mapping_status": "VERIFIED",
+  "mapping": [
+    {
+      "joint": "h_right_finger1_joint1",
+      "source_joint": "right_finger1_joint1",
+      "slot": 1,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F1J1"
+    },
+    {
+      "joint": "h_right_finger1_joint2",
+      "source_joint": "right_finger1_joint2",
+      "slot": 2,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F1J2"
+    },
+    {
+      "joint": "h_right_finger1_joint3",
+      "source_joint": "right_finger1_joint3",
+      "slot": 3,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F1J3"
+    },
+    {
+      "joint": "h_right_finger1_joint4",
+      "source_joint": "right_finger1_joint4",
+      "slot": 4,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F1J4"
+    },
+    {
+      "joint": "h_right_finger2_joint1",
+      "source_joint": "right_finger2_joint1",
+      "slot": 7,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F2J1"
+    },
+    {
+      "joint": "h_right_finger2_joint2",
+      "source_joint": "right_finger2_joint2",
+      "slot": 6,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F2J2"
+    },
+    {
+      "joint": "h_right_finger2_joint3",
+      "source_joint": "right_finger2_joint3",
+      "slot": 8,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F2J3"
+    },
+    {
+      "joint": "h_right_finger2_joint4",
+      "source_joint": "right_finger2_joint4",
+      "slot": 9,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F2J4"
+    },
+    {
+      "joint": "h_right_finger3_joint1",
+      "source_joint": "right_finger3_joint1",
+      "slot": 12,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F3J1"
+    },
+    {
+      "joint": "h_right_finger3_joint2",
+      "source_joint": "right_finger3_joint2",
+      "slot": 11,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F3J2"
+    },
+    {
+      "joint": "h_right_finger3_joint3",
+      "source_joint": "right_finger3_joint3",
+      "slot": 13,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F3J3"
+    },
+    {
+      "joint": "h_right_finger3_joint4",
+      "source_joint": "right_finger3_joint4",
+      "slot": 14,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F3J4"
+    },
+    {
+      "joint": "h_right_finger4_joint1",
+      "source_joint": "right_finger4_joint1",
+      "slot": 17,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F4J1"
+    },
+    {
+      "joint": "h_right_finger4_joint2",
+      "source_joint": "right_finger4_joint2",
+      "slot": 16,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F4J2"
+    },
+    {
+      "joint": "h_right_finger4_joint3",
+      "source_joint": "right_finger4_joint3",
+      "slot": 18,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F4J3"
+    },
+    {
+      "joint": "h_right_finger4_joint4",
+      "source_joint": "right_finger4_joint4",
+      "slot": 19,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F4J4"
+    },
+    {
+      "joint": "h_right_finger5_joint1",
+      "source_joint": "right_finger5_joint1",
+      "slot": 22,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F5J1"
+    },
+    {
+      "joint": "h_right_finger5_joint2",
+      "source_joint": "right_finger5_joint2",
+      "slot": 21,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F5J2"
+    },
+    {
+      "joint": "h_right_finger5_joint3",
+      "source_joint": "right_finger5_joint3",
+      "slot": 23,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F5J3"
+    },
+    {
+      "joint": "h_right_finger5_joint4",
+      "source_joint": "right_finger5_joint4",
+      "slot": 24,
+      "scale": 1.0,
+      "offset": 0.0,
+      "upstream_slot_reference": "F5J4"
+    }
+  ],
   "upstream": {
     "repository": "https://github.com/unidex-ai/UniDex",
     "revision": "97d869e0f2d1ec0372cd3cdf28dde66b4e3f216d",
     "mapping_file": "src/assets/utils/hand_utils.json",
-    "mapping_sha256": "d79907a33331d30a87fc7c17106095786e454b9ec0897bf0c811abc370ac3172"
+    "mapping_sha256": "d79907a33331d30a87fc7c17106095786e454b9ec0897bf0c811abc370ac3172",
+    "reference_hand": "Wuji",
+    "reference_urdf_sha256": "94c06247d1b0250e9c12c43ed9957233c414c765903f08a00c8a883186fd7c66"
   },
-  "blocked_reason": "This exact WUJI asset differs from pinned upstream Wuji in named joint axes/origins/position limits. A one-to-one brand/ordinal alias and affine sign/zero calibration are unverified.",
   "runtime_controller": {
     "source_file": "ops/xr/wrist.py",
     "source_sha256": "8e6b6edb6c06f7817fada5196e6a38c374f14408abb8b51db22f6c6d41bd02c8",
@@ -418,5 +580,101 @@
     },
     "reason": "Exact collection/evaluator virtual rotation limit override; physical finger limits preserved"
   },
-  "spec_hash": "72ba126c05184b0221a0811a90e5800bcbdb8de7d2c35ab82b4462ef6744eb53"
+  "spec_hash": "80b3615bc4729185a8ca267ffedad674f915131c84077f6ddd40509cb59b2c74",
+  "mapping_evidence": "WUJI1-specific anatomical extension, not an alias of the upstream Wuji asset. Independent URDF joint sweeps verify all 20 functional slots and positive motion against pinned Wuji. Native URDF q=0 is the declared local rest reference; no demonstration fit or limit normalization. See docs/wuji1-faas.md and tests/test_wuji1_faas.py.",
+  "mapping_validation": {
+    "kind": "anatomical_extension",
+    "exact_upstream_asset_equivalence": false,
+    "rest_reference": "native_urdf_zero",
+    "offset_policy": "All offsets are explicitly zero relative to WUJI1 native URDF rest. This coordinate reference need not be an executable joint configuration: thumb joint1 lower limit is 0.0475 rad. It does not assert identical upstream fingertip poses.",
+    "scope": [
+      "named functional slots",
+      "positive anatomical motion",
+      "local rest convention",
+      "wrist frame",
+      "codec reversibility"
+    ],
+    "does_not_establish": [
+      "identical upstream fingertip poses",
+      "pretrained checkpoint calibration",
+      "cross-embodiment generalization performance"
+    ],
+    "reference_upstream_physical_to_local_coordinates": [
+      [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        -1.0,
+        0.0,
+        0.0
+      ]
+    ]
+  },
+  "native_wrist": {
+    "upstream_hand": "Wuji",
+    "kind": "anatomical_extension",
+    "local_physical_link": "h_right_palm_link",
+    "local_wrist_link": "h_right_palm_link",
+    "physical_link_to_wrist": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "hand_transform": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "reference_upstream_urdf_sha256": "94c06247d1b0250e9c12c43ed9957233c414c765903f08a00c8a883186fd7c66",
+    "evidence": "Retain WUJI1 own physical palm origin and anatomical palmar/radial/distal axes. No upstream base_joint pose, wrist translation, link length or camera pose is copied."
+  }
 }

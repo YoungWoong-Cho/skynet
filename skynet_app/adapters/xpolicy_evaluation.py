@@ -7,7 +7,8 @@ from pathlib import Path
 
 from policy_simulator import run_simulator, validate_simulation
 from recording_dataset import digest, verify_dataset
-from xpolicy_runtime import validate_manifest
+from xpolicy_runtime import validate_manifest, checkpoint_sampling
+from recording_time import resolve_sampling
 
 
 class RecordedPolicy:
@@ -26,6 +27,8 @@ class RecordedPolicy:
         if self.kind == "xpolicylab-act-native":
             from act_native_evaluation import load_native_act
             self.model, self.stats, self.scenes, self.action_steps = load_native_act(context, source_dir, manifest)
+            sampling = resolve_sampling(manifest, config.get("control_hz"),
+                action_steps=config.get("action_steps", 50), window_policy="pad", require_validation=True)
             self.mode = "rgb"
         elif self.kind == "xpolicylab-act":
             from skynet_act_training import build_policy
@@ -38,6 +41,7 @@ class RecordedPolicy:
                 or payload["manifest_sha256"] != config["dataset_manifest_sha256"]
             ):
                 raise ValueError("ACT checkpoint does not match the selected dataset")
+            sampling = checkpoint_sampling(manifest, config, payload.get("recording_sampling"))
             self.model = build_policy(
                 source_dir, revision, payload["settings"], payload["dimension"]
             )
@@ -50,6 +54,9 @@ class RecordedPolicy:
             self.scenes = ["scene_front", "scene_left", "scene_right"]
         else:
             raise ValueError("Unsupported recorded-data policy")
+        self.control_hz = sampling["control_hz"]
+        if self.action_steps != sampling["action_steps"]:
+            raise ValueError("ACT checkpoint action chunk differs from its sampling receipt")
         self.model.cuda().eval()
 
     def reset(self, seed):

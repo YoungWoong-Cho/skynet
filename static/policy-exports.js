@@ -42,8 +42,8 @@
   let snapshot = null,
     preparation = null,
     preparationDirty = false,
-    resourceId = null,
-    selectedResource = null,
+    detailTarget = null,
+    defaultName = "",
     sourceSessionId = null;
   let busy = false,
     timer = null,
@@ -51,7 +51,6 @@
     detailGeneration = 0,
     refreshPromise = null,
     pendingConfirmation = null;
-  const expandedResults = new Set();
   const terminal = (job) =>
     ["READY", "FAILED", "DELETE_FAILED"].includes(job.state);
   const adapterFor = (job) => job.adapter;
@@ -63,17 +62,26 @@
   const inputModalities = [
     ["state", "State"], ["rgb", "RGB"], ["depth", "Depth"], ["point_cloud", "Point cloud"],
   ];
-  function renderInputModalities(preset) {
-    const field = el("policy-export-modalities-field");
-    field.hidden = !preset;
-    const streams = preset?.observation_requirements?.streams || [];
+  function inputModalityItems(requirements) {
+    const streams = requirements?.observation_requirements?.streams || [];
     // Rendering dependencies and action representations are not model inputs.
-    const used = new Set([...(preset?.observations || []), ...streams.map((stream) => stream.modality)]);
-    el("policy-export-modalities").innerHTML = inputModalities.map(([id, label]) => {
+    const used = new Set([...(requirements?.observations || []), ...streams.map((stream) => stream.modality)]);
+    return inputModalities.map(([id, label]) => {
       const active = used.has(id);
       const status = active ? "Used" : "Not used";
       return `<li data-input-modality="${id}" class="${active ? "is-used" : ""}" aria-label="${label}: ${status}">${label}</li>`;
     }).join("");
+  }
+  function renderInputModalities(preset) {
+    el("policy-export-modalities-field").hidden = !preset;
+    el("policy-export-modalities").innerHTML = inputModalityItems(preset);
+  }
+  function resultInputModalities(...declarations) {
+    const requirements = declarations.find((item) =>
+      Array.isArray(item?.observations) || Array.isArray(item?.observation_requirements?.streams));
+    return requirements
+      ? `<ul class="adapter-input-modalities" aria-label="Input modalities">${inputModalityItems(requirements)}</ul>`
+      : '<span class="secondary">—</span>';
   }
   const splitLabel = (split) =>
     typeof split === "string" ? split : !split?.validation?.length
@@ -176,15 +184,6 @@
       progress
     );
   }
-  function renderHistory() {
-    el("policy-export-history").hidden = true;
-    el("policy-export-jobs").replaceChildren();
-    document.dispatchEvent(
-      new CustomEvent("dataset-preparation-changed", {
-        detail: snapshot.exports,
-      }),
-    );
-  }
   function refresh() {
     if (!refreshPromise)
       refreshPromise = refreshNow().finally(() => {
@@ -202,7 +201,7 @@
     // Readiness and training setup come from the server's current adapter catalog.
     // A browser snapshot must never override a newly archived/restored adapter.
     snapshot = value;
-    renderHistory();
+    document.dispatchEvent(new CustomEvent("dataset-preparation-changed", {detail: value.exports || []}));
   }
   function populateAdapters(selected = null, version = null) {
     const control = el("policy-export-adapter");
@@ -239,23 +238,19 @@
           sourceNote();
         }
       }
-      if (detail.open && selectedResource && pendingConfirmation !== detailGeneration)
-        await renderDataset();
+      if (detail.open && detailTarget && pendingConfirmation !== detailGeneration)
+        await renderDetail();
       if (visible() && !window.SkynetRefresh?.connected && snapshot.exports.some((j) => !terminal(j)))
         timer = setTimeout(() => { if (visible() && !window.SkynetRefresh?.connected) void refresh(); }, 3000);
     } catch (e) {
-      if (detail.open) datasetLoadError(e.message);
-      else {
-        el("policy-export-history").hidden = false;
-        el("policy-export-jobs").textContent = e.message;
-      }
+      if (detail.open) detailError(e.message);
     }
   }
   window.openPolicyExport = async (sessionId) => {
     const token = ++generation;
     SkynetDialog.close(detail);
     sourceSessionId = sessionId;
-    resourceId = null;
+    defaultName = "";
     preparation = null;
     error("policy-export-error", null);
     retryPreparation.hidden = true;
@@ -276,18 +271,12 @@
       const result = await request(`/options/${encodeURIComponent(sessionId)}`);
       if (token !== generation || !dialog.open) return;
       preparation = result;
-      const { session: source, resource } = preparation;
+      const { session: source } = preparation;
       if (!source)
         throw new Error("This recording session is no longer available.");
-      resourceId = source.resource_id || null;
       preparationDirty = false;
       populateAdapters();
-      el("policy-export-name").value =
-        resource?.display_name || source.name;
-      el("policy-export-name").readOnly = Boolean(resource);
-      el("policy-export-name-help").textContent = resource
-        ? "Adds a prepared result to this dataset."
-        : "Name this dataset.";
+      updateDefaultName();
       sourceNote();
     } catch (e) {
       if (token === generation && dialog.open) {
@@ -333,367 +322,193 @@
           : null,
       ],
       ["Converter", result.converter_sha256 || metadata.converter_sha256],
-      ["Source revision", result.source_revision || result.revision],
+      ["Source revision", result.source_revision || metadata.source_revision],
     ].filter(([, value]) => value != null && value !== "");
     return pairs.length
-      ? `<dl class="dataset-result-settings">${pairs.map(([label, value]) => `<dt>${esc(label)}</dt><dd>${esc(value)}</dd>`).join("")}</dl>`
+      ? `<div class="key-value-grid">${keyValueHtml(pairs)}</div>`
       : '<p class="secondary">No conversion settings recorded.</p>';
   }
-  function datasetMetadata() {
-    const resource = selectedResource;
-    const attempts = (snapshot?.exports || []).filter(
-      (job) => job.resource_id === resource.id,
-    );
-    return `<div class="key-value-grid" data-dataset-metadata>
-      <div class="key-value"><span>Type</span><strong>${esc(dataResourceTypeLabel(resource))}</strong></div>
-      <div class="key-value"><span>Source</span><strong>${esc(resource.provider || "—")}</strong></div>
-      <div class="key-value"><span>Conversion attempts</span><strong>${attempts.length}</strong></div>
-    </div>${resource.metadata?.test_fixture ? '<p class="secondary">Test fixture</p>' : ""}`;
+  function adapterLabel(dataset) {
+    const adapter = dataset?.metadata?.adapter;
+    return dataset?.adapter_name || (typeof adapter === "string" ? adapter : adapter?.name) || "—";
   }
-  function resultRow({
-    id,
-    versionId,
-    title,
-    container,
-    status,
-    note,
-    episodes,
-    split,
-    createdAt,
-    storage,
-    settings,
-    primary = [],
-    secondary = [],
-  }) {
-    const detailId = `dataset-result-${encodeURIComponent(id)}`;
-    const expanded = expandedResults.has(id);
-    const badge =
-      status && !["READY", "PUBLISHED", "SUCCEEDED"].includes(status)
-        ? statusPill(status)
-        : "";
-    const dataset = selectedResource?.category === "dataset";
-    const presetIds = [
-      ...new Set(
-        (selectedResource?.experiment_presets || [])
-          .filter((link) => link.version_id === versionId)
-          .map((link) => link.experiment_id),
-      ),
-    ];
-    const presets = dataset
-      ? `<td><button type="button" class="text-button" data-dataset-presets="${esc(selectedResource.id)}" data-dataset-label="${esc(selectedResource.display_name)}" data-preset-ids="${esc(JSON.stringify(presetIds))}">${presetIds.length} preset${presetIds.length === 1 ? "" : "s"}</button></td>`
-      : "";
-    const source =
-      dataset && resourceRecordingIds(selectedResource).length
-        ? `<button type="button" data-dataset-recordings="${esc(selectedResource.id)}">View source recordings</button>`
-        : "";
-    return `<tr data-dataset-result="${esc(id)}">
-      <td class="wrap-cell"><strong>${esc(title)}</strong>${container ? `<span class="secondary">${esc(container)}</span>` : ""}${badge}${note ? `<span class="secondary">${esc(note)}</span>` : ""}</td>
-      <td class="wrap-cell">${esc(episodes)}${split ? `<span class="secondary">${esc(splitLabel(split))}</span>` : ""}</td>
-      ${presets}<td>${esc(formatDate(createdAt))}</td>
-      <td class="row-actions">${primary.join("")}${source}<button type="button" data-dataset-result-toggle="${esc(id)}" aria-expanded="${expanded}" aria-controls="${esc(detailId)}">Details</button></td>
-    </tr><tr id="${esc(detailId)}" class="dataset-result-details"${expanded ? "" : " hidden"}><td colspan="${dataset ? 5 : 4}" class="wrap-cell">
-      ${datasetMetadata()}
-      <div class="dataset-result-metadata"><section><h4>Storage</h4>${storage}</section><section><h4>Conversion settings</h4>${settings}</section></div>
-      ${secondary.length ? `<div class="form-actions">${secondary.join("")}</div>` : ""}
-    </td></tr>`;
-  }
-  function preparedRow(job) {
-    const policy = adapterFor(job);
-    const copies = (job.locations || []).filter(
-      (l) => l.status === "AVAILABLE",
-    );
-    const cluster = copies.some((l) => l.kind === "cluster");
-    const failed = ["FAILED", "DELETE_FAILED"].includes(job.state);
-    const state = failed
-      ? "FAILED"
-      : job.state === "READY"
-        ? job.training_ready
-          ? "READY"
-          : "PREPARED"
-        : ["QUEUED", "PENDING"].includes(job.state)
-          ? "QUEUED"
-          : job.state === "STAGING"
-            ? "PREPARING SUBMISSION"
-            : job.state === "SUBMITTING"
-              ? "SUBMITTING"
-              : job.state === "SUBMISSION_UNKNOWN"
-                ? "CHECKING SUBMISSION"
-                : "RUNNING";
-    const primary = [],
-      secondary = [];
-    if (job.version_id && cluster) {
-      secondary.push(
-        `<a class="button button-outline" href="/api/data/exports/${encodeURIComponent(job.id)}/manifest.json" download>Download manifest</a>`,
-      );
-    }
-    if (job.state === "FAILED") {
-      if (job.execution !== "cluster" || job.cluster_job_id)
-        secondary.push(
-          `<a class="button button-outline" href="/api/data/exports/${encodeURIComponent(job.id)}/export.log" download>Preparation log</a>`,
-        );
-      primary.push(
-        `<button type="button" data-preparation-retry="${esc(job.id)}">Retry</button>`,
-      );
-    }
-    if (job.training_ready && job.version_id)
-      primary.push(
-        `<button type="button" data-preparation-train="${esc(job.id)}">Use in experiment</button>`,
-      );
-    const statusNote =
-      failed || !terminal(job)
-        ? jobStatus(job)
-        : policy?.trainable === false
-          ? "Export only"
-          : "";
-    return resultRow({
-      id: `job-${job.id}`,
-      versionId: job.version_id,
-      title: policy?.name || "Recording dataset",
-      container: job.adapter_data_preset,
-      status: state,
-      note: statusNote,
-      episodes: job.episodes ?? job.sources?.length ?? "—",
-      split: job.split,
-      createdAt: job.created_at,
-      storage: locationHtml(copies),
-      settings: resultSettings(job),
-      primary,
-      secondary,
-    });
-  }
-  function sourceVersionRow(version, dataset) {
-    const locations = (version.locations || []).filter(
-      (l) => l.status === "AVAILABLE",
-    );
-    const paths = locations.length
-      ? locations
-      : version.path
-        ? [
-            {
-              kind: version.metadata?.storage_location || "unknown",
-              path: version.path,
-            },
-          ]
-        : [];
-    const episodes = Array.isArray(version.metadata?.episodes)
-      ? version.metadata.episodes.length
-      : (version.metadata?.num_episodes ?? version.metadata?.episodes ?? "—");
-    return resultRow({
-      id: `version-${version.id}`,
-      versionId: version.id,
-      title: version.format || "Data files",
-      status: dataVersionStatus(version),
-      episodes,
-      split: version.metadata?.split,
-      createdAt: version.created_at,
-      storage: locationHtml(paths),
-      settings: resultSettings(version),
-      primary:
-        dataset && version.format !== "skynet.episodes/v1"
-          ? [
-              `<button type="button" data-registered-train="${esc(version.id)}">Use in experiment</button>`,
-            ]
-          : [],
-    });
-  }
+  window.SkynetDatasetUI = {inputModalities: resultInputModalities, adapterLabel};
 
-  function datasetLoadError(message) {
-    error("prepared-dataset-error", message);
+  function matchingJobs(scope = {}) {
+    return (snapshot?.exports || []).filter((job) =>
+      (!scope.jobId || job.id === scope.jobId) &&
+      (!scope.versionId || job.version_id === scope.versionId) &&
+      (!scope.resourceId || job.resource_id === scope.resourceId) &&
+      (!scope.recordingId || job.session_id === scope.recordingId ||
+        job.sources?.some((source) => source.session_id === scope.recordingId)))
+      .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+  }
+  function conversionHistoryRow(job) {
+    const actions = [];
+    if (job.state === "FAILED") actions.push(`<button type="button" data-preparation-retry="${esc(job.id)}">Retry</button>`);
+    if (job.version_id) actions.push(`<button type="button" data-prepared-dataset="${esc(job.version_id)}">View dataset</button>`);
+    else if (["FAILED", "DELETE_FAILED"].includes(job.state))
+      actions.push(`<button type="button" data-delete-kind="prepared" data-delete-id="${esc(job.id)}">Delete attempt</button>`);
+    if (job.execution !== "cluster" || job.cluster_job_id)
+      actions.push(`<a class="row-action-link" href="/api/data/exports/${encodeURIComponent(job.id)}/export.log" download="">Preparation log</a>`);
+    return {id: job.id, cells: [
+      `<span class="node-name">${esc(job.name || "Conversion")}</span>`,
+      {className: "wrap-cell", html: esc(job.adapter?.name || "—")},
+      statusPill(job.state),
+      {className: "wrap-cell", html: esc(jobStatus(job) || "—")},
+      esc(formatDate(job.created_at)),
+      {className: "row-actions", html: actions.join("")},
+    ]};
+  }
+  function renderConversionHistory(jobs) {
     const content = el("prepared-dataset-content");
-    if (content.textContent === "Loading dataset…")
-      content.innerHTML = "<p>Dataset details could not be loaded.</p>";
-    if (!content.querySelector("[data-prepared-load-retry]"))
-      content.insertAdjacentHTML(
-        "beforeend",
-        `<button type="button" class="button button-outline" data-prepared-load-retry data-prepared-resource="${esc(selectedResource.id)}">Try again</button>`,
-      );
+    let table = content.querySelector(":scope > .table-scroll");
+    if (!table) {
+      table = document.createElement("div");
+      content.replaceChildren(table);
+    }
+    window.SkynetJobHistory.render(table, {
+      columns: ["Name", "Adapter", "State", "Progress", "Created at", "Actions"],
+      rows: jobs.map(conversionHistoryRow),
+      empty: "No conversion attempts.",
+    });
   }
-  async function renderDataset(
-    token = ++detailGeneration,
-    refreshCatalog = false,
-  ) {
+  function detailError(message) {
+    error("prepared-dataset-error", message);
+    if (!el("prepared-dataset-content").querySelector("[data-detail-retry]"))
+      el("prepared-dataset-content").insertAdjacentHTML("beforeend",
+        '<button type="button" class="button button-outline" data-detail-retry="">Try again</button>');
+  }
+  async function renderDetail(token = ++detailGeneration) {
+    const target = detailTarget;
+    if (!target) return;
+    const current = () => token === detailGeneration && detail.open;
     try {
-      await renderDatasetCurrent(token, refreshCatalog);
+      if (target.kind === "job") {
+        const job = matchingJobs({jobId: target.id})[0] || target.job;
+        if (job?.state === "READY" && job.version_id) {
+          detailTarget = {kind: "dataset", id: job.version_id};
+          return renderDetail(token);
+        }
+        if (!current()) return;
+        el("prepared-dataset-title").textContent = job?.name || "Dataset conversion";
+        el("prepared-dataset-context").textContent = "Conversion";
+        el("prepared-dataset-actions").replaceChildren();
+        renderConversionHistory(job ? [job] : []);
+      } else if (target.kind === "history") {
+        if (!current()) return;
+        const jobs = matchingJobs(target.scope);
+        el("prepared-dataset-title").textContent = "Conversion history";
+        el("prepared-dataset-context").textContent = `${jobs.length} attempt${jobs.length === 1 ? "" : "s"}`;
+        el("prepared-dataset-actions").replaceChildren();
+        renderConversionHistory(jobs);
+      } else {
+        const {dataset} = await api(`/api/data/datasets/${encodeURIComponent(target.id)}`);
+        if (!current()) return;
+        const jobs = matchingJobs({versionId: dataset.id});
+        const job = jobs.find((item) => item.training_ready) || jobs[0];
+        const metadata = dataset.metadata || {};
+        const episodes = datasetEpisodeCount(dataset);
+        const split = metadata.split || job?.split;
+        el("prepared-dataset-title").textContent = dataset.display_name;
+        el("prepared-dataset-context").textContent = `${episodes} episode${episodes === 1 ? "" : "s"}${dataset.archived_at ? " · Archived" : ""}`;
+        const canUse = datasetCanTrain(dataset);
+        el("prepared-dataset-actions").innerHTML = canUse
+          ? `<button type="button" class="button button-accent" data-use-dataset="${esc(dataset.id)}">Use in experiment</button>` : "";
+        el("prepared-dataset-content").innerHTML =
+          `${dataset.description && dataset.description !== dataset.display_name ? `<p>${esc(dataset.description)}</p>` : ""}
+          <div class="key-value-grid">
+            ${keyValueHtml([["Adapter", adapterLabel(dataset)]])}
+            <div class="key-value"><span>Input modalities</span>${resultInputModalities(metadata, job?.requirements)}</div>
+            ${keyValueHtml([["Created at", formatDate(dataset.created_at)], ...(split ? [["Split", splitLabel(split)]] : [])])}
+          </div>
+          <div class="dataset-result-metadata"><section><h4>Storage</h4>${locationHtml(dataset.locations || [])}</section><section><h4>Conversion settings</h4>${resultSettings({...job, ...dataset})}</section></div>
+          <div class="form-actions">
+            ${job ? `<a class="button button-outline" href="/api/data/exports/${encodeURIComponent(job.id)}/manifest.json" download>Download manifest</a>` : ""}
+            ${jobs.length ? `<button type="button" class="button button-outline" data-version-history="${esc(dataset.id)}">Conversion history</button>` : ""}
+          </div>`;
+      }
+      if (current()) error("prepared-dataset-error", null);
     } catch (e) {
-      if (token !== detailGeneration || !detail.open) return;
-      datasetLoadError(e.message);
+      if (current()) detailError(e.message);
     }
   }
-  async function renderDatasetCurrent(token, refreshCatalog) {
-    const payload = await api(
-      `/api/data/resources/${encodeURIComponent(selectedResource.id)}`,
-    );
-    if (token !== detailGeneration || !detail.open) return;
-    selectedResource = payload.resource;
-    let r = selectedResource;
-    let activityError = "";
-    if (
-      r.category === "dataset" &&
-      (refreshCatalog || catalogState !== "ready")
-    ) {
-      try {
-        await request();
-      } catch (e) {
-        activityError = `Conversion history unavailable: ${e.message}`;
-      }
-      if (token !== detailGeneration || !detail.open) return;
-
-    }
-    const jobs =
-      r.category === "dataset"
-        ? (snapshot?.exports || []).filter((j) => j.resource_id === r.id)
-        : [];
-    const versions = r.versions || [];
-    el("prepared-dataset-title").textContent = r.display_name;
-    const results = versions.filter((v) => v.format !== "skynet.episodes/v1");
-    el("prepared-dataset-context").textContent =
-      `${results.length} result${results.length === 1 ? "" : "s"}`;
-    const resultsById = new Map(results.map((v) => [v.id, v]));
-    const shown = new Set();
-    const rows = [];
-    for (const job of jobs) {
-      if (job.version_id && resultsById.has(job.version_id)) {
-        if (shown.has(job.version_id)) continue;
-        shown.add(job.version_id);
-      }
-      rows.push(preparedRow(job));
-    }
-    for (const version of results) {
-      if (!shown.has(version.id))
-        rows.push(sourceVersionRow(version, r.category === "dataset"));
-    }
-    const focusedResult = document.activeElement?.dataset?.datasetResultToggle;
-    const title = r.display_name;
-    const description =
-      r.description?.trim() && r.description.trim() !== title.trim()
-        ? `<p>${esc(r.description)}</p>`
-        : "";
-    error("prepared-dataset-error", activityError);
-    el("prepared-dataset-content").innerHTML =
-      `${description}${activityError ? `<button type="button" class="button button-outline" data-prepared-load-retry data-prepared-resource="${esc(r.id)}">Try again</button>` : ""}
-      <div class="table-scroll identity-table"><table data-dataset-results><thead><tr>${["Format", "Episodes", ...(r.category === "dataset" ? ["Experiments presets"] : []), "Created", "Actions"].map((label) => `<th scope="col">${label}</th>`).join("")}</tr></thead><tbody>${rows.join("") || `<tr><td colspan="${r.category === "dataset" ? 5 : 4}">No results yet.</td></tr>`}</tbody></table></div>
-      ${rows.length ? "" : datasetMetadata()}`;
-    el("prepared-dataset-actions").innerHTML =
-      `<button type="button" class="button button-outline" data-data-history="${esc(r.id)}">Files and history</button>`;
-    if (focusedResult) {
-      [
-        ...el("prepared-dataset-content").querySelectorAll(
-          "[data-dataset-result-toggle]",
-        ),
-      ]
-        .find((button) => button.dataset.datasetResultToggle === focusedResult)
-        ?.focus({ preventScroll: true });
-    }
-  }
-
-  function showAcceptedPreparation(job) {
+  function openDetail(target, options) {
+    const same = detail.open && detailTarget?.kind === target.kind && detailTarget?.id === target.id;
+    detailTarget = target;
+    pendingConfirmation = null;
     const token = ++detailGeneration;
-    pendingConfirmation = token;
-    expandedResults.clear();
-    selectedResource = { ...preparation?.resource, id: job.resource_id };
-    const policy = adapterFor(job) || preparation?.adapters.find((item) => item.id === job.adapter_id);
-    el("prepared-dataset-title").textContent =
-      job.name || preparation?.resource?.display_name || el("policy-export-name").value;
-    el("prepared-dataset-context").textContent = job.state === "READY"
-      ? "Conversion is prepared"
-      : "Conversion request accepted";
-    error("prepared-dataset-error", null);
-    el("prepared-dataset-actions").innerHTML =
-      `<button type="button" class="button button-outline" data-data-history="${esc(job.resource_id)}">Files and history</button>`;
-    el("prepared-dataset-content").innerHTML =
-      `<section data-preparation-accepted><strong>${esc(policy?.name || "Dataset conversion")}</strong>
-      <p>${statusPill(job.state || "ACCEPTED")} ${esc(job.detail || stageLabels[job.stage] || job.state || "Request accepted")}</p>
-      <p class="secondary">Loading dataset details…</p></section>`;
     SkynetDialog.close(dialog);
-    SkynetDialog.open(detail);
+    error("prepared-dataset-error", null);
+    if (!same) {
+      el("prepared-dataset-title").textContent = target.kind === "history" ? "Conversion history" : "Dataset";
+      el("prepared-dataset-context").textContent = "";
+      el("prepared-dataset-actions").replaceChildren();
+      el("prepared-dataset-content").textContent = "Loading…";
+    }
+    SkynetDialog.open(detail, options);
+    return token;
+  }
+  window.openPreparedDataset = async (id) => {
+    const token = openDetail({kind: "dataset", id});
+    // Display a published result even if the conversion history service is down.
+    await renderDetail(token);
+  };
+  window.openFileResource = (id) => {
+    SkynetDialog.close(detail);
+    openDataInspection(id);
+  };
+  window.openDatasetConversionHistory = async (scope = {}, options) => {
+    const token = openDetail({kind: "history", scope}, options);
+    try {
+      await request();
+      if (token === detailGeneration && detail.open) await renderDetail(token);
+    } catch (e) {
+      if (token === detailGeneration && detail.open) detailError(e.message);
+    }
+  };
+  function showAcceptedPreparation(job) {
+    const token = openDetail({kind: "job", id: job.id, job});
+    pendingConfirmation = token;
+    el("prepared-dataset-title").textContent = job.name || "Dataset conversion";
+    el("prepared-dataset-context").textContent = job.state === "READY" ? "Dataset is ready" : "Conversion request accepted";
+    renderConversionHistory([job]);
     return token;
   }
   async function finishAcceptedPreparation(token) {
     try {
-      // An older poll may predate the accepted job. Complete a fresh read before
-      // replacing its acknowledgment with the complete dataset history.
       await refreshAfterMutation();
       if (token !== detailGeneration || !detail.open) return;
       pendingConfirmation = null;
-      await renderDataset(token);
+      await renderDetail(token);
     } catch (e) {
-      if (token === detailGeneration && detail.open) datasetLoadError(e.message);
+      if (token === detailGeneration && detail.open) detailError(e.message);
     }
   }
-
-  window.openPreparedDataset = async (id) => {
-    const token = ++detailGeneration;
-    pendingConfirmation = null;
-    const retainDetails = detail.open && selectedResource?.id === id;
-    if (!retainDetails) {
-      expandedResults.clear();
-      selectedResource = { id };
-      el("prepared-dataset-title").textContent = "Dataset";
-      el("prepared-dataset-actions").replaceChildren();
-      el("prepared-dataset-context").textContent = "";
-      el("prepared-dataset-content").textContent = "Loading dataset…";
-    }
-    SkynetDialog.close(dialog);
-    error("prepared-dataset-error", null);
-    if (!retainDetails) SkynetDialog.open(detail);
-    try {
-      if (token === detailGeneration && detail.open)
-        await renderDataset(token, true);
-    } catch (e) {
-      if (token === detailGeneration && detail.open)
-        datasetLoadError(e.message);
-    }
-  };
   async function action(event) {
     const button = event.target.closest("button");
     if (!button || button.disabled) return;
     const data = button.dataset;
-    if (data.datasetResultToggle) {
-      const id = data.datasetResultToggle;
-      const expanded = !expandedResults.has(id);
-      if (expanded) expandedResults.add(id);
-      else expandedResults.delete(id);
-      button.setAttribute("aria-expanded", String(expanded));
-      el(button.getAttribute("aria-controls")).hidden = !expanded;
-      return;
-    }
+    if (data.dataHistory || data.deleteKind) return;
+    button.disabled = true;
     try {
-      if (
-        data.deleteKind ||
-        data.dataHistory ||
-        data.recordingLink ||
-        data.datasetRecordings ||
-        data.datasetPresets
-      )
-        return;
-      button.disabled = true;
       if (data.datasetCopyPath) {
         await navigator.clipboard.writeText(data.datasetCopyPath);
         showToast("Path copied.");
-        return;
-      }
-      if (data.preparedResource)
-        return await window.openPreparedDataset(data.preparedResource);
-      if (data.registeredTrain) {
+      } else if (data.preparedDataset) {
+        await window.openPreparedDataset(data.preparedDataset);
+      } else if (data.useDataset) {
         SkynetDialog.close(detail);
-        await window.useRegisteredDataset(data.registeredTrain);
-        return;
+        await window.useDataset(data.useDataset);
+      } else if (data.versionHistory) {
+        await window.openDatasetConversionHistory({versionId: data.versionHistory});
+      } else if (Object.hasOwn(data, "detailRetry")) {
+        await refreshAfterMutation();
+        await renderDetail();
+      } else if (data.preparationRetry) {
+        await request(`/${encodeURIComponent(data.preparationRetry)}/retry`, {method: "POST", body: JSON.stringify({})});
+        await refreshAfterMutation();
       }
-      const id =
-        data.preparationRetry ||
-        data.preparationTrain;
-      if (!id) return;
-      if (data.preparationTrain) {
-        const job = snapshot.exports.find((j) => j.id === id);
-        SkynetDialog.close(detail);
-        await window.usePreparedDataset(job);
-        return;
-      }
-      await request(`/${encodeURIComponent(id)}/retry`, {
-        method: "POST",
-        body: JSON.stringify({}),
-      });
-      await refresh();
     } catch (e) {
       if (detail.open) error("prepared-dataset-error", e.message);
       else showToast(e.message);
@@ -705,7 +520,7 @@
     await refreshAfterMutation();
     if (detail.open) {
       try {
-        await renderDataset();
+        await renderDetail();
       } catch {
         SkynetDialog.close(detail);
       }
@@ -713,12 +528,21 @@
   };
   dialog.addEventListener("close", () => generation++);
   detail.addEventListener("close", () => detailGeneration++);
-  el("policy-export-adapter").onchange = sourceNote;
+  function updateDefaultName() {
+    const control = el("policy-export-name");
+    if (!control.value || control.value === defaultName) {
+      defaultName = [preparation?.session?.name, selectedAdapter()?.name].filter(Boolean).join(" · ").slice(0, 100);
+      control.value = defaultName;
+    }
+  }
+  el("policy-export-adapter").onchange = () => {
+    updateDefaultName();
+    sourceNote();
+  };
   el("preparation-validation").oninput = sourceNote;
-  el("refresh-policy-exports").onclick = refresh;
   el("refresh-data-registry").addEventListener("click", refresh);
-  el("policy-export-jobs").onclick = action;
   el("prepared-dataset-content").onclick = action;
+  el("prepared-dataset-actions").onclick = action;
   el("policy-export-form").onsubmit = async (event) => {
     event.preventDefault();
     if (
@@ -740,7 +564,6 @@
           adapter_version_id: selectedAdapter().adapter_version_id,
           adapter_data_preset: selectedPreset().id,
           name: el("policy-export-name").value.trim(),
-          resource_id: resourceId,
           gateway: el("gateway").value,
           validation_percent: Number(el("preparation-validation").value),
           seed: Number(el("preparation-seed").value),

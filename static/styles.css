@@ -3401,20 +3401,6 @@ footer {
   align-self: center;
 }
 
-.policy-export-job {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding-block: 12px;
-  border-top: 1px solid var(--line);
-}
-.policy-export-job p {
-  margin: 6px 0;
-  max-width: 70ch;
-  overflow-wrap: anywhere;
-}
-
 /* Dataset preparation uses the existing dialogs, form grid and registry controls. */
 .dataset-result-metadata {
   display: grid;
@@ -3430,40 +3416,13 @@ footer {
   white-space: normal;
   overflow-wrap: anywhere;
 }
-.dataset-result-metadata h4,
-[data-dataset-metadata] h4 {
+.dataset-result-metadata h4 {
   margin: 0 0 8px;
-}
-.dataset-result-settings {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: 8px 16px;
-  margin: 0;
-}
-.dataset-result-settings dt {
-  color: var(--muted);
-}
-.dataset-result-settings dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-.dataset-result-details .form-actions {
-  flex-wrap: wrap;
 }
 @media (max-width: 700px) {
   .dataset-result-metadata {
     grid-template-columns: minmax(0, 1fr);
   }
-}
-.prepared-usage {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: baseline;
-}
-.prepared-usage .text-button {
-  text-align: left;
-  overflow-wrap: anywhere;
 }
 #prepared-dataset-content h3 {
   margin-bottom: 8px;

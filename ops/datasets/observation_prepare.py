@@ -387,11 +387,24 @@ def _derive(job, source, *, staging_root=None):
             writer.discard()
 
 
-def run_request(request, *, renderer_factory=None, progress=None):
+def run_request(request, *, renderer_factory=None, progress=None, publish_result=None):
     started = time.monotonic()
     progress = progress or (lambda phase, **fields: None)
     result = {"schema": PREPARE_SCHEMA, "request_id": request.get("request_id"),
               "attempt_token": request.get("attempt_token"), "state": "FAILED", "artifacts": []}
+    committed = False
+
+    def complete():
+        nonlocal committed
+        # Every returned artifact has already been closed, checked and atomically
+        # published. Commit the batch before native simulator shutdown can exit
+        # or hang; the supervisor still owns stopping all renderer processes.
+        ready = dict(result, state="READY", duration_seconds=round(time.monotonic() - started, 6))
+        if publish_result is not None:
+            publish_result(ready)
+        result.update(ready)
+        committed = True
+
     try:
         sources, jobs = _validate_request(request)
         pending = []
@@ -419,7 +432,8 @@ def run_request(request, *, renderer_factory=None, progress=None):
                 if not 0 < source_path.stat().st_size <= MAX_RECORDING_BYTES or file_digest(source_path) != sources[key]["sha256"]:
                     raise ValueError("Original recording checksum or size changed")
             progress("initializing")
-            with renderer_factory(sources, pending) as renderer:
+            with renderer_factory(sources, pending, progress=progress,
+                                  staging_root=request.get("staging_root")) as renderer:
                 for key in episode_keys:
                     progress("episode", episode_key=key)
                     payload, episode, step_dt = _load_source(sources[key])
@@ -456,11 +470,16 @@ def run_request(request, *, renderer_factory=None, progress=None):
                     finally:
                         for writer in writers:
                             writer.discard()
+                complete()
                 progress("closing")
-        result["state"] = "READY"
+        if not committed:
+            complete()
     except Exception as exc:
         traceback.print_exc(file=sys.stderr)
-        result["error"] = str(exc)
+        if committed:
+            result["cleanup_warning"] = "Renderer shutdown failed after artifact publication: " + str(exc)
+        else:
+            result["error"] = str(exc)
     result["duration_seconds"] = round(time.monotonic() - started, 6)
     return result
 
@@ -481,7 +500,8 @@ def main(argv=None):
         result = supervise(request, args.request, args.result, worker_path=__file__)
     else:
         progress = ProgressReporter(request, args.progress) if args.render_child and args.progress else None
-        result = run_request(request, progress=progress)
+        result = run_request(request, progress=progress,
+                             publish_result=lambda value: write_json(args.result, value))
         write_json(args.result, result)
     return 0 if result["state"] == "READY" else 1
 

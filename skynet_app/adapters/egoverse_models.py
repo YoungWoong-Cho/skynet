@@ -2,6 +2,10 @@
 
 import re
 
+# Original pinned EgoVerse ACT chunk_size and HPT EVA flow-head horizon.
+# Skynet exposes this original default as an experiment setting for recordings.
+RECORDING_ACTION_STEPS = {"act": 100, "hpt_joints": 100}
+
 MODEL_LEARNING_RATES = {
     "act": 5e-5,
     "hpt_bc_keypoints_base": 5e-5,

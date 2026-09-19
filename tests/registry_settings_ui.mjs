@@ -13,23 +13,23 @@ w.HTMLDialogElement.prototype.close=function(value=''){if(this.open){this.return
 try {
   for (const name of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js']) w.eval((await readFile(new URL('../static/'+name,import.meta.url),'utf8')) + (name === 'app.js' ? `window.registryFixture=(versions,resources=[])=>{dataVersionRows=versions;dataResourceRows=resources;renderDataVersions();renderDataResources();};
     window.trackingFixture=provider=>trackingConnections.get(provider);
-    window.missingTutorialFixture=()=>{tutorialState.active=true;tutorialState.page='datasets';tutorialState.session=newTutorialSession('datasets');tutorialState.sessionGeneration=tutorialState.session.sessionGeneration;showTutorialUnavailableStep(tutorialTours.datasets.steps[7],7);};
+    window.missingTutorialFixture=()=>{tutorialState.active=true;tutorialState.page='collection';tutorialState.session=newTutorialSession('collection');tutorialState.sessionGeneration=tutorialState.session.sessionGeneration;showTutorialUnavailableStep(tutorialTours.collection.steps[7],7);};
     window.tutorialBackFixture=()=>{
-      const steps=tutorialTours.datasets.steps; const readIndex=steps.findIndex(step=>step.id==='read');
+      const steps=tutorialTours.collection.steps; const readIndex=steps.findIndex(step=>step.id==='read');
       tutorialState.index=steps.length-1;tutorialState.gateComplete=true;
       tutorialState.session.completedStepIds=[steps.at(-1).id,'read'];
       showTutorialUnavailableStep(steps[readIndex],readIndex);
       return {index:tutorialState.index,expected:readIndex};
     };
     window.tutorialPendingFixture=(confirmationWindowOpen=true)=>{
-      resetTutorialAttempt();tutorialState.active=true;tutorialState.page='datasets';
-      tutorialState.index=tutorialTours.datasets.steps.length-1;
-      tutorialState.session=newTutorialSession('datasets');tutorialState.session.bindings={resourceId:'fixture'};
+      resetTutorialAttempt();tutorialState.active=true;tutorialState.page='collection';
+      tutorialState.index=tutorialTours.collection.steps.length-1;
+      tutorialState.session=newTutorialSession('collection');tutorialState.session.bindings={collectionAdapterId:'fixture'};
       tutorialState.sessionGeneration=tutorialState.session.sessionGeneration;
       const attempt={sessionGeneration:tutorialState.sessionGeneration,gateGeneration:tutorialState.gateGeneration,
         stepId:tutorialStep().id,attemptId:'fixture',expiresAt:Date.now()+8000,confirmationDeadline:Date.now()+120000,
-        confirmationWindowOpen,claimed:false,request:{method:'DELETE',bind:'resourceId'},
-        expectedPath:'/api/data/resources/fixture',bindingId:'fixture'};
+        confirmationWindowOpen,claimed:false,request:{method:'DELETE',bind:'collectionAdapterId'},
+        expectedPath:'/api/collection/adapters/fixture',bindingId:'fixture'};
       tutorialState.pendingAttempt=attempt;scheduleTutorialAttemptExpiry(attempt);return attempt;
     };
     window.pendingTutorial=()=>tutorialState.pendingAttempt;
@@ -56,7 +56,7 @@ try {
     window.tutorialResultState=()=>({index:tutorialState.index,gateComplete:tutorialState.gateComplete,stepId:tutorialStep().id,
       record:tutorialState.session.ownedRecords[0],completed:[...tutorialState.session.completedStepIds]});
     window.hideCurrentTutorialControl=()=>{tutorialState.target.remove();showTutorialUnavailableStep(tutorialStep(),tutorialState.index);};
-    window.completedTutorialFixture=()=>{tutorialState.index=tutorialTours.datasets.steps.length-1;tutorialState.target=document.createElement('button');completeTutorialGate('Archived');return advanceTutorial();};` : ''));
+    window.completedTutorialFixture=()=>{tutorialState.index=tutorialTours.collection.steps.length-1;tutorialState.target=document.createElement('button');completeTutorialGate('Archived');return advanceTutorial();};` : ''));
 
   // Bundle authoring has been removed from the user-facing registry.
   assert.equal(el('data-bundle-version-picker'),null);
@@ -132,13 +132,13 @@ try {
     w.onTutorialKeydown(keyboard);assert.equal(keyboard.defaultPrevented,false,'Native confirmation owns '+key);
   }
   now+=20000;
-  assert.equal(w.tutorialObserveApiStart('/api/data/resources/fixture',{method:'DELETE'}),null,'No claim while confirmation remains open');
+  assert.equal(w.tutorialObserveApiStart('/api/collection/adapters/fixture',{method:'DELETE'}),null,'No claim while confirmation remains open');
   confirmation.querySelector('form').dispatchEvent(new w.Event('submit',{cancelable:true}));
   assert.equal(await answer,true);
   assert.ok(attempt.expiresAt>now);
-  assert.equal(w.tutorialObserveApiStart('/api/data/resources/other',{method:'DELETE'}),null,'Record binding remains exact');
-  assert.equal(w.tutorialObserveApiStart('/api/data/resources/fixture',{method:'POST'}),null,'Method binding remains exact');
-  assert.ok(w.tutorialObserveApiStart('/api/data/resources/fixture',{method:'DELETE'}));
+  assert.equal(w.tutorialObserveApiStart('/api/collection/adapters/other',{method:'DELETE'}),null,'Record binding remains exact');
+  assert.equal(w.tutorialObserveApiStart('/api/collection/adapters/fixture',{method:'POST'}),null,'Method binding remains exact');
+  assert.ok(w.tutorialObserveApiStart('/api/collection/adapters/fixture',{method:'DELETE'}));
   attempt=w.tutorialPendingFixture();answer=w.askUserDialog('Cancel this fixture?');
   confirmation=w.document.querySelector('dialog[data-app-confirmation][open]');
   confirmation.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));

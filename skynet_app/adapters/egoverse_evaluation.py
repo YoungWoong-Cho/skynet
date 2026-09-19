@@ -40,7 +40,7 @@ def evaluate(context, repository):
     from artifacts import digest, verify
     from egoverse_runtime import (
         register_joint_domain, JOINT_CONTRACT, model_algorithm, validate_hpt_joint_inputs,
-        validate_manifest, validate_checkpoint_receipt,
+        validate_manifest, validate_checkpoint_receipt, experiment_sampling,
     )
     from evaluation_video import compose_camera_views, rgb_frame
 
@@ -69,8 +69,9 @@ def evaluate(context, repository):
     if actual_revision != receipt["revision"]:
         raise ValueError("Evaluation must use the checkpoint's exact EgoVerse revision")
     config = context["policy"]["native_config"]
-    validate_checkpoint_receipt(receipt, receipt["model"], config["dataset_manifest_sha256"])
-    manifest = validate_manifest(config["dataset_path"], receipt["manifest_sha256"], receipt["model"])
+    manifest = validate_manifest(config["dataset_path"], config["dataset_manifest_sha256"], receipt["model"])
+    sampling = experiment_sampling(manifest, receipt["model"], control_hz=config.get("control_hz"), action_steps=config.get("action_steps"))
+    validate_checkpoint_receipt(receipt, receipt["model"], config["dataset_manifest_sha256"], sampling=sampling)
     if manifest.get("split", {}).get("mode") == "single_episode_overfit":
         raise ValueError("This is a single-episode overfit dataset, with no held-out episodes. Use its training validation loss to check overfitting.")
     recorded = manifest["contract"] == JOINT_CONTRACT
@@ -95,7 +96,7 @@ def evaluate(context, repository):
     evaluator = None if recorded else hydra.utils.instantiate(cfg.evaluator)
     if evaluator is not None:
         evaluator.model = model.model
-    # Evaluate original episode boundaries, with no resampling between episodes.
+    # Preserve episode boundaries and use the checkpoint's training-time sampling.
     episodes = [manifest["episodes"][i] for i in manifest["split"]["validation"]]
     requested = context["episodes_per_task"]
     if requested > len(episodes):
@@ -118,14 +119,15 @@ def evaluate(context, repository):
             domain, dataset, indices = sources[
                 episode["id"] if recorded else str((Path(config["dataset_path"]) / episode["path"]).resolve())
             ]
-            if len(indices) != episode["steps"]:
+            episode_steps = sampling["episodes"][episode["index"]]["sampled_steps"] if recorded else episode["steps"]
+            if len(indices) != episode_steps:
                 raise ValueError(
-                    "Native episode length differs from the saved manifest"
+                    "Native episode length differs from the checkpoint sampling configuration"
                 )
             with imageio.get_writer(
-                str(video), fps=1 / manifest["capture"]["step_dt"]
+                str(video), fps=sampling["control_hz"] if recorded else 1 / manifest["capture"]["step_dt"]
             ) as writer:
-                for frame in range(episode["steps"]):
+                for frame in range(episode_steps):
                     sample = dataset[indices[frame]]
                     sample = default_collate([sample])
                     sample = {
@@ -156,13 +158,13 @@ def evaluate(context, repository):
                         actual = preds["skynet_joints_actions_joints"]
                         expected = stats.unnormalize(batch[100], 100)["actions_joints"]
                     # Score real future frames only, excluding native end padding.
-                    length = min(actual.shape[1], episode["steps"] - frame)
+                    length = min(actual.shape[1], episode_steps - frame)
                     error = (actual[:, :length] - expected[:, :length]).float()
                     squared += float(error.square().sum())
                     elements += error.numel()
                     writer.append_data(compose_camera_views(
                         video_views,
-                        captions=(f"Held-out prediction: {frame + 1}/{episode['steps']}",
+                        captions=(f"Held-out prediction: {frame + 1}/{episode_steps}",
                                   f"Joint MSE: {squared / elements:.5f}"),
                     ))
             row = dict(
@@ -171,7 +173,7 @@ def evaluate(context, repository):
                 episode_index=index,
                 success=None,
                 status="SUCCEEDED",
-                episode_length=episode["steps"],
+                episode_length=episode_steps,
                 metrics=(
                     {"joint_mse": squared / elements}
                     if recorded

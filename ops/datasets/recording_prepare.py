@@ -479,7 +479,7 @@ def prepare(request):
         preprocessing=request.get("preprocessing", {}), observations=request.get("observations", []),
         observation_requirements=requirements, source_revision=request.get("source_revision"),
         shared_artifacts=artifacts, validation={"status": "PASSED", "checks": ["source_checksums", "aligned_shared_streams"]})
-    for key in ("temporal", "action_representation", "hand_profile", "hand_profile_digest"):
+    for key in ("action_representation", "hand_profile", "hand_profile_digest"):
         if key in request:
             manifest[key] = request[key]
     output = Path(request["output"])

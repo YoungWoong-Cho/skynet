@@ -6,7 +6,7 @@ from skynet_app.model_io import adapter_io_contract
 from .egoverse_models import ALGORITHMS, MODEL_LEARNING_RATES, model_contracts
 from skynet_app.observation_contracts import rgb_requirements
 from skynet_app.training_contracts import (
-    RECORDING_DATASET_FORMAT, RecordingConversion, RecordingDataPreset, RecordingLoaderValidation,
+    RECORDING_DATASET_FORMAT, RecordingConversion, RecordingDataPreset, RecordingLoaderValidation, RecordingSampling,
 )
 
 REPOSITORY = "https://github.com/GaTech-RL2/EgoVerse"
@@ -47,6 +47,7 @@ def support_files():
             "egoverse_evaluation.py",
             "egoverse_data.py",
             "recording_dataset.py",
+            "recording_time.py",
             "egoverse_splits.py",
             "egoverse_readiness.py",
             "evaluation_video.py",
@@ -154,6 +155,18 @@ def manifests():
             )
         )
         if recorded:
+            fields.extend([
+                AdapterInputField(
+                    path="native.config.control_hz", label="Training frequency (Hz)",
+                    kind="number", minimum=0.001,
+                    help="Skynet recording sampling: leave blank for the source frequency. Use an integer divisor of every recording frequency.",
+                ),
+                AdapterInputField(
+                    path="native.config.action_steps", label="Action chunk",
+                    kind="integer", minimum=1,
+                    help="Recorded ACT/HPT only. Leave blank for the original EgoVerse default of 100 actions. Configured per experiment.",
+                ),
+            ])
             fields.append(
                 AdapterInputField(
                     path="native.config.reject_outliers",
@@ -178,6 +191,8 @@ def manifests():
             flags["native.config.weights"] = "weights"
         if recorded:
             flags["native.config.reject_outliers"] = "reject-outliers"
+            flags["native.config.control_hz"] = "control-hz"
+            flags["native.config.action_steps"] = "action-steps"
         argv = [
             "python",
             "{{tokens.run_dir}}/adapter-support/egoverse_runtime.py",
@@ -242,6 +257,7 @@ def manifests():
                         "The selected model preset defines the verified dataset contract. Recorded joints are supported by ACT and the HPT recorded-joints configuration; other presets require native data.yaml, evaluator.yaml and Zarr episodes."
                     ),
                     recording_conversion=recording_conversion(algorithm),
+                    recording_sampling=RecordingSampling(window_policy="pad", default_action_steps=100) if recorded else None,
                 ),
                 batch_compatibility=AdapterBatchCompatibility(
                     allowed_semantics=["per_device"],

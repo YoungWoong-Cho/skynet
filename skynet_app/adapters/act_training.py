@@ -8,6 +8,7 @@ from pathlib import Path
 
 from xpolicy_runtime import repository, validate_manifest, write_json
 from recording_dataset import RecordingDataset, verify_dataset, FORMAT
+from recording_time import resolve_sampling
 
 CAMERAS = ["cam_head", "cam_left_wrist", "cam_right_wrist"]
 
@@ -80,10 +81,11 @@ def build_policy(repository_path, revision, settings, dimension):
 
 
 class RecordedACTDataset:
-    def __init__(self, root, manifest, stats, split, chunk):
-        self.root, self.stats, self.chunk = RecordingDataset(root, manifest=manifest), stats, chunk
+    def __init__(self, root, manifest, stats, split, chunk, control_hz=None):
+        self.root = root if isinstance(root, RecordingDataset) else RecordingDataset(root, manifest=manifest, control_hz=control_hz)
+        self.stats, self.chunk = stats, chunk
         self.samples = [(i, t) for i in manifest["split"][split]
-            for t in range(manifest["episodes"][i]["steps"])]
+            for t in range(self.root.episode_steps(i))]
 
     def __len__(self):
         return len(self.samples)
@@ -122,6 +124,7 @@ def arguments():
     ).items():
         parser.add_argument("--" + key.replace("_", "-"), type=float, default=value)
     parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--control-hz", type=float)
     parser.add_argument(
         "--batch-semantics",
         default="per_device",
@@ -181,9 +184,12 @@ def main():
         or manifest["format"] != FORMAT
     ):
         raise ValueError("Select a prepared ACT RGB dataset")
-    stats = RecordingDataset(root, manifest=manifest).normalization()
+    sampling = (None if args.verify_only else resolve_sampling(
+        manifest, args.control_hz, action_steps=args.action_steps, window_policy="pad"))
+    recordings = RecordingDataset(root, manifest=manifest, control_hz=None if args.verify_only else sampling["control_hz"])
+    stats = recordings.normalization()
     datasets = {
-        s: RecordedACTDataset(root, manifest, stats, s, args.action_steps)
+        s: RecordedACTDataset(recordings, manifest, stats, s, 1 if args.verify_only else args.action_steps)
         for s in ["train", "validation"]
     }
     dim = len(manifest["policy_to_source_indices"])
@@ -201,7 +207,7 @@ def main():
         split=manifest["split"],
         train_sequences=len(datasets["train"]),
         validation_sequences=len(datasets["validation"]),
-        action_shape=[args.action_steps, dim],
+        action_shape=[1 if args.verify_only else args.action_steps, dim],
         normalization="training_episodes_only",
         observation_mode="rgb",
     )
@@ -235,6 +241,7 @@ def main():
                 effective_batch_size=batch_size * args.gradient_accumulation,
                 manifest_sha256=args.manifest_sha,
                 repository_revision=args.revision,
+                recording_sampling=sampling,
             ),
         )
     checkpoints = output / "checkpoints"
@@ -304,6 +311,7 @@ def main():
                 epoch=epoch + 1,
                 global_step=global_step,
                 manifest_sha256=args.manifest_sha,
+                recording_sampling=sampling,
             )
             for name in ["latest.ckpt", *(["best.ckpt"] if improved else [])]:
                 temporary = checkpoints / (name + ".tmp")
@@ -322,6 +330,7 @@ def main():
             epochs=epoch + 1,
             stop_reason="max_epochs",
             manifest_sha256=args.manifest_sha,
+            recording_sampling=sampling,
         ),
     )
 

@@ -211,3 +211,42 @@ def test_seeding_retires_per_config_choices_without_changing_history(tmp_path):
         assert record["latest_version"] == old["latest_version"]
     service._seed_registries()
     assert len([r for r in database.list_adapter_registry() if str(r.get("seed_key", "")).startswith("egoverse-")]) == 3
+
+
+def test_recorded_action_chunk_updates_all_native_output_dimensions():
+    from skynet_app.adapters.egoverse_runtime import apply_recording_horizon
+    act = {"robomimic_model": {"chunk_size": 100, "style_encoder": {"act_len": 100}}}
+    apply_recording_horizon(act, "act", 30)
+    assert act["robomimic_model"]["chunk_size"] == act["robomimic_model"]["style_encoder"]["act_len"] == 30
+    hpt = {"robomimic_model": {"trunk": {"action_horizon": 64}, "head_specs": {"skynet_joints": {"action_horizon": 100, "model": {"act_seq": 100}}}}}
+    apply_recording_horizon(hpt, "hpt_joints", 30)
+    head = hpt["robomimic_model"]["head_specs"]["skynet_joints"]
+    assert head["action_horizon"] == head["model"]["act_seq"] == 30
+    assert hpt["robomimic_model"]["trunk"]["action_horizon"] == 64
+
+
+@pytest.mark.parametrize("overrides", [
+    {"robomimic_model.chunk_size": 20},
+    {"robomimic_model.style_encoder": {"act_len": 20}},
+    {"robomimic_model.head_specs.skynet_joints.action_horizon": 20},
+    {"robomimic_model.head_specs.skynet_joints": {"model": {"act_seq": 20}}},
+])
+def test_recorded_horizon_has_one_experiment_configuration_source(overrides):
+    from skynet_app.adapters.egoverse_runtime import reject_sampling_overrides
+    with pytest.raises(ValueError, match="native.config.action_steps"):
+        reject_sampling_overrides(overrides, "hpt_joints")
+    # Native imported models retain their own model-override contract.
+    reject_sampling_overrides(overrides, "hpt_bc_flow_eva")
+
+
+@pytest.mark.parametrize("slug", ["egoverse-act", "egoverse-hpt"])
+def test_recording_experiment_controls_reach_the_runtime_and_capsule(slug):
+    manifest = next(item for item in manifests() if item.slug == slug)
+    spec = native_spec(manifest)
+    spec.native.config.update(control_hz=30, action_steps=30)
+    plan = resolve_adapter_plan(spec)
+    args = parser().parse_args(plan.argv[2:])
+    assert args.control_hz == 30 and args.action_steps == 30
+    assert manifest.train.data_requirements.recording_sampling.default_action_steps == 100
+    assert manifest.train.data_requirements.recording_sampling.window_policy == "pad"
+    assert "adapter-support/recording_time.py" in manifest.train.capsule_files

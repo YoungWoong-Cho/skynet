@@ -96,13 +96,16 @@ def test_unidex_declares_geometry_temporal_semantics_and_verified_hands():
     assert stream["camera_convention"] == "ros_optical" and stream["crop"] is None
     assert preset.preprocessing == {"pointcloud_frame": "camera_ros_optical", "pointcloud_native_frame": "camera_opengl"}
     assert preset.action_representation == {"id": "skynet.unidex-faas/v1", "frame": "camera_opengl", "action_semantics": "controller_targets"}
-    assert preset.temporal == dict(source_fps=60, control_hz=15, frame_stride=4, action_horizon=30, execution_horizon=1)
-    assert preset.validation_required and preset.minimum_episodes == 2
+    assert "temporal" not in preset.model_dump()
+    assert not preset.validation_required and preset.minimum_episodes == 1
+    sampling = manifest.train.data_requirements.recording_sampling
+    assert sampling.window_policy == "complete" and sampling.require_validation
+    assert sampling.default_action_steps == 30
     assert set(preset.supported_robots) == {
         "floating_shadow_right", "skynet_inspire_rh56_right", "skynet_allegro_v4_right",
-        "skynet_leap_v1_right", "skynet_wuji_2_right",
+        "skynet_leap_v1_right", "skynet_wuji_2_right", "skynet_wuji_1_right",
+        "skynet_sharpa_right",
     }
-    assert {"skynet_wuji_1_right", "skynet_sharpa_right"}.isdisjoint(preset.supported_robots)
     assert manifest.evaluations == []
 
 
