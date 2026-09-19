@@ -84,20 +84,6 @@
       "infrastructure_patches": []
     },
     {
-      "policy": "DP",
-      "slug": "xpolicylab-dp-native",
-      "train_sha256": "5afe8861724fd9bedf86987ff1d4f3d8f6f60ceff5a56f2bb786b383f83030df",
-      "minimum_gpus": 1,
-      "maximum_gpus": 1,
-      "entry_kind": "standard",
-      "action_types": [
-        "joint",
-        "ee"
-      ],
-      "notes": "Native RGB Diffusion Policy recipe; original Zarr layout. Horizon 8, observation history 3, action steps 6, 600 epochs, batch 128, inference 100. Requires native W&B setup.",
-      "infrastructure_patches": []
-    },
-    {
       "policy": "DreamZero",
       "slug": "xpolicylab-dreamzero-native",
       "train_sha256": "90333519563dac541aef2d26893d0e3ac67bb5db1a179c24ef7afb3eeecf40d4",

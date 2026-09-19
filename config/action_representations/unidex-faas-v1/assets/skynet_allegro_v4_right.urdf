@@ -1,0 +1,221 @@
+<robot name="skynet_allegro_v4_right"><link name="h_palm_link">
+    </link>
+  
+  
+  
+  
+  
+  <link name="h_link_0_0">
+    </link>
+  <joint name="h_joint_0_0" type="revolute">
+    <axis xyz="0 0 1" />
+    <limit effort="15" lower="-0.47" upper="0.47" velocity="7" />
+    <parent link="h_palm_link" />
+    <child link="h_link_0_0" />
+    <origin rpy="-0.08726646255 0 0" xyz="0 0.0435 -0.001542" />
+    <dynamics damping="3" friction="10" />
+  </joint>
+  
+  <link name="h_link_1_0">
+    </link>
+  <joint name="h_joint_1_0" type="revolute">
+    <limit effort="15" lower="-0.196" upper="1.61" velocity="7" />
+    <axis xyz="0 1 0" />
+    <parent link="h_link_0_0" />
+    <child link="h_link_1_0" />
+    <origin xyz="0 0 0.0164" />
+    <dynamics damping="3" friction="5" />
+  </joint>
+  
+  <link name="h_link_2_0">
+    </link>
+  <joint name="h_joint_2_0" type="revolute">
+    <axis xyz="0 1 0" />
+    <limit effort="15" lower="-0.174" upper="1.709" velocity="7" />
+    <parent link="h_link_1_0" />
+    <child link="h_link_2_0" />
+    <origin xyz="0 0 0.054" />
+    <dynamics damping="8" friction="10" />
+  </joint>
+  
+  <link name="h_link_3_0">
+    </link>
+  <joint name="h_joint_3_0" type="revolute">
+    <axis xyz="0 1 0" />
+    <limit effort="15" lower="-0.227" upper="1.618" velocity="7" />
+    <parent link="h_link_2_0" />
+    <child link="h_link_3_0" />
+    <origin xyz="0 0 0.0384" />
+    <dynamics damping="10" friction="12" />
+  </joint>
+  
+  <link name="h_link_3_0_tip">
+    </link>
+  <joint name="h_joint_3_0_tip" type="fixed">
+    <parent link="h_link_3_0" />
+    <child link="h_link_3_0_tip" />
+    <origin rpy="0 0 0" xyz="0 0 0.0267" />
+  </joint>
+  
+  <link name="h_link_4_0">
+    </link>
+  <joint name="h_joint_4_0" type="revolute">
+    <axis xyz="0 0 1" />
+    <limit effort="15" lower="-0.47" upper="0.47" velocity="7" />
+    <parent link="h_palm_link" />
+    <child link="h_link_4_0" />
+    <origin rpy="0.0 0 0" xyz="0 0 0.0007" />
+    <dynamics damping="3" friction="10" />
+  </joint>
+  
+  <link name="h_link_5_0">
+    </link>
+  <joint name="h_joint_5_0" type="revolute">
+    <limit effort="15" lower="-0.196" upper="1.61" velocity="7" />
+    <axis xyz="0 1 0" />
+    <parent link="h_link_4_0" />
+    <child link="h_link_5_0" />
+    <origin xyz="0 0 0.0164" />
+    <dynamics damping="3" friction="5" />
+  </joint>
+  
+  <link name="h_link_6_0">
+    </link>
+  <joint name="h_joint_6_0" type="revolute">
+    <axis xyz="0 1 0" />
+    <limit effort="15" lower="-0.174" upper="1.709" velocity="7" />
+    <parent link="h_link_5_0" />
+    <child link="h_link_6_0" />
+    <origin xyz="0 0 0.054" />
+    <dynamics damping="8" friction="10" />
+  </joint>
+  
+  <link name="h_link_7_0">
+    </link>
+  <joint name="h_joint_7_0" type="revolute">
+    <axis xyz="0 1 0" />
+    <limit effort="15" lower="-0.227" upper="1.618" velocity="7" />
+    <parent link="h_link_6_0" />
+    <child link="h_link_7_0" />
+    <origin xyz="0 0 0.0384" />
+    <dynamics damping="10" friction="12" />
+  </joint>
+  
+  <link name="h_link_7_0_tip">
+    </link>
+  <joint name="h_joint_7_0_tip" type="fixed">
+    <parent link="h_link_7_0" />
+    <child link="h_link_7_0_tip" />
+    <origin rpy="0 0 0" xyz="0 0 0.0267" />
+  </joint>
+  
+  <link name="h_link_8_0">
+    </link>
+  <joint name="h_joint_8_0" type="revolute">
+    <axis xyz="0 0 1" />
+    <limit effort="15" lower="-0.47" upper="0.47" velocity="7" />
+    <parent link="h_palm_link" />
+    <child link="h_link_8_0" />
+    <origin rpy="0.08726646255 0 0" xyz="0 -0.0435 -0.001542" />
+    <dynamics damping="3" friction="10" />
+  </joint>
+  
+  <link name="h_link_9_0">
+    </link>
+  <joint name="h_joint_9_0" type="revolute">
+    <limit effort="15" lower="-0.196" upper="1.61" velocity="7" />
+    <axis xyz="0 1 0" />
+    <parent link="h_link_8_0" />
+    <child link="h_link_9_0" />
+    <origin xyz="0 0 0.0164" />
+    <dynamics damping="3" friction="5" />
+  </joint>
+  
+  <link name="h_link_10_0">
+    </link>
+  <joint name="h_joint_10_0" type="revolute">
+    <axis xyz="0 1 0" />
+    <limit effort="15" lower="-0.174" upper="1.709" velocity="7" />
+    <parent link="h_link_9_0" />
+    <child link="h_link_10_0" />
+    <origin xyz="0 0 0.054" />
+    <dynamics damping="8" friction="10" />
+  </joint>
+  
+  <link name="h_link_11_0">
+    </link>
+  <joint name="h_joint_11_0" type="revolute">
+    <axis xyz="0 1 0" />
+    <limit effort="15" lower="-0.227" upper="1.618" velocity="7" />
+    <parent link="h_link_10_0" />
+    <child link="h_link_11_0" />
+    <origin xyz="0 0 0.0384" />
+    <dynamics damping="10" friction="12" />
+  </joint>
+  
+  <link name="h_link_11_0_tip">
+    </link>
+  <joint name="h_joint_11_0_tip" type="fixed">
+    <parent link="h_link_11_0" />
+    <child link="h_link_11_0_tip" />
+    <origin rpy="0 0 0" xyz="0 0 0.0267" />
+  </joint>
+  
+  
+  <link name="h_link_12_0">
+    </link>
+  <joint name="h_joint_12_0" type="revolute">
+    <axis xyz="-1 0 0" />
+    <limit effort="15" lower="0.263" upper="1.396" velocity="7" />
+    <parent link="h_palm_link" />
+    <child link="h_link_12_0" />
+    <origin rpy="0 -1.65806278845 -1.5707963259" xyz="-0.0182 0.019333 -0.045987" />
+    <dynamics damping="3" friction="10" />
+  </joint>
+  
+  <link name="h_link_13_0">
+    </link>
+  <joint name="h_joint_13_0" type="revolute">
+    <axis xyz="0 0 1" />
+    <limit effort="15" lower="-0.105" upper="1.163" velocity="7" />
+    <parent link="h_link_12_0" />
+    <child link="h_link_13_0" />
+    <origin xyz="-0.027 0.005 0.0399" />
+    <dynamics damping="3" friction="5" />
+  </joint>
+  
+  <link name="h_link_14_0">
+    </link>
+  <joint name="h_joint_14_0" type="revolute">
+    <axis xyz="0 1 0" />
+    <limit effort="15" lower="-0.189" upper="1.644" velocity="7" />
+    <parent link="h_link_13_0" />
+    <child link="h_link_14_0" />
+    <origin xyz="0 0 0.0177" />
+    <dynamics damping="3" friction="10" />
+  </joint>
+  
+  <link name="h_link_15_0">
+    </link>
+  <joint name="h_joint_15_0" type="revolute">
+    <axis xyz="0 1 0" />
+    <limit effort="15" lower="-0.162" upper="1.719" velocity="7" />
+    <parent link="h_link_14_0" />
+    <child link="h_link_15_0" />
+    <origin xyz="0 0 0.0514" />
+    <dynamics damping="3" friction="12" />
+  </joint>
+  
+  <link name="h_link_15_0_tip">
+    </link>
+  <joint name="h_joint_15_0_tip" type="fixed">
+    <parent link="h_link_15_0" />
+    <child link="h_link_15_0_tip" />
+    <origin rpy="0 0 0" xyz="0 0 0.0423" />
+  </joint>
+  
+  
+  
+  
+  
+<link name="skynet_palm" /><joint name="skynet_alignment" type="fixed"><parent link="skynet_palm" /><child link="h_palm_link" /><origin xyz="0 0 0" rpy="-0.0 1.5707963267948966 0.0" /></joint><link name="skynet_base" /><link name="skynet_x_link" /><joint name="skynet_x" type="prismatic"><parent link="skynet_base" /><child link="skynet_x_link" /><origin xyz="0 0 0" rpy="0 0 0" /><axis xyz="1 0 0" /><limit lower="-2" upper="2" effort="30" velocity="5" /></joint><link name="skynet_y_link" /><joint name="skynet_y" type="prismatic"><parent link="skynet_x_link" /><child link="skynet_y_link" /><origin xyz="0 0 0" rpy="0 0 0" /><axis xyz="0 1 0" /><limit lower="-2" upper="2" effort="30" velocity="5" /></joint><link name="skynet_z_link" /><joint name="skynet_z" type="prismatic"><parent link="skynet_y_link" /><child link="skynet_z_link" /><origin xyz="0 0 0" rpy="0 0 0" /><axis xyz="0 0 1" /><limit lower="-2" upper="2" effort="30" velocity="5" /></joint><link name="skynet_roll_link" /><joint name="skynet_roll" type="revolute"><parent link="skynet_z_link" /><child link="skynet_roll_link" /><origin xyz="0 0 0" rpy="0 0 0" /><axis xyz="1 0 0" /><limit lower="-1000000" upper="1000000" effort="30" velocity="5" /></joint><link name="skynet_pitch_link" /><joint name="skynet_pitch" type="revolute"><parent link="skynet_roll_link" /><child link="skynet_pitch_link" /><origin xyz="0 0 0" rpy="0 0 0" /><axis xyz="0 1 0" /><limit lower="-1000000" upper="1000000" effort="30" velocity="5" /></joint><joint name="skynet_yaw" type="revolute"><parent link="skynet_pitch_link" /><child link="skynet_palm" /><origin xyz="0 0 0" rpy="0 0 0" /><axis xyz="0 0 1" /><limit lower="-1000000" upper="1000000" effort="30" velocity="5" /></joint></robot>

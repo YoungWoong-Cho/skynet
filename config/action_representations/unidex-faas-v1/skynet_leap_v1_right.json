@@ -1,0 +1,545 @@
+{
+  "schema": "skynet.unidex-faas/v1",
+  "robot": "skynet_leap_v1_right",
+  "side": "right",
+  "faas_dim": 82,
+  "units": {
+    "length": "m",
+    "angle": "rad"
+  },
+  "source_revision": "30cc673e27684b9f10186fa6bea731aed246bc9f",
+  "capture": {
+    "robot": "skynet_leap_v1_right",
+    "task": "Dexverse-PickCube-v0",
+    "hand": "right",
+    "action_joint_names": [
+      "skynet_x",
+      "skynet_y",
+      "skynet_z",
+      "skynet_roll",
+      "skynet_pitch",
+      "skynet_yaw",
+      "h_0",
+      "h_1",
+      "h_2",
+      "h_3",
+      "h_4",
+      "h_5",
+      "h_6",
+      "h_7",
+      "h_8",
+      "h_9",
+      "h_10",
+      "h_11",
+      "h_12",
+      "h_13",
+      "h_14",
+      "h_15"
+    ],
+    "action_scale": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "action_offset": [
+      0.5,
+      0.0,
+      0.30000001192092896,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "action_semantics": "raw_joint_position_command; target = action * scale + offset",
+    "step_dt": 0.016666666666666666,
+    "source_revision": "30cc673e27684b9f10186fa6bea731aed246bc9f",
+    "groups": [
+      {
+        "finger_indices": [
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21
+        ],
+        "side": "right",
+        "wrist_indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      }
+    ],
+    "hand_asset": {
+      "digest": "60982b4aa02b34a121954c4b557eb23e2b109f7617aff2727156d3ce56c27a04",
+      "schema": "skynet.hand-bundle/v1",
+      "source_model_sha256": "d783743494238a5ddb06837f4c6680e273adb6a2a64c3f2d4585c7e32eaaecc3",
+      "source_revision": "150bc3d4b61fd6619193ba5a8ef209f3609ced89"
+    },
+    "hands": {
+      "right": {
+        "control_frame": "skynet_palm",
+        "finger_joints": [
+          "h_0",
+          "h_1",
+          "h_2",
+          "h_3",
+          "h_4",
+          "h_5",
+          "h_6",
+          "h_7",
+          "h_8",
+          "h_9",
+          "h_10",
+          "h_11",
+          "h_12",
+          "h_13",
+          "h_14",
+          "h_15"
+        ],
+        "palm": "h_palm_lower",
+        "tips": [
+          "h_thumb_fingertip",
+          "h_fingertip",
+          "h_fingertip_2",
+          "h_fingertip_3"
+        ],
+        "wrist_joints": [
+          "skynet_x",
+          "skynet_y",
+          "skynet_z",
+          "skynet_roll",
+          "skynet_pitch",
+          "skynet_yaw"
+        ]
+      }
+    },
+    "hand_order": [
+      "right"
+    ],
+    "units": {
+      "angle": "rad",
+      "length": "m",
+      "mass": "kg"
+    },
+    "wrist_rotation_order": "intrinsic_XYZ",
+    "kinematics_sha256": "a5eef786e3fd04079c6f2f890dc2bb2beb5d5085921772c2c4a414eabc09a774"
+  },
+  "asset": {
+    "digest": "60982b4aa02b34a121954c4b557eb23e2b109f7617aff2727156d3ce56c27a04",
+    "schema": "skynet.hand-bundle/v1",
+    "source_model_sha256": "d783743494238a5ddb06837f4c6680e273adb6a2a64c3f2d4585c7e32eaaecc3",
+    "source_revision": "150bc3d4b61fd6619193ba5a8ef209f3609ced89",
+    "manifest_sha256": "eb6de6477439a4b40f95cbe4f866ed4dde037e38207a91615efa71a811549948",
+    "simulation_urdf_sha256": "b22e1bafe0e4fe4276816a15e3fadb559d5ad130e6b70e006012918259e02f71",
+    "hand_urdf_sha256": "db2634fd2873050471ceddb738fd07b7f53c4c19b8a9853a2bb618fa30cd436c",
+    "source_names": {
+      "0": "h_0",
+      "1": "h_1",
+      "10": "h_10",
+      "11": "h_11",
+      "12": "h_12",
+      "13": "h_13",
+      "14": "h_14",
+      "15": "h_15",
+      "2": "h_2",
+      "3": "h_3",
+      "4": "h_4",
+      "5": "h_5",
+      "6": "h_6",
+      "7": "h_7",
+      "8": "h_8",
+      "9": "h_9",
+      "dip": "h_dip",
+      "dip_2": "h_dip_2",
+      "dip_3": "h_dip_3",
+      "fingertip": "h_fingertip",
+      "fingertip_2": "h_fingertip_2",
+      "fingertip_3": "h_fingertip_3",
+      "mcp_joint": "h_mcp_joint",
+      "mcp_joint_2": "h_mcp_joint_2",
+      "mcp_joint_3": "h_mcp_joint_3",
+      "palm_lower": "h_palm_lower",
+      "pip": "h_pip",
+      "pip_2": "h_pip_2",
+      "pip_3": "h_pip_3",
+      "pip_4": "h_pip_4",
+      "thumb_dip": "h_thumb_dip",
+      "thumb_fingertip": "h_thumb_fingertip",
+      "thumb_pip": "h_thumb_pip"
+    }
+  },
+  "kinematics_file": "assets/skynet_leap_v1_right.urdf",
+  "kinematics_sha256": "a5eef786e3fd04079c6f2f890dc2bb2beb5d5085921772c2c4a414eabc09a774",
+  "control_names": [
+    "skynet_x",
+    "skynet_y",
+    "skynet_z",
+    "skynet_roll",
+    "skynet_pitch",
+    "skynet_yaw",
+    "h_0",
+    "h_1",
+    "h_2",
+    "h_3",
+    "h_4",
+    "h_5",
+    "h_6",
+    "h_7",
+    "h_8",
+    "h_9",
+    "h_10",
+    "h_11",
+    "h_12",
+    "h_13",
+    "h_14",
+    "h_15"
+  ],
+  "action_scale": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "action_offset": [
+    0.5,
+    0.0,
+    0.30000001192092896,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "wrist_names": [
+    "skynet_x",
+    "skynet_y",
+    "skynet_z",
+    "skynet_roll",
+    "skynet_pitch",
+    "skynet_yaw"
+  ],
+  "frame_link": "h_palm_lower",
+  "link_to_frame": [
+    [
+      0.0,
+      0.0,
+      1.0,
+      -0.1
+    ],
+    [
+      0.0,
+      1.0,
+      0.0,
+      -0.03
+    ],
+    [
+      -1.0,
+      0.0,
+      0.0,
+      -0.01
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "tip_links": [
+    "h_thumb_fingertip",
+    "h_fingertip",
+    "h_fingertip_2",
+    "h_fingertip_3"
+  ],
+  "frame_convention": "Official UniDex named wrist link and HAND_TRANSFORMS; exported in camera OpenGL coordinates.",
+  "pose_convention": "position3 + first_two_rotation_rows6",
+  "reference_frame": "fixed_robot_base",
+  "state_semantics": "Measured pre-action independent joints, physical URDF mimic coordinates, native UniDex wrist.",
+  "action_semantics": "q_target = action * action_scale + action_offset; all chunk targets relative to one anchor",
+  "mapping_status": "VERIFIED",
+  "mapping": [
+    {
+      "joint": "h_0",
+      "source_joint": "0",
+      "slot": 6,
+      "scale": -1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_1",
+      "source_joint": "1",
+      "slot": 7,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_10",
+      "source_joint": "10",
+      "slot": 18,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_11",
+      "source_joint": "11",
+      "slot": 19,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_12",
+      "source_joint": "12",
+      "slot": 1,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_13",
+      "source_joint": "13",
+      "slot": 0,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_14",
+      "source_joint": "14",
+      "slot": 2,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_15",
+      "source_joint": "15",
+      "slot": 3,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_2",
+      "source_joint": "2",
+      "slot": 8,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_3",
+      "source_joint": "3",
+      "slot": 9,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_4",
+      "source_joint": "4",
+      "slot": 11,
+      "scale": -1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_5",
+      "source_joint": "5",
+      "slot": 12,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_6",
+      "source_joint": "6",
+      "slot": 13,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_7",
+      "source_joint": "7",
+      "slot": 14,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_8",
+      "source_joint": "8",
+      "slot": 16,
+      "scale": -1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_9",
+      "source_joint": "9",
+      "slot": 17,
+      "scale": 1.0,
+      "offset": 0.0
+    }
+  ],
+  "upstream": {
+    "repository": "https://github.com/unidex-ai/UniDex",
+    "revision": "97d869e0f2d1ec0372cd3cdf28dde66b4e3f216d",
+    "mapping_file": "src/assets/utils/hand_utils.json",
+    "mapping_sha256": "d79907a33331d30a87fc7c17106095786e454b9ec0897bf0c811abc370ac3172",
+    "hand": "Leap",
+    "urdf_sha256": "792e7560e52f203e8756c5e3da84217ee9b50e5234ef492d3fd95f94fa4463db"
+  },
+  "mapping_evidence": "Named alias verified against pinned upstream URDF joint type, axes, origin, position limits and mimic relationships. Effort/velocity retain the original simulator asset.",
+  "runtime_controller": {
+    "source_file": "ops/xr/wrist.py",
+    "source_sha256": "8e6b6edb6c06f7817fada5196e6a38c374f14408abb8b51db22f6c6d41bd02c8",
+    "function": "configure_virtual_wrist",
+    "position_limit_overrides": {
+      "skynet_roll": [
+        -1000000.0,
+        1000000.0
+      ],
+      "skynet_pitch": [
+        -1000000.0,
+        1000000.0
+      ],
+      "skynet_yaw": [
+        -1000000.0,
+        1000000.0
+      ]
+    },
+    "reason": "Exact collection/evaluator virtual rotation limit override; physical finger limits preserved"
+  },
+  "native_wrist": {
+    "upstream_hand": "Leap",
+    "upstream_physical_link": "palm_lower",
+    "local_physical_link": "h_palm_lower",
+    "upstream_wrist_link": "wrist_link",
+    "physical_link_to_wrist": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        -0.1
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        -0.03
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        -0.01
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "hand_transform": [
+      [
+        -0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        -1.0,
+        -0.0,
+        -0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "upstream_urdf_sha256": "792e7560e52f203e8756c5e3da84217ee9b50e5234ef492d3fd95f94fa4463db",
+    "evidence": "Physical link equivalence uses the asset audit of every finger joint origin, axis and bounds; named wrist offset follows exact upstream fixed URDF joints. No retargeting base pose or dataset camera extrinsic is copied."
+  },
+  "spec_hash": "f8db67ff763c1f596e15a8306e05647ec9595324d9463bb6b14c4c0f7b77df59"
+}

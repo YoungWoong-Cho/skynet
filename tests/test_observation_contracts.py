@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from skynet_app.observation_contracts import (
-    CONTRACT_SCHEMA, content_digest, plan_artifacts, resolve_recipe_requirements,
+    CONTRACT_SCHEMA, content_digest, plan_artifacts,
     rgb_requirements, validate_requirements,
 )
 from skynet_app.adapters.observation_artifacts import (
@@ -48,11 +48,12 @@ def cloud(channels="XYZRGB"):
             "insufficient_points": "repeat_with_mask", "crop": None}]}
 
 
-def test_state_recipe_requires_no_render_and_legacy_formats_are_unchanged():
-    from skynet_app.dataset_formats import RECIPES
-    assert plan_artifacts("a" * 64, {}, resolve_recipe_requirements("dp-state"), {}) == []
-    assert RECIPES["act"]["format"] == "xpolicylab-act-hdf5/v1"
-    assert all("reference_format" not in recipe for recipe in RECIPES.values())
+def test_state_declaration_requires_no_render():
+    from test_policy_exports import fixture_recording_manifest
+    declaration = fixture_recording_manifest().train.data_requirements.recording_conversion
+    state = declaration.presets[0].model_dump(mode="json")
+    assert declaration.format == "skynet.recording-dataset/v1"
+    assert plan_artifacts("a" * 64, {}, state["observation_requirements"], {}) == []
 
 
 def test_camera_reuse_does_not_depend_on_other_views_or_dataset_split():

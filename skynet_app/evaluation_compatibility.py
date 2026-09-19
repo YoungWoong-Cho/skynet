@@ -18,7 +18,6 @@ RECORDED_POLICY_MODELS = {
     "egoverse-act": ("egoverse_joints", {"act"}),
     "xpolicylab-act": ("xpolicy_joints", None),
     "xpolicylab-act-native": ("xpolicy_joints", None),
-    "xpolicylab-dp": ("xpolicy_joints", None),
 }
 STATUS_LABELS = {"compatible": "Compatible", "mapping_required": "Mapping required", "unknown": "Missing information", "incompatible": "Incompatible"}
 
@@ -74,7 +73,7 @@ def inspect_compatibility(spec, manifest, suite, checkpoint=None):
             check("loader", f"Policy loader: {loader}.")
             metadata = dataset_metadata(spec)
             config = (spec.get("native") or {}).get("config") or {}
-            binding = recorded_contract(metadata, images=not (loader == "xpolicy_joints" and config.get("observation_mode") == "state"))
+            binding = recorded_contract(metadata)
             checks.extend(contract_issues(binding))
             if spec.get("source", {}).get("adapter") == "xpolicylab-act-native" and metadata.get("contract") != "skynet.act-rgb-joints/v1":
                 check("dataset", "Native ACT simulator evaluation requires a recorded RGB/joint dataset.", "incompatible")
@@ -125,7 +124,7 @@ def compose_evaluator(spec, manifest, suite):
         from .adapters.egoverse_manifest import support_files as egoverse_support
         files = egoverse_support()
     else:
-        files = support_files("act" if spec["source"]["adapter"] in {"xpolicylab-act", "xpolicylab-act-native"} else "dp")
+        files = support_files("act")
     if spec["source"]["adapter"] == "xpolicylab-act-native":
         from .adapters.xpolicy_native_manifest import act_support_files
         files.update(act_support_files())

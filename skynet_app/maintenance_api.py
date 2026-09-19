@@ -12,7 +12,7 @@ from .cluster_runtime import ClusterError
 from .maintenance import Maintenance
 
 router = APIRouter(prefix="/api/maintenance")
-Kind = Literal["experiment", "run", "evaluation", "adapter", "suite", "dataset", "prepared", "local-copy", "recording", "recording-file"]
+Kind = Literal["experiment", "run", "evaluation", "adapter", "suite", "dataset", "prepared", "recording", "recording-file"]
 
 
 class DeleteRequest(BaseModel):
@@ -66,7 +66,7 @@ def invoke(operation):
 def preview(kind: Kind, identifier: str, gateway: str = "auto"):
     if kind in {"recording", "recording-file"}:
         return invoke(lambda: recording_manager(kind).preview(kind, identifier, gateway))
-    if kind in {"dataset", "prepared", "local-copy"}:
+    if kind in {"dataset", "prepared"}:
         from . import prepared_deletion
         from .policy_exports_api import service
         return invoke(lambda: prepared_deletion.preview(service, manager().db, kind, identifier))
@@ -77,7 +77,7 @@ def preview(kind: Kind, identifier: str, gateway: str = "auto"):
 def delete(kind: Kind, identifier: str, request: DeleteRequest):
     if kind in {"recording", "recording-file"}:
         return invoke(lambda: recording_manager(kind).delete(kind, identifier, request.token, request.gateway))
-    if kind in {"dataset", "prepared", "local-copy"}:
+    if kind in {"dataset", "prepared"}:
         from . import prepared_deletion
         from .policy_exports_api import service
         return invoke(lambda: prepared_deletion.delete(service, manager().db, kind, identifier, request.token))

@@ -153,7 +153,7 @@ def test_readiness_checks_use_same_policy_and_reject_other_nodes():
 @pytest.mark.parametrize("slug,suite_name,model", [
     ("egoverse-hpt", "dexverse_training_episode", "hpt_joints"),
     ("egoverse-act", "dexverse_training_episode", "act"),
-    ("xpolicylab-dp", "dexverse_training_episode", None),
+    ("xpolicylab-act", "dexverse_training_episode", None),
     ("xpolicylab-act", "dexverse_training_episode", None),
     ("groot", "groot_gr1_isaaclab_evaltasks", None),
 ])

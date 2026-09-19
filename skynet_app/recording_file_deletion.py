@@ -135,7 +135,7 @@ class RecordingFileMaintenance(RecordingMaintenance):
         root = str(PurePosixPath(archive["root"]).parent)
         base = str(PurePosixPath(root).parent)
         dataset_root = next(key for key, paths in groups.items() if base in paths)
-        retained_observations = [path for path in groups[dataset_root] if "/datasets/observations/" in path]
+        retained_observations = [path for path in groups[dataset_root] if "/datasets/recordings/" in path]
         groups[dataset_root] = [root + "/" + path for path in sorted(removed)] + retained_observations
         groups[dataset_root].extend(
             [

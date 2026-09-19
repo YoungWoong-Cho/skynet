@@ -102,7 +102,7 @@ def test_runtime_refuses_removed_model_before_loading_data_or_frameworks():
 
 @pytest.mark.parametrize("mode", ["train", "resume", "evaluation"])
 @pytest.mark.parametrize("defect", ["removed_dp", "omitted_joints"])
-def test_submission_gate_blocks_retired_stored_plans_without_cluster_calls(mode, defect):
+def test_submission_gate_blocks_retired_stored_plans_without_cluster_calls(mode, defect, tmp_path):
     manifest = next(m for m in manifests() if m.slug == "egoverse-hpt")
     if defect == "removed_dp":
         manifest.slug = "egoverse-dp-joints"
@@ -119,8 +119,10 @@ def test_submission_gate_blocks_retired_stored_plans_without_cluster_calls(mode,
            "evaluations": [{"id": "evaluation", "stage_id": "stage"}] if mode == "evaluation" else []}
     transitions = []
     service = PipelineService.__new__(PipelineService)
+    database = Database(tmp_path / "retired-plan.store")
     service.database = SimpleNamespace(
         get_run=lambda _: copy.deepcopy(run), transition_workflow_state=lambda **kw: transitions.append(kw),
+        connection=database.connection,
     )
     kwargs = {"manual_mode": "resume", "resume_checkpoint": "/saved.ckpt",
               "pinned_execution": {"resolved_spec": document, "plan": frozen}} if mode == "resume" else {}

@@ -49,10 +49,6 @@ def recorded_joint_io(*, history=1, action_steps=100, history_paths=(), action_p
 
 def adapter_io_contract(slug):
     """Built-in declarations; configurable dimensions always prefer saved values."""
-    if slug == "xpolicylab-dp":
-        return recorded_joint_io(history=2, action_steps=16, image_size=(240, 320),
-            history_paths=("spec.native.config.observation_steps",), action_paths=("spec.native.config.action_steps",),
-            observation_selector="native.config.observation_mode")
     if slug == "xpolicylab-act":
         return recorded_joint_io(action_steps=50, image_size=(480, 640), action_paths=("spec.native.config.action_steps",))
     if slug in {"egoverse-hpt", "egoverse-pi"}:
@@ -142,7 +138,7 @@ def resolve_model_io(manifest, spec=None, *, legacy=False):
         if manifest.get("slug") == "egoverse-dp-joints":
             # This retired adapter is still describable in immutable history.
             contract = adapter_io_contract("egoverse-hpt-joints")
-        elif manifest.get("slug") in {"xpolicylab-dp", "xpolicylab-act", "egoverse-act", "egoverse-hpt-joints"}:
+        elif manifest.get("slug") in {"xpolicylab-act", "egoverse-act", "egoverse-hpt-joints"}:
             contract = adapter_io_contract(manifest["slug"])
     if isinstance(contract, ModelIOContract):
         contract = contract.model_dump(mode="json")

@@ -60,19 +60,3 @@ def test_real_usd_scene_preserves_rigid_scale_static_meshes_and_instances():
     assert not table["dynamic"] and len(table["parts"][0]["indices"]) == 6
     assert table["parts"][0]["matrix"][12:15] == [10,0,0]
     assert 'references' not in json.dumps(saved)
-
-
-def test_large_scene_saved_as_compressed_dataset_not_hdf5_attribute(tmp_path):
-    import h5py
-    file = Path(__file__).parents[1]/"ops/xr/images.py"
-    spec = importlib.util.spec_from_file_location("scene_image_writer", file)
-    module = importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-    scene = dict(schema="skynet.scene-geometry/v1", objects=[{"vertices":[.123]*40000}])
-    writer = module.ImageWriter(tmp_path, {"action_joint_names":["finger"], "scene_geometry":scene})
-    try:
-        with h5py.File(writer.temp, "r") as h5:
-            assert "scene_geometry" not in json.loads(h5.attrs["metadata"])
-            assert h5["scene_geometry"].compression == "gzip"
-            assert json.loads(h5["scene_geometry"][:].tobytes()) == scene
-    finally:
-        writer.discard()

@@ -8,7 +8,11 @@ import signal
 import sys
 import tempfile
 
-from artifacts import digest, materialize, pack, verify
+import hashlib
+import fcntl
+import shutil
+
+from recording_dataset import verify_dataset
 
 
 def run_loader(argv, log_path, timeout=300):
@@ -39,55 +43,39 @@ def run_loader(argv, log_path, timeout=300):
 
 
 def run(request):
-    from policy_export import export
+    from recording_prepare import prepare
 
     output = Path(request["output"])
-    previous = Path(request["reuse_output"]) if request.get("reuse_output") else None
-    if previous and (previous / "manifest.json").is_file() and (previous.parent / "dataset.zip").is_file():
-        previous_manifest = verify(previous, digest(previous / "manifest.json"))
-        for key in ("source_revision", "converter_sha256", "contract", "split"):
-            if previous_manifest.get(key) != request.get(key):
-                raise ValueError("Previous preparation does not match the pinned conversion inputs")
-        expected_sources = [(s["sha256"], s.get("image_sha256")) for s in request["sources"]]
-        if [(e["sha256"], e.get("image_sha256")) for e in previous_manifest["episodes"]] != expected_sources:
-            raise ValueError("Previous preparation belongs to different recordings")
-        output = previous
-        print("Reusing verified conversion output; checking publication and loader", flush=True)
-    else:
-        # Each attempt builds new output. A published version is never overwritten.
-        if output.exists() and not request.get("migration"):
-            raise ValueError("Preparation attempt already has output; start a new attempt")
-        for source in request.get("sources", []):
-            for path_key, sha_key in (("recording", "sha256"), ("images", "image_sha256")):
-                if source.get(path_key):
-                    path = Path(source[path_key])
-                    if path.is_symlink() or digest(path) != source[sha_key]:
-                        raise ValueError("Archived source checksum verification failed")
-        if request.get("migration"):
-            verify(output, request["expected_manifest_sha256"])
-            pack(output)
-        else:
-            export(request)
-    manifest_sha = digest(output / "manifest.json")
-    manifest = verify(output, manifest_sha)
-    archive = output.parent / "dataset.zip"
-    archive_sha = digest(archive)
+    if output.exists():
+        raise ValueError("Preparation attempt already has output; retry with a new attempt")
+    prepare(request)
+    manifest_sha = hashlib.sha256((output / "manifest.json").read_bytes()).hexdigest()
+    manifest = verify_dataset(output, manifest_sha, verify_files=True)
     destination = Path(request["prepared_root"]) / manifest_sha
-    materialize(archive, destination, manifest_sha, archive_sha)
-    loader = request.get("loader")
-    receipt = None
-    if loader:
-        argv = [value.replace("{dataset}", str(destination)).replace("{manifest_sha}", manifest_sha)
-                for value in loader["argv"]]
-        receipt = run_loader(argv, Path(request["receipt_path"]).with_name("loader.log"))
-        if (receipt.get("manifest_sha256") != manifest_sha
-                or receipt.get("schema") not in loader["schemas"]
-                or receipt.get("observation_mode", "rgb") != loader["mode"]):
-            raise ValueError("Training loader verification returned a different dataset")
-    return dict(schema="skynet.cluster-preparation/v1", job_id=request["job_id"],
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    # Both directories are on the shared dataset filesystem. Only a small manifest
+    # is published; stream arrays already live in the recording's immutable store.
+    lock_path = destination.parent / ("." + manifest_sha + ".publish.lock")
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if destination.exists():
+            if destination.is_symlink():
+                raise ValueError("Dataset publication cannot follow a symbolic link")
+            verify_dataset(destination, manifest_sha, verify_files=False)
+            shutil.rmtree(output)
+        else:
+            os.rename(output, destination)
+    loader = request["loader"]
+    argv = [value.replace("{dataset}", str(destination)).replace("{manifest_sha256}", manifest_sha)
+            for value in loader["argv"]]
+    receipt = run_loader(argv, Path(request["receipt_path"]).with_name("loader.log"))
+    if (receipt.get("manifest_sha256") != manifest_sha
+            or receipt.get("schema") not in loader["schemas"]
+            or receipt.get("observation_mode", "rgb") != loader["mode"]):
+        raise ValueError("Training reader verification returned a different dataset")
+    return dict(schema="skynet.cluster-preparation/v2", job_id=request["job_id"],
                 attempt_id=request["attempt_id"], verified=True, manifest=manifest,
-                manifest_sha256=manifest_sha, archive_sha256=archive_sha,
-                path=str(destination), archive_path=str(archive), loader_validation=receipt)
+                manifest_sha256=manifest_sha, path=str(destination), loader_validation=receipt)
 
 
 def main(path):
@@ -97,7 +85,7 @@ def main(path):
         receipt = run(request)
         code = 0
     except Exception as exc:
-        receipt = dict(schema="skynet.cluster-preparation/v1", job_id=request["job_id"],
+        receipt = dict(schema="skynet.cluster-preparation/v2", job_id=request["job_id"],
                        attempt_id=request["attempt_id"], verified=False, error=str(exc))
         code = 1
     temporary = receipt_path.with_suffix(".part")

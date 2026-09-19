@@ -54,8 +54,27 @@
   const expandedResults = new Set();
   const terminal = (job) =>
     ["READY", "FAILED", "DELETE_FAILED"].includes(job.state);
-  const recipe = (id) => snapshot?.policies?.find((p) => p.id === id)
-    || snapshot?.formats?.find((p) => p.id === id);
+  const adapterFor = (job) => job.adapter;
+  const selectedAdapter = () => preparation?.adapters.find((p) => p.id === el("policy-export-adapter").value);
+  const selectedPreset = () => {
+    const adapter = selectedAdapter();
+    return adapter?.data_presets?.find((preset) => preset.id === adapter.default_data_preset);
+  };
+  const inputModalities = [
+    ["state", "State"], ["rgb", "RGB"], ["depth", "Depth"], ["point_cloud", "Point cloud"],
+  ];
+  function renderInputModalities(preset) {
+    const field = el("policy-export-modalities-field");
+    field.hidden = !preset;
+    const streams = preset?.observation_requirements?.streams || [];
+    // Rendering dependencies and action representations are not model inputs.
+    const used = new Set([...(preset?.observations || []), ...streams.map((stream) => stream.modality)]);
+    el("policy-export-modalities").innerHTML = inputModalities.map(([id, label]) => {
+      const active = used.has(id);
+      const status = active ? "Used" : "Not used";
+      return `<li data-input-modality="${id}" class="${active ? "is-used" : ""}" aria-label="${label}: ${status}">${label}</li>`;
+    }).join("");
+  }
   const splitLabel = (split) =>
     typeof split === "string" ? split : !split?.validation?.length
       ? `${split?.train?.length || 0} train · no validation`
@@ -67,33 +86,31 @@
     el(id).hidden = !message;
   }
   function sourceNote() {
-    const policy = preparation?.policies.find((p) => p.id === el("policy-export-format").value);
+    const adapter = selectedAdapter();
+    const preset = selectedPreset();
+    const policy = adapter && preset ? { ...adapter, ...preset } : adapter;
     const source = preparation?.session;
     for (const id of ["preparation-validation", "preparation-seed"]) {
-      el(id).disabled = source?.episodes === 1 || policy?.split_mode === "upstream";
+      el(id).disabled = source?.episodes === 1;
       el(id).closest(".field").hidden = el(id).disabled;
     }
-    const hint = el("policy-export-format-help");
-    hint.textContent =
-      policy?.available && (!policy.trainable || policy.split_mode === "upstream")
-        ? policy.description
-        : policy?.available && policy.observation_requirements?.streams?.length
-          ? "Conversion prepares missing camera data and reuses matching data."
-          : "";
-    hint.hidden = !hint.textContent;
+    renderInputModalities(preset);
     const noValidation =
-      policy?.trainable && policy.split_mode !== "upstream" &&
+      policy?.trainable &&
       (source?.episodes < 2 ||
         Number(el("preparation-validation").value) === 0);
     const insufficientEpisodes = source && policy?.minimum_episodes && source.episodes < policy.minimum_episodes;
+    const needsValidation = preset?.validation_required && Number(el("preparation-validation").value) === 0;
     const message = !source
       ? "Loading recordings…"
       : !source.eligible
         ? source.reason || "This session is not ready for preparation."
-        : !policy?.available
-          ? policy?.description || "Choose an available policy."
+        : !policy?.available || !preset
+          ? policy?.reason || "Choose an available adapter."
           : insufficientEpisodes
-            ? "ACT Native needs two episodes for its original 80/20 split. Choose ACT · Skynet recordings for single-episode training."
+            ? `This adapter requires at least ${policy.minimum_episodes} episodes.`
+          : needsValidation
+            ? "This adapter requires separate validation episodes."
           : "";
     error(
       "policy-export-compatibility",
@@ -112,6 +129,8 @@
       !source?.eligible ||
       !source.episodes ||
       !policy?.available ||
+      !preset ||
+      needsValidation ||
       insufficientEpisodes;
   }
   const stageLabels = {
@@ -123,16 +142,19 @@
     OBSERVATIONS: "Preparing required observations",
     CONVERTING: "Converting",
     VALIDATING: "Validating",
-    TRANSFERRING: "Copying to cluster",
-    VERIFYING_COPY: "Checking cluster copy",
-    CHECKING_LOADER: "Checking policy data loader",
+    CHECKING_LOADER: "Checking adapter data loader",
     READY: "Prepared",
   };
   function jobStatus(job) {
     if (job.state === "DELETE_FAILED")
       return `Deletion incomplete · ${job.error}`;
     if (job.state === "FAILED") return `Failed · ${job.error}`;
-    if (job.stage === "OBSERVATIONS") return job.detail || "Preparing required camera data";
+    if (job.stage === "OBSERVATIONS") {
+      const progress = job.observation_progress;
+      return (job.detail || "Preparing required observations") +
+        (progress && Number.isInteger(progress.ready) && Number.isInteger(progress.total)
+          ? ` · ${progress.ready}/${progress.total} observations ready` : "");
+    }
     const progress = job.progress
       ? ` · ${job.progress.episodes_done}/${job.progress.episodes_total} episodes`
       : "";
@@ -178,21 +200,23 @@
   }
   async function updateSnapshot(value) {
     // Readiness and training setup come from the server's current adapter catalog.
-    // A browser snapshot must never override a newly archived/restored policy.
+    // A browser snapshot must never override a newly archived/restored adapter.
     snapshot = value;
     renderHistory();
   }
-  function populatePolicies(selected = null) {
-    const control = el("policy-export-format");
+  function populateAdapters(selected = null, version = null) {
+    const control = el("policy-export-adapter");
     control.replaceChildren();
-    for (const policy of preparation.policies) {
-      const format = policy.container && !policy.name.toLowerCase().includes(policy.container.toLowerCase())
-        ? ` · ${policy.container}` : "";
-      control.add(new Option(
-        `${policy.name}${format}${!policy.available ? " · unavailable" : !policy.trainable ? " · export only" : ""}`,
-        policy.id));
+    control.add(new Option("Choose an adapter", ""));
+    for (const adapter of preparation.adapters) {
+      const option = new Option(`${adapter.name} · v${adapter.adapter_version_number}${adapter.available ? "" : " · unavailable"}`, adapter.id);
+      option.disabled = !adapter.available;
+      control.add(option);
     }
-    if (selected !== null) control.value = selected;
+    const previous = preparation.adapters.find((adapter) => adapter.id === selected);
+    control.value = selected === null
+      ? preparation.adapters.find((adapter) => adapter.available)?.id || ""
+      : previous?.adapter_version_id === version ? selected : "";
   }
   function visible() {
     return !window.SkynetRefresh?.stopped && document.visibilityState === "visible" &&
@@ -208,9 +232,10 @@
         const token = generation;
         const current = await request(`/options/${encodeURIComponent(sourceSessionId)}`);
         if (token === generation && dialog.open) {
-          const selected = el("policy-export-format").value;
+          const selected = el("policy-export-adapter").value;
+          const version = selectedAdapter()?.adapter_version_id;
           preparation = current;
-          populatePolicies(selected);
+          populateAdapters(selected, version);
           sourceNote();
         }
       }
@@ -235,7 +260,8 @@
     error("policy-export-error", null);
     retryPreparation.hidden = true;
     retryPreparation.onclick = () => window.openPolicyExport(sessionId);
-    el("policy-export-format").replaceChildren();
+    el("policy-export-adapter").replaceChildren();
+    renderInputModalities(null);
     el("policy-export-name").value = "";
     el("policy-export-name").readOnly = false;
     el("policy-export-name-help").textContent = "Name this dataset.";
@@ -255,7 +281,7 @@
         throw new Error("This recording session is no longer available.");
       resourceId = source.resource_id || null;
       preparationDirty = false;
-      populatePolicies();
+      populateAdapters();
       el("policy-export-name").value =
         resource?.display_name || source.name;
       el("policy-export-name").readOnly = Boolean(resource);
@@ -293,11 +319,10 @@
   }
   function resultSettings(result) {
     const metadata = result.metadata || {};
-    const upstream = recipe(result.format)?.split_mode === "upstream";
-    const split = upstream ? null : result.split || metadata.split;
+    const split = result.split || metadata.split;
     const pairs = [
-      ["Recipe", result.contract || metadata.contract],
-      ["Training split", upstream ? "Original ACT random 80/20; conversion split and normalization files are not used." : null],
+      ["Adapter", adapterFor(result)?.name || metadata.adapter?.name],
+      ["Data preset", result.adapter_data_preset || metadata.adapter_data_preset],
       ["Split seed", split?.seed],
       [
         "Validation",
@@ -373,11 +398,10 @@
     </td></tr>`;
   }
   function preparedRow(job) {
-    const policy = recipe(job.format);
+    const policy = adapterFor(job);
     const copies = (job.locations || []).filter(
       (l) => l.status === "AVAILABLE",
     );
-    const local = copies.some((l) => l.kind === "local");
     const cluster = copies.some((l) => l.kind === "cluster");
     const failed = ["FAILED", "DELETE_FAILED"].includes(job.state);
     const state = failed
@@ -397,12 +421,9 @@
                 : "RUNNING";
     const primary = [],
       secondary = [];
-    if (job.version_id && (local || (cluster && job.remote_archive))) {
+    if (job.version_id && cluster) {
       secondary.push(
-        `<a class="button button-outline" href="/api/data/exports/${encodeURIComponent(job.id)}/dataset.zip" download><span aria-hidden="true">↓</span> dataset.zip</a>`,
-      );
-      secondary.push(
-        `<a class="button button-outline" href="/api/data/exports/${encodeURIComponent(job.id)}/manifest.json" download><span aria-hidden="true">↓</span> manifest.json</a>`,
+        `<a class="button button-outline" href="/api/data/exports/${encodeURIComponent(job.id)}/manifest.json" download>Download manifest</a>`,
       );
     }
     if (job.state === "FAILED") {
@@ -414,10 +435,6 @@
         `<button type="button" data-preparation-retry="${esc(job.id)}">Retry</button>`,
       );
     }
-    if (job.state === "READY" && !cluster)
-      primary.push(
-        `<button type="button" data-preparation-transfer="${esc(job.id)}">Copy to cluster</button>`,
-      );
     if (job.training_ready && job.version_id)
       primary.push(
         `<button type="button" data-preparation-train="${esc(job.id)}">Use in experiment</button>`,
@@ -431,16 +448,12 @@
     return resultRow({
       id: `job-${job.id}`,
       versionId: job.version_id,
-      title: policy?.name || job.format,
-      container: policy?.container,
+      title: policy?.name || "Recording dataset",
+      container: job.adapter_data_preset,
       status: state,
       note: statusNote,
       episodes: job.episodes ?? job.sources?.length ?? "—",
-      split: policy?.split_mode === "upstream"
-        ? job.loader_validation
-          ? `${job.loader_validation.train_episodes} train / ${job.loader_validation.validation_episodes} validation · original ACT`
-          : "Original ACT 80/20 split"
-        : job.split,
+      split: job.split,
       createdAt: job.created_at,
       storage: locationHtml(copies),
       settings: resultSettings(job),
@@ -578,7 +591,7 @@
     pendingConfirmation = token;
     expandedResults.clear();
     selectedResource = { ...preparation?.resource, id: job.resource_id };
-    const policy = preparation?.policies.find((item) => item.id === job.format);
+    const policy = adapterFor(job) || preparation?.adapters.find((item) => item.id === job.adapter_id);
     el("prepared-dataset-title").textContent =
       job.name || preparation?.resource?.display_name || el("policy-export-name").value;
     el("prepared-dataset-context").textContent = job.state === "READY"
@@ -588,7 +601,7 @@
     el("prepared-dataset-actions").innerHTML =
       `<button type="button" class="button button-outline" data-data-history="${esc(job.resource_id)}">Files and history</button>`;
     el("prepared-dataset-content").innerHTML =
-      `<section data-preparation-accepted><strong>${esc(policy?.name || job.format || "Dataset conversion")}</strong>
+      `<section data-preparation-accepted><strong>${esc(policy?.name || "Dataset conversion")}</strong>
       <p>${statusPill(job.state || "ACCEPTED")} ${esc(job.detail || stageLabels[job.stage] || job.state || "Request accepted")}</p>
       <p class="secondary">Loading dataset details…</p></section>`;
     SkynetDialog.close(dialog);
@@ -668,7 +681,6 @@
       }
       const id =
         data.preparationRetry ||
-        data.preparationTransfer ||
         data.preparationTrain;
       if (!id) return;
       if (data.preparationTrain) {
@@ -701,7 +713,7 @@
   };
   dialog.addEventListener("close", () => generation++);
   detail.addEventListener("close", () => detailGeneration++);
-  el("policy-export-format").onchange = sourceNote;
+  el("policy-export-adapter").onchange = sourceNote;
   el("preparation-validation").oninput = sourceNote;
   el("refresh-policy-exports").onclick = refresh;
   el("refresh-data-registry").addEventListener("click", refresh);
@@ -724,7 +736,9 @@
         method: "POST",
         body: JSON.stringify({
           session_id: sourceSessionId,
-          format: el("policy-export-format").value,
+          adapter_id: selectedAdapter().adapter_id,
+          adapter_version_id: selectedAdapter().adapter_version_id,
+          adapter_data_preset: selectedPreset().id,
           name: el("policy-export-name").value.trim(),
           resource_id: resourceId,
           gateway: el("gateway").value,

@@ -2,7 +2,7 @@
 
 Adapter manifests are the source of truth for trainer requirements. The existing
 `train.input_fields`, `data_binding`, `supported_canonical_fields` and argument
-mappings remain the submission path; there is no separate DP submission system.
+mappings remain the submission path.
 
 - `train.data_requirements` explains the observations and action representation.
   Dataset versus simulation/custom workflows are distinguished explicitly.
@@ -21,46 +21,14 @@ mappings remain the submission path; there is no separate DP submission system.
   their previous interpretation and their manifest hashes.
 - Common-parameter receipts include supported native settings and their canonical
   aliases. Unmapped schema defaults are not reported as applied hyperparameters.
-  The DP capsule additionally writes `applied-settings.json` and the fully resolved
-  `training-config.yaml`; its declared JSONL progress source feeds progress/ETA
-  and the existing tracking bridge.
+  ACT capsules additionally write `applied-settings.json`; their declared JSONL
+  progress source feeds progress/ETA and the existing tracking bridge.
 
-The conversion catalog advertises formats/contracts; it derives compatible
-adapters from registry declarations. DP and ACT have registered training adapters;
-the shared XPolicyLab HDF5 remains an intermediate export format.
+The conversion catalog derives adapter requirements from registry declarations.
+Prepared datasets reference shared recording streams; adapter-specific loaders
+consume those streams without duplicating the original recording payloads.
 No arbitrary conversion to GR00T/OpenPI/Robomimic is claimed: those need their
 actual observation, action, embodiment and configuration mappings.
-
-## DP presets and runtime
-
-`dexverse-state/v1` uses joint positions without RGB, an encoder with hidden width
-256 and output width 128 per observation, observation history 2, future action
-chunks 16, DDPM squared-cosine training with 100 timesteps and 20 inference steps,
-AdamW LR 1e-4 / weight decay 1e-4, nominal effective batch 256, gradient clipping 1,
-fixed EMA 0.995 and 300 epochs, with held-out validation each epoch.
-The two encoded observations are concatenated for U-Net conditioning. Constant LR,
-zero warmup, seed 42 and the pinned optimizer betas/epsilon are
-implementation choices: the [paper](https://arxiv.org/html/2607.08751v1) does not
-specify them. The encoder history aggregation is also explicit in the saved config.
-This is a policy training preset, not a reproduction of the paper's task suite,
-collection distribution, or rollout success rates.
-
-`rgb-joints/v2` uses the same training code with the pinned three-view ResNet18
-encoder and batch 8. Pixels are divided by 255, then ImageNet-normalized once.
-Both modes use training-only joint/action normalization, complete episode splits,
-correct accumulation (including partial batches), EMA validation, best/latest
-checkpoints, and finite-loss checks. A prediction returns all 16 future actions;
-observation history never consumes part of that action chunk.
-
-New collection recordings retain joint names, command scale/offset and timing
-without requiring camera capture. State conversion reads this metadata directly.
-Older recordings lacking it can use their existing verified image sidecars for
-joint layout, or their already prepared Zarr data can train directly in state mode.
-Original recordings remain immutable; converted versions, provenance, copies and
-reference-protected deletion use the existing dataset lifecycle.
-
-Existing jobs keep their pinned capsule. Changing from RGB to state changes the
-model architecture and requires a new run.
 
 ## ACT and recorded-task evaluation
 
@@ -72,7 +40,7 @@ Best/latest model files, applied settings, loss logs and a final result are save
 the best checkpoint is registered for inference. ACT training resume is not
 advertised because these model checkpoints do not contain optimizer state.
 
-Both adapters expose the same DexVerse recorded-task evaluator. The evaluation
+ACT adapters expose the DexVerse recorded-task evaluator. The evaluation
 suite binds its task from the immutable training bundle. Policy inference stays
 in the policy runtime and communicates with a separate Isaac runtime on the same
 allocated GPU. Evaluation checks source revisions, checkpoint/dataset checksums,
@@ -90,21 +58,17 @@ private `data/operator.env` file with `--env-file`. Readiness runs a GPU scene,
 reset, camera and video check. Each simulator process uses a private temporary
 directory so another cluster user's IsaacLab logs cannot block startup.
 
-Validation on 2026-09-09: browser-submitted two-epoch jobs 3796701 (DP state,
-51 real episodes) and 3796686 (ACT RGB, two real episodes) completed with losses
-and registered checkpoints. Full-session ACT preparation produced 51 episodes
-(41 train / 10 validation). GPU inference test 3796722 loaded both checkpoints,
-produced finite 16x28 / 50x28 action chunks and verified seeded resets.
-Browser-submitted ACT A40 training job 3800608 also completed at 2/2 epochs.
-Real simulator evaluations 3800601 (DP state) and 3800610 (ACT RGB) each completed
-one 1,200-step episode, published 1/1 progress and a task-success result, and
-produced a 20-second video loaded and scrubbed in the browser. Neither short-test
-checkpoint picked up the cube. These tests establish execution, not policy quality
-or benchmark success. DP RGB rollout is supported by the same bridge but was not
-part of these end-to-end tests. Backend regression tests: 525 passed; all live UI
-regression suites passed.
+Validation on 2026-09-09: browser-submitted two-epoch ACT RGB job 3796686
+(two real episodes) completed with losses and a registered checkpoint.
+Full-session ACT preparation produced 51 episodes (41 train / 10 validation).
+GPU inference test 3796722 produced finite 50×28 ACT action chunks and verified
+seeded resets. Browser-submitted ACT A40 training job 3800608 completed at 2/2
+epochs. ACT simulator evaluation 3800610 completed one 1,200-step episode,
+published 1/1 progress and a task-success result, and produced a 20-second video
+loaded and scrubbed in the browser. The short-test checkpoint did not pick up
+the cube. These tests establish execution, not policy quality or benchmark success.
 
-GPU readiness passed on `heistotron`, and both rollouts passed on `consu`
+GPU readiness passed on `heistotron`, and the ACT rollout passed on `consu`
 (NVIDIA driver 580.178.04). A readiness attempt on `voltron` with driver 610.57.04
 crashed inside the RTX renderer before scene creation. That node's runtime/driver
 issue remains unresolved; a successful readiness check on one node does not

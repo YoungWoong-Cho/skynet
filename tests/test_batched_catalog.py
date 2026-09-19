@@ -48,11 +48,11 @@ def dataset(db, index=0):
 
 
 @pytest.mark.parametrize("count", [1, 9])
-def test_catalog_and_choices_use_three_reads_regardless_of_size(db, reads, count):
+def test_catalog_and_choices_use_four_reads_regardless_of_size(db, reads, count):
     records = [dataset(db, i) for i in range(count)]
     reads.clear()
     resources = db.list_data_resources(include_versions=True)
-    assert len(reads) == 3
+    assert len(reads) == 4
     assert len(resources) == count
     assert all(resource["version_count"] == 2 for resource in resources)
     assert all(resource["latest_version"] == resource["versions"][0] for resource in resources)
@@ -60,12 +60,12 @@ def test_catalog_and_choices_use_three_reads_regardless_of_size(db, reads, count
     assert set(resources[0]["recording_ids"]) == {"recording-0", "source-0"}
     reads.clear()
     choices = data_selection.choices(db)
-    assert len(reads) == 3
+    assert len(reads) == 4
     assert len(choices) == count
     assert {item["id"] for item in choices} == {item[1]["id"] for item in records}
     reads.clear()
     defaults = db.list_data_resources()
-    assert len(reads) == 3
+    assert len(reads) == 4
     assert defaults == [{key: value for key, value in row.items() if key != "versions"} for row in resources]
 
 
@@ -119,7 +119,7 @@ def test_catalog_snapshot_is_coherent_and_next_read_is_fresh(db, monkeypatch):
     assert db.list_data_resources(include_archived=True)[0]["archived_at"]
 
 
-def test_bulk_versions_preserve_lineage_and_bundle_links_with_five_reads(db, reads):
+def test_bulk_versions_preserve_lineage_and_bundle_links_with_six_reads(db, reads):
     resource, version, locations, source = dataset(db)
     derivation = db.create_data_derivation(
         output_version_id=version["id"], inputs=[{"version_id": source["id"]}],
@@ -130,7 +130,7 @@ def test_bulk_versions_preserve_lineage_and_bundle_links_with_five_reads(db, rea
     }])
     reads.clear()
     versions = db.get_data_resource_versions([version["id"], source["id"], "missing"])
-    assert len(reads) == 5
+    assert len(reads) == 6
     assert set(versions) == {version["id"], source["id"]}
     assert versions[version["id"]]["derivation_id"] == derivation["id"]
     assert versions[source["id"]]["derivation_id"] is None
@@ -209,7 +209,7 @@ def test_http_catalog_exposes_versions_and_adapter_editability_without_detail_re
         reads.clear()
         response = client.get("/api/data/resources?include_versions=true")
         assert response.status_code == 200
-        assert len(reads) == 3
+        assert len(reads) == 4
         item = response.json()["resources"][0]
         assert item["id"] == resource["id"] and len(item["versions"]) == 2
         assert "versions" not in client.get("/api/data/resources").json()["resources"][0]

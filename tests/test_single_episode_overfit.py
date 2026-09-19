@@ -5,49 +5,45 @@ import pytest
 from skynet_app.adapters.egoverse_runtime import joint_data, validate_episode_split
 from skynet_app.adapters.egoverse_splits import validate_split
 from skynet_app.policy_exports_api import ExportRequest
-from test_policy_exports import setup, digest
+from test_policy_exports import setup, digest, create, manifest_path
 
 
 def test_single_episode_export_preserves_source_and_separate_dataset(setup):
     service, session, source = setup
-    full = service.create(session['id'], 'egoverse', 'All recordings')
+    full = create(service, session['id'], 'egoverse', 'All recordings')
     before = {str(p): digest(p) for p in source.rglob('*') if p.is_file()}
-    job = service.create(session['id'], 'egoverse', 'Episode 2 overfit', overfit_episode=1)
+    job = create(service, session['id'], 'egoverse', 'Episode 2 overfit', overfit_episode=1)
     assert job['resource_id'] != full['resource_id']
     assert len(job['sources']) == 1 and job['sources'][0]['index'] == 1
-    assert service.create(session['id'], 'egoverse', 'Other name', overfit_episode=1)['id'] == job['id']
+    assert create(service, session['id'], 'egoverse', 'Other name', overfit_episode=1)['id'] == job['id']
     service.prepare(job['id'])
     result = service.get(job['id'])
     assert result['state'] == 'READY', result
-    manifest = json.loads(service.artifact(job['id'], 'manifest.json').read_text())
+    manifest = json.loads(manifest_path(service,job).read_text())
     assert len(manifest['episodes']) == 1
     assert manifest['episodes'][0]['source_index'] == 1
     assert manifest['split']['mode'] == 'training_only'
     assert manifest['split']['train'] == [0] and manifest['split']['validation'] == []
-    assert 'disjoint_episode_split' in manifest['validation']['checks']
     root = service.root / job['id'] / 'output'
-    assert len(list(root.rglob('*.zarr'))) == 1, 'no duplicated validation recording'
+    assert not list(root.rglob('*.zarr')), 'shared manifest stores no duplicate episode payload'
     validate_episode_split(root, manifest)
     assert manifest['episodes'][0]['steps'] == 3
-    data = joint_data(root, 1, 0, validation=False)
-    assert data["valid_datasets"] == {}
-    assert data["valid_dataloader_params"] == {}
-    assert data["train_datasets"]["skynet_joints"]["resolver"]["folder_path"] == str(root / "dataset/train")
+    assert [p.name for p in root.iterdir()] == ['manifest.json']
     assert {str(p): digest(p) for p in source.rglob('*') if p.is_file()} == before
     assert service.database.get_data_resource(full['resource_id'])['display_name'] == 'All recordings'
 
 
 @pytest.mark.parametrize('changes', [
-    {'format': 'dp'}, {'overfit_episode': 99}, {'overfit_episode': True},
+    {'overfit_episode': 99}, {'overfit_episode': True},
     {'resource_id': 'existing'}, {'selections': [{'session_id': 'session-1', 'indices': [0]}]},
 ])
 def test_invalid_overfit_is_rejected_before_registration(setup, changes):
     service, session, _ = setup
-    kwargs = dict(identifier=session['id'], format='egoverse', name='Overfit', overfit_episode=0)
+    kwargs = dict(session_id=session['id'], kind='egoverse', name='Overfit', overfit_episode=0)
     kwargs.update(changes)
     before = len(service.list())
     with pytest.raises(ValueError):
-        service.create(**kwargs)
+        create(service, **kwargs)
     assert len(service.list()) == before
 
 
@@ -59,7 +55,7 @@ def test_overlap_is_only_allowed_for_explicit_single_episode_mode():
     for split, count in [(valid, 2), ({**valid, 'validation': [1]}, 2), ({**valid, 'train': [False]}, 1)]:
         with pytest.raises(ValueError):
             validate_split(split, count)
-    assert ExportRequest(session_id='source', name='One', format='egoverse', overfit_episode=0).overfit_episode == 0
+    assert ExportRequest(session_id='source', name='One', adapter_id='adapter', adapter_version_id='version', overfit_episode=0).overfit_episode == 0
 
 
 def test_held_out_suite_rejects_overfit_before_submission():
@@ -73,8 +69,8 @@ def test_held_out_suite_rejects_overfit_before_submission():
 def test_recording_links_follow_resource_ownership_not_source_membership(setup, monkeypatch):
     import copy
     service, original, _ = setup
-    full = service.create(original['id'], 'egoverse', 'All recordings')
-    subset = service.create(original['id'], 'egoverse', 'Episode 1', overfit_episode=0)
+    full = create(service, original['id'], 'egoverse', 'All recordings')
+    subset = create(service, original['id'], 'egoverse', 'Episode 1', overfit_episode=0)
     before = {j['id']: j['recording_session_id'] for j in service.options()['exports']}
     assert before[full['id']] == original['id']
     assert before[subset['id']] is None
@@ -94,27 +90,23 @@ def test_recording_links_follow_resource_ownership_not_source_membership(setup, 
 def test_overfit_of_a_one_episode_recording_keeps_its_dataset_link(setup):
     service, session, _ = setup
     session['recordings'] = session['recordings'][:1]
-    job = service.create(session['id'], 'egoverse', 'One episode', overfit_episode=0)
+    job = create(service, session['id'], 'egoverse', 'One episode', overfit_episode=0)
     assert service.dataset(session, create=False)['id'] == job['resource_id']
     assert service.options()['exports'][0]['recording_session_id'] == session['id']
 
 
-@pytest.mark.parametrize("format", ["egoverse", "act", "dp"])
+@pytest.mark.parametrize("format", ["egoverse", "act", "fixture-rgb"])
 def test_one_recording_prepares_without_a_validation_split(setup, format):
     service, session, _ = setup
     session["recordings"] = session["recordings"][:1]
-    job = service.create(session["id"], format, "One recording")
+    job = create(service, session["id"], format, "One recording")
     assert job["split"]["train"] == [0]
     assert job["split"]["validation"] == []
     assert job["split"]["mode"] == "training_only"
     service.prepare(job["id"])
     result = service.get(job["id"])
     assert result["state"] == "READY", result
-    manifest = json.loads(service.artifact(job["id"], "manifest.json").read_text())
+    manifest = json.loads(manifest_path(service,job).read_text())
     assert manifest["split"]["validation"] == []
-    if format == "egoverse":
-        validate_episode_split(service.root / job["id"] / "output", manifest)
-    else:
-        from skynet_app.adapters.xpolicy_runtime import validate_manifest
-        manifest["capture"]["action_semantics"] = "raw_joint_position_command; target = action * scale + offset"
-        validate_manifest(manifest)
+    from skynet_app.adapters.recording_dataset import verify_dataset
+    verify_dataset(service.root / job['id'] / 'output')

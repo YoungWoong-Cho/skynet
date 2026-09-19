@@ -17,15 +17,11 @@ def bundle():
 
 
 def test_modalities_use_policy_resolution_not_capture_resolution(manifests, bundle):
-    dp = manifests["xpolicylab-dp"]
-    state = resolve_model_io(dp, preview_spec({}, bundle))
-    assert not any("RGB" in key for key, _ in state["entries"])
-    assert dict(state["entries"])["Output · Joint commands"] == "16 × 28 (steps × values)"
-    rgb = resolve_model_io(dp, preview_spec({"native.config.observation_mode": "rgb", "native.config.observation_steps": 4, "native.config.action_steps": 32}, bundle))
-    assert dict(rgb["entries"])["Input · RGB · scene_front"] == "4 × 240 × 320 × 3 (timesteps × height × width × channels)"
-    assert dict(rgb["entries"])["Output · Joint commands"] == "32 × 28 (steps × values)"
     act = resolve_model_io(manifests["xpolicylab-act"], preview_spec({}, bundle))
-    assert "480 × 640 × 3" in dict(act["entries"])["Input · RGB · scene_left"]
+    assert dict(act["entries"])["Input · RGB · scene_left"] == "1 × 480 × 640 × 3 (timesteps × height × width × channels)"
+    assert dict(act["entries"])["Output · Joint commands"] == "50 × 28 (steps × values)"
+    custom = resolve_model_io(manifests["xpolicylab-act"], preview_spec({"native.config.action_steps": 32}, bundle))
+    assert dict(custom["entries"])["Output · Joint commands"] == "32 × 28 (steps × values)"
 
 
 def test_native_flat_overrides_and_saved_dataset_resolve_together(manifests, bundle):

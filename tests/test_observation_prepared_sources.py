@@ -33,14 +33,12 @@ from test_observation_preparation import context, cloud_contract
 
 
 def test_point_cloud_sampling_is_scheduled_per_recording(context, monkeypatch):
-    from skynet_app.dataset_formats import RECIPES
+    from test_policy_exports import create, set_requirements
     from copy import deepcopy
     service = context.service
     context.add_session('second', checksum='b' * 64)
-    recipe = deepcopy(RECIPES['dp'])
-    recipe['observation_requirements'] = cloud_contract()
-    monkeypatch.setitem(RECIPES, 'dp', recipe)
-    job = service.create('first', 'dp', 'Separate CPU episodes', selections=[
+    set_requirements(service, 'test-recording-inputs', cloud_contract())
+    job = create(service, 'first', 'fixture-rgb', 'Separate CPU episodes', selections=[
         dict(session_id='first', indices=[0]), dict(session_id='second', indices=[0])])
     service.prepare(job['id'])
     renders = service.observations.store.producers()

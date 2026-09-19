@@ -5759,7 +5759,7 @@ async function refreshAfterDeletion(kind, identifier) {
     await Promise.all([window.refreshRecordingsAfterDeletion?.(), loadDataRegistry(true), window.refreshPreparedDatasets?.()]);
     return;
   }
-  if (["dataset", "prepared", "local-copy"].includes(kind)) {
+  if (["dataset", "prepared"].includes(kind)) {
     SkynetDialog.close(document.getElementById("prepared-dataset-dialog"));
     await Promise.all([
       loadDataRegistry(true),
@@ -13661,7 +13661,7 @@ function experimentBundleCompatibility(
     )
       return {
         compatible: false,
-        message: "Dataset has not passed this policy's data requirements.",
+        message: "Dataset has not passed this adapter's data requirements.",
       };
     if (binding.value_path === "location.path" && !locationReady)
       return {
@@ -13737,6 +13737,7 @@ function dataResourceTypeLabel(resource) {
 
 function dataFormatLabel(format) {
   const value = String(format || "");
+  if (value === "skynet.recording-dataset/v1") return "Shared recording data";
   if (/zarr/i.test(value)) return "Zarr";
   if (/hdf5|h5/i.test(value)) return "HDF5";
   if (/lerobot/i.test(value)) return "LeRobot";
@@ -20467,15 +20468,21 @@ window.usePreparedDataset = async (job) => {
   void activateTab("experiments", true, "submit");
   await loadTrainingInputs();
   const setup = job.training_setup;
-  const adapter = adapterRows.find(
-    (a) => adapterManifest(a).slug === setup?.adapter && !adapterArchived(a),
-  );
-  if (!adapter)
+  const identity = job.adapter;
+  if (!identity?.adapter_id || !identity?.adapter_version_id || !identity?.adapter_version_number)
+    throw new Error("The prepared dataset does not identify its exact adapter version.");
+  const { adapter } = await api(`/api/adapters/${encodeURIComponent(identity.adapter_id)}?version_number=${encodeURIComponent(identity.adapter_version_number)}`);
+  if (!adapter || adapterArchived(adapter))
     throw new Error(
       "The training adapter is unavailable. Restore it in Adapters.",
     );
+  if (adapterVersionId(adapter) !== identity.adapter_version_id ||
+      adapter.selected_version?.manifest_sha256 !== identity.adapter_manifest_sha256)
+    throw new Error("The registered adapter differs from the prepared dataset's pinned version.");
   loadedExperimentCanonicalContext = null;
-  loadedExperimentAdapterSnapshot = null;
+  loadedExperimentAdapterSnapshot = { ...adapter, _pinnedExperiment: true };
+  const scope = adapterDeclaredScope(loadedExperimentAdapterSnapshot);
+  if (scope) adapterDeclaredValueState.delete(scope.key);
   populateExperimentAdapters(adapterOptionId(adapter));
   elements.experimentAdapter.value = adapterOptionId(adapter);
   applySelectedAdapter({ loadSource: false });
@@ -20486,12 +20493,23 @@ window.usePreparedDataset = async (job) => {
       .replace(/^-|-$/g, "")
       .slice(0, 70) || "recorded-dataset") +
     "-" +
-    String(job.format || setup.adapter).replace(/[^a-z0-9-]+/g, "-");
+    String(setup.adapter).replace(/[^a-z0-9-]+/g, "-");
   renderTrackingNamePreview();
   elements.experimentDataBundle.value = job.version_id;
   populateExperimentDataBundles();
   renderAdapterDeclaredFields();
   if (setup.preset) applyTrainingPreset(setup.preset);
+  for (const [key, value] of Object.entries(setup.native_config || {})) {
+    const path = "native.config." + key;
+    const field = adapterInputFields().find((item) => item.path === path);
+    const control = field && document.getElementById(adapterFieldControlId(path));
+    if (!control) throw new Error("Prepared dataset selected an undeclared adapter setting: " + key);
+    setAdapterFieldControlValue(control, field, value);
+    adapterDeclaredScopeValues(renderedAdapterDeclaredScope, true)?.set(path, {
+      kind: field.kind, raw: adapterFieldRawValue(control), touched: true,
+    });
+  }
+  renderAdapterDeclaredFields();
   invalidateExperimentPreview();
   elements.experimentForm.scrollIntoView({ block: "start" });
   installPinnedSourceRevision(setup, "dataset preparation");
@@ -20505,8 +20523,8 @@ window.usePreparedDataset = async (job) => {
   }
   showToast(
     profile
-      ? "Dataset, policy, pinned source and runtime selected. Preview the training run when ready."
-      : "Dataset and pinned policy selected. Choose an available training runtime, then preview.",
+      ? "Dataset, adapter, pinned source and runtime selected. Preview the training run when ready."
+      : "Dataset and pinned adapter selected. Choose an available training runtime, then preview.",
   );
 };
 

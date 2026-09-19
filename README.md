@@ -90,7 +90,7 @@ Open **Settings → Slack** to connect a personal Slack webhook and receive subm
 9. Create evaluations from a retained inference checkpoint and monitor the episode ledger, logs, videos, and normalized result.
 
 For multi-GPU training, choose **Experiments → Slurm resources → GPU allocation → Manual**
-and set **GPUs / node**. DP, ACT and DexMimicGen support up to eight GPUs on one
+and set **GPUs / node**. ACT and DexMimicGen support up to eight GPUs on one
 node. Each GPU runs a separate DDP worker; per-device batch size is multiplied
 by the GPU count before accumulation. Losses and gradients are weighted by the
 actual sample count, including uneven final batches. Only the main worker
@@ -106,7 +106,7 @@ The shared trainers validate collective communication before loading the policy
 and fail if loss values or sample counts are invalid. Existing experiment revisions
 retain their pinned code; create a new revision to use an updated trainer.
 
-For DP and ACT, open **Training Runs → View attempts → Start evaluation**. In
+For ACT, open **Training Runs → View attempts → Start evaluation**. In
 **Evaluations**, choose one or more configured DexVerse tasks, episodes, seeds,
 and up to eight parallel jobs. The recorded task is the default. Choose the
 queue, GPU type, CPUs and RAM per worker, and wall time; the total allocation is
@@ -602,7 +602,7 @@ For a read-only metadata and file-presence check, run `python skynet_app/adapter
 - The console is currently single-user and trusted-network only.
 - Statistical reproducibility may be the strongest available guarantee for nondeterministic frameworks and simulators.
 
-Policy-aware dataset preparation and management are described in [Dataset preparation](docs/policy-data-exports.md). One dataset groups original revisions, prepared formats, verified local/cluster copies and experiment usage. DP and ACT support training and evaluation through the pinned XPolicyLab adapters; shared XPolicyLab HDF5 is an export format. All entry points use the same preparation workflow.
+Policy-aware dataset preparation and management are described in [Dataset preparation](docs/policy-data-exports.md). One dataset groups original revisions, prepared formats, verified local/cluster copies and experiment usage. ACT supports training and evaluation through the pinned XPolicyLab adapters. All entry points use the same preparation workflow.
 
 
 ## Retired collection workflows

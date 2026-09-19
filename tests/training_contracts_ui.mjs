@@ -74,5 +74,25 @@ try {
  input('steps').value='101';
  assert.equal(w.validateAdapterDeclaredFields({focus:false,notify:false}),false);
  assert.match(input('steps').validationMessage,/maximum is 100/);
+ // Starting from prepared data pins its original adapter version even after a registry edit.
+ const selectedVersion={id:'version-prepared',version_number:1,manifest,manifest_sha256:'a'.repeat(64)};
+ const pinnedAdapter={id:'adapter-test',name:'Test policy',selected_version:selectedVersion,latest_version:{id:'version-latest',version_number:2,manifest,manifest_sha256:'b'.repeat(64)}};
+ const requests=[];
+ w.api=async path=>{requests.push(path);return {adapter:pinnedAdapter};};
+ w.eval(`
+   activateTab=async()=>{};loadTrainingInputs=async()=>{};inspectRepositoryRuntime=async()=>{};
+   installPinnedSourceRevision=()=>{};showToast=()=>{};runtimeProfiles=[];
+   adapterRows=[{id:'adapter-test',name:'Test policy',latest_version:{id:'version-latest',version_number:2,manifest:${JSON.stringify(manifest)}}}];
+   window.preparedAdapterVersion=()=>adapterVersionId(selectedExperimentAdapter());
+ `);
+ const prepared={name:'Recorded data',version_id:'bundle-test',adapter:{adapter_id:'adapter-test',adapter_version_id:'version-prepared',adapter_version_number:1,adapter_manifest_sha256:'a'.repeat(64)},training_setup:{adapter:'policy-test',preset:'state/v1',native_config:{observation_mode:'state'}}};
+ await w.usePreparedDataset(prepared);
+ assert.equal(requests.at(-1),'/api/adapters/adapter-test?version_number=1');
+ assert.equal(el('experiment-adapter').value,'adapter-version:version-prepared');
+ assert.equal(input('observation_mode').value,JSON.stringify('state'));
+ assert.equal(el('experiment-name').value,'recorded-data-policy-test');
+ assert.equal(el('experiment-data-bundle').value,'bundle-test');
+ await assert.rejects(()=>w.usePreparedDataset({...prepared,adapter:{...prepared.adapter,adapter_version_id:'different-version'}}),/pinned version/);
+ await assert.rejects(()=>w.usePreparedDataset({...prepared,adapter:null}),/exact adapter version/);
  console.log('Training contracts UI: generic preset switching, defaults, imported dataset compatibility and input bounds passed.');
 } finally {for(const observer of observers)observer.disconnect();w.close();}

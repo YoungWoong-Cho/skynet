@@ -56,7 +56,7 @@ def test_all_multi_view_evaluation_capsules_include_shared_renderer():
     for manifest in builtin_adapter_manifests():
         for evaluation in manifest.evaluations:
             if evaluation.command and (manifest.slug.startswith('egoverse-') or
-                                      manifest.slug in {'xpolicylab-dp', 'xpolicylab-act'} or
+                                      manifest.slug in {'xpolicylab-act'} or
                                       evaluation.environment == 'libero'):
                 files = evaluation.command.capsule_files
                 assert 'adapter-support/evaluation_video.py' in files, manifest.slug

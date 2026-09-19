@@ -1,4 +1,4 @@
-"""Isaac-side rollout; shared by recorded-data DP and ACT policies."""
+"""Isaac-side rollout; used by recorded-data ACT policies."""
 
 import argparse
 import hashlib

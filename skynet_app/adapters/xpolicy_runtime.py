@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from recording_dataset import validate_manifest as validate_recording_manifest
+
 
 def repository(root, revision, policy):
     root = Path(root).resolve()
@@ -21,10 +23,12 @@ def repository(root, revision, policy):
 
 
 def validate_manifest(manifest):
+    validate_recording_manifest(manifest)
     order = manifest["policy_to_source_indices"]
     capture = manifest["capture"]
     names = capture["action_joint_names"]
-    if sorted(order) != list(range(len(names))) or len(set(names)) != len(names):
+    if (not names or any(type(i) is not int for i in order)
+            or sorted(order) != list(range(len(names))) or len(set(names)) != len(names)):
         raise ValueError("Dataset joint mapping is not a permutation")
     split = manifest["split"]
     if (
@@ -40,6 +44,15 @@ def validate_manifest(manifest):
         != "raw_joint_position_command; target = action * scale + offset"
     ):
         raise ValueError("Unsupported action representation")
+    for episode in manifest["episodes"]:
+        if episode.get("policy_to_source_indices") != order:
+            raise ValueError("Recorded joint policies require the same joint mapping in every episode")
+        for key in ("robot", "hand", "action_joint_names", "action_semantics", "action_scale", "action_offset", "step_dt"):
+            if episode.get("capture", {}).get(key) != capture.get(key):
+                raise ValueError("Recorded joint policies require the same capture contract in every episode: " + key)
+        for key in ("state", "action"):
+            if episode["streams"].get(key, {}).get("shape") != [episode["steps"], len(names)]:
+                raise ValueError("Recorded state/action dimensions differ from the joint mapping")
     return manifest
 
 
@@ -49,28 +62,3 @@ def write_json(path, value):
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, indent=2, allow_nan=False))
     temporary.replace(path)
-
-
-def normalization(root, manifest):
-    import numpy as np
-
-    value = json.loads((Path(root) / "normalization.json").read_text())
-    if (
-        value["fit"] != "training_episodes_only"
-        or value["train"] != manifest["split"]["train"]
-    ):
-        raise ValueError("Normalization must use only the registered training split")
-    result = {}
-    for kind in ("state", "action"):
-        stats = value["statistics"][kind]
-        for field in ("mean", "std"):
-            array = np.asarray(stats[field], dtype=np.float32)
-            if (
-                array.shape != (len(manifest["policy_to_source_indices"]),)
-                or not np.isfinite(array).all()
-            ):
-                raise ValueError("Invalid normalization statistics")
-            result[kind + "_" + field] = (
-                np.maximum(array, 0.01) if field == "std" else array
-            )
-    return result

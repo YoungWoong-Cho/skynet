@@ -19,6 +19,7 @@ import tarfile
 import tempfile
 
 from artifacts import verify, digest, relative_file
+from recording_dataset import verify_dataset, FORMAT
 
 
 def read_catalog():
@@ -270,8 +271,12 @@ def run(args):
         raise ValueError("Native checkpoint resume is supported for ACT training only")
     devices = "0" if verify_only else gpu_ids(args.gpu_count, os.environ)
     dataset, output = Path(args.dataset).resolve(), Path(args.output).resolve()
-    manifest = verify(dataset, args.manifest_sha)
-    recorded_act = args.policy == "ACT" and manifest.get("format") == "xpolicylab-act-hdf5/v1"
+    # External native policy datasets retain their own explicit contracts. All
+    # recording-derived data use the one shared-store manifest and reader bridge.
+    data_format = json.loads((dataset / "manifest.json").read_text()).get("format")
+    manifest = (verify_dataset(dataset, args.manifest_sha) if data_format == FORMAT
+                else verify(dataset, args.manifest_sha))
+    recorded_act = args.policy == "ACT" and manifest.get("format") == FORMAT
     if recorded_act:
         from act_native_data import validate_recorded_act
         dimensions = validate_recorded_act(dataset, manifest)

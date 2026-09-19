@@ -11,7 +11,31 @@ from skynet_app.database import canonical_json
 from skynet_app.db_backend import PostgresConnection
 from skynet_app.live_xr import LiveXRService
 from skynet_app.live_xr_archive import LiveArchiveService
-from test_policy_exports import setup
+from pathlib import Path
+from types import SimpleNamespace
+
+from skynet_app.database import Database
+from skynet_app.live_xr_review import LiveReviewService
+from skynet_app.policy_exports import PolicyExportService
+
+
+@pytest.fixture
+def setup(tmp_path, monkeypatch):
+    source = tmp_path / "remote/output"
+    source.mkdir(parents=True)
+    recordings = [f"recordings/live/episode-{i:06d}.pkl" for i in range(2)]
+    session = dict(
+        id="session-1", state="STOPPED", root=str(source.parent), gateway="test-host",
+        created_at="2026-09-08", profile=dict(display_name="Test hand", task="test-task", robot="floating_shadow_hand"),
+        recordings=recordings, recording_checksums={name: "a" * 64 for name in recordings}, recording_images={},
+    )
+    live = SimpleNamespace(root=Path(__file__).resolve().parents[1], database=Database(tmp_path / "db.store"),
+                           get=lambda _: session, list=lambda **_: [session])
+    service = PolicyExportService(LiveReviewService(live, root=tmp_path / "reviews"), root=tmp_path / "exports")
+    monkeypatch.setattr(service, "dispatch", lambda _: None)
+    yield service, session, source
+    service.stop()
+
 
 
 def persisted_sessions(service):

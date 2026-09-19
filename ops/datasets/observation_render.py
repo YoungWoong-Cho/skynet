@@ -18,6 +18,7 @@ import re
 import runpy
 import shutil
 import signal
+import subprocess
 import tempfile
 import sys
 
@@ -32,6 +33,29 @@ CAMERA_POLICY = "skynet.scene-cameras/v1"
 SUPPORTED_SOURCES = {"30cc673e27684b9f10186fa6bea731aed246bc9f", "917092d28764549f0f6a77872022c93ef3373c48"}
 PROJECTION_KEYS = {"focal_length", "focus_distance", "horizontal_aperture", "vertical_aperture",
                    "horizontal_aperture_offset", "vertical_aperture_offset", "clipping_range", "projection_type"}
+
+
+def check_renderer_driver(runtime):
+    """Reject only the Isaac 5.1/driver pairs with evidenced RTX startup crashes.
+
+    This probes the allocated GPU node immediately before native initialization;
+    it is not cached cluster health and does not change any shared driver.
+    NVIDIA confirmation: forums.developer.nvidia.com/t/371957
+    Local minimal SimulationApp reproduction: L40S/A40, driver 595.84.
+    """
+    if not re.search(r"(?:^|[-_])isaacsim-5\.1(?:\.0)?(?:[_-]|$)", Path(runtime).name.lower()):
+        return
+    probe = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                           check=True, capture_output=True, text=True, timeout=10)
+    blocked = sorted(set(line.strip() for line in probe.stdout.splitlines()) & {"595.84", "595.71.05"})
+    if blocked:
+        raise RuntimeError(
+            "Camera rendering is unavailable on this GPU node: Isaac Sim 5.1 and NVIDIA driver "
+            + ", ".join(blocked)
+            + " have a known RTX startup crash (librtx.scenedb). Ask the cluster administrator to provide "
+              "a compatible driver, such as NVIDIA's validated Linux 580.65.06, or a separately verified "
+              "compatible Isaac runtime. No shared driver or runtime has been changed."
+        )
 
 
 @contextmanager
@@ -240,6 +264,7 @@ class DexVerseRenderer:
                     raise ValueError("Worker profile differs from its frozen render identity")
                 if identity["cameras"][job["camera_id"]] != job["recipe"]["camera"]:
                     raise ValueError("Worker camera differs from its frozen render recipe")
+        check_renderer_driver(self.profile["runtime"])
         root = Path(self.profile["repository"])
         marker = root / ".skynet-source-revision"
         if marker.read_text().strip() != self.profile["source_revision"]:

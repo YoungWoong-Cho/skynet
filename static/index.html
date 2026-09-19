@@ -10,7 +10,7 @@
     <title>Skynet / Experiment Console</title>
     <meta name="hand-viewer-module" content="/static/hands-viewer.js" />
     <meta name="episode-scene-module" content="/static/episode-scene.js" />
-    <link rel="stylesheet" href="/static/styles.css?v=consistent-20260912" />
+    <link rel="stylesheet" href="/static/styles.css?v=recording-loading-20260919" />
     <script
       type="application/skynet-script"
       data-workspace-src="/static/dialogs.js?v=consistent-20260912"
@@ -38,7 +38,7 @@
     ></script>
     <script
       type="application/skynet-script"
-      data-workspace-src="/static/episode-viewer.js?v=consistent-20260912"
+      data-workspace-src="/static/episode-viewer.js?v=recording-loading-20260919"
       defer=""
     ></script>
     <script
@@ -58,7 +58,7 @@
     ></script>
     <script
       type="application/skynet-script"
-      data-workspace-src="/static/live-review.js?v=consistent-20260912"
+      data-workspace-src="/static/live-review.js?v=recording-loading-20260919"
       defer=""
     ></script>
     <script
@@ -2659,7 +2659,7 @@ trainer.deterministic=true"
                           <li>
                             In <strong>Recordings</strong>, choose
                             <strong>View</strong> to inspect saved episodes in
-                            3D. Choose <strong>Convert</strong> and a policy to
+                            3D. Choose <strong>Convert</strong> and an adapter to
                             prepare its dataset. Conversion prepares the camera
                             data it needs and reuses matching saved data.
                           </li>
@@ -3673,7 +3673,7 @@ Select a session.</pre
                       </div>
                       <p class="collection-section-help">
                         Saves recorded states and actions. Review recordings in 3D;
-                        Convert prepares the observations required by the selected policy.
+                        Convert prepares the observations required by the selected adapter.
                       </p>
                       <p
                         id="live-xr-selection-note"
@@ -3776,87 +3776,99 @@ Select a session.</pre
                 data-dialog-close-id="live-review-close"
               >
                 <section data-dialog-panel="">
-                  <div class="section-heading">
-                    <div class="field">
-                      <label for="live-review-recording">Recording</label
-                      ><select id="live-review-recording"></select>
-                    </div>
-                    <button id="live-review-delete" type="button" class="button button-outline" data-delete-kind="recording-file" hidden>Delete</button>
+                  <div id="live-review-loading">
+                    <p id="live-review-status" role="status">
+                      Loading recording…
+                    </p>
+                    <button
+                      id="live-review-retry"
+                      class="button button-outline"
+                      type="button"
+                      hidden=""
+                    >
+                      Retry download
+                    </button>
                   </div>
-                  <p id="live-review-status" role="status">
-                    Loading recording…
-                  </p>
-                  <button
-                    id="live-review-retry"
-                    class="button button-outline"
-                    type="button"
-                    hidden=""
-                  >
-                    Retry download
-                  </button>
                   <div id="live-review-content" hidden="">
                     <div class="field">
                       <label for="live-review-episode">Demonstration</label
                       ><select id="live-review-episode"></select>
                     </div>
                     <div id="live-episode-viewer"></div>
-                    <div id="live-review-source" class="field" hidden="">
-                      <span id="live-review-source-label">Path</span>
-                      <span class="copy-value">
-                        <code id="live-review-source-path"></code>
-                        <button
-                          id="live-review-source-copy"
-                          type="button"
-                          class="entity-link"
-                          aria-label="Copy recording path"
-                        >
-                          Copy
-                        </button>
-                      </span>
+                    <div id="live-review-recording-actions" class="live-review-recording-actions" hidden>
+                      <span id="live-review-recording-position"></span>
+                      <button id="live-review-previous-recording" type="button" aria-label="Previous recording" title="Previous recording" disabled>
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg>
+                      </button>
+                      <button id="live-review-next-recording" type="button" aria-label="Next recording" title="Next recording" disabled>
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m10 6 6 6-6 6"/></svg>
+                      </button>
+                      <button id="live-review-delete" type="button" class="live-review-delete" data-delete-kind="recording-file" aria-label="Delete recording" title="Delete recording" disabled>
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                          <path d="M3 6h18M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M5 6l1 14a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1l1-14M10 10v7M14 10v7"/>
+                        </svg>
+                      </button>
+                    </div>
+                    <div id="live-review-source" class="recording-path" hidden="">
+                      <pre><code id="live-review-source-path"></code></pre>
+                      <button
+                        id="live-review-source-copy"
+                        type="button"
+                        class="recording-path-copy"
+                        aria-label="Copy recording path"
+                        title="Copy recording path"
+                      >
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                          <rect x="8" y="8" width="12" height="12" rx="2"/>
+                          <path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>
+                        </svg>
+                      </button>
                     </div>
                     <details id="live-review-data">
                       <summary>Recorded values</summary>
-                      <div class="live-review-downloads">
-                        <a
-                          id="live-review-original"
-                          class="text-button"
-                          download=""
-                          >Download original (.pkl)</a
-                        ><a
-                          id="live-review-summary"
-                          class="text-button"
-                          download=""
-                          >Download summary</a
-                        ><a
-                          id="live-review-json"
-                          class="text-button"
-                          download=""
-                          >Download preview values</a
-                        >
-                      </div>
+                      <div id="live-review-values-content">
+                        <div class="live-review-downloads">
+                          <a
+                            id="live-review-original"
+                            class="text-button"
+                            download=""
+                            >Download original (.pkl)</a
+                          ><a
+                            id="live-review-summary"
+                            class="text-button"
+                            download=""
+                            >Download summary</a
+                          ><a
+                            id="live-review-json"
+                            class="text-button"
+                            download=""
+                            >Download preview values</a
+                          >
+                        </div>
 
-                      <div class="field">
-                        <label for="live-review-field">Recorded value</label
-                        ><select id="live-review-field"></select>
+                        <div class="field">
+                          <label for="live-review-field">Recorded value</label
+                          ><select id="live-review-field"></select>
+                        </div>
+                        <p id="live-review-value-note" class="secondary"></p>
+                        <div
+                          class="table-scroll live-review-values identity-table"
+                        >
+                          <table>
+                            <thead>
+                              <tr>
+                                <th>Component</th>
+                                <th>Saved value</th>
+                              </tr>
+                            </thead>
+                            <tbody id="live-review-values"></tbody>
+                          </table>
+                        </div>
+                        <details>
+                          <summary>Full scene state at this frame</summary>
+                          <pre id="live-review-state"></pre>
+                        </details>
                       </div>
-                      <p id="live-review-value-note" class="secondary"></p>
-                      <div
-                        class="table-scroll live-review-values identity-table"
-                      >
-                        <table>
-                          <thead>
-                            <tr>
-                              <th>Component</th>
-                              <th>Saved value</th>
-                            </tr>
-                          </thead>
-                          <tbody id="live-review-values"></tbody>
-                        </table>
-                      </div>
-                      <details>
-                        <summary>Full scene state at this frame</summary>
-                        <pre id="live-review-state"></pre>
-                      </details>
                     </details>
                   </div>
                 </section>
@@ -4869,9 +4881,12 @@ Select a session.</pre
                   /><small id="policy-export-name-help"></small>
                 </div>
                 <div class="field">
-                  <label for="policy-export-format">Policy</label
-                  ><select id="policy-export-format" required=""></select
-                  ><small id="policy-export-format-help" hidden=""></small>
+                  <label for="policy-export-adapter">Adapter</label
+                  ><select id="policy-export-adapter" required=""></select>
+                </div>
+                <div class="field span-2" id="policy-export-modalities-field" hidden="">
+                  <span class="field-label" id="policy-export-modalities-label">Input modalities</span>
+                  <ul id="policy-export-modalities" class="adapter-input-modalities" aria-labelledby="policy-export-modalities-label"></ul>
                 </div>
                 <div class="field">
                   <label for="preparation-validation"

@@ -1,19 +1,25 @@
-"""Preparation API; the historic exports URL remains a compatible entry point."""
+"""Adapter-selected recording preparation API."""
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from .live_xr_api import checked, reviews
 from .policy_exports import PolicyExportService
+from .workspaces import require_workspace_records
 
-router = APIRouter(prefix="/api/data/exports", tags=["data"])
+router = APIRouter(
+    prefix="/api/data/exports", tags=["data"],
+    dependencies=[Depends(require_workspace_records)],
+)
 service = PolicyExportService(reviews)
 
 
 class ExportRequest(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
     session_id: str
-    format: str
+    adapter_id: str
+    adapter_version_id: str
+    adapter_data_preset: str | None = None
     name: str
     resource_id: str | None = None
     gateway: str = "auto"
@@ -60,7 +66,7 @@ def create(request: ExportRequest):
     return checked(
         lambda: service.create(
             request.session_id,
-            request.format,
+            request.adapter_id,
             request.name,
             request.resource_id,
             target="cluster",
@@ -68,6 +74,8 @@ def create(request: ExportRequest):
             seed=request.seed,
             gateway=request.gateway,
             overfit_episode=request.overfit_episode,
+            adapter_version_id=request.adapter_version_id,
+            adapter_data_preset=request.adapter_data_preset,
         )
     )
 
@@ -92,16 +100,11 @@ def retry(identifier: str, request: RetryRequest):
     return checked(service.retry, identifier, "cluster")
 
 
-@router.delete("/{identifier}/local-copy")
-def remove_local_copy(identifier: str):
-    return checked(service.remove_local_copy, identifier)
-
-
 @router.get("/{identifier}/{name}")
 def artifact(identifier: str, name: str, request: Request):
     remote = checked(service.remote_artifact, identifier, name)
     if remote:
-        media = "application/zip" if name == "dataset.zip" else "application/json" if name == "manifest.json" else "text/plain"
+        media = "application/json" if name == "manifest.json" else "text/plain"
         return checked(lambda: remote.response(request, media_type=media, filename=name))
     return FileResponse(
         checked(service.artifact, identifier, name),

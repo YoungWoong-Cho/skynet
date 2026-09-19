@@ -20,17 +20,17 @@ from ops.datasets.artifacts import digest
 from .recording_guard import guarded_recording
 from .database import canonical_json, utc_now
 from . import dataset_cleanup
-from .dataset_formats import RECIPES, XPL_COMMIT as COMMIT, XPL_REPOSITORY, catalog
+from .dataset_formats import catalog, resolve_adapter
+
+DATASET_FORMAT = "skynet.recording-dataset/v1"
 from .live_xr import TERMINAL
 from .live_xr_review import ArrayUnpickler
 from .cluster_runtime import ClusterClient, ClusterError, WORK_ROOT
-from .cluster_config import CLUSTER
-from .cluster_upload import upload_capture
 from .policy_exports_cluster import ClusterPolicyPreparation
-from .observation_contracts import resolve_recipe_requirements
+from .observation_contracts import validate_requirements
 from .observation_preparation import ObservationPreparation
 
-FORMATS = list(RECIPES.values())
+
 
 
 def fingerprint(value):
@@ -131,7 +131,7 @@ class PolicyExportService(ClusterPolicyPreparation):
                 self.monitor_thread = threading.Thread(target=self._monitor, name="dataset-preparation-monitor", daemon=True)
                 self.monitor_thread.start()
         for job in self.list():
-            if job["state"] not in {"READY", "FAILED", "DELETE_FAILED"}:
+            if job.get("format") == DATASET_FORMAT and job["state"] not in {"READY", "FAILED", "DELETE_FAILED"}:
                 self.dispatch(job["id"])
 
     def _monitor(self):
@@ -142,7 +142,7 @@ class PolicyExportService(ClusterPolicyPreparation):
                 import logging
                 logging.getLogger(__name__).exception("Observation monitor could not refresh cluster work")
             for job in self.list():
-                if job["state"] not in {"READY", "FAILED", "DELETE_FAILED"}:
+                if job.get("format") == DATASET_FORMAT and job["state"] not in {"READY", "FAILED", "DELETE_FAILED"}:
                     self.dispatch(job["id"])
 
     def stop(self):
@@ -319,7 +319,6 @@ class PolicyExportService(ClusterPolicyPreparation):
         return [dict(kind="remote", host="sky2" if archived else session.get("gateway") or session.get("profile", {}).get("gateway") or "Collection host", path=path) for path in sorted(directories)]
 
     def preparation_options(self, session_id, *, workspace_database=None):
-        """Only the selected recording and policy choices needed by Convert."""
         session = self.live.get(session_id)
         resource = self.database.find_collection_dataset(session_id)
         try:
@@ -327,124 +326,95 @@ class PolicyExportService(ClusterPolicyPreparation):
             reason = "Dataset is archived" if (resource or {}).get("archived_at") else None
         except (ValueError, KeyError) as exc:
             reason = str(exc)
-        return dict(
-            session=dict(
-                id=session["id"],
-                name=session["profile"]["display_name"],
-                episodes=len(session.get("recordings", [])),
-                eligible=reason is None,
-                reason=reason,
-                images=len(session.get("recording_images") or {}),
-                resource_id=(resource or {}).get("id"),
-            ),
-            resource=resource,
-            policies=catalog(workspace_database or self.database),
-        )
+        return dict(session=dict(id=session["id"], name=session["profile"]["display_name"],
+                    episodes=len(session.get("recordings", [])), eligible=reason is None,
+                    reason=reason, resource_id=(resource or {}).get("id")),
+                    resource=resource, adapters=catalog(workspace_database or self.database),
+                    output_format=DATASET_FORMAT)
 
     def options(self, *, workspace_database=None):
-        # The catalog only needs each collection resource once. Keep the same
-        # first-match ordering as dataset(), including single-recording overfits.
         resources = self.database.list_data_resources(
-            provider="collection", namespace="datasets", include_archived=True
-        )
+            provider="collection", namespace="datasets", include_archived=True)
         session_resources = {}
         for resource in resources:
             for identifier in (resource["source_key"], resource.get("metadata", {}).get("recording_session_id")):
                 if identifier is not None:
                     session_resources.setdefault(identifier, resource)
         sessions = []
-        # Public sessions omit the archive manifest needed for source validation.
-        # Load full records once rather than rereading the DB for every episode.
         for session in self.live.list(include_private=True):
-            resource = None
+            if not session.get("recordings"):
+                continue
+            resource = session_resources.get(session["id"])
             try:
-                sources = self.sources(session, require_images=False)
-                reason = None
-                resource = session_resources.get(session["id"])
+                self.sources(session, require_images=False)
+                reason = "Dataset is archived" if (resource or {}).get("archived_at") else None
             except (ValueError, KeyError) as exc:
-                sources, reason = [], str(exc)
-            if session.get("recordings"):
-                sessions.append(
-                    dict(
-                        id=session["id"],
-                        name=session["profile"]["display_name"],
-                        created_at=session["created_at"],
-                        episodes=len(session["recordings"]),
-                        eligible=reason is None
-                        and not (resource or {}).get("archived_at"),
-                        reason=reason
-                        or (
-                            "Dataset is archived"
-                            if (resource or {}).get("archived_at")
-                            else None
-                        ),
-                        images=len(session.get("recording_images") or {}),
-                        resource_id=(resource or {}).get("id"),
-                        locations=self.recording_locations(session),
-                    )
-                )
-        policies = catalog(workspace_database or self.database)
-        # A dataset belongs to a recording entry independently of which source
-        # recordings a preparation used. Subsets must not replace their source's link.
+                reason = str(exc)
+            sessions.append(dict(id=session["id"], name=session["profile"]["display_name"],
+                created_at=session["created_at"], episodes=len(session["recordings"]),
+                eligible=reason is None, reason=reason, resource_id=(resource or {}).get("id"),
+                locations=self.recording_locations(session)))
+        jobs = self.job_overview(workspace_database=workspace_database)["exports"]
         resource_sessions = {s["resource_id"]: s["id"] for s in sessions if s["resource_id"]}
-        jobs = self.job_overview(workspace_database=workspace_database, policies=policies)["exports"]
         for job in jobs:
             job["recording_session_id"] = resource_sessions.get(job.get("resource_id"))
-            policy = next((p for p in policies if p["id"] == job["format"]), {})
-            job["training_setup"] = policy.get("training_setup")
-            job["training_ready"] = bool(job.get("training_ready") and policy.get("trainable"))
-        return dict(
-            formats=FORMATS,
-            policies=policies,
-            sessions=sessions,
-            exports=jobs,
-            targets=[
-                dict(id="cluster", name="Training cluster"),
-            ],
-        )
+        return dict(adapters=catalog(workspace_database or self.database), sessions=sessions,
+                    exports=jobs, output_format=DATASET_FORMAT,
+                    targets=[dict(id="cluster", name="Training cluster")])
 
-    def job_overview(self, *, workspace_database=None, policies=None):
-        """Pure progress read; scheduling and remote reconciliation belong to the monitor."""
-        jobs = self.list()
-        if policies is None:
-            policies = catalog(workspace_database or self.database) if jobs else []
-        policy_by_id = {policy["id"]: policy for policy in policies}
+    def job_overview(self, *, workspace_database=None):
+        # Progress reads never schedule conversion or touch cluster files.
+        jobs = [job for job in self.list() if job.get("format") == DATASET_FORMAT and not job.get("retired_at")]
+        active_adapters = (workspace_database or self.database).active_adapter_ids(
+            {job["adapter_id"] for job in jobs})
         versions = self.database.get_data_resource_versions(
-            {job["version_id"] for job in jobs if job.get("version_id")}
-        )
+            {job["version_id"] for job in jobs if job.get("version_id")})
         usage = self.database.data_version_usage_many(
             {version["manifest_sha256"] for version in versions.values()},
-            workspace_id=getattr(workspace_database, "workspace_id", None),
-        )
+            workspace_id=getattr(workspace_database, "workspace_id", None))
         for job in jobs:
-            policy = policy_by_id.get(job["format"], {})
-            job["training_setup"] = policy.get("training_setup")
-            job["training_ready"] = bool(job.get("training_ready") and policy.get("trainable"))
             version = versions.get(job.get("version_id"))
             job["locations"] = version.get("locations", []) if version else []
             job["usage"] = usage.get(version["manifest_sha256"], []) if version else []
-            if job.get("stage") == "CONVERTING":
-                log = self.root / job["id"] / "export.log"
-                if log.exists():
-                    with log.open("rb") as stream:
-                        stream.seek(max(0, log.stat().st_size - 1024))
-                        for line in stream.read().decode(errors="replace").splitlines():
-                            try:
-                                progress = json.loads(line)
-                                if "episodes_done" in progress:
-                                    job["progress"] = progress
-                            except ValueError:
-                                pass
-        return {"formats": FORMATS, "exports": jobs}
+            if job["adapter_id"] not in active_adapters or (version and version.get("retirement")):
+                job["training_ready"] = False
+                job["training_setup"] = None
+        return {"output_format": DATASET_FORMAT, "exports": jobs}
+
+    def _frozen_conversion_files(self, selection):
+        root = self.live.root
+        files = {
+            "recording_prepare.py": (root / "ops/datasets/recording_prepare.py").read_text(),
+            "recording_probe.py": (root / "ops/datasets/recording_probe.py").read_text(),
+            "recording_dataset.py": (root / "skynet_app/adapters/recording_dataset.py").read_text(),
+            "trajectory.py": (root / "skynet_app/trajectory.py").read_text(),
+            "arrays.py": "import pickle\nimport numpy as np\n" + inspect.getsource(ArrayUnpickler),
+            "recording_metadata.py": (root / "ops/xr/recording_metadata.py").read_text(),
+            "scene_geometry.py": (root / "skynet_app/adapters/scene_geometry.py").read_text(),
+            "observation_artifacts.py": (root / "skynet_app/adapters/observation_artifacts.py").read_text(),
+            "observation_contracts.py": (root / "skynet_app/observation_contracts.py").read_text(),
+        }
+        for relative, content in selection.get("capsule_files", {}).items():
+            name = PurePosixPath(relative)
+            if name.is_absolute() or ".." in name.parts or name.parts[0] != "adapter-support":
+                raise ValueError("Conversion support must be inside adapter-support")
+            name = name.relative_to("adapter-support").as_posix()
+            if name in files and files[name] != content:
+                raise ValueError("Adapter support does not match the current recording schema; update its version")
+            files[name] = content
+        files["conversion-dependencies.json"] = canonical_json(selection.get("conversion_dependencies") or [])
+        return files
 
     @guarded_recording
     def create(
         self,
         session_id,
-        format,
+        adapter_id,
         name,
         resource_id=None,
         *,
+        adapter_version_id,
+        adapter_data_preset=None,
         selections=None,
         target="cluster",
         validation_percent=20,
@@ -452,8 +422,13 @@ class PolicyExportService(ClusterPolicyPreparation):
         gateway="auto",
         overfit_episode=None,
     ):
-        if format not in RECIPES:
-            raise ValueError("No converter is registered for this policy")
+        selection = resolve_adapter(self.database, adapter_id, adapter_version_id, adapter_data_preset)
+        adapter = {key: selection[key] for key in (
+            "adapter_id", "adapter_version_id", "adapter_version_number", "adapter_manifest_sha256",
+            "adapter", "name", "adapter_data_preset")}
+        requirements = {key: selection.get(key) for key in (
+            "contract", "observations", "action_representation", "observation_requirements", "temporal", "preprocessing")}
+        format = DATASET_FORMAT
         if target != "cluster":
             raise ValueError("Collection datasets are prepared and retained on sky2")
         self.cluster.candidates(gateway)
@@ -461,8 +436,8 @@ class PolicyExportService(ClusterPolicyPreparation):
         if not name or len(name) > 100 or any(ord(c) < 32 for c in name):
             raise ValueError("Dataset name must contain 1–100 printable characters")
         if overfit_episode is not None:
-            if format != "egoverse" or type(overfit_episode) is not int or overfit_episode < 0:
-                raise ValueError("Single-episode overfit requires EgoVerse and a valid recording number")
+            if type(overfit_episode) is not int or overfit_episode < 0:
+                raise ValueError("Select a valid recording number for single-episode training")
             if selections is not None or resource_id is not None:
                 raise ValueError("Single-episode overfit creates its own dataset from the selected session")
             selections = [dict(session_id=session_id, indices=[overfit_episode])]
@@ -476,11 +451,11 @@ class PolicyExportService(ClusterPolicyPreparation):
             raise ValueError("Select 1–25 unique collection sessions")
         sources = []
         sessions = {}
-        for selection in sorted(selections, key=lambda s: s["session_id"]):
-            sessions[selection["session_id"]] = self.live.get(selection["session_id"])
+        for source_selection in sorted(selections, key=lambda s: s["session_id"]):
+            sessions[source_selection["session_id"]] = self.live.get(source_selection["session_id"])
             sources.extend(
                 self.sources(
-                    sessions[selection["session_id"]], selection.get("indices"),
+                    sessions[source_selection["session_id"]], source_selection.get("indices"),
                     require_images=False
                 )
             )
@@ -493,71 +468,26 @@ class PolicyExportService(ClusterPolicyPreparation):
             raise ValueError(
                 "The selection contains duplicate recordings; select each episode once"
             )
-        if format == "act-native":
-            if len(sources) < 2:
-                raise ValueError("The original ACT loader needs two episodes for its 80/20 split. Use ACT · Skynet recordings for single-episode training.")
-            validation_percent, seed = 20, 42
-        observation_contract = resolve_recipe_requirements(RECIPES[format])
+        minimum = selection.get("minimum_episodes", 1)
+        if len(sources) < minimum:
+            raise ValueError(f"This adapter requires at least {minimum} episodes")
+        supported = set(selection.get("supported_robots") or [])
+        if supported:
+            unsupported = sorted({session["profile"].get("robot") for session in sessions.values()} - supported)
+            if unsupported:
+                raise ValueError("This adapter does not support these recording hands: " + ", ".join(str(value) for value in unsupported))
+        observation_contract = validate_requirements(selection["observation_requirements"])
         observation_files = self.observations.frozen_files() if observation_contract["streams"] else {}
         split = self.split(sources, validation_percent, seed)
         if not split["validation"]:
+            if selection.get("validation_required"):
+                raise ValueError("This adapter requires a separate validation episode; choose a nonzero validation percentage")
             split["mode"] = "training_only"
-        source_root = self.live.root / "ops/datasets"
-        worker = (source_root / "policy_export.py").read_text()
-        arrays = "import pickle\nimport numpy as np\n" + inspect.getsource(
-            ArrayUnpickler
-        )
-        provenance = json.loads(
-            (source_root / "xpolicylab/provenance.json").read_text()
-        )
-        for file, checksum in provenance["files"].items():
-            if digest(source_root / "xpolicylab/XPolicyLab" / file) != checksum:
-                raise ValueError(
-                    "Pinned policy converter files changed; review their provenance before preparing data"
-                )
         runtime_lock = digest(self.live.root / "uv.lock")
-        frozen_files = {
-            "policy_export.py": worker,
-            "trajectory.py": Path(__file__).with_name("trajectory.py").read_text(),
-            "arrays.py": arrays,
-            "artifacts.py": (source_root / "artifacts.py").read_text(),
-            "formats.json": canonical_json(
-                {key: value["format"] for key, value in RECIPES.items()}
-            ),
-            "scene_geometry.py": (Path(__file__).parent / "adapters/scene_geometry.py").read_text(),
-            "images.py": (self.live.root / "ops/xr/images.py").read_text(),
-            "recording_metadata.py": (self.live.root / "ops/xr/recording_metadata.py").read_text(),
-            "observation_contracts.py": Path(__file__).with_name("observation_contracts.py").read_text(),
-            "observation_artifacts.py": (self.live.root / "skynet_app/adapters/observation_artifacts.py").read_text(),
-            **{
-                name: (self.live.root / "skynet_app/adapters" / source).read_text()
-                for name, source in {
-                    "skynet_dp_training.py": "dp_training.py",
-                    "skynet_act_training.py": "act_training.py",
-                    "xpolicy_runtime.py": "xpolicy_runtime.py",
-                    "training_parallel.py": "training_parallel.py",
-                    "xpolicy_native.py": "xpolicy_native.py",
-                    "xpolicy_native_catalog.json": "xpolicy_native_catalog.json",
-                    "act_native_data.py": "act_native_data.py",
-                }.items()
-            },
-        }
-        if format == "egoverse":
-            provenance = json.loads((source_root / "egoverse-provenance.json").read_text())
-            expected = provenance["files"]["egomimic/rldb/zarr/zarr_writer.py"]
-            if digest(source_root / "egoverse_zarr_writer.py") != expected:
-                raise ValueError("Pinned EgoVerse writer changed; review its provenance")
-            for asset_name in ("egoverse_export.py", "egoverse_zarr_writer.py", "egoverse-provenance.json", "egoverse-LICENSE"):
-                frozen_files[asset_name] = (source_root / asset_name).read_text()
-            frozen_files["egoverse_runtime.py"] = (self.live.root / "skynet_app/adapters/egoverse_runtime.py").read_text()
-            frozen_files["egoverse_models.py"] = (self.live.root / "skynet_app/adapters/egoverse_models.py").read_text()
-            frozen_files["egoverse_data.py"] = (self.live.root / "skynet_app/adapters/egoverse_data.py").read_text()
-            frozen_files["egoverse_splits.py"] = (self.live.root / "skynet_app/adapters/egoverse_splits.py").read_text()
-            frozen_files["conversion-dependencies.json"] = canonical_json(RECIPES[format]["conversion_dependencies"])
-        converter_sha = fingerprint([frozen_files, provenance, runtime_lock])
-        identity = fingerprint(
-            [sources, format, split, converter_sha, RECIPES[format]["contract"], observation_contract, fingerprint(observation_files)]
-        )
+        frozen_files = self._frozen_conversion_files(selection)
+        converter_sha = fingerprint([frozen_files, runtime_lock])
+        identity = fingerprint([sources, adapter, split, converter_sha, requirements,
+                                fingerprint(observation_files)])
         with self.lock:
             if self.stopping:
                 raise ValueError("The app is restarting; retry shortly")
@@ -596,24 +526,16 @@ class PolicyExportService(ClusterPolicyPreparation):
                     and job.get("resource_id") == resource["id"]
                     and job["state"] != "FAILED"
                 ):
-                    if job["state"] == "READY" and (
-                        target == "cluster" and job.get("target") != "cluster"
-                    ):
-                        return self.retry(job["id"], target="cluster")
-                    if (
-                        job["state"] == "READY"
-                        and not job.get("remote_archive")
-                        and not (self.root / job["id"] / "dataset.zip").is_file()
-                    ):
-                        return self.retry(job["id"], target=target)
                     return job
             source_version = self.register_source(resource, sources, split)
             identifier = str(uuid4())
             directory = self.root / identifier
             frozen = directory / "worker"
-            shutil.copytree(source_root / "xpolicylab", frozen / "xpolicylab")
+            frozen.mkdir(parents=True)
             for filename, content in frozen_files.items():
-                (frozen / filename).write_text(content)
+                target_file = frozen / filename
+                target_file.parent.mkdir(parents=True, exist_ok=True)
+                target_file.write_text(content)
             observation_dir = directory / "observation-worker"
             observation_dir.mkdir()
             for filename, content in observation_files.items():
@@ -629,12 +551,21 @@ class PolicyExportService(ClusterPolicyPreparation):
                 source_revision=source_version["revision"],
                 name=name,
                 format=format,
-                contract=RECIPES[format]["contract"],
+                contract=selection["contract"],
+                adapter=adapter,
+                adapter_id=selection["adapter_id"],
+                adapter_version_id=selection["adapter_version_id"],
+                adapter_data_preset=selection["adapter_data_preset"],
+                requirements=requirements,
+                training_setup=selection["training_setup"],
+                loader_validation_spec=selection["loader_validation"],
+                conversion_dependencies=selection.get("conversion_dependencies") or [],
                 target=target,
                 gateway="sky2",
                 execution="cluster",
                 sources=sources,
                 split=split,
+                split_mode=selection.get("split_mode", "episode"),
                 runtime_lock_sha256=runtime_lock,
                 fingerprint=identity,
                 converter_sha256=converter_sha,
@@ -662,16 +593,14 @@ class PolicyExportService(ClusterPolicyPreparation):
                 raise ValueError("Restore this dataset before preparing another copy")
             if identifier in self.active:
                 return job
-            if not job.get("source_version_id"):
-                raise ValueError(
-                    "This is an older export. Prepare a new version from its original recordings"
-                )
+            if job.get("format") != DATASET_FORMAT:
+                raise ValueError("Prepare this recording with a current adapter; the old conversion scheme is retired")
             if target not in {None, "cluster"}:
                 raise ValueError("Collection datasets are prepared and retained on sky2")
-            if job.get("cluster_script") and job["state"] not in {"FAILED", "READY"}:
+            if (job.get("cluster_script") or job.get("preflight_script")) and job["state"] not in {"FAILED", "READY"}:
                 self.dispatch(identifier)
                 return job
-            if job["state"] == "READY" and job.get("remote_archive"):
+            if job["state"] == "READY" and job.get("version_id"):
                 return job
             self.observations.store.retry(identifier)
             job = self.update(
@@ -680,6 +609,9 @@ class PolicyExportService(ClusterPolicyPreparation):
                 stage="QUEUED",
                 target="cluster",
                 execution="cluster",
+                preflight_script=None,
+                preflight_job_id=None,
+                preflight_sha256=None,
                 cluster_script=None,
                 cluster_job_id=None,
                 cluster_root=None,
@@ -721,7 +653,7 @@ class PolicyExportService(ClusterPolicyPreparation):
                     path=remote_path or str(self.root / job["id"] / "output"),
                     manifest_sha256=manifest_sha,
                     status="ON_CLUSTER" if remote_path else "LOCAL",
-                    size_bytes=sum(f["size_bytes"] for f in manifest["files"].values()),
+                    size_bytes=len(canonical_json(manifest).encode()),
                     source_uri="collection:" + job["source_revision"],
                     metadata={
                         **manifest,
@@ -744,10 +676,10 @@ class PolicyExportService(ClusterPolicyPreparation):
                         role="native_demonstrations",
                     )
                 ],
-                converter_repository=RECIPES[job["format"]].get("training_setup", {}).get("repository", XPL_REPOSITORY),
-                converter_commit=RECIPES[job["format"]].get("training_setup", {}).get("revision", COMMIT),
+                converter_repository=job["training_setup"]["repository"],
+                converter_commit=job["training_setup"]["revision"],
                 converter_config={
-                    "recipe": job["format"],
+                    "adapter": job["adapter"],
                     "contract": job["contract"],
                     "converter_sha256": job["converter_sha256"],
                     "split": job["split"],
@@ -755,167 +687,6 @@ class PolicyExportService(ClusterPolicyPreparation):
                 runtime_lock_sha256=job["runtime_lock_sha256"],
             )
         return version
-
-    def transfer(self, job):
-        failures = []
-        for host in self.cluster.candidates(job.get("gateway", "auto")):
-            try:
-                return self._transfer_host(job, self.cluster.resolve_gateway(host))
-            except ClusterError as exc:
-                failures.append(str(exc))
-        raise ClusterError("; ".join(failures))
-
-    def _transfer_host(self, job, gateway):
-        directory = self.root / job["id"]
-        version = self.database.get_data_resource_version(job["version_id"])
-        destination = f"{WORK_ROOT}/datasets/prepared/{version['manifest_sha256']}"
-        script = (directory / "worker/artifacts.py").read_text()
-        remote_script = f"{WORK_ROOT}/jobs/runs/{job['id']}/verify-dataset.py"
-        self.cluster.write_capsule_file(job["id"], "verify-dataset.py", script, gateway)
-        remote_archive = upload_capture(
-            self.cluster,
-            directory / "dataset.zip",
-            job["id"],
-            job["archive_sha256"],
-            gateway,
-            relative_path="dataset.zip",
-            timeout=3600,
-        )
-        command = shlex.join(
-            [
-                "python3",
-                remote_script,
-                destination,
-                version["manifest_sha256"],
-                "--archive",
-                remote_archive,
-                "--archive-sha",
-                job["archive_sha256"],
-            ]
-        )
-        self.update(
-            job["id"],
-            stage="VERIFYING_COPY",
-            detail="Verifying every file on the training cluster",
-        )
-        receipt = json.loads(self.cluster.ssh(gateway, command, timeout=3600))
-        if (
-            not receipt.get("verified")
-            or receipt["manifest_sha256"] != version["manifest_sha256"]
-        ):
-            raise ValueError(
-                "Training cluster verification did not match the prepared dataset"
-            )
-        if RECIPES[job["format"]]["trainable"]:
-            kind = "egoverse" if job["format"] == "egoverse" else "act" if job["format"] in {"act", "act-native"} else "dp"
-            expected_mode = (
-                "rgb" if "rgb" in RECIPES[job["format"]]["observations"] else "state"
-            )
-            self.update(
-                job["id"],
-                stage="CHECKING_LOADER",
-                detail="Checking the training data loader",
-            )
-            profile = CLUSTER.runtime_profiles["egoverse-native" if kind == "egoverse" else "skynet-dp"]
-            source = profile.source_prerequisites[0].path
-            for name in [
-                "egoverse_runtime.py" if kind == "egoverse" else f"skynet_{kind}_training.py",
-                "artifacts.py",
-                *(["egoverse_data.py", "egoverse_models.py"] if kind == "egoverse" else []),
-                *(["xpolicy_runtime.py"] if kind == "act" else []),
-                *(["training_parallel.py"] if kind in {"act", "dp"} else []),
-            ]:
-                frozen = directory / "worker" / name
-                # Older export-only ACT copies predate the training integration.
-                if frozen.is_file():
-                    content = frozen.read_text()
-                else:
-                    filename = {
-                        "skynet_act_training.py": "act_training.py",
-                        "skynet_dp_training.py": "dp_training.py",
-                    }.get(name, name)
-                    content = (
-                        self.live.root / "skynet_app/adapters" / filename
-                    ).read_text()
-                self.cluster.write_capsule_file(
-                    job["id"], "adapter-support/" + name, content, gateway
-                )
-            command = shlex.join(
-                [
-                    str(profile.environment_path) + "/bin/python",
-                    f"{WORK_ROOT}/jobs/runs/{job['id']}/adapter-support/" + ("egoverse_runtime.py" if kind == "egoverse" else f"skynet_{kind}_training.py"),
-                    "--repository",
-                    str(source),
-                    "--revision",
-                    RECIPES[job["format"]].get("training_setup", {}).get("revision", COMMIT),
-                    "--dataset",
-                    destination,
-                    "--manifest-sha",
-                    version["manifest_sha256"],
-                    "--output",
-                    f"{WORK_ROOT}/jobs/runs/{job['id']}/dataset-validation",
-                    "--batch-size",
-                    "1",
-                    "--verify-only",
-                    *(["--observation-mode", expected_mode] if kind == "dp" else []),
-                ]
-            )
-            output = self.cluster.ssh(gateway, command, timeout=300)
-            receipt = json.loads(output.strip().splitlines()[-1])
-            schemas = (
-                {"skynet.egoverse-loader-validation/v1"} if kind == "egoverse" else {"skynet.act-loader-validation/v1"}
-                if kind == "act"
-                else {
-                    "skynet.dp-loader-validation/v1",
-                    "skynet.dp-loader-validation/v2",
-                }
-            )
-            if (
-                receipt.get("manifest_sha256") != version["manifest_sha256"]
-                or receipt.get("schema") not in schemas
-                or receipt.get("observation_mode", "rgb") != expected_mode
-            ):
-                raise ValueError(
-                    "Training loader verification returned a different dataset"
-                )
-            self.update(job["id"], loader_validation=receipt)
-        return self.database.record_data_location(
-            version["id"],
-            kind="cluster",
-            host="skynet",
-            path=destination,
-            manifest_sha256=version["manifest_sha256"],
-        )
-
-    def bundle(self, job, location):
-        if not RECIPES[job["format"]]["trainable"]:
-            return None
-        name, version = job["name"], job["fingerprint"][:16] + "-cluster"
-        existing = next(
-            (
-                b
-                for b in self.database.list_data_bundles()
-                if b["name"] == name and b["version"] == version
-            ),
-            None,
-        )
-        return existing or self.database.create_data_bundle(
-            name=name,
-            version=version,
-            description="Verified training data with pinned robot/camera mapping and split",
-            assignments=[
-                dict(
-                    role="training_data",
-                    version_id=job["version_id"],
-                    config={"location_id": location["id"]},
-                )
-            ],
-            metadata={
-                "prepared_dataset": True,
-                "adapter": RECIPES[job["format"]]["adapter"],
-                "resource_id": job["resource_id"],
-            },
-        )
 
     def delete_dataset(self, resource_id, identifier=None):
         with self.lock:
@@ -985,7 +756,14 @@ class PolicyExportService(ClusterPolicyPreparation):
                 ]
             )
             failures = []
-            for host in self.cluster.candidates("auto"):
+            configured = self.cluster.candidates("auto")
+            recorded = [
+                job.get("gateway") for job in jobs
+                if job["id"] in remote_jobs and job.get("gateway") in configured
+            ]
+            # Use the confirmed preparation host first; retain configured
+            # fallback without accepting arbitrary hosts from saved jobs.
+            for host in dict.fromkeys([*recorded, *configured]):
                 try:
                     receipt = json.loads(
                         self.cluster.ssh(
@@ -1003,92 +781,11 @@ class PolicyExportService(ClusterPolicyPreparation):
         # Source manifests and the source cache describe original recordings and
         # may be shared. They contain no converted training data.
 
-    def remove_local_copy(self, identifier, *, validate=None):
-        with self.lock:
-            if validate:
-                validate()
-            job = self.get(identifier)
-            if identifier in self.active or job["state"] != "READY":
-                raise ValueError(
-                    "Wait for preparation to finish before removing its local copy"
-                )
-            version = self.database.get_data_resource_version(job.get("version_id", ""))
-            if not version:
-                raise ValueError("This preparation has no registered version")
-            if self.database.data_version_usage(version["manifest_sha256"]):
-                raise ValueError(
-                    "This dataset is pinned by an experiment; retain its copies for reproducibility"
-                )
-            cluster = next(
-                (
-                    l
-                    for l in version["locations"]
-                    if l["kind"] == "cluster" and l["status"] == "AVAILABLE"
-                ),
-                None,
-            )
-            if not cluster:
-                raise ValueError(
-                    "Keep at least one verified copy; transfer to the training cluster first"
-                )
-            # Reserve this preparation, not the entire catalog, during remote I/O.
-            self.active.add(identifier)
-        try:
-            script = f"{WORK_ROOT}/jobs/runs/{identifier}/verify-dataset.py"
-            self.cluster.run_with_fallback(
-                shlex.join(
-                    ["python3", script, cluster["path"], version["manifest_sha256"]]
-                ),
-                gateway=job.get("gateway", "auto"),
-                timeout=60,
-            )
-            with self.lock:
-                if self.stopping:
-                    raise ValueError("The app is restarting; retry shortly")
-                # An experiment may have pinned the version while verification ran.
-                if self.database.data_version_usage(version["manifest_sha256"]):
-                    raise ValueError(
-                        "This dataset is now pinned by an experiment; retain its copies"
-                    )
-                current = self.database.get_data_resource_version(version["id"])
-                if not current or not any(
-                    location["id"] == cluster["id"]
-                    and location["status"] == "AVAILABLE"
-                    for location in current["locations"]
-                ):
-                    raise ValueError("The verified cluster copy is no longer available")
-                directory = self.root / identifier
-                if (directory / "output").exists():
-                    shutil.rmtree(directory / "output")
-                (directory / "dataset.zip").unlink(missing_ok=True)
-                self.database.record_data_location(
-                    version["id"],
-                    kind="local",
-                    host="local",
-                    path=str(directory / "output"),
-                    manifest_sha256=version["manifest_sha256"],
-                    status="REMOVED",
-                )
-                return self.update(
-                    identifier,
-                    local_removed=True,
-                    detail="Verified dataset retained on the training cluster",
-                )
-        finally:
-            with self.lock:
-                self.active.discard(identifier)
-
     def artifact(self, identifier, name):
-        job = self.get(identifier)
-        if name not in {"dataset.zip", "manifest.json", "export.log"}:
-            raise KeyError("Dataset file not found")
-        if name != "export.log" and not job.get("version_id"):
-            raise ValueError("Preparation is not complete")
-        path = (
-            self.root
-            / identifier
-            / ("output/manifest.json" if name == "manifest.json" else name)
-        )
+        self.get(identifier)
+        if name != "export.log":
+            raise KeyError("Prepared data is stored on the cluster")
+        path = self.root / identifier / name
         if not path.is_file():
-            raise KeyError("This file is unavailable; use its verified sky2 copy or retry preparation")
+            raise KeyError("Log is stored on the cluster")
         return path

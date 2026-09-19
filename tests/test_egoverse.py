@@ -16,7 +16,7 @@ from skynet_app.adapters.egoverse_runtime import (
 from skynet_app.adapters.egoverse_evaluation import result
 from skynet_app.training_contracts import data_contract_error
 from test_experiments import make_spec
-from test_policy_exports import setup as setup
+from test_policy_exports import setup as setup, create
 
 
 def test_every_native_model_forwards_values_and_supports_four_gpus():
@@ -101,16 +101,6 @@ def test_offline_results_do_not_claim_simulation_success():
     assert not any(metric["metric"] == "success_rate" for metric in output["aggregate"])
 
 
-def test_native_writer_matches_pinned_provenance():
-    import hashlib
-
-    root = Path(__file__).parents[1] / "ops/datasets"
-    receipt = json.loads((root / "egoverse-provenance.json").read_text())
-    assert (
-        hashlib.sha256((root / "egoverse_zarr_writer.py").read_bytes()).hexdigest()
-        == receipt["files"]["egomimic/rldb/zarr/zarr_writer.py"]
-    )
-    assert receipt["revision"] == REVISION
 
 
 def test_incompatible_native_policies_do_not_accept_recorded_joint_contract():
@@ -124,11 +114,11 @@ def test_incompatible_native_policies_do_not_accept_recorded_joint_contract():
 
 def test_preparation_preserves_dataset_name_when_freezing_native_assets(setup):
     service, session, _ = setup
-    job = service.create(session["id"], "egoverse", "My recorded demonstrations")
+    job = create(service, session["id"], "egoverse", "My recorded demonstrations")
     assert job["name"] == "My recorded demonstrations"
     assert service.database.get_data_resource(job["resource_id"])["display_name"] == job["name"]
     worker = service.root / job["id"] / "worker"
-    assert (worker / "egoverse-LICENSE").is_file()
+    assert (worker / "recording_dataset.py").is_file()
     assert (worker / "egoverse_data.py").is_file()
 
 
@@ -199,18 +189,18 @@ def test_native_readiness_uses_gpu_and_media_checks_without_simulator_consent():
     assert "${OMNI_KIT_ACCEPT_EULA:-}" not in script
 
 
-def test_native_split_rejects_duplicate_leaked_or_unconfined_episodes(tmp_path):
+def test_native_split_rejects_duplicate_or_leaked_episode_identities(tmp_path):
     from skynet_app.adapters.egoverse_runtime import validate_episode_split
 
     manifest = {
-        "episodes": [{"path": "train/a.zarr"}, {"path": "valid/b.zarr"}],
+        "episodes": [{"id": "a"}, {"id": "b"}],
         "split": {"train": [0], "validation": [1]},
     }
     validate_episode_split(tmp_path, manifest)
-    for path in ("train/a.zarr", "../outside.zarr"):
+    for identity in ("a", ""):
         broken = copy.deepcopy(manifest)
-        broken["episodes"][1]["path"] = path
-        with pytest.raises(ValueError, match="distinct paths"):
+        broken["episodes"][1]["id"] = identity
+        with pytest.raises(ValueError, match="distinct stable identities"):
             validate_episode_split(tmp_path, broken)
     manifest["split"]["validation"] = [0]
     with pytest.raises(ValueError, match="exactly one"):
@@ -228,6 +218,7 @@ def test_finite_input_check_ignores_optional_native_metadata(monkeypatch):
         SimpleNamespace(MultiDataset=object),
     )
     file = Path(__file__).parents[1] / "skynet_app/adapters/egoverse_data.py"
+    monkeypatch.syspath_prepend(str(file.parent))
     spec = importlib.util.spec_from_file_location("egoverse_data_check", file)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

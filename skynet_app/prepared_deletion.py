@@ -3,8 +3,8 @@ from .database import content_sha256
 
 
 def preview(service, workspace, kind, identifier):
-    if kind == "local-copy":
-        return local_copy_preview(service, workspace, identifier)
+    if kind not in {"dataset", "prepared"}:
+        raise ValueError("Unknown prepared-data deletion kind")
     job_id = identifier if kind == "prepared" else None
     resource_id = service.get(identifier)["resource_id"] if job_id else identifier
     resource = service.database.get_data_resource(resource_id)
@@ -52,41 +52,8 @@ def delete(service, workspace, kind, identifier, token):
         plan = preview(service, workspace, kind, identifier)
         if plan["token"] != token or plan["blockers"]:
             raise ValueError("Dataset or dependencies changed. Review deletion again.")
-    if kind == "local-copy":
-        return service.remove_local_copy(identifier, validate=validate)
     with service.lock:
         validate()
         resource_id = service.get(identifier)["resource_id"] if kind == "prepared" else identifier
         # The existing deletion transaction rechecks references before any file is removed.
         return service.delete_dataset(resource_id, identifier if kind == "prepared" else None)
-
-
-def local_copy_preview(service, workspace, identifier):
-    """Keep the same verified-copy and dependency requirements as the deletion itself."""
-    job = service.get(identifier)
-    version = service.database.get_data_resource_version(job.get("version_id", ""))
-    if not version:
-        raise ValueError("This preparation has no registered files")
-    resource = service.database.get_data_resource(job["resource_id"])
-    blockers = []
-    if identifier in service.active or job["state"] != "READY":
-        blockers.append(dict(kind="prepared", id=identifier, label=resource["display_name"], reason="Wait for preparation to finish"))
-    for use in service.database.data_version_usage(version["manifest_sha256"]):
-        visible = workspace.owns("experiments", use["experiment_id"])
-        blockers.append(dict(kind="experiment", id=use["experiment_id"] if visible else None,
-                             label=use["name"] if visible else "Another workspace's experiment",
-                             reason="Delete the experiment and its runs first; their saved paths must remain available"))
-    cluster = [item for item in version.get("locations", []) if item["kind"] == "cluster" and item["status"] == "AVAILABLE"
-               and item["manifest_sha256"] == version["manifest_sha256"]]
-    if not cluster:
-        blockers.append(dict(kind="prepared", id=identifier, label=resource["display_name"], reason="Transfer and verify a cluster copy first"))
-    directory = service.root / identifier
-    # Only converted local data is removed, never metadata or source recordings.
-    files = [dict(path=str(path), exists=path.exists(), size_bytes=path.stat().st_size if path.is_file() else None)
-             for path in (directory / "output", directory / "dataset.zip")]
-    plan = dict(label=resource["display_name"],
-                counts={"local_copies": 1}, blockers=blockers, files=files,
-                notices=["Only this computer's prepared files are removed. Original recordings, dataset registration, and the verified cluster copy are kept. The cluster copy is checked again before deletion."], retry=False)
-    plan["token"] = content_sha256(dict(plan=plan, state=job["state"], version=version["manifest_sha256"],
-                                        locations=version.get("locations"), local_removed=job.get("local_removed")))
-    return plan

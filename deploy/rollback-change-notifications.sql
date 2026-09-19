@@ -1,6 +1,16 @@
 -- Stop app writers and restore the prior source before running this rollback.
 BEGIN;
 SELECT pg_advisory_xact_lock(-8777073831261177637);
+-- Later schema migrations own their notification triggers. Require top-down
+-- rollback instead of silently removing them and breaking future invalidation.
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+               JOIN pg_class c ON c.oid=t.tgrelid
+               WHERE p.proname='skynet_notify_change'
+                 AND c.relname IN ('observation_artifacts','observation_version_inputs','data_version_retirements')) THEN
+        RAISE EXCEPTION 'Rollback later observation/retirement notification triggers before migration 11';
+    END IF;
+END $$;
 DROP TRIGGER IF EXISTS skynet_change ON data_resources;
 DROP TRIGGER IF EXISTS skynet_change ON data_resource_versions;
 DROP TRIGGER IF EXISTS skynet_change ON data_locations;

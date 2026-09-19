@@ -1,6 +1,7 @@
 """Recording ownership plugged into the shared history deletion engine."""
 
 import json
+from pathlib import PurePosixPath
 import re
 from pathlib import Path
 from uuid import UUID
@@ -289,7 +290,27 @@ class RecordingMaintenance(Maintenance):
         from .database import canonical_json
         if hashlib.sha256(canonical_json(spec).encode()).hexdigest() != key:
             raise ValueError("Observation recipe differs from its storage identity")
-        expected = f"{WORK_ROOT}/datasets/observations/{source}/{key}"
+        if spec.get("schema") == "skynet.recording-file/v1":
+            from pathlib import PurePosixPath
+            path = PurePosixPath(spec.get("path", ""))
+            root = PurePosixPath(WORK_ROOT) / "datasets"
+            if not path.is_absolute() or ".." in path.parts:
+                raise ValueError("Invalid shared recording path")
+            if spec.get("owned") is True:
+                if (path.parent.parent != root / "recordings" / source / "state"
+                        or path.name != "values.hdf5" or not re.fullmatch(r"[a-f0-9]{64}", path.parent.name)):
+                    raise ValueError("Shared state storage differs from its recording identity")
+            elif spec.get("owned") is False:
+                if not path.is_relative_to(root / "raw/dexverse-live") or path.suffix != ".hdf5":
+                    raise ValueError("Capture reference is outside the raw recording archive")
+            else:
+                raise ValueError("Shared recording ownership is missing")
+            expected = str(path)
+        else:
+            modality, camera = spec.get("modality", ""), spec.get("camera_id", "")
+            if modality not in {"rgb", "depth", "point_cloud"} or not re.fullmatch(r"[A-Za-z0-9_.-]+", camera):
+                raise ValueError("Invalid shared observation identity")
+            expected = f"{WORK_ROOT}/datasets/recordings/{source}/{modality}/{camera}/{key}"
         if artifact.get("path") is not None and artifact["path"] != expected:
             raise ValueError("Observation storage differs from its immutable identity")
         return expected
@@ -297,6 +318,12 @@ class RecordingMaintenance(Maintenance):
     @classmethod
     def _observation_lock_path(cls, artifact):
         path = cls._observation_path(artifact)
+        spec = json.loads(artifact["spec_json"])
+        if spec.get("schema") == "skynet.recording-file/v1":
+            if not spec["owned"]:
+                return None
+            parent = str(PurePosixPath(path).parent)
+            return str(PurePosixPath(parent).parent / ("." + PurePosixPath(parent).name + ".lock"))
         parent, name = path.rsplit("/", 1)
         return parent + "/." + name + ".publish.lock"
 
@@ -328,7 +355,9 @@ class RecordingMaintenance(Maintenance):
         for row in rows(c, "observation_artifacts"):
             if row["artifact_key"] not in excluded_observations:
                 result.append((self._observation_path(row), "observation_artifacts", row["artifact_key"]))
-                result.append((self._observation_lock_path(row), "observation_artifacts", row["artifact_key"]))
+                lock_path = self._observation_lock_path(row)
+                if lock_path:
+                    result.append((lock_path, "observation_artifacts", row["artifact_key"]))
         excluded_producers = {row["id"] for row in (graph or {}).get("observation_producers", [])}
         for row in rows(c, "observation_producers"):
             if row["id"] not in excluded_producers:
@@ -400,9 +429,13 @@ class RecordingMaintenance(Maintenance):
                 )
             groups.setdefault(WORK_ROOT, []).append(remote)
         for artifact in graph.get("observation_artifacts", []):
-            groups.setdefault(WORK_ROOT, []).extend([
-                self._observation_path(artifact), self._observation_lock_path(artifact),
-            ])
+            spec = json.loads(artifact["spec_json"])
+            if spec.get("schema") == "skynet.recording-file/v1" and not spec["owned"]:
+                continue  # The raw archive owns this file, not an individual stream.
+            path = self._observation_path(artifact)
+            if spec.get("schema") == "skynet.recording-file/v1":
+                path = str(PurePosixPath(path).parent)
+            groups.setdefault(WORK_ROOT, []).extend(p for p in [path, self._observation_lock_path(artifact)] if p)
         for producer in graph.get("observation_producers", []):
             groups.setdefault(WORK_ROOT, []).append(self._observation_producer_path(producer))
         retained = self._references(c, graph)

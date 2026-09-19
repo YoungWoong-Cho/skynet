@@ -39,6 +39,90 @@ def object_db(pg, tmp_path, monkeypatch):
     return db, url
 
 
+def track_payload_reads(db, monkeypatch):
+    reads = []
+    original_read = db.payload_store.objects.read
+    original_many = db.payload_store.objects.read_many
+
+    def read(path, digest):
+        reads.append(digest)
+        return original_read(path, digest)
+
+    def many(references):
+        reads.extend(ref["sha256"] for ref in references)
+        return original_many(references)
+
+    monkeypatch.setattr(db.payload_store.objects, "read", read)
+    monkeypatch.setattr(db.payload_store.objects, "read_many", many)
+    _CACHE.clear()
+    return reads
+
+
+def test_seed_without_result_never_reads_payloads_and_default_keeps_full_history(object_db, monkeypatch):
+    db, _ = object_db
+    db.payload_store = PayloadStore(db)
+    reads = track_payload_reads(db, monkeypatch)
+    manifests = [{"slug": "qa", "revision": number, "body": "x" * 200000}
+                 for number in range(4)]
+    for manifest in manifests:
+        assert db.upsert_seed_adapter(seed_key="qa", name="QA", manifest=manifest,
+                                      materialize_result=False) is None
+        _CACHE.clear()
+    assert db.upsert_seed_adapter(seed_key="qa", name="QA", manifest=manifests[-1],
+                                  materialize_result=False) is None
+    assert reads == [], "Creating, advancing and comparing seeds must not read stored bodies"
+    bundle = db.upsert_seed_adapter(seed_key="qa", name="QA", manifest=manifests[-1])
+    assert bundle["version_count"] == bundle["latest_version_number"] == 4
+    assert [version["manifest"] for version in bundle["versions"]] == list(reversed(manifests))
+    assert len(reads) == 4, "The default public result materializes each version only once"
+
+
+def test_seed_scalar_comparison_preserves_user_edits_and_archive_state(object_db, monkeypatch):
+    db, _ = object_db
+    db.payload_store = PayloadStore(db)
+    owned = db.upsert_seed_adapter(seed_key="owned", name="Owned", manifest={"seed": 1})
+    own_manifest = {"user": "custom configuration"}
+    edited = db.edit_adapter(owned["id"], manifest=own_manifest, created_by="user")
+    archived = db.upsert_seed_adapter(seed_key="archived", name="Archived", manifest={"seed": 1})
+    archived = db.archive_adapter(archived["id"])
+    reads = track_payload_reads(db, monkeypatch)
+    db.upsert_seed_adapter(seed_key="owned", name="Owned", manifest={"seed": 2}, materialize_result=False)
+    db.upsert_seed_adapter(seed_key="archived", name="Archived", manifest={"seed": 2}, materialize_result=False)
+    assert reads == []
+    with db.connection() as connection:
+        rows = connection.execute(
+            "SELECT adapter_key, max(version_number) AS version FROM adapters GROUP BY adapter_key"
+        ).fetchall()
+    assert {row["adapter_key"]: row["version"] for row in rows} == {owned["id"]: 2, archived["id"]: 2}
+    assert db.get_adapter(owned["id"])["latest_version"] == edited["latest_version"]
+    latest = db.get_adapter(archived["id"])
+    assert latest["archived_at"] == archived["archived_at"] and not latest["enabled"]
+    assert latest["latest_version"]["manifest"] == {"seed": 2}
+
+
+def test_startup_seeding_reads_only_latest_catalog_body(object_db, monkeypatch):
+    from skynet_app import pipeline_api
+    from skynet_app.adapters import canonical_adapter_manifest
+    from skynet_app.adapters.act_manifest import manifest as act_manifest
+
+    db, _ = object_db
+    db.payload_store = PayloadStore(db)
+    manifest = act_manifest()
+    canonical = canonical_adapter_manifest(manifest)
+    for revision in range(3):
+        db.upsert_seed_adapter(seed_key=manifest.slug, name=manifest.display_name,
+                               manifest={**canonical, "description": str(revision)}, materialize_result=False)
+    db.upsert_seed_adapter(seed_key=manifest.slug, name=manifest.display_name,
+                           manifest=canonical, materialize_result=False)
+    reads = track_payload_reads(db, monkeypatch)
+    monkeypatch.setattr(pipeline_api, "builtin_adapter_manifests", lambda: [manifest])
+    monkeypatch.setattr(pipeline_api, "get_evaluation_catalog", lambda: [])
+    service = object.__new__(pipeline_api.PipelineService)
+    service.database = db
+    service._seed_registries()
+    assert len(reads) == 1, "Startup's current catalog must not hydrate historical seed versions"
+
+
 def test_relocate_preserves_bytes_hashes_and_refuses_receipt_mutations(object_db):
     db, url = object_db
     adapter = db.upsert_seed_adapter(

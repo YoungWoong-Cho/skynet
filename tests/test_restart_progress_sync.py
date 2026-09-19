@@ -17,7 +17,7 @@ def progress(tmp_path):
     project = database.create_project("restart")
     experiment = database.create_experiment(project_id=project["id"], name="progress", requested_spec=spec)
     variant = database.create_variant(experiment["latest_revision"]["id"], name="one", parameters={}, resolved_spec=spec)
-    run = database.create_run(variant["id"], seed=0, adapter_name="xpolicylab-dp", adapter_version="1",
+    run = database.create_run(variant["id"], seed=0, adapter_name="xpolicylab-act", adapter_version="1",
                               run_directory="/synthetic/run", status="RUNNING")
     stage = database.create_stage(run["id"], stage_type="TRAIN", name="train", status="RUNNING")
     attempt = database.create_job_attempt(stage["id"], status="RUNNING", gateway="synthetic",

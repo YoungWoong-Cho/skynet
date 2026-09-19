@@ -57,6 +57,12 @@
     button.onclick = action;
     return button;
   }
+  function playbackTime(seconds) {
+    const centiseconds = Math.max(0, Math.round((seconds || 0) * 100));
+    const minutes = Math.floor(centiseconds / 6000);
+    const remainder = centiseconds % 6000;
+    return `${String(minutes).padStart(2, "0")}:${String(Math.floor(remainder / 100)).padStart(2, "0")}.${String(remainder % 100).padStart(2, "0")}`;
+  }
 
   class EpisodeViewer {
     constructor(host, video) {
@@ -137,8 +143,15 @@
         this.seekFrame(index);
       };
       this.time = node("output");
-      const controls = node("div", null, "episode-viewer-playback");
-      const buttons = node("div", null, "form-actions");
+      this.rate = node("span", null, "episode-viewer-rate");
+      this.frameLabel = node("span", null, "episode-viewer-frame");
+      this.play.classList.add("episode-viewer-play");
+      this.separator = node("span", null, "episode-viewer-playback-separator");
+      this.separator.setAttribute("aria-hidden", "true");
+      this.playbackRow = node("div", null, "episode-viewer-playback-row");
+      this.playbackInfo = node("div", null, "episode-viewer-playback-info");
+      const controls = this.controls = node("div", null, "episode-viewer-playback");
+      const buttons = this.buttons = node("div", null, "form-actions");
       buttons.append(this.loop, this.previous, this.play, this.next);
       controls.append(buttons, this.seek, this.time);
       this.aside = node("aside", null, "episode-viewer-hand");
@@ -328,6 +341,9 @@
         robot = null,
         sourceNames = null,
         timeline = [],
+        simulationHz = null,
+        toolbarActions = null,
+        onLoadState = null,
         onFrame = null,
       } = {},
     ) {
@@ -341,6 +357,9 @@
         robot,
         sourceNames,
         timeline,
+        simulationHz,
+        toolbarActions,
+        onLoadState,
         onFrame,
       };
       this.clockTime = 0;
@@ -351,6 +370,16 @@
       const generation = ++this.generation;
       this.base = base;
       this.collection = collection;
+      this.controls.classList.toggle("episode-viewer-playback-recording", collection);
+      if (collection) {
+        this.buttons.replaceChildren(this.previous, this.play, this.next, this.separator, this.loop);
+        this.playbackInfo.replaceChildren(this.rate, this.frameLabel, this.time);
+        this.playbackRow.replaceChildren(this.buttons, this.playbackInfo);
+        this.controls.replaceChildren(this.playbackRow, this.seek);
+      } else {
+        this.buttons.replaceChildren(this.loop, this.previous, this.play, this.next);
+        this.controls.replaceChildren(this.buttons, this.seek, this.time);
+      }
       if (!collection) this.watchFrames();
       if (this.video) this.video.hidden = collection;
       this.aside.hidden = collection;
@@ -367,6 +396,7 @@
         node("p", "Loading hand information…", "secondary"),
       );
       this.renderControls();
+      onLoadState?.("loading", "Loading scene…");
       this.message("Loading episode views…");
       if (robot) this.loadHand(robot, generation);
       const query = collection ? `?episode=${episode}` : "";
@@ -386,6 +416,7 @@
         if (generation === this.generation) {
           this.message(error.message);
           this.retry.hidden = false;
+          this.options.onLoadState?.("error", error.message);
         }
       }
     }
@@ -405,6 +436,7 @@
         if (generation === this.generation) {
           this.message(error.message);
           this.retry.hidden = false;
+          this.options.onLoadState?.("error", error.message);
         }
       }
     }
@@ -416,6 +448,7 @@
           result.detail || "This result has no saved camera or keypoint data.",
         );
         if (result.robot) this.loadHand(result.robot, generation);
+        this.options.onLoadState?.("error", result.detail || "Episode view unavailable.");
         return;
       }
       const data =
@@ -439,7 +472,9 @@
         this.legend.textContent += ` · Source ${data.demonstration.session_id.slice(0, 8)}, recording ${data.demonstration.source_index + 1}. Aligned by elapsed time; hidden when the recording ends.`;
       this.message((data.warnings || []).join(" "));
       if (this.collection) await this.loadScene();
+      if (generation !== this.generation) return;
       this.draw();
+      this.options.onLoadState?.("ready");
     }
 
     async loadScene() {
@@ -465,8 +500,6 @@
           }
           if (generation !== this.generation || !this.active) return;
           if (warnings.length) this.message(warnings.join(" · "));
-          else if (this.data?.scene_appearance)
-            this.message(this.data.scene_appearance);
           this.draw();
         }
       } catch (error) {
@@ -587,6 +620,8 @@
             "No saved " + label.toLowerCase() + " keypoints for this episode";
         this.layers.append(wrapper);
       }
+      if (this.collection && this.options?.toolbarActions)
+        this.layers.append(this.options.toolbarActions);
     }
 
     async loadHand(robot, generation) {
@@ -737,9 +772,17 @@
       if (!this.scrubbing) this.seek.value = String(index);
       const stateIndex = current?.state_index ?? current?.index ?? index;
       const last = timeline.at(-1);
-      this.time.textContent = current
-        ? `Frame ${stateIndex} of ${last?.state_index ?? last?.index ?? timeline.length - 1} · ${this.frameTimeAt(current).toFixed(3)} s`
-        : "No frames";
+      const lastIndex = last?.state_index ?? last?.index ?? timeline.length - 1;
+      if (this.collection) {
+        this.rate.textContent = this.options.simulationHz ? `${this.options.simulationHz} Hz` : "";
+        this.rate.hidden = !this.options.simulationHz;
+        this.frameLabel.textContent = current ? `Frame ${stateIndex} / ${lastIndex}` : "No frames";
+        this.time.textContent = `${playbackTime(this.frameTimeAt(current))} / ${playbackTime(this.frameTimeAt(last))}`;
+      } else {
+        this.time.textContent = current
+          ? `Frame ${stateIndex} of ${lastIndex} · ${this.frameTimeAt(current).toFixed(3)} s`
+          : "No frames";
+      }
       this.play.disabled = !timeline.length && !(this.video?.readyState >= 2);
       this.seek.disabled = !timeline.length;
       this.previous.disabled = !timeline.length || index === 0;
@@ -835,6 +878,7 @@
       cancelAnimationFrame(this.animation);
       this.scene?.dispose();
       this.scene = null;
+      delete this.sceneHost.dataset.loading;
     }
   }
 

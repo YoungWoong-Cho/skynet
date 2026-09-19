@@ -1,259 +1,125 @@
-"""Deletion exercises generated files, registry references and recoverable failures."""
-
-import shlex
-import shutil
-import psycopg
-import subprocess
-from pathlib import Path
-
+"""Exact dataset deletion keeps raw recordings, shared streams and live users safe."""
+from types import SimpleNamespace
 import pytest
-from test_dataset_preparation import prepared
-from test_policy_exports import (
-    setup as setup,  # noqa: PLC0414 (pytest fixture re-export)
-)
-
-from skynet_app import dataset_cleanup, policy_exports
+from prepared_fixture import preparation, published
+from skynet_app import data_selection, dataset_cleanup, prepared_deletion
 from skynet_app.cluster_runtime import ClusterError
 
 
-def cluster_copy(service, job, tmp_path, monkeypatch):
-    root = tmp_path / "cluster"
-    monkeypatch.setattr(policy_exports, "WORK_ROOT", str(root))
-    version = service.database.get_data_resource_version(job["version_id"])
-    destination = root / "datasets/prepared" / version["manifest_sha256"]
-    shutil.copytree(service.root / job["id"] / "output", destination)
-    capsule = root / "jobs/runs" / job["id"]
-    capsule.mkdir(parents=True)
-    (capsule / "dataset.zip").write_bytes(b"generated archive")
-    location = service.database.record_data_location(
-        version["id"],
-        kind="cluster",
-        host="skynet",
-        path=str(destination),
-        manifest_sha256=version["manifest_sha256"],
-    )
-    bundle = service.bundle(job, location)
-    service.update(
-        job["id"], target="cluster", bundle_id=bundle["id"], training_ready=True
-    )
-
-    class Cluster:
-        def candidates(self, gateway):
-            return ["test"]
-
-        def resolve_gateway(self, gateway):
-            return gateway
-
-        def ssh(self, gateway, command, timeout):
-            result = subprocess.run(
-                shlex.split(command), capture_output=True, text=True, check=True
-            )
-            return result.stdout
-
-    service.cluster = Cluster()
-    return destination, capsule, bundle
+def test_complete_delete_preserves_raw_and_shared(preparation,tmp_path,monkeypatch):
+    service,job,path,capsule,raw,shared=published(preparation,tmp_path,monkeypatch)
+    before=(raw.read_bytes(),shared.read_bytes())
+    assert service.delete_dataset(job['resource_id'],job['id'])['deleted']
+    assert not path.exists() and not capsule.exists() and not (service.root/job['id']).exists()
+    assert service.database.get_data_resource_version(job['version_id']) is None
+    assert service.database.get_data_resource_version(job['source_version_id'])
+    assert before==(raw.read_bytes(),shared.read_bytes())
 
 
-def test_complete_delete_preserves_recordings_and_does_not_reappear(
-    setup, tmp_path, monkeypatch
-):
-    service, session, source, job = prepared(setup)
-    before = {str(p): p.read_bytes() for p in source.rglob("*") if p.is_file()}
-    destination, capsule, bundle = cluster_copy(service, job, tmp_path, monkeypatch)
-    assert service.delete_dataset(job["resource_id"])["deleted"]
-    assert not destination.exists() and not capsule.exists()
-    assert not (service.root / job["id"]).exists()
-    assert service.database.get_data_resource(job["resource_id"]) is None
-    assert service.database.get_data_bundle(bundle["id"]) is None
-    assert service.list() == []
-    assert service.options()["sessions"][0]["resource_id"] is None
-    assert {str(p): p.read_bytes() for p in source.rglob("*") if p.is_file()} == before
-    new = service.create(session["id"], "dp", "Prepared again")
-    assert new["resource_id"] != job["resource_id"]
-    # Immutable registry operations still reject direct deletion.
-    with (
-        service.database.transaction() as c,
-        pytest.raises(psycopg.IntegrityError, match="immutable"),
-    ):
-        c.execute("DELETE FROM data_resource_versions")
-
-
-@pytest.mark.parametrize("resolved", [False, True])
-def test_used_dataset_is_blocked_before_removing_any_files(
-    setup, tmp_path, monkeypatch, resolved
-):
-    service, _, _, job = prepared(setup)
-    destination, capsule, bundle = cluster_copy(service, job, tmp_path, monkeypatch)
-    db = service.database
-    project = db.create_project("test")
-    spec = {"data": {"bundle": db.data_bundle_snapshot(bundle["id"])}}
-    experiment = db.create_experiment(
-        project_id=project["id"],
-        name="uses data",
-        requested_spec={} if resolved else spec,
-    )
+@pytest.mark.parametrize('resolved',[False,True])
+def test_used_dataset_blocks_every_file_removal(preparation,tmp_path,monkeypatch,resolved):
+    service,job,path,capsule,raw,shared=published(preparation,tmp_path,monkeypatch)
+    db=service.database
+    project=db.create_project('test')
+    spec={'data':{'bundle':data_selection.snapshot(db,[{'version_id':job['version_id']}])}}
+    experiment=db.create_experiment(project_id=project['id'],name='Uses dataset',requested_spec={} if resolved else spec)
     if resolved:
-        db.create_variant(
-            experiment["latest_revision"]["id"],
-            name="resolved",
-            parameters={},
-            resolved_spec={
-                "native": {"path": str(destination / "dataset/demonstrations.zarr")}
-            },
-        )
-    with pytest.raises(ValueError, match="used by an experiment"):
-        service.delete_dataset(job["resource_id"])
-    assert destination.exists() and capsule.exists()
-    assert service.artifact(job["id"], "dataset.zip").exists()
+        db.create_variant(experiment['latest_revision']['id'],name='resolved',parameters={},resolved_spec={'native':{'path':str(path)}})
+    with pytest.raises(ValueError,match='used by an experiment'):
+        service.delete_dataset(job['resource_id'],job['id'])
+    assert all(p.exists() for p in (path,capsule,raw,shared))
 
 
-def test_cluster_failure_retains_registry_for_delete_retry(
-    setup, tmp_path, monkeypatch
-):
-    service, _, _, job = prepared(setup)
-    destination, _, bundle = cluster_copy(service, job, tmp_path, monkeypatch)
-    good = service.cluster.ssh
-
-    def fail(*args, **kwargs):
-        raise ClusterError("offline")
-
-    monkeypatch.setattr(service.cluster, "ssh", fail)
-    with pytest.raises(ValueError, match="Retry Delete dataset"):
-        service.delete_dataset(job["resource_id"])
-    assert service.get(job["id"])["state"] == "DELETE_FAILED"
-    assert service.options()["exports"][0]["training_ready"] is False
-    assert service.database.get_data_bundle(bundle["id"])["archived_at"]
-    with pytest.raises(ValueError, match="deletion"):
-        service.retry(job["id"])
-    monkeypatch.setattr(service.cluster, "ssh", good)
-    assert service.delete_dataset(job["resource_id"])["deleted"]
-    assert not destination.exists()
+def test_cluster_failure_retains_metadata_for_safe_retry(preparation,tmp_path,monkeypatch):
+    service,job,path,*_=published(preparation,tmp_path,monkeypatch)
+    good=service.cluster.ssh
+    def fail(*a,**kw): raise ClusterError('offline')
+    monkeypatch.setattr(service.cluster,'ssh',fail)
+    with pytest.raises(ValueError,match='Retry Delete dataset'):
+        service.delete_dataset(job['resource_id'],job['id'])
+    assert service.get(job['id'])['state']=='DELETE_FAILED'
+    assert service.database.get_data_resource_version(job['version_id']) and path.exists()
+    monkeypatch.setattr(service.cluster,'ssh',good)
+    assert service.delete_dataset(job['resource_id'],job['id'])['deleted']
+    assert not path.exists()
 
 
-def test_manual_bundle_blocks_deletion(setup):
-    service, _, _, job = prepared(setup)
-    db = service.database
-    db.create_data_bundle(
-        name="manual",
-        version="1",
-        assignments=[{"role": "training_data", "version_id": job["version_id"]}],
-    )
-    with pytest.raises(ValueError, match="bundle"):
-        service.delete_dataset(job["resource_id"])
-    assert service.artifact(job["id"], "dataset.zip").exists()
+@pytest.mark.parametrize('gateway,failed_host,expected',[
+    ('sky2',None,['sky2']),
+    ('sky2','sky2',['sky2','sky1']),
+    ('unconfigured-host',None,['sky1']),
+])
+def test_cleanup_prefers_recorded_configured_gateway_and_preserves_fallback(
+        preparation,tmp_path,monkeypatch,gateway,failed_host,expected):
+    service,job,path,capsule,raw,shared=published(preparation,tmp_path,monkeypatch)
+    service.update(job['id'],gateway=gateway)
+    cleanup=service.cluster.ssh
+    attempts=[]
+    service.cluster.candidates=lambda _:('sky1','sky2')
+
+    def resolve(host):
+        assert host in ('sky1','sky2'), 'Saved metadata cannot introduce an SSH host'
+        return host
+
+    def ssh(host,command,timeout):
+        attempts.append(host)
+        if host==failed_host:
+            raise ClusterError('Confirmed gateway is unavailable')
+        return cleanup(host,command,timeout)
+
+    service.cluster.resolve_gateway=resolve
+    service.cluster.ssh=ssh
+    assert service.delete_dataset(job['resource_id'],job['id'])['deleted']
+    assert attempts==expected
+    assert not path.exists() and not capsule.exists()
+    assert raw.exists() and shared.exists()
 
 
-@pytest.mark.parametrize("single_format", [False, True])
-def test_legacy_preparation_deletes_without_flag_and_preserves_archived_sources(
-    setup, tmp_path, monkeypatch, single_format
-):
-    service, _, source, job = prepared(setup)
-    db = service.database
-    resource = db.get_data_resource(job["resource_id"])
-    metadata = dict(resource["metadata"])
-    metadata.pop("managed_dataset")
-    db.update_data_resource(resource["id"], metadata=metadata)
-    destination, capsule, _ = cluster_copy(service, job, tmp_path, monkeypatch)
-    original = {str(p): p.read_bytes() for p in source.rglob("*") if p.is_file()}
-    source_version = db.get_data_resource_version(job["source_version_id"])
-    archived_source = tmp_path / "archived-recordings" / "source-manifest.json"
-    archived_source.parent.mkdir()
-    archived_source.write_bytes(Path(source_version["path"]).read_bytes())
-    db.record_data_location(
-        source_version["id"], kind="cluster", host="sky2",
-        path=str(archived_source),
-        manifest_sha256=source_version["manifest_sha256"],
-    )
-
-    assert service.delete_dataset(
-        resource["id"], job["id"] if single_format else None
-    )["deleted"]
-    assert not destination.exists() and not capsule.exists()
-    assert archived_source.is_file()
-    assert {str(p): p.read_bytes() for p in source.rglob("*") if p.is_file()} == original
-    assert db.get_data_resource_version(job["version_id"]) is None
-    assert bool(db.get_data_resource(resource["id"])) is single_format
+def test_unused_adapter_result_deleted_without_touching_used_result(preparation,tmp_path,monkeypatch):
+    service,first,path,*_=published(preparation,tmp_path,monkeypatch)
+    db=service.database
+    project=db.create_project('test')
+    db.create_experiment(project_id=project['id'],name='Keep this input',requested_spec={'data':{'bundle':data_selection.snapshot(db,[{'version_id':first['version_id']}])}})
+    _,second,other,*_=published(preparation,tmp_path,monkeypatch,'rgb')
+    assert second['resource_id']==first['resource_id']
+    assert service.delete_dataset(second['resource_id'],second['id'])['deleted']
+    assert path.exists() and not other.exists()
+    assert db.get_data_resource_version(first['version_id'])
+    assert db.get_data_resource_version(second['version_id']) is None
 
 
-def test_empty_collection_registration_can_be_deleted(setup):
-    service, _, _ = setup
-    resource = service.database.create_data_resource(
-        category="dataset", provider="collection", namespace="datasets",
-        source_key="Empty registration", kind="demonstrations",
-    )
-    assert service.delete_dataset(resource["id"])["deleted"]
-    assert service.database.get_data_resource(resource["id"]) is None
+def test_manual_bundle_blocks_deletion(preparation,tmp_path,monkeypatch):
+    service,job,path,*_=published(preparation,tmp_path,monkeypatch)
+    service.database.create_data_bundle(name='manual',version='1',assignments=[{'role':'training_data','version_id':job['version_id']}])
+    with pytest.raises(ValueError,match='bundle'):
+        service.delete_dataset(job['resource_id'],job['id'])
+    assert path.exists()
 
 
-def test_legacy_preparation_requires_matching_version_backlink(setup):
-    service, _, _, job = prepared(setup)
-    resource = service.database.get_data_resource(job["resource_id"])
-    metadata = dict(resource["metadata"])
-    metadata.pop("managed_dataset")
-    service.database.update_data_resource(resource["id"], metadata=metadata)
-    service.update(job["id"], version_id="unrelated-version")
-    with pytest.raises(ValueError, match="Only prepared collection datasets"):
-        service.delete_dataset(resource["id"])
-    assert service.artifact(job["id"], "dataset.zip").is_file()
+def test_cleanup_rejects_redirected_paths(tmp_path):
+    root=tmp_path/'exports';root.mkdir()
+    original=tmp_path/'recordings';original.mkdir()
+    (original/'original.pkl').write_bytes(b'original')
+    identifier='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+    (root/identifier).symlink_to(original,target_is_directory=True)
+    with pytest.raises(ValueError,match='symbolic'):dataset_cleanup.cleanup(root,jobs=[identifier])
+    with pytest.raises(ValueError):dataset_cleanup.cleanup(root,jobs=['../recordings'])
+    assert (original/'original.pkl').read_bytes()==b'original'
 
 
-def test_cleanup_rejects_redirected_paths_and_keeps_outside_files(tmp_path):
-    root = tmp_path / "exports"
-    root.mkdir()
-    outside = tmp_path / "recordings"
-    outside.mkdir()
-    (outside / "original.pkl").write_bytes(b"original")
-    identifier = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-    (root / identifier).symlink_to(outside, target_is_directory=True)
-    with pytest.raises(ValueError, match="symbolic"):
-        dataset_cleanup.cleanup(root, jobs=[identifier])
-    assert (outside / "original.pkl").read_bytes() == b"original"
-    with pytest.raises(ValueError):
-        dataset_cleanup.cleanup(root, jobs=["../recordings"])
-
-
-def test_delete_unused_format_keeps_training_dataset(setup, tmp_path, monkeypatch):
-    service, session, source, dp = prepared(setup)
-    destination, _, bundle = cluster_copy(service, dp, tmp_path, monkeypatch)
-    db = service.database
-    project = db.create_project('uses-dp')
-    db.create_experiment(project_id=project['id'], name='keep-training', requested_spec={'data': {'bundle': db.data_bundle_snapshot(bundle['id'])}})
-    act = service.create(session['id'], 'act', 'Hand demonstrations')
-    service.prepare(act['id'])
-    act = service.get(act['id'])
-    assert act['state'] == 'READY'
-    assert service.delete_dataset(act['resource_id'], act['id'])['deleted']
-    assert not (service.root / act['id']).exists()
-    assert db.get_data_resource_version(act['version_id']) is None
-    assert destination.exists() and db.get_data_bundle(bundle['id'])
-    assert {v['id'] for v in db.get_data_resource(dp['resource_id'])['versions']} == {dp['version_id'], dp['source_version_id']}
-    assert len(list(source.rglob('*.pkl'))) == 2
-    with pytest.raises(ValueError, match='used by an experiment'):
-        service.delete_dataset(dp['resource_id'], dp['id'])
-
-
-def test_external_registration_deletion_preserves_source_and_blocks_active_import(setup, tmp_path):
-    from types import SimpleNamespace
-    from skynet_app import prepared_deletion
-    service, _, _ = setup
-    db = service.database
-    resource = db.create_data_resource(category='dataset', provider='huggingface', namespace='test', source_key='External', kind='dataset')
-    source = tmp_path / 'external.zarr'
-    source.write_bytes(b'Externally owned dataset')
-    version = db.create_data_resource_version(resource['id'], revision='1', format='zarr', path=str(source), manifest_sha256='e'*64)
-    db.record_data_location(version['id'], kind='cluster', host='test', path=str(source), manifest_sha256='e'*64)
-    job = db.create_data_import(resource['id'], request={'revision':'1'})
-    workspace = SimpleNamespace(owns=lambda *_: True)
-    blocked = prepared_deletion.preview(service, workspace, 'dataset', resource['id'])
+def test_external_registration_preserves_source_and_blocks_active_import(preparation,tmp_path):
+    service,*_=preparation;db=service.database
+    resource=db.create_data_resource(category='dataset',provider='huggingface',namespace='test',source_key='External',kind='dataset')
+    source=tmp_path/'external.zarr';source.write_bytes(b'Externally owned dataset')
+    version=db.create_data_resource_version(resource['id'],revision='1',format='zarr',path=str(source),manifest_sha256='e'*64)
+    db.record_data_location(version['id'],kind='cluster',host='test',path=str(source),manifest_sha256='e'*64)
+    job=db.create_data_import(resource['id'],request={'revision':'1'})
+    workspace=SimpleNamespace(owns=lambda *_:True)
+    blocked=prepared_deletion.preview(service,workspace,'dataset',resource['id'])
     assert 'import to finish' in blocked['blockers'][0]['reason']
-    db.update_data_import(job['id'], state='FAILED', version_id=version['id'])
-    plan = prepared_deletion.preview(service, workspace, 'dataset', resource['id'])
+    db.update_data_import(job['id'],state='FAILED',version_id=version['id'])
+    plan=prepared_deletion.preview(service,workspace,'dataset',resource['id'])
     assert not plan['blockers'] and not plan['files']
-    assert 'source files are kept' in plan['notices'][0]
-    with pytest.raises(ValueError, match='changed'):
-        prepared_deletion.delete(service, workspace, 'dataset', resource['id'], blocked['token'])
-    assert prepared_deletion.delete(service, workspace, 'dataset', resource['id'], plan['token'])['deleted']
-    assert db.get_data_resource(resource['id']) is None
-    assert db.get_data_resource_version(version['id']) is None
-    assert db.get_data_import(job['id']) is None
-    assert source.read_bytes() == b'Externally owned dataset'
+    with pytest.raises(ValueError,match='changed'):prepared_deletion.delete(service,workspace,'dataset',resource['id'],blocked['token'])
+    assert prepared_deletion.delete(service,workspace,'dataset',resource['id'],plan['token'])['deleted']
+    assert source.read_bytes()==b'Externally owned dataset'

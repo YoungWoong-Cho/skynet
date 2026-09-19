@@ -1527,6 +1527,7 @@ class PipelineService:
                 manifest=canonical_adapter_manifest(manifest),
                 description=manifest.description,
                 repository_url=manifest.default_repository,
+                materialize_result=False,
             )
         # Old database migrations created builtin:* compatibility records whose
         # payload predates AdapterManifest. Preserve them for history, but never
@@ -4004,13 +4005,17 @@ class PipelineService:
 
     def submit_experiment(self, experiment_id: str, gateway: str = "auto") -> dict[str, Any]:
         with self._reconcile_lock:
-            pre_submission_repairs = self.database.repair_pre_submission_orphans(
-                experiment_id
-            )
             detail = self.experiment_detail(experiment_id)
             revision = detail["latest_revision"]
             if not revision:
                 raise ValueError("experiment has no revision to submit")
+            data_selection.assert_available(self.database, revision["requested_spec_json"])
+            pre_submission_repairs = self.database.repair_pre_submission_orphans(
+                experiment_id
+            )
+            if pre_submission_repairs.get("revision_ids"):
+                detail = self.experiment_detail(experiment_id)
+                revision = detail["latest_revision"]
             revision_locked = bool(revision.get("submitted_at"))
             self._validate_tracking_requirements(
                 ExperimentSpec.model_validate(revision["requested_spec_json"])
@@ -4504,6 +4509,8 @@ class PipelineService:
         if not run:
             raise KeyError("Run not found")
         stage = next(item for item in run["stages"] if item["id"] == stage_id)
+        data_selection.assert_available(self.database, run["resolved_spec_json"],
+                                        stage["resolved_config_json"], pinned_execution)
         is_evaluation_stage = stage["stage_type"] == "EVALUATE"
         evaluation = next(
             (item for item in run["evaluations"] if item.get("stage_id") == stage_id),
@@ -8481,6 +8488,7 @@ class PipelineService:
             run = self.database.get_run(run_id)
             if not run:
                 raise KeyError("Run not found")
+            data_selection.assert_available(self.database, run)
             action = self.run_manual_actions(run)["resume"]
             if not action["enabled"]:
                 raise ValueError(str(action["reason"]))
@@ -8542,6 +8550,7 @@ class PipelineService:
             source = self.database.get_run(run_id)
             if not source:
                 raise KeyError("Run not found")
+            data_selection.assert_available(self.database, source)
             action = self.run_manual_actions(source)["rerun"]
             if not action["enabled"]:
                 raise ValueError(str(action["reason"]))
@@ -9485,6 +9494,10 @@ class PipelineService:
         return validation
 
     def create_evaluation(self, request: EvaluationRequest) -> dict[str, Any]:
+        with self._reconcile_lock:
+            return self._create_evaluation(request)
+
+    def _create_evaluation(self, request: EvaluationRequest) -> dict[str, Any]:
         target, run, checkpoint = self._resolve_evaluation_target(
             request.run_id, request.checkpoint_path
         )
@@ -9497,6 +9510,7 @@ class PipelineService:
             raise ValueError(target["errors"]["checkpoint_path"])
         assert run is not None
         assert checkpoint is not None
+        data_selection.assert_available(self.database, run)
         busy_reason = _evaluation_busy_reason(run)
         if busy_reason:
             raise ValueError(busy_reason)

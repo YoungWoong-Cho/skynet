@@ -7,6 +7,35 @@ New selections do not create a separate data_bundles row.
 from .database import content_sha256
 
 
+def assert_available(database, *execution_inputs):
+    """Reject obsolete pinned inputs before a launch can change run state."""
+    from .data_version_retirement import references
+
+    with database.connection() as connection:
+        versions = connection.execute(
+            "SELECT v.id,v.manifest_sha256,v.path FROM data_resource_versions v "
+            "JOIN data_version_retirements r ON r.version_id=v.id"
+        ).fetchall()
+        if not versions:
+            return
+        identifiers = [version["id"] for version in versions]
+        needles = {value for version in versions for value in
+                   (version["id"], version["manifest_sha256"], version["path"])}
+        needles.update(row["path"] for row in connection.execute(
+            "SELECT path FROM data_locations WHERE version_id=ANY(?)", (identifiers,)).fetchall())
+        for row in connection.execute(
+            "SELECT b.id,b.manifest_sha256 FROM data_bundles b "
+            "JOIN data_bundle_assignments a ON a.bundle_id=b.id WHERE a.version_id=ANY(?)",
+            (identifiers,),
+        ).fetchall():
+            needles.update((row["id"], row["manifest_sha256"]))
+        if any(references(value, needles) for value in execution_inputs):
+            raise ValueError(
+                "This execution uses retired converted data. Use the experiment's new revision "
+                "with its replacement dataset. Historical checkpoints remain available for inspection."
+            )
+
+
 def snapshot(database, selections):
     if not isinstance(selections, list) or not selections:
         raise ValueError("Choose at least one registered dataset")
@@ -20,6 +49,10 @@ def snapshot(database, selections):
                 raise ValueError("Each dataset input must have a unique role and position")
             seen.add((role, position))
             version_id = str(item["version_id"])
+            if connection.execute(
+                "SELECT 1 FROM data_version_retirements WHERE version_id=?", (version_id,)
+            ).fetchone():
+                raise ValueError("This converted dataset has been retired; select its replacement")
             row = connection.execute(
                 "SELECT r.* FROM data_resources r JOIN data_resource_versions v "
                 "ON v.resource_id=r.id WHERE v.id=?", (version_id,),

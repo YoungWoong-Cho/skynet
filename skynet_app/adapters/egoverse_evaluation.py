@@ -40,6 +40,7 @@ def evaluate(context, repository):
     from artifacts import digest, verify
     from egoverse_runtime import (
         register_joint_domain, JOINT_CONTRACT, model_algorithm, validate_hpt_joint_inputs,
+        validate_manifest, validate_checkpoint_receipt,
     )
     from evaluation_video import compose_camera_views, rgb_frame
 
@@ -68,11 +69,8 @@ def evaluate(context, repository):
     if actual_revision != receipt["revision"]:
         raise ValueError("Evaluation must use the checkpoint's exact EgoVerse revision")
     config = context["policy"]["native_config"]
-    if receipt["manifest_sha256"] != config["dataset_manifest_sha256"]:
-        raise ValueError(
-            "Evaluation dataset differs from the checkpoint's training dataset"
-        )
-    manifest = verify(Path(config["dataset_path"]), receipt["manifest_sha256"])
+    validate_checkpoint_receipt(receipt, receipt["model"], config["dataset_manifest_sha256"])
+    manifest = validate_manifest(config["dataset_path"], receipt["manifest_sha256"], receipt["model"])
     if manifest.get("split", {}).get("mode") == "single_episode_overfit":
         raise ValueError("This is a single-episode overfit dataset, with no held-out episodes. Use its training validation loss to check overfitting.")
     recorded = manifest["contract"] == JOINT_CONTRACT
@@ -88,7 +86,7 @@ def evaluate(context, repository):
         dataset = hydra.utils.instantiate(dataset_cfg)
         dataset.set_norm_stats_from(stats)
         for name, leaf in dataset.datasets.items():
-            path = str(Path(leaf.episode_path).resolve())
+            path = leaf.episode_id if recorded else str(Path(leaf.episode_path).resolve())
             if path in sources:
                 raise ValueError(
                     "Duplicate validation episode in native data configuration"
@@ -118,7 +116,7 @@ def evaluate(context, repository):
             video.parent.mkdir(parents=True, exist_ok=True)
             squared, elements, observed_metrics = 0.0, 0, {}
             domain, dataset, indices = sources[
-                str((Path(config["dataset_path"]) / episode["path"]).resolve())
+                episode["id"] if recorded else str((Path(config["dataset_path"]) / episode["path"]).resolve())
             ]
             if len(indices) != episode["steps"]:
                 raise ValueError(

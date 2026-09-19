@@ -97,6 +97,7 @@ def remote_video(tmp_path):
                             source=lambda *args:(job,str(original/'recordings/demo.pkl')),
                             directory=lambda *args:directory)
     videos=LiveVideoService(reviews)
+    videos.cluster_profile=lambda job:{'execution':'slurm'}
     videos.version='a'*16
     yield SimpleNamespace(videos=videos,job=job,transport=transport,original=original,derived=derived,
                           directory=directory/'video-0')

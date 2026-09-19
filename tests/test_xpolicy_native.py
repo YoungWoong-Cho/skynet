@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 
 import pytest
 
@@ -26,13 +27,14 @@ def runner(monkeypatch):
 
 def test_catalog_has_real_training_entries_and_no_inference_stubs():
     records = catalog()
-    assert len(records["policies"]) == 38
+    assert len(records["policies"]) == 37
     assert set(records["without_training_entrypoint"]) == {
         "Dexora_1B", "InternVLA_A1_5", "Meituan_Robotics_0", "MolmoAct2", "OpenDM", "Spatial_Forcing",
     }
-    assert len({r["slug"] for r in records["policies"]}) == 38
+    assert len({r["slug"] for r in records["policies"]}) == 37
     for manifest in manifests():
         assert manifest.train.capsule_files["adapter-support/xpolicy_native.py"]
+        assert manifest.train.capsule_files["adapter-support/recording_dataset.py"]
         assert bool(manifest.evaluations) == (manifest.slug == "xpolicylab-act-native")
         assert manifest.capabilities.supports_resume == (manifest.slug == "xpolicylab-act-native")
         assert bool(manifest.train.checkpoint_globs) == (manifest.slug == "xpolicylab-act-native")
@@ -53,6 +55,24 @@ def test_catalog_has_real_training_entries_and_no_inference_stubs():
         if manifest.capabilities.maximum_gpus == 1:
             spec.resources.gpu.count = 2
             assert ManifestAdapter(manifest).resolve(spec).blockers
+
+
+@pytest.mark.parametrize("recorded_act", [False, True])
+def test_native_launcher_imports_from_its_frozen_capsule(tmp_path, recorded_act):
+    manifest = next(entry for entry in manifests()
+                    if (entry.slug == "xpolicylab-act-native") == recorded_act)
+    for relative, content in manifest.train.capsule_files.items():
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    # Exclude repository paths to expose omitted portable imports.
+    result = subprocess.run(
+        [sys.executable, "-I", "-c",
+         "import sys; sys.path.insert(0, sys.argv[1]); import xpolicy_native",
+         str(tmp_path / "adapter-support")],
+        cwd=tmp_path, text=True, capture_output=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_native_device_mapping_preserves_slurm_ids(runner):
@@ -198,34 +218,12 @@ def test_process_and_network_settings_follow_one_node_allocation(runner, tmp_pat
 
 @pytest.fixture
 def recorded_act(tmp_path, runner):
-    import h5py
-    import numpy as np
-    root = tmp_path / "recorded"
-    (root / "dataset").mkdir(parents=True)
-    names = ["wrist_x", "wrist_y", "wrist_z", "wrist_rx", "wrist_ry", "wrist_rz", "finger"]
-    manifest = {
-        "format": "xpolicylab-act-hdf5/v1", "contract": "skynet.act-rgb-joints/v1",
-        "validation": {"status": "PASSED"}, "policy_to_source_indices": list(range(7)),
-        "capture": {"action_joint_names": names,
-                    "action_semantics": "raw_joint_position_command; target = action * scale + offset",
-                    "groups": [{"wrist_indices": list(range(6)), "finger_indices": [6]}],
-                    "cameras": {"front": {}, "left": {}, "right": {}}},
-        "camera_slots": dict(cam_head="front", cam_left_wrist="left", cam_right_wrist="right"),
-        "episodes": [{"index": i, "steps": i + 2} for i in range(2)], "files": {},
-    }
-    (root / "robot_config.json").write_text(json.dumps(dict(arm_dim=[6], ee_dim=[1])))
-    for episode in manifest["episodes"]:
-        n = episode["steps"]
-        with h5py.File(root / f'dataset/episode_{episode["index"]}.hdf5', "w") as file:
-            file["action"] = np.zeros((n, 7), dtype="f4")
-            file["observations/qpos"] = np.ones((n, 7), dtype="f4")
-            for camera in manifest["camera_slots"]:
-                file.create_dataset("observations/images/" + camera, shape=(n, 480, 640, 3), dtype="u1", compression="lzf")
-    for file in root.rglob("*"):
-        if file.is_file():
-            manifest["files"][str(file.relative_to(root))] = dict(sha256=runner.digest(file), size_bytes=file.stat().st_size)
-    (root / "manifest.json").write_text(json.dumps(manifest))
-    return root, manifest
+    from test_recording_dataset import source, request, prepare
+    sources = [source(tmp_path,index=i,images=True)[0] for i in range(2)]
+    config = request(tmp_path,sources,name='recorded',rgb=True)
+    config['contract'] = 'skynet.act-rgb-joints/v1'
+    manifest = prepare(config)
+    return Path(config['output']), manifest
 
 
 def test_recorded_native_inputs_merge_private_config_and_keep_source_data(runner, recorded_act, native_run):
@@ -237,17 +235,19 @@ def test_recorded_native_inputs_merge_private_config_and_keep_source_data(runner
     config.parent.mkdir(parents=True)
     config.write_text(json.dumps({"other_robot": {"arm_dim": [10]}}))
     (workspace / "XPolicyLab/policy/ACT").mkdir(parents=True)
+    (workspace / "XPolicyLab/policy/ACT/utils.py").write_text("def load_data(*args): pass\n")
     before = runner.digest(root / "manifest.json")
     dims = validate_recorded_act(root, manifest)
     launch = prepare_recorded_act(root, manifest, workspace, dims)
     configs = json.loads((workspace / "XPolicyLab/policy/ACT/TASK_CONFIGS.json").read_text())
-    assert configs["Skynet-recordings-skynet-joint"]["dataset_dir"] == str(root / "dataset")
+    assert configs["Skynet-recordings-skynet-joint"]["dataset_dir"] == str(root)
     assert configs["Skynet-recordings-skynet-joint"]["camera_names"] == ["cam_head", "cam_right_wrist", "cam_left_wrist"]
     robots = json.loads(config.read_text())
     assert robots == {"other_robot": {"arm_dim": [10]}, "skynet": {"arm_dim": [6], "ee_dim": [1]}}
     assert launch["action_type"] == "joint"
     assert runner.digest(root / "manifest.json") == before
-    runner.verify(root, before)
+    from recording_dataset import verify_dataset
+    verify_dataset(root, before)
     assert not (source / "policy/ACT/TASK_CONFIGS.json").exists()
 
 
@@ -257,16 +257,21 @@ def test_invalid_recorded_act_rejected_before_launch(recorded_act, problem):
     import h5py
     root, manifest = recorded_act
     if problem == "dimension":
-        (root / "robot_config.json").write_text(json.dumps(dict(arm_dim=[6], ee_dim=[22])))
+        manifest['episodes'][0]['streams']['action']['shape'][1] += 1
     elif problem == "order":
-        manifest["policy_to_source_indices"] = list(reversed(range(7)))
+        manifest['policy_to_source_indices'] = list(reversed(range(7)))
     elif problem == "single":
-        manifest["episodes"].pop()
+        manifest['episodes'].pop()
     elif problem == "camera":
-        manifest["camera_slots"]["cam_head"] = "left"
+        manifest['episodes'][0]['streams']['scene_front']['dtype'] = 'float32'
     else:
-        with h5py.File(root / "dataset/episode_0.hdf5", "r+") as file:
-            file["action"][0, 0] = float("nan")
+        from recording_dataset import verify_dataset
+        reference = manifest['episodes'][0]['streams']['action']
+        with h5py.File(reference['path'],'r+') as file:
+            file[reference['dataset']][0,0] = float('nan')
+        with pytest.raises(ValueError, match='checksum'):
+            verify_dataset(root)
+        return
     with pytest.raises(ValueError):
         validate_recorded_act(root, manifest)
 
@@ -276,13 +281,15 @@ def test_native_act_declares_recording_conversion_and_existing_formats():
     records = manifests()
     class Registry:
         def list_adapter_registry(self):
-            return [{"slug": m.slug, "latest_version": {"manifest": m.model_dump(mode="json")}} for m in records]
+            return [{'id':m.slug,'name':m.display_name,'latest_version':{'id':m.slug+'-v1','version_number':1,'manifest':m.model_dump(mode='json')}} for m in records]
     options = conversion_catalog(Registry())
-    native = next(p for p in options if p["id"] == "act-native")
-    assert native["available"] and native["trainable"]
-    assert native["training_setup"]["adapter"] == "xpolicylab-act-native"
-    assert native["split_mode"] == "upstream"
-    assert not any(p["id"] == "xpolicylab-act-native" for p in options)
+    native = next(p for p in options if p['id'] == 'xpolicylab-act-native')
+    assert native['available'] and native['trainable']
+    preset, = native['data_presets']
+    assert preset['training_setup']['adapter'] == 'xpolicylab-act-native'
+    assert preset['split_mode'] == 'episode' and preset['validation_required']
+    assert native['format'] == 'skynet.recording-dataset/v1'
+    assert not any(p['available'] for p in options if p['id'] != native['id'])
 
 
 def test_native_resume_uses_only_full_state_checkpoints():

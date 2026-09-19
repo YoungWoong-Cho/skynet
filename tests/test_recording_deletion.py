@@ -331,9 +331,10 @@ def observation(recording, *, source_path="recordings/one.pkl", label="rgb", inp
     from skynet_app.observation_contracts import content_digest
     service, live, job, _, _, root = recording
     spec = dict(schema="skynet.observation-artifact/v1", source_sha256="a"*64,
-                modality=label, dependencies=list(inputs))
+                modality="point_cloud" if label == "cloud" else "depth" if label == "depth" else "rgb",
+                camera_id="scene_front", label=label, dependencies=list(inputs))
     key = content_digest(spec)
-    path = root / "datasets/observations" / spec["source_sha256"] / key
+    path = root / "datasets/recordings" / spec["source_sha256"] / spec["modality"] / spec["camera_id"] / key
     path.mkdir(parents=True)
     (path/"data.bin").write_bytes(b"immutable observation")
     now, producer = utc_now(), str(uuid4()) if producer_state else None

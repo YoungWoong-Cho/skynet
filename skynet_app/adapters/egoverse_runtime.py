@@ -23,6 +23,8 @@ JOINT_CONTRACT = "skynet.egoverse-rgb-joints/v1"
 JOINT_MODELS = {"act", "hpt_joints"}
 CAMERAS = ["scene_front", "scene_left", "scene_right"]
 HPT_JOINT_STATE_KEY = "state_joint_positions"
+DATASET_FORMAT = "skynet.recording-dataset/v1"
+NATIVE_DATASET_FORMAT = "egoverse-episodes-zarr/v1"
 
 
 def register_joint_domain():
@@ -83,20 +85,21 @@ def make_act(norm_stats, **kwargs):
     return ACT(data_schematic=ACTDataInterface(norm_stats), **kwargs)
 
 
-def joint_data(root, batch, workers, horizon=100, reject_outliers=True, *, overfit=False, validation=True):
+def joint_data(root, batch, workers, horizon=100, reject_outliers=True, *, overfit=False, validation=True, manifest_sha=None):
     datasets = {}
     for split in ("train", "validation"):
         datasets[split] = {
             "skynet_joints": {
                 "_target_": "egoverse_data.JointDataset._from_resolver",
                 "resolver": {
-                    "_target_": "egomimic.rldb.zarr.zarr_dataset_multi.LocalEpisodeResolver",
-                    "folder_path": str(Path(root) / "dataset" / ("train" if overfit else split)),
+                    "_target_": "egoverse_data.RecordingResolver",
+                    "root": str(root),
+                    "manifest_sha": manifest_sha,
+                    "split": "train" if overfit else split,
                     "key_map": {
                         "_target_": "egoverse_runtime.joint_keymap",
                         "horizon": horizon,
                     },
-                    "transform_list": [],
                 },
                 "mode": "total",
                 "reject_outliers": reject_outliers if split == "train" else False,
@@ -154,30 +157,68 @@ def validate_hpt_joint_inputs(model, *, checkpoint=False):
 
 
 def validate_episode_split(root, manifest):
+    episodes, split = manifest["episodes"], manifest["split"]
+    validate_split(split, len(episodes))
+    identities = [ep.get("id") for ep in episodes]
+    if any(not isinstance(value, str) or not value for value in identities) or len(set(identities)) != len(identities):
+        raise ValueError("Recording episodes must have distinct stable identities")
+
+
+def validate_native_episode_split(root, manifest):
     root = Path(root).resolve()
     episodes, split = manifest["episodes"], manifest["split"]
     validate_split(split, len(episodes))
     paths = [(root / episode["path"]).resolve() for episode in episodes]
     if len(set(paths)) != len(paths) or any(not p.is_relative_to(root) for p in paths):
-        raise ValueError(
-            "Episodes must have distinct paths inside the registered dataset"
-        )
+        raise ValueError("Native episodes must have distinct paths inside the registered dataset")
 
 
 def validate_manifest(root, sha, model):
     model_algorithm(model)
-    from artifacts import verify
-
-    manifest = verify(Path(root), sha)
+    if model not in JOINT_MODELS:
+        # External native robot/human datasets are a separate input contract,
+        # not compatibility for retired collection conversion output.
+        try:
+            from ops.datasets.artifacts import verify
+        except ImportError:
+            from artifacts import verify
+        manifest = verify(Path(root), sha)
+        if manifest.get("format") != NATIVE_DATASET_FORMAT or manifest.get("contract") != f"egoverse.native-{model}/v1":
+            raise ValueError("External native dataset contract does not match the selected EgoVerse model")
+        validate_native_episode_split(root, manifest)
+        return manifest
+    try:
+        from .recording_dataset import verify_dataset
+    except ImportError:
+        from recording_dataset import verify_dataset
+    manifest = verify_dataset(root, sha)
+    if manifest.get("format") != DATASET_FORMAT:
+        raise ValueError("Convert the recordings again with the current adapter; old dataset formats are no longer supported")
     validate_episode_split(root, manifest)
-    if manifest.get("contract") == JOINT_CONTRACT:
-        if model not in JOINT_MODELS:
-            raise ValueError(
-                "This model requires its native robot/human dataset, not recorded joint data"
-            )
-    elif manifest.get("contract") != f"egoverse.native-{model}/v1":
-        raise ValueError("Dataset contract does not match the selected EgoVerse model")
+    if manifest.get("contract") != JOINT_CONTRACT or model not in JOINT_MODELS:
+        raise ValueError("This recording reader supports native EgoVerse ACT and HPT recorded-joint presets only")
+    for episode in manifest["episodes"]:
+        if not {"state", "action", *CAMERAS}.issubset(episode["streams"]):
+            raise ValueError("EgoVerse requires joint state/actions and three aligned scene RGB views")
+        streams, steps = episode["streams"], episode["steps"]
+        state_shape, action_shape = streams["state"]["shape"], streams["action"]["shape"]
+        if len(state_shape) != 2 or state_shape != action_shape or state_shape[0] != steps:
+            raise ValueError("EgoVerse joint state and action streams must have identical [frame,joint] shape")
+        order = episode.get("policy_to_source_indices", manifest.get("policy_to_source_indices"))
+        if not isinstance(order, list) or sorted(order) != list(range(state_shape[1])):
+            raise ValueError("EgoVerse joint mapping must cover each source joint exactly once")
+        for camera in CAMERAS:
+            shape = streams[camera]["shape"]
+            if len(shape) != 4 or shape[0] != steps or shape[-1] != 3 or streams[camera]["dtype"] != "uint8":
+                raise ValueError("EgoVerse requires aligned uint8 RGB camera streams")
     return manifest
+
+
+def validate_checkpoint_receipt(receipt, model, manifest_sha):
+    if model in JOINT_MODELS and receipt.get("dataset_format") != DATASET_FORMAT:
+        raise ValueError("This checkpoint predates the shared recording dataset format. Its history and weights are preserved; start a new run with the current adapter. Old-checkpoint resume/evaluation is not supported.")
+    if receipt.get("model") != model or receipt.get("manifest_sha256") != manifest_sha:
+        raise ValueError("Checkpoint model or dataset differs from the selected native configuration")
 
 
 def model_settings(value):
@@ -260,14 +301,15 @@ def build_config(args, manifest):
             cfg.model.optimizer.lr = args.learning_rate
         cfg.ckpt_path = args.checkpoint
         cfg.logger = None  # Skynet publishes the native metrics with its pinned tracking identity.
-        if manifest["contract"] == JOINT_CONTRACT:
+        if args.model in JOINT_MODELS:
+            if manifest.get("format") != DATASET_FORMAT or manifest.get("contract") != JOINT_CONTRACT or args.model not in JOINT_MODELS:
+                raise ValueError("Select a newly converted recording dataset and a recorded-joint EgoVerse preset")
             cfg.data = joint_data(
-                args.dataset,
-                args.batch_size,
-                args.num_workers,
+                args.dataset, args.batch_size, args.num_workers,
                 reject_outliers=args.reject_outliers,
                 overfit=manifest["split"].get("mode") == OVERFIT_MODE,
                 validation=bool(manifest["split"]["validation"]),
+                manifest_sha=args.manifest_sha,
             )
             if args.model == "act":
                 cfg.model.robomimic_model._target_ = "egoverse_runtime.make_act"
@@ -278,6 +320,8 @@ def build_config(args, manifest):
                 )
             cfg.evaluator = {"_target_": "egoverse_runtime.JointEvaluator"}
         else:
+            if manifest.get("format") != NATIVE_DATASET_FORMAT or manifest.get("contract") != f"egoverse.native-{args.model}/v1":
+                raise ValueError("Select the model's externally imported native dataset")
             # Imported native data supplies its verified native reader configuration.
             cfg.data = OmegaConf.load(Path(args.dataset) / "data.yaml")
             evaluator_path = Path(args.dataset) / "evaluator.yaml"
@@ -294,7 +338,7 @@ def build_config(args, manifest):
                     "Use the model's native EgoVerse evaluator configuration"
                 )
             root = Path(args.dataset).resolve()
-            validate_episode_split(root, manifest)
+            validate_native_episode_split(root, manifest)
             for partition in ("train_datasets", "valid_datasets"):
                 actual_episodes = set()
                 for data_config in cfg.data[partition].values():
@@ -507,9 +551,7 @@ def main():
         import torch
         saved = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
         receipt = saved.get("skynet") or {}
-        model_algorithm(receipt.get("model"))
-        if receipt.get("model") != args.model or receipt.get("manifest_sha256") != args.manifest_sha:
-            raise ValueError("Resume checkpoint model or dataset differs from the selected native configuration")
+        validate_checkpoint_receipt(receipt, args.model, args.manifest_sha)
         if args.model == "hpt_joints":
             validate_hpt_joint_inputs(receipt.get("config", {}).get("model", {}), checkpoint=True)
     from omegaconf import OmegaConf
@@ -523,6 +565,7 @@ def main():
             json.dumps(
                 dict(
                     manifest_sha256=args.manifest_sha,
+                    dataset_format=manifest["format"],
                     model=args.model,
                     revision=REVISION,
                 )

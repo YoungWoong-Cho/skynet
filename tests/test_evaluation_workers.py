@@ -114,7 +114,7 @@ def test_parallel_capability_preserves_serial_historical_manifests():
     old = EvaluationAdapterMetadata(environment="sim")
     assert "maximum_parallelism" not in old.model_dump()
     for manifest in builtin_adapter_manifests():
-        if manifest.slug in {"xpolicylab-dp", "xpolicylab-act"}:
+        if manifest.slug in {"xpolicylab-act"}:
             assert manifest.evaluations[0].maximum_parallelism == 8
             assert manifest.capabilities.maximum_gpus == 8
             assert "evaluation_workers.py" in manifest.evaluations[0].command.argv[1]

@@ -13,6 +13,7 @@ def support_files(policy):
         "adapter-support/xpolicy_runtime.py": (
             SUPPORT / "xpolicy_runtime.py"
         ).read_text(),
+        "adapter-support/recording_dataset.py": (SUPPORT / "recording_dataset.py").read_text(),
         "adapter-support/artifacts.py": (
             SUPPORT.parents[1] / "ops/datasets/artifacts.py"
         ).read_text(),
@@ -94,7 +95,7 @@ def simulation_support_files():
     }
     files.update({
         "adapter-support/" + name: (SUPPORT.parents[1] / "ops/xr" / name).read_text()
-        for name in ("images.py", "recording_metadata.py", "wrist.py", "render_images.py", "scene_restore.py")
+        for name in ("images.py", "recording_metadata.py", "wrist.py", "scene_restore.py")
     })
     files["adapter-support/trajectory.py"] = (SUPPORT.parent / "trajectory.py").read_text()
     files["adapter-support/arrays.py"] = "import pickle\nimport numpy as np\n" + inspect.getsource(ArrayUnpickler)

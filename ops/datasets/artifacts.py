@@ -1,13 +1,9 @@
-"""Portable dataset integrity checks, shared by conversion, transfer and training."""
+"""Integrity checks for externally prepared native dataset inventories."""
 
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path, PurePosixPath
-import shutil
-import tempfile
-import zipfile
 
 
 def digest(path):
@@ -53,73 +49,12 @@ def verify(root, expected):
     return manifest
 
 
-def pack(root):
-    root = Path(root)
-    archive = root.parent / "dataset.zip.part"
-    archive.unlink(missing_ok=True)
-    with zipfile.ZipFile(
-        archive, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=1, allowZip64=True
-    ) as zipped:
-        for path in sorted(root.rglob("*")):
-            if path.is_file():
-                zipped.write(path, path.relative_to(root))
-    archive.replace(root.parent / "dataset.zip")
-
-
-def materialize(archive, destination, expected, archive_sha):
-    """Publish a verified immutable directory; incomplete copies stay private."""
-    import fcntl
-
-    destination = Path(destination)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with (destination.parent / ("." + expected + ".lock")).open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        if destination.exists():
-            return verify(destination, expected)
-        if digest(archive) != archive_sha:
-            raise ValueError("Transferred archive failed verification")
-        staging = Path(tempfile.mkdtemp(prefix=".preparing-", dir=destination.parent))
-        try:
-            with zipfile.ZipFile(archive) as zipped:
-                manifest_bytes = zipped.read("manifest.json")
-                if hashlib.sha256(manifest_bytes).hexdigest() != expected:
-                    raise ValueError("Archive contains a different manifest")
-                manifest = json.loads(manifest_bytes)
-                allowed = {
-                    **manifest["files"],
-                    "manifest.json": {"size_bytes": len(manifest_bytes)},
-                }
-                names = zipped.namelist()
-                if len(names) != len(set(names)) or set(names) != set(allowed):
-                    raise ValueError("Archive entries differ from the manifest")
-                for entry in zipped.infolist():
-                    relative_file(entry.filename)
-                    if entry.file_size != allowed[entry.filename]["size_bytes"]:
-                        raise ValueError("Archive size differs from its manifest")
-                    target = staging / entry.filename
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    with zipped.open(entry) as source, target.open("xb") as output:
-                        shutil.copyfileobj(source, output, 1024 * 1024)
-            verify(staging, expected)
-            os.rename(staging, destination)
-        finally:
-            if staging.exists():
-                shutil.rmtree(staging)
-        return manifest
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("root")
     parser.add_argument("manifest_sha")
-    parser.add_argument("--archive")
-    parser.add_argument("--archive-sha")
     args = parser.parse_args()
-    result = (
-        materialize(args.archive, args.root, args.manifest_sha, args.archive_sha)
-        if args.archive
-        else verify(args.root, args.manifest_sha)
-    )
+    result = verify(args.root, args.manifest_sha)
     print(
         json.dumps(
             dict(

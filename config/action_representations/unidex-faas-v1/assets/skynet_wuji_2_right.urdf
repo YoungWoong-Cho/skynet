@@ -1,0 +1,248 @@
+<robot name="skynet_wuji_2_right"><link name="h_r_wrist">
+    </link>
+  <link name="h_r_thumb_proximal">
+    </link>
+  <joint name="h_r_thumb_cmc_flex" type="revolute">
+    <origin xyz="0.01721 0.008138 -0.016458" rpy="-1.6617 -1.059 1.9921" />
+    <parent link="h_r_wrist" />
+    <child link="h_r_thumb_proximal" />
+    <axis xyz="1 0 0" />
+    <limit lower="-1.1870" upper="1.2910" effort="0.6000" velocity="8.587" />
+  </joint>
+  <link name="h_r_thumb_proximal_abd">
+    </link>
+  <joint name="h_r_thumb_cmc_abd" type="revolute">
+    <origin xyz="0.00024788 -0.00053658 -0.014754" rpy="0.20529 0.70051 0.025238" />
+    <parent link="h_r_thumb_proximal" />
+    <child link="h_r_thumb_proximal_abd" />
+    <axis xyz="0 1 0" />
+    <limit lower="-1.4840" upper="0.6980" effort="0.6000" velocity="11.1" />
+  </joint>
+  <link name="h_r_thumb_middle">
+    </link>
+  <joint name="h_r_thumb_mcp" type="revolute">
+    <origin xyz="0 0 -0.0325" rpy="0 0.087266 0.56723" />
+    <parent link="h_r_thumb_proximal_abd" />
+    <child link="h_r_thumb_middle" />
+    <axis xyz="1 0 0" />
+    <limit lower="-1.0470" upper="1.5700" effort="0.3000" velocity="12.86" />
+  </joint>
+  <link name="h_r_thumb_distal">
+    </link>
+  <joint name="h_r_thumb_ip" type="revolute">
+    <origin xyz="-5E-05 0 -0.035" rpy="0 0 0" />
+    <parent link="h_r_thumb_middle" />
+    <child link="h_r_thumb_distal" />
+    <axis xyz="1 0 0" />
+    <limit lower="-1.0470" upper="1.5700" effort="0.3000" velocity="13.5" />
+  </joint>
+  <link name="h_r_thumb_tip" />
+  <joint name="h_r_thumb_tip_fixed" type="fixed">
+    <origin xyz="0 0 -0.02978" rpy="0 0 0" />
+    <parent link="h_r_thumb_distal" />
+    <child link="h_r_thumb_tip" />
+  </joint>
+  <link name="h_r_thumb_tip_sensor_frame">
+    </link>
+  <joint name="h_r_thumb_tip_sensor_frame_fixed" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="h_r_thumb_distal" />
+    <child link="h_r_thumb_tip_sensor_frame" />
+  </joint>
+  <link name="h_r_index_finger_proximal">
+    </link>
+  <joint name="h_r_index_finger_mcp_flex" type="revolute">
+    <origin xyz="0.022661 -0.0033252 -0.069975" rpy="-0.039792 -0.13705 0.10041" />
+    <parent link="h_r_wrist" />
+    <child link="h_r_index_finger_proximal" />
+    <axis xyz="1 0 0" />
+    <limit lower="-1.0470" upper="1.5700" effort="2.0000" velocity="8.203" />
+  </joint>
+  <link name="h_r_index_finger_proximal_abd">
+    </link>
+  <joint name="h_r_index_finger_mcp_abd" type="revolute">
+    <origin xyz="0 -0.001201 -0.0145" rpy="0 0 0" />
+    <parent link="h_r_index_finger_proximal" />
+    <child link="h_r_index_finger_proximal_abd" />
+    <axis xyz="0 1 0" />
+    <limit lower="-0.6980" upper="0.6980" effort="0.2000" velocity="8.11" />
+  </joint>
+  <link name="h_r_index_finger_middle">
+    </link>
+  <joint name="h_r_index_finger_pip" type="revolute">
+    <origin xyz="0 0 -0.0376" rpy="0 0 0" />
+    <parent link="h_r_index_finger_proximal_abd" />
+    <child link="h_r_index_finger_middle" />
+    <axis xyz="1 0 0" />
+    <limit lower="-1.0470" upper="2.0940" effort="0.3000" velocity="12.86" />
+  </joint>
+  <link name="h_r_index_finger_distal">
+    </link>
+  <joint name="h_r_index_finger_dip" type="revolute">
+    <origin xyz="0 0 -0.0295" rpy="0 0 0" />
+    <parent link="h_r_index_finger_middle" />
+    <child link="h_r_index_finger_distal" />
+    <axis xyz="1 0 0" />
+    <limit lower="-1.0470" upper="1.5700" effort="0.3000" velocity="13.5" />
+  </joint>
+  <link name="h_r_index_finger_tip" />
+  <joint name="h_r_index_finger_tip_fixed" type="fixed">
+    <origin xyz="0 0 -0.02475" rpy="0 0 0" />
+    <parent link="h_r_index_finger_distal" />
+    <child link="h_r_index_finger_tip" />
+  </joint>
+  <link name="h_r_index_finger_tip_sensor_frame">
+    </link>
+  <joint name="h_r_index_finger_tip_sensor_frame_fixed" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="h_r_index_finger_distal" />
+    <child link="h_r_index_finger_tip_sensor_frame" />
+  </joint>
+  <link name="h_r_middle_finger_proximal">
+    </link>
+  <joint name="h_r_middle_finger_mcp_flex" type="revolute">
+    <origin xyz="0.00095202 -0.008303 -0.073915" rpy="-0.03391 0.011037 -0.00071534" />
+    <parent link="h_r_wrist" />
+    <child link="h_r_middle_finger_proximal" />
+    <axis xyz="1 0 0" />
+    <limit lower="-1.0470" upper="1.5700" effort="2.0000" velocity="8.203" />
+  </joint>
+  <link name="h_r_middle_finger_proximal_abd">
+    </link>
+  <joint name="h_r_middle_finger_mcp_abd" type="revolute">
+    <origin xyz="0 -0.001201 -0.0145" rpy="0 0 0" />
+    <parent link="h_r_middle_finger_proximal" />
+    <child link="h_r_middle_finger_proximal_abd" />
+    <axis xyz="0 1 0" />
+    <limit lower="-0.6980" upper="0.6980" effort="0.2000" velocity="8.11" />
+  </joint>
+  <link name="h_r_middle_finger_middle">
+    </link>
+  <joint name="h_r_middle_finger_pip" type="revolute">
+    <origin xyz="0 0 -0.0376" rpy="0 0 0" />
+    <parent link="h_r_middle_finger_proximal_abd" />
+    <child link="h_r_middle_finger_middle" />
+    <axis xyz="1 0 0" />
+    <limit lower="-1.0470" upper="2.0940" effort="0.3000" velocity="12.86" />
+  </joint>
+  <link name="h_r_middle_finger_distal">
+    </link>
+  <joint name="h_r_middle_finger_dip" type="revolute">
+    <origin xyz="0 0 -0.0295" rpy="0 0 0" />
+    <parent link="h_r_middle_finger_middle" />
+    <child link="h_r_middle_finger_distal" />
+    <axis xyz="1 0 0" />
+    <limit lower="-1.0470" upper="1.5700" effort="0.3000" velocity="13.5" />
+  </joint>
+  <link name="h_r_middle_finger_tip" />
+  <joint name="h_r_middle_finger_tip_fixed" type="fixed">
+    <origin xyz="0 0 -0.02475" rpy="0 0 0" />
+    <parent link="h_r_middle_finger_distal" />
+    <child link="h_r_middle_finger_tip" />
+  </joint>
+  <link name="h_r_middle_finger_tip_sensor_frame">
+    </link>
+  <joint name="h_r_middle_finger_tip_sensor_frame_fixed" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="h_r_middle_finger_distal" />
+    <child link="h_r_middle_finger_tip_sensor_frame" />
+  </joint>
+  <link name="h_r_ring_finger_proximal">
+    </link>
+  <joint name="h_r_ring_finger_mcp_flex" type="revolute">
+    <origin xyz="-0.019744 -0.0055929 -0.0654" rpy="-0.016655 0.14163 -0.06832" />
+    <parent link="h_r_wrist" />
+    <child link="h_r_ring_finger_proximal" />
+    <axis xyz="1 0 0" />
+    <limit lower="-1.0470" upper="1.5700" effort="2.0000" velocity="8.203" />
+  </joint>
+  <link name="h_r_ring_finger_proximal_abd">
+    </link>
+  <joint name="h_r_ring_finger_mcp_abd" type="revolute">
+    <origin xyz="0 -0.001201 -0.0145" rpy="0 0 0" />
+    <parent link="h_r_ring_finger_proximal" />
+    <child link="h_r_ring_finger_proximal_abd" />
+    <axis xyz="0 1 0" />
+    <limit lower="-0.6980" upper="0.6980" effort="0.2000" velocity="8.11" />
+  </joint>
+  <link name="h_r_ring_finger_middle">
+    </link>
+  <joint name="h_r_ring_finger_pip" type="revolute">
+    <origin xyz="0 0 -0.0376" rpy="0 0 0" />
+    <parent link="h_r_ring_finger_proximal_abd" />
+    <child link="h_r_ring_finger_middle" />
+    <axis xyz="1 0 0" />
+    <limit lower="-1.0470" upper="2.0940" effort="0.3000" velocity="12.86" />
+  </joint>
+  <link name="h_r_ring_finger_distal">
+    </link>
+  <joint name="h_r_ring_finger_dip" type="revolute">
+    <origin xyz="0 0 -0.0295" rpy="0 0 0" />
+    <parent link="h_r_ring_finger_middle" />
+    <child link="h_r_ring_finger_distal" />
+    <axis xyz="1 0 0" />
+    <limit lower="-1.0470" upper="1.5700" effort="0.3000" velocity="13.5" />
+  </joint>
+  <link name="h_r_ring_finger_tip" />
+  <joint name="h_r_ring_finger_tip_fixed" type="fixed">
+    <origin xyz="0 0 -0.02475" rpy="0 0 0" />
+    <parent link="h_r_ring_finger_distal" />
+    <child link="h_r_ring_finger_tip" />
+  </joint>
+  <link name="h_r_ring_finger_tip_sensor_frame">
+    </link>
+  <joint name="h_r_ring_finger_tip_sensor_frame_fixed" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="h_r_ring_finger_distal" />
+    <child link="h_r_ring_finger_tip_sensor_frame" />
+  </joint>
+  <link name="h_r_pinky_proximal">
+    </link>
+  <joint name="h_r_pinky_mcp_flex" type="revolute">
+    <origin xyz="-0.037351 -0.00073376 -0.055296" rpy="-0.029938 0.24886 -0.13602" />
+    <parent link="h_r_wrist" />
+    <child link="h_r_pinky_proximal" />
+    <axis xyz="1 0 0" />
+    <limit lower="-1.0470" upper="1.5700" effort="2.0000" velocity="8.203" />
+  </joint>
+  <link name="h_r_pinky_proximal_abd">
+    </link>
+  <joint name="h_r_pinky_mcp_abd" type="revolute">
+    <origin xyz="0 -0.001201 -0.0145" rpy="0 0 3.6273E-05" />
+    <parent link="h_r_pinky_proximal" />
+    <child link="h_r_pinky_proximal_abd" />
+    <axis xyz="0 1 0" />
+    <limit lower="-0.6980" upper="0.6980" effort="0.2000" velocity="8.11" />
+  </joint>
+  <link name="h_r_pinky_middle">
+    </link>
+  <joint name="h_r_pinky_pip" type="revolute">
+    <origin xyz="0.0001 0 -0.0336" rpy="0 0 -3.6273E-05" />
+    <parent link="h_r_pinky_proximal_abd" />
+    <child link="h_r_pinky_middle" />
+    <axis xyz="1 0 0" />
+    <limit lower="-1.0470" upper="2.0940" effort="0.3000" velocity="12.86" />
+  </joint>
+  <link name="h_r_pinky_distal">
+    </link>
+  <joint name="h_r_pinky_dip" type="revolute">
+    <origin xyz="0 0 -0.0275" rpy="0 0 0" />
+    <parent link="h_r_pinky_middle" />
+    <child link="h_r_pinky_distal" />
+    <axis xyz="1 0 0" />
+    <limit lower="-1.0470" upper="1.5700" effort="0.3000" velocity="13.5" />
+  </joint>
+  <link name="h_r_pinky_tip" />
+  <joint name="h_r_pinky_tip_fixed" type="fixed">
+    <origin xyz="0 0 -0.02475" rpy="0 0 0" />
+    <parent link="h_r_pinky_distal" />
+    <child link="h_r_pinky_tip" />
+  </joint>
+  <link name="h_r_pinky_tip_sensor_frame">
+    </link>
+  <joint name="h_r_pinky_tip_sensor_frame_fixed" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="h_r_pinky_distal" />
+    <child link="h_r_pinky_tip_sensor_frame" />
+  </joint>
+<link name="skynet_palm" /><joint name="skynet_alignment" type="fixed"><parent link="skynet_palm" /><child link="h_r_wrist" /><origin xyz="0 0 0" rpy="-1.5707963267948966 0.0 1.5707963267948966" /></joint><link name="skynet_base" /><link name="skynet_x_link" /><joint name="skynet_x" type="prismatic"><parent link="skynet_base" /><child link="skynet_x_link" /><origin xyz="0 0 0" rpy="0 0 0" /><axis xyz="1 0 0" /><limit lower="-2" upper="2" effort="30" velocity="5" /></joint><link name="skynet_y_link" /><joint name="skynet_y" type="prismatic"><parent link="skynet_x_link" /><child link="skynet_y_link" /><origin xyz="0 0 0" rpy="0 0 0" /><axis xyz="0 1 0" /><limit lower="-2" upper="2" effort="30" velocity="5" /></joint><link name="skynet_z_link" /><joint name="skynet_z" type="prismatic"><parent link="skynet_y_link" /><child link="skynet_z_link" /><origin xyz="0 0 0" rpy="0 0 0" /><axis xyz="0 0 1" /><limit lower="-2" upper="2" effort="30" velocity="5" /></joint><link name="skynet_roll_link" /><joint name="skynet_roll" type="revolute"><parent link="skynet_z_link" /><child link="skynet_roll_link" /><origin xyz="0 0 0" rpy="0 0 0" /><axis xyz="1 0 0" /><limit lower="-1000000" upper="1000000" effort="30" velocity="5" /></joint><link name="skynet_pitch_link" /><joint name="skynet_pitch" type="revolute"><parent link="skynet_roll_link" /><child link="skynet_pitch_link" /><origin xyz="0 0 0" rpy="0 0 0" /><axis xyz="0 1 0" /><limit lower="-1000000" upper="1000000" effort="30" velocity="5" /></joint><joint name="skynet_yaw" type="revolute"><parent link="skynet_pitch_link" /><child link="skynet_palm" /><origin xyz="0 0 0" rpy="0 0 0" /><axis xyz="0 0 1" /><limit lower="-1000000" upper="1000000" effort="30" velocity="5" /></joint></robot>

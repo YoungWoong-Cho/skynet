@@ -34,7 +34,9 @@ def portable(monkeypatch):
 
 
 def manifest():
-    return {
+    value = {
+        "format": "skynet.recording-dataset/v1",
+        "contract": "skynet.act-rgb-joints/v1", "steps": 5,
         "policy_to_source_indices": [1, 0],
         "episodes": [{"steps": 3}, {"steps": 2}],
         "split": {"train": [1], "validation": [0]},
@@ -43,6 +45,11 @@ def manifest():
             "action_semantics": "raw_joint_position_command; target = action * scale + offset",
         },
     }
+    for index, episode in enumerate(value["episodes"]):
+        episode.update(index=index, id=str(index), source={"sha256":str(index)*64},
+            streams={key:{"shape":[episode["steps"],2]} for key in ("state","action")},
+            capture=copy.deepcopy(value["capture"]), policy_to_source_indices=[1,0])
+    return value
 
 
 def test_registered_split_and_joint_mapping_are_enforced(portable):
@@ -63,18 +70,24 @@ def test_registered_split_and_joint_mapping_are_enforced(portable):
 
 
 def test_act_observation_matches_its_command_and_padding_is_masked(portable, tmp_path):
-    (tmp_path / "dataset").mkdir()
-    with h5py.File(tmp_path / "dataset/episode_0.hdf5", "w") as f:
-        f["observations/qpos"] = np.array([[1, 2], [3, 4], [5, 6]], dtype=np.float32)
+    from recording_dataset import canonical, stream_reference
+    shared=tmp_path / "recording.hdf5"
+    with h5py.File(shared, "w") as f:
+        f["state"] = np.array([[1, 2], [3, 4], [5, 6]], dtype=np.float32)
         f["action"] = np.array([[10, 20], [30, 40], [50, 60]], dtype=np.float32)
-        for camera in portable.act.CAMERAS:
+        for camera in ("scene_front","scene_left","scene_right"):
             f.create_dataset(
-                "observations/images/" + camera,
-                shape=(3, 480, 640, 3),
+                camera,
+                shape=(3, 8, 8, 3),
                 dtype="uint8",
                 compression="gzip",
                 fillvalue=123,
             )
+    data=manifest();data.update(steps=3,split={"train":[0],"validation":[]},policy_to_source_indices=[0,1])
+    data['episodes']=data['episodes'][:1]
+    data['episodes'][0].update(policy_to_source_indices=[0,1],streams={key:stream_reference(shared,key)
+        for key in ('state','action','scene_front','scene_left','scene_right')})
+    (tmp_path/'manifest.json').write_bytes(canonical(data))
     stats = dict(
         state_mean=np.array([1, 2]),
         state_std=np.array([2, 2]),
@@ -89,24 +102,20 @@ def test_act_observation_matches_its_command_and_padding_is_masked(portable, tmp
     assert images[0, 0, 0, 0] == 123
 
 
-def test_normalization_rejects_validation_leakage(portable, tmp_path):
+def test_normalization_uses_registered_training_split_without_stored_adapter_arrays(portable, tmp_path):
+    from recording_dataset import canonical, stream_reference, RecordingDataset
     data = manifest()
-    stats = {
-        "fit": "training_episodes_only",
-        "train": [1],
-        "statistics": {
-            k: {"mean": [1.0, 2.0], "std": [0.0, 2.0]} for k in ["state", "action"]
-        },
-    }
-    path = tmp_path / "normalization.json"
-    path.write_text(json.dumps(stats))
-    np.testing.assert_allclose(
-        portable.data.normalization(tmp_path, data)["action_std"], [0.01, 2.0]
-    )
-    stats["train"] = [0, 1]
-    path.write_text(json.dumps(stats))
-    with pytest.raises(ValueError, match="training split"):
-        portable.data.normalization(tmp_path, data)
+    for index,episode in enumerate(data['episodes']):
+        shared=tmp_path/f'recording-{index}.hdf5'
+        values=np.array([[1000.,2000.]]*3 if index==0 else [[0.,1.],[4.,1.]],dtype='f4')
+        with h5py.File(shared,'w') as file:
+            file['state']=values;file['action']=values
+        episode['streams']={key:stream_reference(shared,key) for key in ('state','action')}
+    (tmp_path/'manifest.json').write_bytes(canonical(data))
+    stats=RecordingDataset(tmp_path).normalization()
+    np.testing.assert_allclose(stats['action_mean'],[1.,2.])
+    np.testing.assert_allclose(stats['action_std'],[.01,2.])
+    assert not (tmp_path/'normalization.json').exists()
 
 
 def test_evaluation_task_is_frozen_from_training_bundle_not_catalog_mutated():
@@ -183,9 +192,9 @@ def test_dataset_bound_runtime_evidence_pins_the_simulator_not_one_dataset():
     assert suite_contract_sha256(bound) != suite_contract_sha256(original)
 
 
-def test_both_policies_have_training_and_same_real_rollout_contract():
+def test_act_adapters_have_training_and_same_real_rollout_contract():
     policies = {m.slug: m for m in builtin_adapter_manifests()}
-    for slug in ["xpolicylab-dp", "xpolicylab-act"]:
+    for slug in ["xpolicylab-act", "xpolicylab-act-native"]:
         model = policies[slug]
         assert model.train.progress.unit == "epoch"
         assert model.evaluations[0].suites == ["dexverse_recorded", "dexverse_training_episode"]

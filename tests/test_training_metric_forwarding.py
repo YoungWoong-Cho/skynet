@@ -38,6 +38,10 @@ def produced_row(epoch=0):
         "learning_rate": 0.0001,
         "grad_norm": 1.5,
         "train/grad_norm": 1.25,
+        "train/l1": 0.15,
+        "train/kl": 0.25,
+        "validation/l1": 0.1,
+        "validation/kl": 0.2,
         "timing/train_batch_s": 0.125,
         "Validation/IoU": 0.75,
         "ZeroMetric": 0,
@@ -79,6 +83,10 @@ def expected_raw_metrics(epoch=0):
         "learning_rate": 0.0001,
         "grad_norm": 1.5,
         "train/grad_norm": 1.25,
+        "train/l1": 0.15,
+        "train/kl": 0.25,
+        "validation/l1": 0.1,
+        "validation/kl": 0.2,
         "timing/train_batch_s": 0.125,
         "Validation/IoU": 0.75,
         "ZeroMetric": 0,
@@ -98,9 +106,10 @@ def expected_metrics(adapter, epoch=0):
 
 
 def test_every_builtin_jsonl_adapter_participates():
-    assert len(JSONL_ADAPTERS) == 5
+    assert len(JSONL_ADAPTERS) == 6
     assert {adapter.slug for adapter in JSONL_ADAPTERS} == {
-        "egoverse-act", "egoverse-hpt", "egoverse-pi", "xpolicylab-act", "xpolicylab-dp",
+        "egoverse-act", "egoverse-hpt", "egoverse-pi", "xpolicylab-act",
+        "xpolicylab-act-native", "unidex",
     }
 
 
@@ -156,7 +165,7 @@ def test_explicit_native_metric_names_win_collisions_in_either_field_order(rever
         ("native/key", 7), ("train/loss", 9),
     ]
     row = dict(reversed(items) if reverse else items)
-    adapter = next(adapter for adapter in JSONL_ADAPTERS if adapter.slug == "xpolicylab-dp")
+    adapter = next(adapter for adapter in JSONL_ADAPTERS if adapter.slug == "xpolicylab-act")
     records = pipeline.parse_declared_training_progress(
         json.dumps(row) + "\n", adapter.train.progress,
         resolved_spec={"native": {"config": {"epochs": 10}}},
@@ -175,7 +184,7 @@ def forwarding_service(tmp_path, monkeypatch):
         "identity": {"project": "metric-test", "experiment": "all-scalars"},
         "source": {
             "repository": "https://github.com/XPolicyLab/XPolicyLab",
-            "revision": "a" * 40, "adapter": "xpolicylab-dp",
+            "revision": "a" * 40, "adapter": "xpolicylab-act",
         },
         "native": {"config": {"epochs": 10}},
         "tracking": {"providers": [{
@@ -188,7 +197,7 @@ def forwarding_service(tmp_path, monkeypatch):
     experiment = database.create_experiment(project_id=project["id"], name="all-scalars", requested_spec=spec)
     variant = database.create_variant(experiment["latest_revision"]["id"], name="one", parameters={}, resolved_spec=spec)
     run = database.create_run(
-        variant["id"], seed=0, adapter_name="xpolicylab-dp", adapter_version="1",
+        variant["id"], seed=0, adapter_name="xpolicylab-act", adapter_version="1",
         run_directory="/synthetic/run", status="RUNNING",
     )
     stage = database.create_stage(run["id"], stage_type="TRAIN", name="train")
@@ -225,7 +234,7 @@ def forwarding_service(tmp_path, monkeypatch):
         database=database, run_id=run["id"], attempt_id=attempt["id"],
         service=new_service(), new_service=new_service, content=content, reads=reads,
         capsule=capsule, settings=settings,
-        adapter=next(adapter for adapter in JSONL_ADAPTERS if adapter.slug == "xpolicylab-dp"),
+        adapter=next(adapter for adapter in JSONL_ADAPTERS if adapter.slug == "xpolicylab-act"),
     )
 
 

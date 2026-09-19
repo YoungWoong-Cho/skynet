@@ -30,11 +30,11 @@ def test_application_routes_keep_current_workflows_and_remove_retired_ones():
         ("POST", "/api/collection/live/sessions"),
         ("GET", "/api/collection/sessions"),
         ("GET", "/api/collection/live/sessions/{identifier}/recordings/{index}/video"),
-        ("POST", "/api/collection/live/sessions/{identifier}/recordings/{index}/video"),
         ("GET", "/api/data/exports/options/{session_id}"),
         ("POST", "/api/data/exports"),
         ("GET", "/api/maintenance/history/{kind}/{identifier}"),
     } <= registered
+    assert ("POST", "/api/collection/live/sessions/{identifier}/recordings/{index}/video") not in registered
 
 
 def test_live_overview_no_longer_reads_retired_conversion_history(monkeypatch, tmp_path):

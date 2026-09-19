@@ -6,20 +6,22 @@ from contextlib import nullcontext
 import os
 from pathlib import Path
 
-from xpolicy_runtime import repository, validate_manifest, normalization, write_json
+from xpolicy_runtime import repository, validate_manifest, write_json
+from recording_dataset import RecordingDataset, verify_dataset, FORMAT
 
 CAMERAS = ["cam_head", "cam_left_wrist", "cam_right_wrist"]
 
 
 def read_sample(root, episode, step, stats, chunk):
-    import h5py
     import numpy as np
 
-    with h5py.File(Path(root) / "dataset" / f"episode_{episode}.hdf5", "r") as f:
-        qpos = f["observations/qpos"][step]
-        images = np.stack([f["observations/images/" + c][step] for c in CAMERAS])
-        # Every observation precedes its matching command. Never shift backwards.
-        actions = f["action"][step : step + chunk]
+    dataset = root if isinstance(root, RecordingDataset) else RecordingDataset(root)
+    reader = dataset.episode(episode)
+    qpos = reader.joint("state", step).astype(np.float32)
+    images = np.stack([reader.rgb(camera, step, size=(640, 480))
+                       for camera in ("scene_front", "scene_left", "scene_right")])
+    # Every observation precedes its matching command. Never shift backwards.
+    actions = reader.joint("action", slice(step, step + chunk)).astype(np.float32)
     count = len(actions)
     padded = np.zeros((chunk, len(qpos)), dtype=np.float32)
     padded[:count] = (actions - stats["action_mean"]) / stats["action_std"]
@@ -79,7 +81,7 @@ def build_policy(repository_path, revision, settings, dimension):
 
 class RecordedACTDataset:
     def __init__(self, root, manifest, stats, split, chunk):
-        self.root, self.stats, self.chunk = Path(root), stats, chunk
+        self.root, self.stats, self.chunk = RecordingDataset(root, manifest=manifest), stats, chunk
         self.samples = [(i, t) for i in manifest["split"][split]
             for t in range(manifest["episodes"][i]["steps"])]
 
@@ -165,47 +167,34 @@ def main():
     import numpy as np
     import torch
     from training_parallel import PolicyLoss, training_batch_size
-    from artifacts import verify, digest
+    from artifacts import digest
 
     root, output = Path(args.dataset), Path(args.output)
     if primary:
-        manifest = validate_manifest(verify(root, args.manifest_sha))
+        manifest = validate_manifest(verify_dataset(root, args.manifest_sha))
     if context is not None and context.world_size > 1:
         context.dist.barrier()
     if not primary:
         manifest = validate_manifest(json.loads((root / "manifest.json").read_text()))
     if (
         manifest.get("contract") != "skynet.act-rgb-joints/v1"
-        or manifest["format"] != "xpolicylab-act-hdf5/v1"
+        or manifest["format"] != FORMAT
     ):
         raise ValueError("Select a prepared ACT RGB dataset")
-    stats = normalization(root, manifest)
+    stats = RecordingDataset(root, manifest=manifest).normalization()
     datasets = {
         s: RecordedACTDataset(root, manifest, stats, s, args.action_steps)
         for s in ["train", "validation"]
     }
-    # Validate every episode without reading all image pixels a second time.
-    import h5py
-
     dim = len(manifest["policy_to_source_indices"])
-    for i, ep in enumerate(manifest["episodes"]):
-        with h5py.File(root / "dataset" / f"episode_{i}.hdf5", "r") as f:
-            if f["action"].shape != (ep["steps"], dim) or f[
-                "observations/qpos"
-            ].shape != (ep["steps"], dim):
-                raise ValueError(
-                    "ACT episode length or joint dimensions differ from the manifest"
-                )
-            for camera in CAMERAS:
-                if f["observations/images/" + camera].shape != (
-                    ep["steps"],
-                    480,
-                    640,
-                    3,
-                ):
-                    raise ValueError(
-                        "ACT camera shape differs from the conversion contract"
-                    )
+    for episode in manifest["episodes"]:
+        for name in ("state", "action"):
+            if episode["streams"][name]["shape"] != [episode["steps"], dim]:
+                raise ValueError("ACT state/action dimensions differ from the manifest")
+        for camera in ("scene_front", "scene_left", "scene_right"):
+            reference = episode["streams"][camera]
+            if reference["dtype"] != "uint8" or len(reference["shape"]) != 4 or reference["shape"][-1] != 3:
+                raise ValueError("ACT requires three RGB recording streams")
     receipt = dict(
         schema="skynet.act-loader-validation/v1",
         manifest_sha256=args.manifest_sha,

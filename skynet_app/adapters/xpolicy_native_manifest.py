@@ -5,8 +5,9 @@ import json
 from .xpolicy_manifest import progress_contract
 from pathlib import Path
 
-from skynet_app.dataset_formats import RECIPES, XPL_COMMIT, XPL_REPOSITORY
-from skynet_app.training_contracts import DatasetRequirement
+from skynet_app.dataset_formats import XPL_COMMIT, XPL_REPOSITORY
+from skynet_app.training_contracts import DatasetRequirement, RECORDING_DATASET_FORMAT
+from .act_manifest import recording_conversion
 
 
 def catalog():
@@ -16,7 +17,7 @@ def catalog():
 def act_support_files():
     root = Path(__file__).parent
     return {"adapter-support/" + name: (root / name).read_text() for name in (
-        "act_native_data.py", "act_native_checkpoint.py", "act_native_evaluation.py",
+        "act_native_data.py", "act_native_checkpoint.py", "act_native_evaluation.py", "recording_dataset.py",
     )}
 
 
@@ -49,6 +50,7 @@ def manifests():
         raise ValueError("XPolicyLab launcher catalog must match the pinned source revision")
     capsules = {
         "adapter-support/xpolicy_native.py": (root / "xpolicy_native.py").read_text(),
+        "adapter-support/recording_dataset.py": (root / "recording_dataset.py").read_text(),
         "adapter-support/xpolicy_native_catalog.json": (root / "xpolicy_native_catalog.json").read_text(),
         "adapter-support/artifacts.py": (root.parents[1] / "ops/datasets/artifacts.py").read_text(),
     }
@@ -58,9 +60,10 @@ def manifests():
         data_format = f"xpolicylab-native-{name.lower()}/v1"
         formats = [data_format]
         contracts = ["skynet.xpolicylab-native/v1"]
-        if name == "ACT":
-            formats.append(RECIPES["act"]["format"])
-            contracts.append(RECIPES["act"]["contract"])
+        conversion = recording_conversion(native=True) if name == "ACT" else None
+        if conversion:
+            formats.append(RECORDING_DATASET_FORMAT)
+            contracts.append(conversion.presets[0].contract)
         fields = [AdapterInputField(
             path="native.config." + key, label=label, kind="string", required=True,
             data_binding=DataBundleInputBinding(
@@ -123,19 +126,20 @@ def manifests():
                 strict_native_config=True, strict_canonical_inputs=True,
                 supported_canonical_fields=["train.seed"] if seed_supported else [],
                 data_requirements=DatasetRequirement(
-                    description=("ACT RGB/joint HDF5, including converted Skynet recordings. Original loader uses at least two episodes, its own 80/20 split and normalization over all episodes."
-                        if name == "ACT" else f"{name} native prepared inputs ({data_format}). Skynet ACT/DP/EgoVerse exports are not this format."),
+                    description=("Recorded RGB and joint commands in the shared recording dataset. Conversion fixes whole-episode splits; normalization uses training episodes only."
+                        if name == "ACT" else f"{name} native prepared inputs ({data_format}). Skynet ACT/EgoVerse exports are not this format."),
                     observations=["policy_specific"], action_representation="policy_specific",
+                    recording_conversion=conversion,
                 ),
                 checkpoint_globs=["artifacts/checkpoints/last.ckpt"] if name == "ACT" else [],
             ),
             evaluations=[act_evaluation()] if name == "ACT" else [],
             warnings=[
-                ("Accepts ACT HDF5 from Recordings. The upstream loader uses its own 80/20 split, statistics over all episodes, and previous-step action alignment; dataset split/normalization files are not used."
+                ("Recorded inputs use the registered episode split, training-only normalization and recorded command timing. The native ACT model and loss are preserved."
                  if name == "ACT" else "Requires this policy's native prepared dataset, weights and Runtime; current Shadow conversion outputs are not automatically compatible."),
                 ("Original ACT defaults are preserved. Epochs can be configured; checkpoint hooks save optimizer, RNG, split and normalization for automatic recovery. Recorded RGB/joint inputs support Isaac Lab evaluation."
                  if name == "ACT" else "Hyperparameters come from the upstream recipe and registered native configuration. Automatic resume and simulator evaluation are not implemented for this native adapter."),
-                ("ACT recording inputs passed a one-epoch L40S training and checkpoint-save check. This does not establish full training quality." if name == "ACT" else "GPU training has not been validated for this adapter. Native logs and outputs are retained under the run's artifacts/native-workspace."),
+                ("The shared recording loader requires conversion-time validation. Full GPU training quality is not established by that check." if name == "ACT" else "GPU training has not been validated for this adapter. Native logs and outputs are retained under the run's artifacts/native-workspace."),
             ],
         ))
     return result

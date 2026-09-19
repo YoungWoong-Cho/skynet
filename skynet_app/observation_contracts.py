@@ -97,19 +97,6 @@ def validate_requirements(value):
     return result
 
 
-def resolve_recipe_requirements(recipe):
-    """Resolve a converter's immutable declaration, without starting work."""
-    if isinstance(recipe, str):
-        from .dataset_formats import RECIPES
-        recipe = RECIPES[recipe]
-    if recipe.get("schema") == CONTRACT_SCHEMA:
-        return validate_requirements(recipe)
-    value = recipe.get("observation_requirements")
-    if value is None:
-        raise ValueError("Converter does not declare its observation requirements")
-    return validate_requirements(value)
-
-
 def plan_artifacts(source_sha, source_info, contract, render_identity):
     """Return dependency-ordered nodes. Paths and job IDs are supplied by caller.
 

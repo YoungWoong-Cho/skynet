@@ -143,7 +143,7 @@ class ObservationPreparation:
     def ensure(self, job, sources):
         """Attach the immutable plan, schedule missing layers, return ready refs."""
         contract = job.get('observation_contract')
-        if not contract or not contract['streams'] or job.get('migrating_local_copy'):
+        if not contract or not contract['streams']:
             return sources
         from ops.datasets.observation_prepare import render_identity
         # Use the capsule frozen when Convert was requested, even after app upgrades.
@@ -162,12 +162,16 @@ class ObservationPreparation:
         else:
             planned, profiles, worker_sources = [], {}, []
             for source in sources:
+                required = dict(contract, streams=[stream for stream in contract['streams']
+                    if stream['name'] not in source.get('shared_image_streams', {})])
+                if not required['streams']:
+                    continue
                 session_id = source['session_id']
                 if session_id not in profiles:
                     profiles[session_id] = self.profile(self.service.live.get(session_id))
                 profile = profiles[session_id]
                 identity = render_identity(profile, renderer_revision)
-                nodes = plan_artifacts(source['sha256'], {'episode_index': 0, 'episode_key': source['sha256']}, contract, identity)
+                nodes = plan_artifacts(source['sha256'], {'episode_index': 0, 'episode_key': source['sha256']}, required, identity)
                 planned.extend(nodes)
                 worker_sources.append(dict(source, episode_key=source['sha256'], episode_index=0,
                                            profile=profile, render_recipe=identity))
@@ -190,7 +194,7 @@ class ObservationPreparation:
                 if any(d['state'] != 'READY' for d in dependencies):
                     continue
                 requests.append(dict(node,
-                    output_dir=f"{WORK_ROOT}/datasets/observations/{node['source_sha256']}/{node['artifact_key']}",
+                    output_dir=f"{WORK_ROOT}/datasets/recordings/{node['source_sha256']}/{node['modality']}/{node['camera_id']}/{node['artifact_key']}",
                     dependencies=[{k: d[k] for k in ('artifact_key','path','manifest_sha256')} for d in dependencies]))
             # claim() needs dependency keys as well as the worker's concrete refs.
             for request in requests:
@@ -213,7 +217,8 @@ class ObservationPreparation:
             raise ValueError(failed['error'] or 'Observation preparation failed')
         ready = sum(a['state'] == 'READY' for a in existing.values())
         producers = self.store.progress(job['id'])
-        self.service.update(job['id'], observation_progress=dict(ready=ready, total=len(existing), producers=producers))
+        self.service.update(job['id'], observation_progress=dict(ready=ready, total=len(existing),
+            reused=sum(len(source.get('shared_image_streams', {})) for source in sources), producers=producers))
         if ready != len(existing):
             running = [p for p in producers if p['state'] == 'RUNNING']
             pending = [p for p in producers if p['state'] in {'QUEUED','SUBMITTING','PENDING'}]
@@ -266,7 +271,7 @@ class ObservationPreparation:
         self.cluster.write_capsule_files(identifier, capsule, 'sky2')
         queue = CLUSTER.queues['normal']
         rendering = request['mode'] == 'render'
-        runtime_id = 'isaacsim-5.1.0_isaaclab-2.3.2_py311' if rendering else 'skynet-dp'
+        runtime_id = 'isaacsim-5.1.0_isaaclab-2.3.2_py311' if rendering else 'xpolicylab-act'
         runtime = CLUSTER.runtime_profiles[runtime_id]
         environment = str(runtime.environment_path)
         gpu = []

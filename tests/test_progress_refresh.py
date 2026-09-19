@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from skynet_app import pipeline_api as pipeline
-from skynet_app.adapters.dp_manifest import manifest
+from skynet_app.adapters.act_manifest import manifest
 from skynet_app.cluster_runtime import ClusterError
 from skynet_app.database import Database
 from skynet_app.tracking import SessionCredentialStore

@@ -4,12 +4,37 @@ from pathlib import Path
 
 from skynet_app.model_io import adapter_io_contract
 from .egoverse_models import ALGORITHMS, MODEL_LEARNING_RATES, model_contracts
+from skynet_app.observation_contracts import rgb_requirements
+from skynet_app.training_contracts import (
+    RECORDING_DATASET_FORMAT, RecordingConversion, RecordingDataPreset, RecordingLoaderValidation,
+)
 
 REPOSITORY = "https://github.com/GaTech-RL2/EgoVerse"
 REVISION = "e17cf98fe4bc234c564b37abc9e155f25e76d566"
 RUNTIME = "egoverse-native"
-FORMAT = "egoverse-episodes-zarr/v1"
+FORMAT = RECORDING_DATASET_FORMAT
+NATIVE_FORMAT = "egoverse-episodes-zarr/v1"
 CONTRACT = "skynet.egoverse-rgb-joints/v1"
+
+
+def recording_conversion(algorithm):
+    if algorithm not in {"act", "hpt"}:
+        return None
+    model = "act" if algorithm == "act" else "hpt_joints"
+    return RecordingConversion(default_preset=model, presets=[RecordingDataPreset(
+        id=model, name="Three scene views and recorded joints", contract=CONTRACT,
+        observations=["state", "rgb"], action_representation="raw_joint_position_command",
+        observation_requirements=rgb_requirements(("scene_front", "scene_left", "scene_right")),
+        training_setup=dict(adapter="egoverse-"+algorithm, repository=REPOSITORY, revision=REVISION,
+                            runtime="existing", runtime_profile=RUNTIME, native_config={"model_preset":model}),
+        loader_validation=RecordingLoaderValidation(
+            runtime_profile=RUNTIME, script="egoverse_runtime.py",
+            argv=["--repository", "{repository}", "--revision", "{revision}", "--dataset", "{dataset}",
+                  "--manifest-sha", "{manifest_sha256}", "--output", "{output}", "--batch-size", "1",
+                  "--algorithm", algorithm, "--model", model, "--verify-only"],
+            schemas=["skynet.egoverse-loader-validation/v1"], mode="rgb",
+        ),
+    )])
 
 
 def support_files():
@@ -21,6 +46,7 @@ def support_files():
             "egoverse_models.py",
             "egoverse_evaluation.py",
             "egoverse_data.py",
+            "recording_dataset.py",
             "egoverse_splits.py",
             "egoverse_readiness.py",
             "evaluation_video.py",
@@ -64,7 +90,7 @@ def manifests():
                 required=True,
                 data_binding=DataBundleInputBinding(
                     role="training_data",
-                    formats=[FORMAT],
+                    formats=([FORMAT] if algorithm == "act" else [FORMAT, NATIVE_FORMAT] if algorithm == "hpt" else [NATIVE_FORMAT]),
                     contracts=model_contracts(model),
                     contract_selector="native.config.model_preset",
                     contract_choices={name: model_contracts(name) for name in models},
@@ -214,7 +240,8 @@ def manifests():
                 data_requirements=DatasetRequirement(
                     description=(
                         "The selected model preset defines the verified dataset contract. Recorded joints are supported by ACT and the HPT recorded-joints configuration; other presets require native data.yaml, evaluator.yaml and Zarr episodes."
-                    )
+                    ),
+                    recording_conversion=recording_conversion(algorithm),
                 ),
                 batch_compatibility=AdapterBatchCompatibility(
                     allowed_semantics=["per_device"],

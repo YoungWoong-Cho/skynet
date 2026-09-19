@@ -2,9 +2,34 @@
 
 from skynet_app.model_io import adapter_io_contract
 
-from skynet_app.dataset_formats import RECIPES, XPL_COMMIT, XPL_REPOSITORY
-from skynet_app.training_contracts import TrainingPreset, DatasetRequirement
+from skynet_app.dataset_formats import XPL_COMMIT, XPL_REPOSITORY
+from skynet_app.observation_contracts import rgb_requirements
+from skynet_app.training_contracts import (
+    RECORDING_DATASET_FORMAT, TrainingPreset, DatasetRequirement,
+    RecordingConversion, RecordingDataPreset, RecordingLoaderValidation,
+)
 from .xpolicy_manifest import support_files, progress_contract, evaluation
+
+
+def recording_conversion(*, native=False):
+    adapter = "xpolicylab-act-native" if native else "xpolicylab-act"
+    return RecordingConversion(default_preset="rgb", presets=[RecordingDataPreset(
+        id="rgb", name="Three scene views and joints", contract="skynet.act-rgb-joints/v1",
+        observations=["state", "rgb"], action_representation="raw_joint_position_command",
+        observation_requirements=rgb_requirements(("scene_front", "scene_left", "scene_right")),
+        minimum_episodes=2 if native else 1, validation_required=native, split_mode="episode",
+        description="Episode splits are fixed during conversion; normalization uses training episodes only.",
+        preprocessing=dict(image_size=[640, 480], image_interpolation="linear", image_layout="CHW", joint_order="policy_to_source_indices"),
+        training_setup=dict(adapter=adapter, repository=XPL_REPOSITORY, revision=XPL_COMMIT,
+                            runtime="existing", runtime_profile="xpolicylab-act", **({} if native else {"preset":"xpolicylab-act/v1"})),
+        loader_validation=RecordingLoaderValidation(
+            runtime_profile="xpolicylab-act", script="xpolicy_native.py" if native else "skynet_act_training.py",
+            argv=["--repository", "{repository}", "--revision", "{revision}", "--dataset", "{dataset}",
+                  "--manifest-sha", "{manifest_sha256}", "--output", "{output}",
+                  *(["--policy", "ACT", "--gpu-count", "1", "--seed", "42"] if native else ["--batch-size", "1"]), "--verify-only"],
+            schemas=["skynet.act-native-loader-validation/v2" if native else "skynet.act-loader-validation/v1"], mode="rgb",
+        ),
+    )])
 
 
 def manifest():
@@ -20,6 +45,7 @@ def manifest():
         CommandTemplate,
     )
 
+    conversion = recording_conversion()
     fields = [
         AdapterInputField(
             path="native.config." + key,
@@ -29,8 +55,8 @@ def manifest():
             help="From the selected cluster dataset.",
             data_binding=DataBundleInputBinding(
                 role="training_data",
-                formats=[RECIPES["act"]["format"]],
-                contracts=[RECIPES["act"]["contract"]],
+                formats=[RECORDING_DATASET_FORMAT],
+                contracts=[conversion.presets[0].contract],
                 value_path=value,
             ),
         )
@@ -151,10 +177,10 @@ def manifest():
             strict_canonical_inputs=True,
             strict_native_config=True,
             data_requirements=DatasetRequirement(
-                description="ACT HDF5 with three RGB views and joints.",
+                description="Recorded joint states and commands with three RGB scene views.",
                 observations=["state", "rgb"],
                 action_representation="raw_joint_position_command",
-                observation_requirements=RECIPES["act"]["observation_requirements"],
+                recording_conversion=conversion,
             ),
             supported_canonical_fields=[
                 *common,

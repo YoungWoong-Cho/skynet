@@ -48,6 +48,8 @@ JSON_COLUMNS = frozenset(
         "execution_snapshot_json",
         "request_json",
         "result_json",
+        "plan_json",
+        "receipt_json",
     }
 )
 
@@ -2760,6 +2762,18 @@ class Database:
                 result.append(item)
             return result
 
+    def active_adapter_ids(self, identifiers):
+        """Current availability without loading large immutable code manifests."""
+        if not identifiers:
+            return set()
+        with self.connection() as connection:
+            rows = connection.execute(
+                f"SELECT DISTINCT ON (adapter_key) adapter_key, enabled, archived_at FROM adapters "
+                f"WHERE adapter_key=ANY(?) AND {visible_sql('adapters')} "
+                "ORDER BY adapter_key, version_number DESC", (list(identifiers),),
+            ).fetchall()
+        return {row["adapter_key"] for row in rows if row["enabled"] and not row["archived_at"]}
+
     def get_adapter(
         self,
         adapter_id: str,
@@ -2953,7 +2967,9 @@ class Database:
         repository_url: str | None = None,
         legacy_version: str | None = None,
         change_note: str | None = None,
-    ) -> dict[str, Any]:
+        materialize_result: bool = True,
+    ) -> dict[str, Any] | None:
+        """Advance a canonical seed, optionally returning its full version history."""
         normalized_seed = seed_key.strip()
         normalized_name = name.strip()
         if not normalized_seed or not normalized_name:
@@ -2992,47 +3008,37 @@ class Database:
                         seed_key=normalized_seed,
                         legacy_version=legacy_version,
                     )
-                    result = self._adapter_bundle(
-                        self._adapter_rows(connection, adapter_key), include_versions=True
-                    )
-                    assert result is not None
-                    return result
             else:
                 adapter_key = seeded["adapter_key"]
 
-            current = self._adapter_bundle(self._adapter_rows(connection, adapter_key))
-            assert current is not None
-            latest = current["latest_version"]
-            if latest["manifest_sha256"] == manifest_sha256:
-                result = self._adapter_bundle(
-                    self._adapter_rows(connection, adapter_key), include_versions=True
-                )
-                assert result is not None
-                return result
-
+            # Seed comparison needs immutable SQL metadata, not external code
+            # bodies for every historical version. Startup discards the result.
+            latest = connection.execute(
+                f"SELECT manifest_sha256, created_by, version_number, archived_at FROM adapters "
+                f"WHERE adapter_key = ? AND {visible_sql('adapters')} "
+                "ORDER BY version_number DESC LIMIT 1", (adapter_key,),
+            ).fetchone()
+            assert latest is not None
             # Canonical seeds may advance seed or schema-migration output, but never
             # supersede a user-authored adapter version.
-            if latest.get("created_by") not in {"__seed__", "__migration__"}:
-                result = self._adapter_bundle(
-                    self._adapter_rows(connection, adapter_key), include_versions=True
+            if (latest["manifest_sha256"] != manifest_sha256
+                    and latest["created_by"] in {"__seed__", "__migration__"}):
+                self._insert_adapter_version(
+                    connection,
+                    adapter_key=adapter_key,
+                    version_number=int(latest["version_number"]) + 1,
+                    name=normalized_name,
+                    manifest=manifest,
+                    description=description,
+                    repository_url=resolved_url,
+                    created_by="__seed__",
+                    change_note=change_note,
+                    archived_at=latest["archived_at"],
+                    seed_key=normalized_seed,
+                    legacy_version=legacy_version,
                 )
-                assert result is not None
-                return result
-
-            self._insert_adapter_version(
-                connection,
-                adapter_key=adapter_key,
-                version_number=int(current["latest_version_number"]) + 1,
-                name=normalized_name,
-                manifest=manifest,
-                description=description,
-                repository_url=resolved_url,
-                created_by="__seed__",
-                change_note=change_note,
-                archived_at=current["archived_at"],
-                seed_key=normalized_seed,
-                legacy_version=legacy_version,
-            )
+            if not materialize_result:
+                return None
             result = self._adapter_bundle(
                 self._adapter_rows(connection, adapter_key), include_versions=True
             )
@@ -3158,6 +3164,7 @@ class Database:
         *,
         include_resource: bool = False,
         locations: Sequence[Mapping[str, Any]] | None = None,
+        retirement: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         result = cls._decode(row) if isinstance(row, Record) else dict(row)
         assert result is not None
@@ -3168,6 +3175,12 @@ class Database:
                 (result["id"],),
             ).fetchall()
         result["locations"] = [dict(item) for item in locations]
+        if retirement is None:
+            retirement = connection.execute(
+                "SELECT state, replacement_version_id, error FROM data_version_retirements WHERE version_id=?",
+                (result["id"],),
+            ).fetchone()
+        result["retirement"] = dict(retirement) if retirement else None
         if include_resource:
             resource_row = connection.execute(
                 "SELECT * FROM data_resources WHERE id = ?", (result["resource_id"],)
@@ -3182,6 +3195,13 @@ class Database:
         if not rows:
             return []
         locations = {}
+        retirements = {
+            row["version_id"]: dict(row)
+            for row in connection.execute(
+                "SELECT version_id, state, replacement_version_id, error FROM data_version_retirements "
+                "WHERE version_id = ANY(?)", ([row["id"] for row in rows],),
+            ).fetchall()
+        }
         for row in connection.execute(
             "SELECT * FROM data_locations WHERE version_id = ANY(?) ORDER BY kind, host",
             ([row["id"] for row in rows],),
@@ -3198,7 +3218,8 @@ class Database:
             }
         result = []
         for row in rows:
-            version = cls._public_data_version(connection, row, locations=locations.get(row["id"], []))
+            version = cls._public_data_version(connection, row, locations=locations.get(row["id"], []),
+                                               retirement=retirements.get(row["id"], {}))
             if include_resource:
                 version["resource"] = resources[version["resource_id"]]
             result.append(version)
@@ -3215,6 +3236,8 @@ class Database:
         ).fetchall()
         by_resource = {}
         for version in cls._data_version_payloads(connection, version_rows):
+            if version["retirement"]:
+                continue
             by_resource.setdefault(version["resource_id"], []).append(version)
         result = []
         for row in rows:

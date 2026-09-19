@@ -53,7 +53,6 @@ recorded-joint contract instead of relabeling its values as another embodiment.
 The synthetic EgoVerse diffusion adapter has been removed. Its old runs, metrics,
 checkpoints and videos remain historical records. New training, resume, and
 evaluation are blocked, including requests using a frozen old adapter plan.
-The separate XPolicyLab DP integration is unaffected.
 
 ## Native dataset imports
 

@@ -3154,8 +3154,8 @@ def test_rollout_logs_use_its_worker_directory_and_shared_log_reader(tmp_path, m
 @pytest.mark.parametrize("requested,expected", [({}, "1"), ({"NCCL_P2P_DISABLE": "0"}, "0")])
 def test_cluster_transport_is_pinned_into_new_runtime_without_mutating_request(tmp_path, requested, expected):
     service = PipelineService(Database(tmp_path / "transport.db"), FakeCluster())
-    manifest = next(m for m in builtin_adapter_manifests() if m.slug == "xpolicylab-dp")
-    runtime_input = {"backend": "existing", "profile_id": "skynet-dp", "environment": dict(requested)}
+    manifest = next(m for m in builtin_adapter_manifests() if m.slug == "xpolicylab-act")
+    runtime_input = {"backend": "existing", "profile_id": "xpolicylab-act", "environment": dict(requested)}
     _, runtime = service._resolve_source_and_runtime(
         {"repository": manifest.default_repository, "revision": COMMIT},
         runtime_input, manifest, "sky2")

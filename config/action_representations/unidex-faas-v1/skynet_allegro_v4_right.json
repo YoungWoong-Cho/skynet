@@ -1,0 +1,553 @@
+{
+  "schema": "skynet.unidex-faas/v1",
+  "robot": "skynet_allegro_v4_right",
+  "side": "right",
+  "faas_dim": 82,
+  "units": {
+    "length": "m",
+    "angle": "rad"
+  },
+  "source_revision": "30cc673e27684b9f10186fa6bea731aed246bc9f",
+  "capture": {
+    "robot": "skynet_allegro_v4_right",
+    "task": "Dexverse-PickCube-v0",
+    "hand": "right",
+    "action_joint_names": [
+      "skynet_x",
+      "skynet_y",
+      "skynet_z",
+      "skynet_roll",
+      "skynet_pitch",
+      "skynet_yaw",
+      "h_joint_0_0",
+      "h_joint_1_0",
+      "h_joint_2_0",
+      "h_joint_3_0",
+      "h_joint_4_0",
+      "h_joint_5_0",
+      "h_joint_6_0",
+      "h_joint_7_0",
+      "h_joint_8_0",
+      "h_joint_9_0",
+      "h_joint_10_0",
+      "h_joint_11_0",
+      "h_joint_12_0",
+      "h_joint_13_0",
+      "h_joint_14_0",
+      "h_joint_15_0"
+    ],
+    "action_scale": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "action_offset": [
+      0.5,
+      0.0,
+      0.30000001192092896,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "action_semantics": "raw_joint_position_command; target = action * scale + offset",
+    "step_dt": 0.016666666666666666,
+    "source_revision": "30cc673e27684b9f10186fa6bea731aed246bc9f",
+    "groups": [
+      {
+        "finger_indices": [
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21
+        ],
+        "side": "right",
+        "wrist_indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      }
+    ],
+    "hand_asset": {
+      "digest": "db4f134da0fd1dee7d317d590e9da8093e6301188c0e40b3273031a0e811fd92",
+      "schema": "skynet.hand-bundle/v1",
+      "source_model_sha256": "eb2fe1ad988ea5fd392c69b50989d6e1de9a6b6f524dfdd21967e1e06d6d1e22",
+      "source_revision": "b19b18ea130c4fbe343f2c178eec6cb55186a4ac"
+    },
+    "hands": {
+      "right": {
+        "control_frame": "skynet_palm",
+        "finger_joints": [
+          "h_joint_0_0",
+          "h_joint_1_0",
+          "h_joint_2_0",
+          "h_joint_3_0",
+          "h_joint_4_0",
+          "h_joint_5_0",
+          "h_joint_6_0",
+          "h_joint_7_0",
+          "h_joint_8_0",
+          "h_joint_9_0",
+          "h_joint_10_0",
+          "h_joint_11_0",
+          "h_joint_12_0",
+          "h_joint_13_0",
+          "h_joint_14_0",
+          "h_joint_15_0"
+        ],
+        "palm": "h_palm_link",
+        "tips": [
+          "h_link_15_0_tip",
+          "h_link_3_0_tip",
+          "h_link_7_0_tip",
+          "h_link_11_0_tip"
+        ],
+        "wrist_joints": [
+          "skynet_x",
+          "skynet_y",
+          "skynet_z",
+          "skynet_roll",
+          "skynet_pitch",
+          "skynet_yaw"
+        ]
+      }
+    },
+    "hand_order": [
+      "right"
+    ],
+    "units": {
+      "angle": "rad",
+      "length": "m",
+      "mass": "kg"
+    },
+    "wrist_rotation_order": "intrinsic_XYZ",
+    "kinematics_sha256": "26f1d58bbea16be56b98a1b80be61b5873bbb29ea72250b18be754757b94ae47"
+  },
+  "asset": {
+    "digest": "db4f134da0fd1dee7d317d590e9da8093e6301188c0e40b3273031a0e811fd92",
+    "schema": "skynet.hand-bundle/v1",
+    "source_model_sha256": "eb2fe1ad988ea5fd392c69b50989d6e1de9a6b6f524dfdd21967e1e06d6d1e22",
+    "source_revision": "b19b18ea130c4fbe343f2c178eec6cb55186a4ac",
+    "manifest_sha256": "fac080642b42dfdf3fc91349545f3fd2d6682d17fbb314840c7be2bbb1412af2",
+    "simulation_urdf_sha256": "655500dad5a51dbdb74075b14a64916dab419412c1e9823d8007474ed7d3b2d4",
+    "hand_urdf_sha256": "0f1872abe9e484f438295d598281b49c7bd68194b6327a71aa13ad015635c5c9",
+    "source_names": {
+      "joint_0.0": "h_joint_0_0",
+      "joint_1.0": "h_joint_1_0",
+      "joint_10.0": "h_joint_10_0",
+      "joint_11.0": "h_joint_11_0",
+      "joint_11.0_tip": "h_joint_11_0_tip",
+      "joint_12.0": "h_joint_12_0",
+      "joint_13.0": "h_joint_13_0",
+      "joint_14.0": "h_joint_14_0",
+      "joint_15.0": "h_joint_15_0",
+      "joint_15.0_tip": "h_joint_15_0_tip",
+      "joint_2.0": "h_joint_2_0",
+      "joint_3.0": "h_joint_3_0",
+      "joint_3.0_tip": "h_joint_3_0_tip",
+      "joint_4.0": "h_joint_4_0",
+      "joint_5.0": "h_joint_5_0",
+      "joint_6.0": "h_joint_6_0",
+      "joint_7.0": "h_joint_7_0",
+      "joint_7.0_tip": "h_joint_7_0_tip",
+      "joint_8.0": "h_joint_8_0",
+      "joint_9.0": "h_joint_9_0",
+      "link_0.0": "h_link_0_0",
+      "link_1.0": "h_link_1_0",
+      "link_10.0": "h_link_10_0",
+      "link_11.0": "h_link_11_0",
+      "link_11.0_tip": "h_link_11_0_tip",
+      "link_12.0": "h_link_12_0",
+      "link_13.0": "h_link_13_0",
+      "link_14.0": "h_link_14_0",
+      "link_15.0": "h_link_15_0",
+      "link_15.0_tip": "h_link_15_0_tip",
+      "link_2.0": "h_link_2_0",
+      "link_3.0": "h_link_3_0",
+      "link_3.0_tip": "h_link_3_0_tip",
+      "link_4.0": "h_link_4_0",
+      "link_5.0": "h_link_5_0",
+      "link_6.0": "h_link_6_0",
+      "link_7.0": "h_link_7_0",
+      "link_7.0_tip": "h_link_7_0_tip",
+      "link_8.0": "h_link_8_0",
+      "link_9.0": "h_link_9_0",
+      "palm_link": "h_palm_link"
+    }
+  },
+  "kinematics_file": "assets/skynet_allegro_v4_right.urdf",
+  "kinematics_sha256": "26f1d58bbea16be56b98a1b80be61b5873bbb29ea72250b18be754757b94ae47",
+  "control_names": [
+    "skynet_x",
+    "skynet_y",
+    "skynet_z",
+    "skynet_roll",
+    "skynet_pitch",
+    "skynet_yaw",
+    "h_joint_0_0",
+    "h_joint_1_0",
+    "h_joint_2_0",
+    "h_joint_3_0",
+    "h_joint_4_0",
+    "h_joint_5_0",
+    "h_joint_6_0",
+    "h_joint_7_0",
+    "h_joint_8_0",
+    "h_joint_9_0",
+    "h_joint_10_0",
+    "h_joint_11_0",
+    "h_joint_12_0",
+    "h_joint_13_0",
+    "h_joint_14_0",
+    "h_joint_15_0"
+  ],
+  "action_scale": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "action_offset": [
+    0.5,
+    0.0,
+    0.30000001192092896,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "wrist_names": [
+    "skynet_x",
+    "skynet_y",
+    "skynet_z",
+    "skynet_roll",
+    "skynet_pitch",
+    "skynet_yaw"
+  ],
+  "frame_link": "h_palm_link",
+  "link_to_frame": [
+    [
+      1.0,
+      0.0,
+      0.0,
+      -0.01
+    ],
+    [
+      0.0,
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0,
+      -0.095
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "tip_links": [
+    "h_link_15_0_tip",
+    "h_link_3_0_tip",
+    "h_link_7_0_tip",
+    "h_link_11_0_tip"
+  ],
+  "frame_convention": "Official UniDex named wrist link and HAND_TRANSFORMS; exported in camera OpenGL coordinates.",
+  "pose_convention": "position3 + first_two_rotation_rows6",
+  "reference_frame": "fixed_robot_base",
+  "state_semantics": "Measured pre-action independent joints, physical URDF mimic coordinates, native UniDex wrist.",
+  "action_semantics": "q_target = action * action_scale + action_offset; all chunk targets relative to one anchor",
+  "mapping_status": "VERIFIED",
+  "mapping": [
+    {
+      "joint": "h_joint_0_0",
+      "source_joint": "joint_0.0",
+      "slot": 5,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_joint_1_0",
+      "source_joint": "joint_1.0",
+      "slot": 7,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_joint_10_0",
+      "source_joint": "joint_10.0",
+      "slot": 18,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_joint_11_0",
+      "source_joint": "joint_11.0",
+      "slot": 19,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_joint_12_0",
+      "source_joint": "joint_12.0",
+      "slot": 1,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_joint_13_0",
+      "source_joint": "joint_13.0",
+      "slot": 0,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_joint_14_0",
+      "source_joint": "joint_14.0",
+      "slot": 2,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_joint_15_0",
+      "source_joint": "joint_15.0",
+      "slot": 3,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_joint_2_0",
+      "source_joint": "joint_2.0",
+      "slot": 8,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_joint_3_0",
+      "source_joint": "joint_3.0",
+      "slot": 9,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_joint_4_0",
+      "source_joint": "joint_4.0",
+      "slot": 10,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_joint_5_0",
+      "source_joint": "joint_5.0",
+      "slot": 12,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_joint_6_0",
+      "source_joint": "joint_6.0",
+      "slot": 13,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_joint_7_0",
+      "source_joint": "joint_7.0",
+      "slot": 14,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_joint_8_0",
+      "source_joint": "joint_8.0",
+      "slot": 15,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_joint_9_0",
+      "source_joint": "joint_9.0",
+      "slot": 17,
+      "scale": 1.0,
+      "offset": 0.0
+    }
+  ],
+  "upstream": {
+    "repository": "https://github.com/unidex-ai/UniDex",
+    "revision": "97d869e0f2d1ec0372cd3cdf28dde66b4e3f216d",
+    "mapping_file": "src/assets/utils/hand_utils.json",
+    "mapping_sha256": "d79907a33331d30a87fc7c17106095786e454b9ec0897bf0c811abc370ac3172",
+    "hand": "Allegro",
+    "urdf_sha256": "546aa0789a0f0ec62efc3756576f96375ab552c296adcbc37f84fc1538008d6d"
+  },
+  "mapping_evidence": "Named alias verified against pinned upstream URDF joint type, axes, origin, position limits and mimic relationships. Effort/velocity retain the original simulator asset.",
+  "runtime_controller": {
+    "source_file": "ops/xr/wrist.py",
+    "source_sha256": "8e6b6edb6c06f7817fada5196e6a38c374f14408abb8b51db22f6c6d41bd02c8",
+    "function": "configure_virtual_wrist",
+    "position_limit_overrides": {
+      "skynet_roll": [
+        -1000000.0,
+        1000000.0
+      ],
+      "skynet_pitch": [
+        -1000000.0,
+        1000000.0
+      ],
+      "skynet_yaw": [
+        -1000000.0,
+        1000000.0
+      ]
+    },
+    "reason": "Exact collection/evaluator virtual rotation limit override; physical finger limits preserved"
+  },
+  "native_wrist": {
+    "upstream_hand": "Allegro",
+    "upstream_physical_link": "base_link",
+    "local_physical_link": "h_palm_link",
+    "upstream_wrist_link": "wrist_link",
+    "physical_link_to_wrist": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        -0.01
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        -0.095
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "hand_transform": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "upstream_urdf_sha256": "546aa0789a0f0ec62efc3756576f96375ab552c296adcbc37f84fc1538008d6d",
+    "evidence": "Physical link equivalence uses the asset audit of every finger joint origin, axis and bounds; named wrist offset follows exact upstream fixed URDF joints. No retargeting base pose or dataset camera extrinsic is copied."
+  },
+  "spec_hash": "9bf7d16531288d2d8a93ed9d907e547a4a3824d71e932e7a98b8b260eb0324fc"
+}

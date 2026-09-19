@@ -1,13 +1,11 @@
 # XPolicyLab adapters
 
 The audited source is [XPolicyLab at 9c98a3aaf02d](https://github.com/XPolicyLab/XPolicyLab/tree/9c98a3aaf02d05c6f9999a5a0a7a42090555ddf3/policy).
-There are 44 policy directories, excluding the `demo_policy` template. 38 contain a native training entrypoint. Their manifests appear in **Experiments → Adapters** with the suffix **Native**.
+There are 44 policy directories, excluding the `demo_policy` template. 38 contain a native training entrypoint; Skynet registers 37 of them. Their manifests appear in **Experiments → Adapters** with the suffix **Native**.
 
-## Existing ACT and DP
+## ACT
 
 **ACT · Skynet recordings** imports the original `ACTPolicy`, including its transformer and L1/KL loss. Its major model defaults match `policy/ACT/train.sh`: 6000 epochs, chunk 50, hidden dimension 512, feedforward dimension 3200, KL weight 10, learning rate 1e-5 and batch 16. Skynet supplies the RGB/joint loader, training-only normalization, split handling, training loop, checkpoint format and distributed execution. It is a bridge for Skynet recordings, not a call to upstream `train.sh`.
-
-**Diffusion Policy · Skynet recordings** uses XPolicyLab diffusion components but has a custom future-action window and state encoder, loader, training loop and fixed EMA. Its state/RGB presets are not upstream DP defaults. The original RGB recipe has horizon 8, observation history 3, 6 executed actions, 600 epochs, batch 128, 100 inference steps, cosine scheduling with 500 warmup steps, weight decay 1e-6 and dynamic EMA. Existing Skynet defaults are 300 epochs, observation history 2, a 16-step future-action chunk, 20 inference steps, weight decay 1e-4 and fixed EMA 0.995. Existing pinned runs and data contracts are preserved.
 
 **ACT · Native** invokes the original launcher and accepts verified Skynet ACT HDF5 exports as well as native input packages. **Recordings → Convert → XPolicyLab · ACT · Native** uses the existing ACT converter. It validates every episode's arrays, joint layout and three RGB cameras, then checks a training and validation batch through the actual upstream loader. Existing `ACT · Skynet recordings` exports can also be selected for Native ACT without reconversion.
 
@@ -21,11 +19,9 @@ A cluster integration check on 2026-09-13 used all 51 episodes of recording `6a2
 
 The check also caught and fixed NumPy 1.26/2.x capture-unpickling compatibility and an overly long temporary path used by multiprocessing Unix sockets. Loader validation now uses a short-lived node-local IPC directory; recording payloads remain on shared cluster storage. Completed conversions can be checksum-verified and reused after loader validation failures.
 
-**DP · Native** still requires native prepared inputs; a Skynet Zarr export is not automatically compatible.
-
 ## Native policy coverage
 
-Training entrypoints are registered for A1, Abot_M0, ACT, AHA_WAM, Being_H05, Dexbotic_DM0, DP, DreamZero, EventVLA, FastWAM, G05, GalaxeaVLA, GigaWorldPolicy, GO1, GR00T_N17, H_RDT, Hy_Embodied_05_VLA, InternVLA_A1, LDA_1B, LingBot_VA, LingBot_VLA, Mem_0, OLA_SEM, OpenVLA_OFT, OpenWAM, Pi_0, Pi_05, Pi_0_Fast, RDT_1B, RISE, SmolVLA, Spirit_v15, starVLA, TinyVLA, X_VLA, X_WAM, Xiaomi_Robotics_0 and Xiaomi_Robotics_1.
+Training entrypoints are registered for A1, Abot_M0, ACT, AHA_WAM, Being_H05, Dexbotic_DM0, DreamZero, EventVLA, FastWAM, G05, GalaxeaVLA, GigaWorldPolicy, GO1, GR00T_N17, H_RDT, Hy_Embodied_05_VLA, InternVLA_A1, LDA_1B, LingBot_VA, LingBot_VLA, Mem_0, OLA_SEM, OpenVLA_OFT, OpenWAM, Pi_0, Pi_05, Pi_0_Fast, RDT_1B, RISE, SmolVLA, Spirit_v15, starVLA, TinyVLA, X_VLA, X_WAM, Xiaomi_Robotics_0 and Xiaomi_Robotics_1.
 
 Dexora_1B, InternVLA_A1_5, Meituan_Robotics_0, MolmoAct2, OpenDM and Spatial_Forcing have no `train.sh` in this commit. They are not registered as fabricated training implementations. Inference code is not evidence of a training implementation.
 
@@ -76,7 +72,7 @@ EventVLA instead uses `data_mix`, `memory_ablation_mode`, `keyframe_memory_polic
 6. Call upstream `train.sh` with structured arguments and preserve Slurm's `CUDA_VISIBLE_DEVICES`. Input prompts receive EOF. Nonzero exit status and failed shell pipelines are propagated. stdout/stderr are captured by the existing Slurm logging path.
 7. Record source/data identity, command, working directory, infrastructure patch hashes and exit status in `artifacts/native-launch.json`. Native checkpoints, metrics and generated files remain under the run's artifact workspace; no fabricated common metrics or checkpoint format is reported.
 
-Absolute paths inside user-supplied native configuration remain that configuration's responsibility; prefer the workspace placeholders. Large external frameworks and pretrained assets must be prepared explicitly. The catalog does not install or download 38 training stacks, submit GPU jobs, or assert that every model fits a particular GPU.
+Absolute paths inside user-supplied native configuration remain that configuration's responsibility; prefer the workspace placeholders. Large external frameworks and pretrained assets must be prepared explicitly. The catalog does not install or download 37 training stacks, submit GPU jobs, or assert that every model fits a particular GPU.
 
 Tests cover policy-specific argument APIs, immutable source/input handling, checksum and path failures, Slurm device mapping, infrastructure patch identity, GPU contract validation and propagation of a real child process failure. Full training requires policy-specific prepared data, weights, installed dependencies and a separate GPU validation run.
 

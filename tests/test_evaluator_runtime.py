@@ -223,7 +223,7 @@ def test_operational_readiness_probe_returns_actionable_blocker(monkeypatch) -> 
     ]
 
 
-def test_validation_requires_runtime_readiness_and_surfaces_blocker(monkeypatch) -> None:
+def test_validation_surfaces_existing_runtime_blockers_without_repeating_remote_probe(monkeypatch) -> None:
     service = PipelineService.__new__(PipelineService)
     run = {"id": "run-1"}
     checkpoint = {"id": "checkpoint-1", "path": "/checkpoint"}
@@ -276,10 +276,10 @@ def test_validation_requires_runtime_readiness_and_surfaces_blocker(monkeypatch)
     monkeypatch.setattr(service, "_resolve_evaluation_implementation", resolve)
 
     result = service.validate_evaluation_target(
-        "run-1", "/checkpoint", suite_id="suite-1", gateway="sky2"
+        "run-1", "/checkpoint", suite_id="suite-1", gateway="sky2", argv=["python", "manual-evaluation.py"]
     )
 
-    assert observed["verify_evaluator_runtime"] is True
+    assert observed["verify_evaluator_runtime"] is False
     assert observed["evaluator_runtime_gateway"] == "sky2"
     assert result["plan_valid"] is False
     assert result["valid"] is False

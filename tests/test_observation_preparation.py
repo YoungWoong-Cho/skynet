@@ -15,7 +15,7 @@ import pytest
 
 from skynet_app.cluster_runtime import ClusterClient, ClusterError, WORK_ROOT
 from skynet_app.database import Database, canonical_json
-from skynet_app.dataset_formats import RECIPES
+from test_policy_exports import create, install_adapters, set_requirements
 from skynet_app.live_xr_review import LiveReviewService
 from skynet_app.observation_contracts import ARTIFACT_SCHEMA, PREPARE_SCHEMA, rgb_requirements
 from skynet_app.policy_exports import PolicyExportService
@@ -133,6 +133,8 @@ def context(tmp_path, monkeypatch):
     live = SimpleNamespace(root=ROOT, database=db, get=sessions.__getitem__, list=lambda **kw: list(sessions.values()),
                            archive=SimpleNamespace(resolve=resolve, ensure=lambda _: pytest.fail('archive already ready')))
     service = PolicyExportService(LiveReviewService(live, root=tmp_path / 'reviews'), root=tmp_path / 'exports', cluster=cluster)
+    install_adapters(service)
+    monkeypatch.setattr(PolicyExportService, '_preflight_sources', lambda self, job, sources: sources)
     monkeypatch.setattr(service, 'dispatch', lambda _: None)
     yield SimpleNamespace(service=service, cluster=cluster, sessions=sessions, add_session=add_session, db=db)
     service.stop()
@@ -149,11 +151,11 @@ def cloud_contract():
 
 def test_state_only_conversion_has_no_observation_producer(context):
     service, cluster = context.service, context.cluster
-    job = service.create('first', 'dp-state', 'State only')
+    job = create(service, 'first', 'fixture-state', 'State only')
     assert job['observation_contract']['streams'] == []
     service.prepare(job['id'])
     current = service.get(job['id'])
-    assert current['state'] == 'PENDING', current
+    assert current['state'] == 'PENDING', current.get('error') or current
     assert not service.observations.store.producers()
     assert not service.observations.store.for_job(job['id'])
     assert len(cluster.submissions) == 1
@@ -167,8 +169,8 @@ def test_plan_claim_render_derive_then_cpu_and_version_refs(context, monkeypatch
     service, cluster = context.service, context.cluster
     # Exercise the generic declared-requirements path without inventing a new
     # production adapter or changing the existing converter contract.
-    monkeypatch.setitem(RECIPES['dp'], 'observation_requirements', cloud_contract())
-    job = service.create('first', 'dp', 'RGB and cloud requirements')
+    set_requirements(service, 'test-recording-inputs', cloud_contract())
+    job = create(service, 'first', 'fixture-rgb', 'RGB and cloud requirements')
     assert not cluster.submissions  # clicking Convert only freezes requirements
     service.prepare(job['id'])
     current = service.get(job['id'])
@@ -198,7 +200,7 @@ def test_plan_claim_render_derive_then_cpu_and_version_refs(context, monkeypatch
     assert 'export PYTHONPATH=' not in derive['script']
     request = derive_request['requests'][0]
     assert request['modality'] == 'point_cloud' and len(request['dependencies']) == 2
-    assert all(ref['manifest_sha256'] and ref['path'].startswith(f'{WORK_ROOT}/datasets/observations/') for ref in request['dependencies'])
+    assert all(ref['manifest_sha256'] and ref['path'].startswith(f'{WORK_ROOT}/datasets/recordings/') for ref in request['dependencies'])
     assert len(cluster.submissions) == 2
     cluster.publish(derive)
     service.observations.tick()
@@ -227,8 +229,8 @@ def test_plan_claim_render_derive_then_cpu_and_version_refs(context, monkeypatch
 
 def test_concurrent_formats_share_one_rgb_producer(context):
     service, cluster = context.service, context.cluster
-    first = service.create('first', 'dp', 'DP')
-    second = service.create('first', 'act', 'ACT')
+    first = create(service, 'first', 'fixture-rgb', 'Fixture RGB')
+    second = create(service, 'first', 'act', 'ACT')
     # Independent monitors use separate store owners against the same real DB.
     other = PolicyExportService(service.reviews, root=service.root, cluster=cluster)
     barrier = threading.Barrier(2)
@@ -258,7 +260,7 @@ def test_concurrent_formats_share_one_rgb_producer(context):
 def test_multi_hand_selection_keeps_simulator_batches_isolated(context):
     service, cluster = context.service, context.cluster
     context.add_session('second', robot='skynet_wuji_2_right', checksum='b' * 64)
-    job = service.create('first', 'dp', 'Two hands', selections=[dict(session_id='first', indices=None), dict(session_id='second', indices=None)])
+    job = create(service, 'first', 'fixture-rgb', 'Two hands', selections=[dict(session_id='first', indices=None), dict(session_id='second', indices=None)])
     service.prepare(job['id'])
     current = service.get(job['id'])
     assert current['stage'] == 'OBSERVATIONS', current
@@ -288,7 +290,7 @@ def test_multi_hand_selection_keeps_simulator_batches_isolated(context):
 @pytest.mark.parametrize('corrupt', ['attempt', 'spec', 'partial'])
 def test_unverified_observation_receipt_never_submits_converter(context, corrupt):
     service, cluster = context.service, context.cluster
-    job = service.create('first', 'dp', 'Invalid result')
+    job = create(service, 'first', 'fixture-rgb', 'Invalid result')
     service.prepare(job['id'])
     producer = service.observations.store.producers()[0]
     cluster.publish(producer, corrupt=corrupt)
@@ -302,7 +304,7 @@ def test_unverified_observation_receipt_never_submits_converter(context, corrupt
 
 def test_changed_frozen_plan_is_rejected_before_cpu_submission(context):
     service, cluster = context.service, context.cluster
-    job = service.create('first', 'dp', 'Frozen plan')
+    job = create(service, 'first', 'fixture-rgb', 'Frozen plan')
     service.prepare(job['id'])
     plan = service.root / job['id'] / 'observation-plan.json'
     plan.write_text(plan.read_text() + ' ')
@@ -315,7 +317,7 @@ def test_changed_frozen_plan_is_rejected_before_cpu_submission(context):
 @pytest.mark.parametrize('log_prefix', [None, '', 'Simulator initialization\n' * 20000], ids=['missing-log', 'short-log', 'large-log'])
 def test_terminal_scheduler_failure_without_receipt_does_not_wait_forever(context, log_prefix):
     service, cluster = context.service, context.cluster
-    job = service.create('first', 'dp', 'Failed bootstrap')
+    job = create(service, 'first', 'fixture-rgb', 'Failed bootstrap')
     service.prepare(job['id'])
     producer = service.observations.store.producers()[0]
     cluster.states[producer['cluster_job_id']] = 'FAILED'
@@ -333,7 +335,7 @@ def test_terminal_scheduler_failure_without_receipt_does_not_wait_forever(contex
 
 def test_unknown_scheduler_status_keeps_same_attempt_until_recovery(context, monkeypatch):
     service, cluster = context.service, context.cluster
-    job = service.create('first', 'dp', 'Reconnect')
+    job = create(service, 'first', 'fixture-rgb', 'Reconnect')
     service.prepare(job['id'])
     producer = service.observations.store.producers()[0]
     statuses = cluster.job_statuses
@@ -358,7 +360,7 @@ def test_long_selection_is_partitioned_into_bounded_complete_render_requests(con
     monkeypatch.setattr(module, 'MAX_BATCH_SOURCES', 2)
     for index in range(1, 5):
         context.add_session(f'episode-{index}', checksum=f'{index:064x}')
-    job = service.create('first', 'dp', 'Bounded selection', selections=[
+    job = create(service, 'first', 'fixture-rgb', 'Bounded selection', selections=[
         dict(session_id=identifier, indices=None) for identifier in context.sessions])
     service.prepare(job['id'])
     assert service.get(job['id'])['stage'] == 'OBSERVATIONS'
@@ -396,7 +398,7 @@ def test_observation_transport_tracks_service_injection(context):
 @pytest.mark.parametrize('scheduler_state', ['REQUEUED', 'RESIZING', 'UNKNOWN', 'SPECIAL_EXIT', 'PREEMPTED', 'REVOKED'])
 def test_scheduler_transition_and_unknown_state_preserve_observation_attempt(context, scheduler_state):
     service, cluster = context.service, context.cluster
-    job = service.create('first', 'dp', 'Keep producer attempt')
+    job = create(service, 'first', 'fixture-rgb', 'Keep producer attempt')
     service.prepare(job['id'])
     original = service.observations.store.producers()[0]
     keys = set(service.observations.store.for_job(job['id']))
@@ -423,7 +425,7 @@ def completed_without_receipt(context, monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr(module, 'time', lambda: clock[0])
     service, cluster = context.service, context.cluster
-    job = service.create('first', 'dp', 'Completed without receipt')
+    job = create(service, 'first', 'fixture-rgb', 'Completed without receipt')
     service.prepare(job['id'])
     producer = service.observations.store.producers()[0]
     cluster.states[producer['cluster_job_id']] = 'COMPLETED'
@@ -524,7 +526,7 @@ def test_requeued_producer_resets_completed_result_visibility_grace(context, mon
 def test_observation_tick_batches_statuses_and_preserves_attempts_on_outage(context, monkeypatch):
     service, cluster = context.service, context.cluster
     context.add_session('second', robot='skynet_wuji_2_right', checksum='b' * 64)
-    job = service.create('first', 'dp', 'Batched scheduler status',
+    job = create(service, 'first', 'fixture-rgb', 'Batched scheduler status',
         selections=[dict(session_id='first', indices=None), dict(session_id='second', indices=None)])
     service.prepare(job['id'])
     producers = service.observations.store.producers()

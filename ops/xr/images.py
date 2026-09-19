@@ -1,21 +1,10 @@
-"""Synchronized RGB sidecars, frozen with each collection session.
-
-No Isaac imports at module load: the file writer and layout validation are CPU-testable.
-"""
+"""Fixed scene camera configuration for adapter simulation evaluation."""
 import hashlib
 import json
-from pathlib import Path
-import time
-from uuid import uuid4
-
-import numpy as np
 
 CAMERAS = {"scene_front": "third_person_camera", "scene_left": "third_person_camera_left", "scene_right": "third_person_camera_right"}
-SCHEMA = "skynet.rgb-trajectory/v1"
-MAX_STEPS = 6000
 
 
-from recording_metadata import array, joint_layout, state_metadata as _state_metadata
 
 
 def configure_cameras(cfg):
@@ -33,146 +22,6 @@ def configure_cameras(cfg):
         if name not in CAMERAS.values() and "camera" in name:
             setattr(cfg.scene, name, None)
     cfg.observations.debug_vis = None
-
-
-class ImageWriter:
-    """Stream every control step to a temporary file; publish only complete episodes."""
-    def __init__(self, root, metadata):
-        import h5py
-        self.root = Path(root)
-        directory = self.root / "recordings/live"
-        directory.mkdir(parents=True, exist_ok=True)
-        self.path = directory / ("images-" + uuid4().hex + ".hdf5")
-        self.temp = self.path.with_suffix(".part")
-        self.file = h5py.File(self.temp, "x")
-        self.file.attrs["schema"] = SCHEMA
-        stored_metadata = dict(metadata)
-        scene = stored_metadata.pop("scene_geometry", None)
-        self.file.attrs["metadata"] = json.dumps(stored_metadata, allow_nan=False)
-        if scene:
-            # Large meshes belong in a compressed dataset, not HDF5's bounded attribute header.
-            payload = json.dumps(scene, allow_nan=False, separators=(",", ":")).encode()
-            if len(payload) <= 12_000_000:
-                self.file.create_dataset("scene_geometry", data=np.frombuffer(payload, dtype="u1"), compression="gzip")
-            else:
-                self.file.attrs["scene_geometry_error"] = "Scene geometry exceeds the recording size limit"
-        self.steps = 0
-        self.dimension = len(metadata["action_joint_names"])
-
-    def append(self, state, action, images, timestamp, wall_time):
-        state, action = array(state).reshape(-1), array(action).reshape(-1)
-        if state.shape != (self.dimension,) or action.shape != state.shape or not np.isfinite([state, action]).all():
-            raise ValueError("Invalid image-aligned state/action")
-        if self.steps >= MAX_STEPS:
-            raise ValueError("Image episode exceeded 6000 steps; restart with a shorter demonstration")
-        values = dict(state=state.astype("f4"), action=action.astype("f4"), timestamps=np.asarray(timestamp, dtype="f8"), wall_times=np.asarray(wall_time, dtype="f8"))
-        if set(images) != set(CAMERAS):
-            raise ValueError("All three training cameras must be present")
-        for name, image in images.items():
-            image = array(image)
-            if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3 or not all(image.shape):
-                raise ValueError("Camera did not produce an RGB uint8 frame")
-            values["images/" + name] = image
-        if not np.isfinite([timestamp, wall_time]).all():
-            raise ValueError("Invalid frame timestamp")
-        if self.steps and timestamp <= self.file["timestamps"][-1]:
-            raise ValueError("Frame timestamps must increase")
-        for key, value in values.items():
-            if key not in self.file:
-                self.file.create_dataset(key, shape=(0, *value.shape), maxshape=(None, *value.shape), dtype=value.dtype, chunks=(1, *value.shape), compression="lzf")
-            dataset = self.file[key]
-            if dataset.shape[1:] != value.shape:
-                raise ValueError("Camera or robot shape changed during the episode")
-            dataset.resize(self.steps + 1, axis=0)
-            dataset[self.steps] = value
-        self.steps += 1
-        if self.steps % 60 == 0:
-            self.file.flush()
-            if self.temp.stat().st_size > 4_000_000_000:
-                raise ValueError("Image episode exceeds its 4 GB limit")
-
-    def finish(self):
-        if not self.steps:
-            raise ValueError("Cannot save an empty image episode")
-        self.file.attrs["complete"] = True
-        self.file.close()
-        with self.temp.open("rb") as stream:
-            import os
-            os.fsync(stream.fileno())
-            digest = hashlib.file_digest(stream, "sha256").hexdigest()
-        if self.path.exists():
-            raise FileExistsError("Refusing to replace saved images")
-        self.temp.replace(self.path)
-        return dict(path=str(self.path.relative_to(self.root)), sha256=digest, size_bytes=self.path.stat().st_size, steps=self.steps, schema=SCHEMA)
-
-    def discard(self):
-        self.file.close()
-        self.temp.unlink(missing_ok=True)
-
-
-def state_metadata(env, profile):
-    ids, metadata = _state_metadata(env, profile)
-    metadata.update(
-        alignment="image and state before action; simulation time excludes tracking pauses",
-        color_space="RGB",
-        cameras={k: dict(sensor=v, mount="fixed_scene", width=256, height=256) for k, v in CAMERAS.items()},
-    )
-    return ids, metadata
-
-
-class ImageRecorder:
-    def __init__(self, root, env, profile, retargeters):
-        # Fail before recording if the runtime is missing HDF5 support.
-        import h5py  # noqa: F401
-        self.root, self.env, self.retargeters = root, env, retargeters
-        self.writer = None
-        self.ids, self.metadata = state_metadata(env, profile)
-
-    def begin(self):
-        self.discard()
-        # Render several times after reset to warm the camera pipeline, without stepping physics.
-        for _ in range(3):
-            self.env.sim.render()
-        for name, sensor_name in CAMERAS.items():
-            sensor = self.env.scene[sensor_name]
-            sensor.update(0.0, force_recompute=True)
-            data = sensor.data
-            self.metadata["cameras"][name].update(
-                intrinsic_matrix=array(data.intrinsic_matrices)[0].tolist(),
-                position_world=array(data.pos_w)[0].tolist(),
-                quaternion_world_ros=array(data.quat_w_ros)[0].tolist(),
-            )
-        self.writer = ImageWriter(self.root, self.metadata)
-
-    def append(self, action, wall_time=None):
-        # Tracking overlays belong to the headset preview, not the training cameras.
-        markers = [getattr(r, n, None) for r in self.retargeters for n in ("_markers", "_canonical_markers")]
-        for marker in markers:
-            if marker is not None:
-                marker.set_visibility(False)
-        try:
-            self.env.sim.render()
-            images = {}
-            for name, sensor_name in CAMERAS.items():
-                sensor = self.env.scene[sensor_name]
-                sensor.update(0.0, force_recompute=True)
-                images[name] = array(sensor.data.output["rgb"])[0, :, :, :3].copy()
-            state = self.env.scene["robot"].data.joint_pos[0, self.ids]
-            self.writer.append(state, action, images, self.writer.steps * self.metadata["step_dt"], time.time() if wall_time is None else wall_time)
-        finally:
-            for marker in markers:
-                if marker is not None:
-                    marker.set_visibility(True)
-
-    def finish(self):
-        result = self.writer.finish()
-        self.writer = None
-        return result
-
-    def discard(self):
-        if self.writer:
-            self.writer.discard()
-            self.writer = None
 
 
 def camera_recipe(cfg):

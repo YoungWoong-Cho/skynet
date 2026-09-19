@@ -6,7 +6,7 @@ names, and declared aliases remain available for existing dashboards. Booleans,
 strings, arrays, private fields, NaN and infinity are not scalar chart data.
 Integers remain integers in W&B, including optimizer step counters.
 
-This shared path covers the native EgoVerse ACT, HPT, and PI adapters and XPolicyLab ACT/DP.
+This shared path covers the native EgoVerse ACT, HPT, and PI adapters and XPolicyLab ACT.
 EgoVerse records losses, validation metrics, learning rates, gradient norms and
 timings at epoch end. XPolicyLab's additional fields, such as `best_val_loss`,
 are forwarded too. No per-model metric allowlist is required. Validation values

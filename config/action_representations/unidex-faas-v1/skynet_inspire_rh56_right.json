@@ -1,0 +1,443 @@
+{
+  "schema": "skynet.unidex-faas/v1",
+  "robot": "skynet_inspire_rh56_right",
+  "side": "right",
+  "faas_dim": 82,
+  "units": {
+    "length": "m",
+    "angle": "rad"
+  },
+  "source_revision": "30cc673e27684b9f10186fa6bea731aed246bc9f",
+  "capture": {
+    "robot": "skynet_inspire_rh56_right",
+    "task": "Dexverse-PickCube-v0",
+    "hand": "right",
+    "action_joint_names": [
+      "skynet_x",
+      "skynet_y",
+      "skynet_z",
+      "skynet_roll",
+      "skynet_pitch",
+      "skynet_yaw",
+      "h_thumb_proximal_yaw_joint",
+      "h_thumb_proximal_pitch_joint",
+      "h_index_proximal_joint",
+      "h_middle_proximal_joint",
+      "h_ring_proximal_joint",
+      "h_pinky_proximal_joint"
+    ],
+    "action_scale": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "action_offset": [
+      0.5,
+      0.0,
+      0.30000001192092896,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "action_semantics": "raw_joint_position_command; target = action * scale + offset",
+    "step_dt": 0.016666666666666666,
+    "source_revision": "30cc673e27684b9f10186fa6bea731aed246bc9f",
+    "groups": [
+      {
+        "finger_indices": [
+          6,
+          7,
+          8,
+          9,
+          10,
+          11
+        ],
+        "side": "right",
+        "wrist_indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      }
+    ],
+    "hand_asset": {
+      "digest": "784e43897b6fa74c369d0b8a177d764ba7732b86c58057ce397eff49000ec427",
+      "schema": "skynet.hand-bundle/v1",
+      "source_model_sha256": "4e60ae1747eceaeae15eef07ded02da8802aa36b5cd8838ac47064ab6a861597",
+      "source_revision": "39bfca04a69912e6561628156d1c63e37698eb75"
+    },
+    "hands": {
+      "right": {
+        "control_frame": "skynet_palm",
+        "finger_joints": [
+          "h_thumb_proximal_yaw_joint",
+          "h_thumb_proximal_pitch_joint",
+          "h_index_proximal_joint",
+          "h_middle_proximal_joint",
+          "h_ring_proximal_joint",
+          "h_pinky_proximal_joint"
+        ],
+        "palm": "h_base",
+        "tips": [
+          "h_thumb_tip",
+          "h_index_tip",
+          "h_middle_tip",
+          "h_ring_tip",
+          "h_pinky_tip"
+        ],
+        "wrist_joints": [
+          "skynet_x",
+          "skynet_y",
+          "skynet_z",
+          "skynet_roll",
+          "skynet_pitch",
+          "skynet_yaw"
+        ]
+      }
+    },
+    "hand_order": [
+      "right"
+    ],
+    "units": {
+      "angle": "rad",
+      "length": "m",
+      "mass": "kg"
+    },
+    "wrist_rotation_order": "intrinsic_XYZ",
+    "kinematics_sha256": "87c5afa906d2a97687e5c8af71cdce0aa04ec77d8ccaff189d4a4b46526db900"
+  },
+  "asset": {
+    "digest": "784e43897b6fa74c369d0b8a177d764ba7732b86c58057ce397eff49000ec427",
+    "schema": "skynet.hand-bundle/v1",
+    "source_model_sha256": "4e60ae1747eceaeae15eef07ded02da8802aa36b5cd8838ac47064ab6a861597",
+    "source_revision": "39bfca04a69912e6561628156d1c63e37698eb75",
+    "manifest_sha256": "15c67411d0151ed224c4e6cac059160f1af95fce53743510d6e4a1b6c3e96151",
+    "simulation_urdf_sha256": "dc26664074fc22f3507db6d32c72ae86fb07b38c01501c9d7687e9399917548d",
+    "hand_urdf_sha256": "05a39883e58e2d72e81d70280a0bac58ce8be23e3a2353206a1dbee5b5bae93c",
+    "source_names": {
+      "base": "h_base",
+      "base_joint": "h_base_joint",
+      "hand_base_link": "h_hand_base_link",
+      "index_intermediate": "h_index_intermediate",
+      "index_intermediate_joint": "h_index_intermediate_joint",
+      "index_proximal": "h_index_proximal",
+      "index_proximal_joint": "h_index_proximal_joint",
+      "index_tip": "h_index_tip",
+      "index_tip_joint": "h_index_tip_joint",
+      "middle_intermediate": "h_middle_intermediate",
+      "middle_intermediate_joint": "h_middle_intermediate_joint",
+      "middle_proximal": "h_middle_proximal",
+      "middle_proximal_joint": "h_middle_proximal_joint",
+      "middle_tip": "h_middle_tip",
+      "middle_tip_joint": "h_middle_tip_joint",
+      "pinky_intermediate": "h_pinky_intermediate",
+      "pinky_intermediate_joint": "h_pinky_intermediate_joint",
+      "pinky_proximal": "h_pinky_proximal",
+      "pinky_proximal_joint": "h_pinky_proximal_joint",
+      "pinky_tip": "h_pinky_tip",
+      "pinky_tip_joint": "h_pinky_tip_joint",
+      "ring_intermediate": "h_ring_intermediate",
+      "ring_intermediate_joint": "h_ring_intermediate_joint",
+      "ring_proximal": "h_ring_proximal",
+      "ring_proximal_joint": "h_ring_proximal_joint",
+      "ring_tip": "h_ring_tip",
+      "ring_tip_joint": "h_ring_tip_joint",
+      "thumb_distal": "h_thumb_distal",
+      "thumb_distal_joint": "h_thumb_distal_joint",
+      "thumb_intermediate": "h_thumb_intermediate",
+      "thumb_intermediate_joint": "h_thumb_intermediate_joint",
+      "thumb_proximal": "h_thumb_proximal",
+      "thumb_proximal_base": "h_thumb_proximal_base",
+      "thumb_proximal_pitch_joint": "h_thumb_proximal_pitch_joint",
+      "thumb_proximal_yaw_joint": "h_thumb_proximal_yaw_joint",
+      "thumb_tip": "h_thumb_tip",
+      "thumb_tip_joint": "h_thumb_tip_joint"
+    }
+  },
+  "kinematics_file": "assets/skynet_inspire_rh56_right.urdf",
+  "kinematics_sha256": "87c5afa906d2a97687e5c8af71cdce0aa04ec77d8ccaff189d4a4b46526db900",
+  "control_names": [
+    "skynet_x",
+    "skynet_y",
+    "skynet_z",
+    "skynet_roll",
+    "skynet_pitch",
+    "skynet_yaw",
+    "h_thumb_proximal_yaw_joint",
+    "h_thumb_proximal_pitch_joint",
+    "h_index_proximal_joint",
+    "h_middle_proximal_joint",
+    "h_ring_proximal_joint",
+    "h_pinky_proximal_joint"
+  ],
+  "action_scale": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "action_offset": [
+    0.5,
+    0.0,
+    0.30000001192092896,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "wrist_names": [
+    "skynet_x",
+    "skynet_y",
+    "skynet_z",
+    "skynet_roll",
+    "skynet_pitch",
+    "skynet_yaw"
+  ],
+  "frame_link": "h_hand_base_link",
+  "link_to_frame": [
+    [
+      -1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      -1.0,
+      0.0
+    ],
+    [
+      0.0,
+      -1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "tip_links": [
+    "h_thumb_tip",
+    "h_index_tip",
+    "h_middle_tip",
+    "h_ring_tip",
+    "h_pinky_tip"
+  ],
+  "frame_convention": "Official UniDex named wrist link and HAND_TRANSFORMS; exported in camera OpenGL coordinates.",
+  "pose_convention": "position3 + first_two_rotation_rows6",
+  "reference_frame": "fixed_robot_base",
+  "state_semantics": "Measured pre-action independent joints, physical URDF mimic coordinates, native UniDex wrist.",
+  "action_semantics": "q_target = action * action_scale + action_offset; all chunk targets relative to one anchor",
+  "mapping_status": "VERIFIED",
+  "mapping": [
+    {
+      "joint": "h_index_intermediate_joint",
+      "source_joint": "index_intermediate_joint",
+      "slot": 8,
+      "scale": 1.0,
+      "offset": -0.04545
+    },
+    {
+      "joint": "h_index_proximal_joint",
+      "source_joint": "index_proximal_joint",
+      "slot": 7,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_middle_intermediate_joint",
+      "source_joint": "middle_intermediate_joint",
+      "slot": 13,
+      "scale": 1.0,
+      "offset": -0.04545
+    },
+    {
+      "joint": "h_middle_proximal_joint",
+      "source_joint": "middle_proximal_joint",
+      "slot": 12,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_pinky_intermediate_joint",
+      "source_joint": "pinky_intermediate_joint",
+      "slot": 23,
+      "scale": 1.0,
+      "offset": -0.04545
+    },
+    {
+      "joint": "h_pinky_proximal_joint",
+      "source_joint": "pinky_proximal_joint",
+      "slot": 22,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_ring_intermediate_joint",
+      "source_joint": "ring_intermediate_joint",
+      "slot": 18,
+      "scale": 1.0,
+      "offset": -0.04545
+    },
+    {
+      "joint": "h_ring_proximal_joint",
+      "source_joint": "ring_proximal_joint",
+      "slot": 17,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_thumb_distal_joint",
+      "source_joint": "thumb_distal_joint",
+      "slot": 4,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_thumb_intermediate_joint",
+      "source_joint": "thumb_intermediate_joint",
+      "slot": 3,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_thumb_proximal_pitch_joint",
+      "source_joint": "thumb_proximal_pitch_joint",
+      "slot": 2,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "joint": "h_thumb_proximal_yaw_joint",
+      "source_joint": "thumb_proximal_yaw_joint",
+      "slot": 1,
+      "scale": 1.0,
+      "offset": 0.0
+    }
+  ],
+  "upstream": {
+    "repository": "https://github.com/unidex-ai/UniDex",
+    "revision": "97d869e0f2d1ec0372cd3cdf28dde66b4e3f216d",
+    "mapping_file": "src/assets/utils/hand_utils.json",
+    "mapping_sha256": "d79907a33331d30a87fc7c17106095786e454b9ec0897bf0c811abc370ac3172",
+    "hand": "Inspire",
+    "urdf_sha256": "9afddd543b443d9003b34240378e85ed540330bc2c706fab08de7c634be9d8df"
+  },
+  "mapping_evidence": "Named alias verified against pinned upstream URDF joint type, axes, origin, position limits and mimic relationships. Effort/velocity retain the original simulator asset.",
+  "runtime_controller": {
+    "source_file": "ops/xr/wrist.py",
+    "source_sha256": "8e6b6edb6c06f7817fada5196e6a38c374f14408abb8b51db22f6c6d41bd02c8",
+    "function": "configure_virtual_wrist",
+    "position_limit_overrides": {
+      "skynet_roll": [
+        -1000000.0,
+        1000000.0
+      ],
+      "skynet_pitch": [
+        -1000000.0,
+        1000000.0
+      ],
+      "skynet_yaw": [
+        -1000000.0,
+        1000000.0
+      ]
+    },
+    "reason": "Exact collection/evaluator virtual rotation limit override; physical finger limits preserved"
+  },
+  "native_wrist": {
+    "upstream_hand": "Inspire",
+    "upstream_physical_link": "hand_base_link",
+    "local_physical_link": "h_hand_base_link",
+    "upstream_wrist_link": "hand_base_link",
+    "physical_link_to_wrist": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "hand_transform": [
+      [
+        -1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        -0.0,
+        -0.0,
+        -1.0,
+        0.0
+      ],
+      [
+        -0.0,
+        -1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "upstream_urdf_sha256": "9afddd543b443d9003b34240378e85ed540330bc2c706fab08de7c634be9d8df",
+    "evidence": "Physical link equivalence uses the asset audit of every finger joint origin, axis and bounds; named wrist offset follows exact upstream fixed URDF joints. No retargeting base pose or dataset camera extrinsic is copied."
+  },
+  "spec_hash": "0443000e66ea4a30faf0ba9f31fdccf3f625bd51dd3389e1f2ad1e32e8bc2899"
+}

@@ -14,7 +14,7 @@ submissions are rejected before creating an evaluation stage.
 ## Independent recorded-policy execution
 
 The policy loader and suite executor are separate. EgoVerse ACT/HPT recorded-joint
-policies and XPolicyLab ACT/DP policies share the recorded simulator executor.
+policies and XPolicyLab ACT policies share the recorded simulator executor.
 They can use the registered `dexverse_recorded` suite or the single-episode suite
 when its dataset conditions hold. Deleting a suite still removes it from the
 picker; this module never registers or restores suites.

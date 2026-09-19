@@ -12,6 +12,55 @@ from pydantic import Field, model_validator
 
 from .experiments import CanonicalModel
 
+RECORDING_DATASET_FORMAT = "skynet.recording-dataset/v1"
+
+
+class RecordingLoaderValidation(CanonicalModel):
+    """The selected adapter's CPU loader check."""
+    runtime_profile: str
+    script: str
+    argv: list[str]
+    schemas: list[str]
+    mode: str
+
+
+class RecordingDataPreset(CanonicalModel):
+    id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
+    name: str
+    description: str = ""
+    contract: str
+    observations: list[str]
+    action_representation: str | dict[str, Any]
+    observation_requirements: dict[str, Any]
+    training_setup: dict[str, Any]
+    loader_validation: RecordingLoaderValidation
+    conversion_dependencies: list[str] = Field(default_factory=list)
+    minimum_episodes: int = Field(default=1, ge=1)
+    validation_required: bool = False
+    split_mode: Literal["episode"] = "episode"
+    temporal: dict[str, Any] = Field(default_factory=dict)
+    preprocessing: dict[str, Any] = Field(default_factory=dict)
+    supported_robots: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_recording_requirements(self):
+        from .observation_contracts import validate_requirements
+        self.observation_requirements = validate_requirements(self.observation_requirements)
+        return self
+
+
+class RecordingConversion(CanonicalModel):
+    format: Literal["skynet.recording-dataset/v1"] = RECORDING_DATASET_FORMAT
+    default_preset: str
+    presets: list[RecordingDataPreset] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def unique_presets(self):
+        identifiers = [preset.id for preset in self.presets]
+        if len(identifiers) != len(set(identifiers)) or self.default_preset not in identifiers:
+            raise ValueError("Recording conversion requires unique presets and a declared default")
+        return self
+
 
 class DatasetRequirement(CanonicalModel):
     description: str
@@ -19,6 +68,7 @@ class DatasetRequirement(CanonicalModel):
     observations: list[str] = Field(default_factory=list)
     action_representation: str | None = None
     observation_requirements: dict[str, Any] | None = None
+    recording_conversion: RecordingConversion | None = None
 
     @model_validator(mode="after")
     def validate_observations(self):

@@ -3207,6 +3207,99 @@ footer {
 #live-review-content > * {
   margin-block: 12px;
 }
+#live-review-content {
+  --review-placeholder: "Loading…";
+}
+#live-review-content[data-review-state="error"] {
+  --review-placeholder: "Unavailable";
+}
+#live-episode-viewer .episode-viewer-stage > #live-review-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+  background: var(--surface-soft);
+  color: var(--muted);
+}
+#live-review-loading p {
+  margin: 0;
+}
+#live-review-content[data-review-state="loading"] .episode-viewer-stage > :not(#live-review-loading),
+#live-review-content[data-review-state="error"] .episode-viewer-stage > :not(#live-review-loading) {
+  visibility: hidden;
+}
+#live-review-values-content,
+#live-episode-viewer .episode-viewer-playback-info {
+  position: relative;
+}
+#live-review-content:is([data-review-state="loading"], [data-review-state="error"]) :is(.episode-viewer-playback-info, #live-review-source, #live-review-values-content) > * {
+  visibility: hidden;
+}
+#live-review-content:is([data-review-state="loading"], [data-review-state="error"]) :is(.episode-viewer-playback-info, #live-review-source, #live-review-values-content)::after {
+  content: var(--review-placeholder);
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding-inline: 14px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+#live-review-content:is([data-review-state="loading"], [data-review-state="error"]) .episode-viewer-playback-info::after {
+  justify-content: flex-end;
+  padding: 0;
+}
+#live-review-content:is([data-review-state="loading"], [data-review-state="error"]) :is(.episode-viewer-playback .form-actions, .episode-viewer-playback input, .episode-viewer-layers > label) {
+  opacity: 0.4;
+}
+#live-review-content:is([data-review-state="loading"], [data-review-state="error"]) .episode-viewer-main > :is([role="status"], .button),
+#live-episode-viewer .episode-viewer-main > [role="status"]:empty {
+  display: none;
+}
+.recording-path {
+  position: relative;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.recording-path pre {
+  margin: 0;
+  padding: 14px 54px 14px 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.recording-path-copy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.recording-path-copy:hover {
+  background: var(--line);
+  color: var(--ink);
+}
+.recording-path-copy:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
 .live-review-controls {
   display: flex;
   flex-wrap: wrap;
@@ -3374,6 +3467,28 @@ footer {
 }
 #prepared-dataset-content h3 {
   margin-bottom: 8px;
+}
+
+.adapter-input-modalities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.adapter-input-modalities > li {
+  padding: 7px 10px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font: 10px var(--mono);
+}
+.adapter-input-modalities > li.is-used {
+  color: var(--green);
+  background: var(--green-soft);
+  border-color: var(--green);
 }
 
 /* Dialog-only forms use a compact layout. Reused page forms keep the same
@@ -3690,6 +3805,52 @@ table:has(> tbody#data-bundles-body) :is(th, td):nth-child(5) {
 .episode-viewer-layers label:has(input:disabled) {
   opacity: 0.5;
 }
+#live-episode-viewer .episode-viewer-layers {
+  align-items: center;
+}
+.live-review-recording-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.live-review-recording-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.live-review-recording-actions button:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--surface-soft);
+}
+.live-review-recording-actions button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.live-review-recording-actions button:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+.live-review-recording-actions .live-review-delete:hover:not(:disabled) {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+.live-review-recording-actions .live-review-delete:focus-visible {
+  outline: 2px solid var(--danger);
+  outline-offset: 2px;
+}
 .episode-viewer-stage {
   position: relative;
   background: #f1f3f4;
@@ -3889,4 +4050,98 @@ table:has(> tbody#data-bundles-body) :is(th, td):nth-child(5) {
 .episode-viewer-playback button[aria-pressed="true"] {
   color: var(--green);
   background: var(--green-soft);
+}
+.episode-viewer-playback-recording {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+}
+.episode-viewer-playback-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.episode-viewer-playback-recording .form-actions {
+  align-items: center;
+  flex-shrink: 0;
+  gap: 8px;
+  margin: 0;
+}
+.episode-viewer-playback-recording button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ink);
+  box-shadow: none;
+}
+.episode-viewer-playback-recording button:hover:not(:disabled) {
+  background: var(--surface-soft);
+}
+.episode-viewer-playback-recording button:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 3px;
+}
+.episode-viewer-playback-recording .episode-viewer-play {
+  border-radius: 50%;
+  background: var(--green);
+  color: white;
+}
+.episode-viewer-playback-recording .episode-viewer-play:hover:not(:disabled) {
+  background: var(--ink);
+}
+.episode-viewer-playback-recording .episode-viewer-play svg {
+  fill: currentColor;
+}
+.episode-viewer-playback-recording button[aria-pressed="true"] {
+  color: var(--green);
+  background: var(--green-soft);
+}
+.episode-viewer-playback-separator {
+  width: 1px;
+  height: 20px;
+  margin-inline: 4px;
+  background: var(--line-strong);
+}
+.episode-viewer-playback-info {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.episode-viewer-playback-info > * {
+  white-space: nowrap;
+}
+.episode-viewer-playback-recording input[type="range"] {
+  flex: none;
+  width: 100%;
+  margin: 0;
+  accent-color: var(--green);
+}
+@media (max-width: 600px) {
+  .episode-viewer-playback-info {
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    font-size: 10px;
+  }
+  .episode-viewer-playback-info output {
+    font-size: inherit;
+  }
+  .episode-viewer-playback-recording .form-actions {
+    gap: 4px;
+  }
 }

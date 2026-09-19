@@ -21,7 +21,6 @@
     recording: "recording",
     "recording-file": "recording",
     prepared: "prepared result",
-    "local-copy": "local copy",
   };
   function setBusy(value) {
     busy = value;
@@ -90,9 +89,7 @@
         );
       } else {
         message.textContent =
-          kind === "local-copy"
-            ? `Remove the local copy of ${result.label}? Only the listed local files will be removed.`
-            : `${result.retry ? "Retry deletion of" : "Permanently delete"} ${result.label}? Skynet records and listed files will be removed. External tracking services keep their own history.`;
+          `${result.retry ? "Retry deletion of" : "Permanently delete"} ${result.label}? Skynet records and listed files will be removed. External tracking services keep their own history.`;
         const counts = Object.entries(result.counts)
           .map(
             ([name, count]) =>

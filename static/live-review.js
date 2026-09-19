@@ -7,13 +7,36 @@
     frame = 0,
     timer;
   const dialog = el("live-review-dialog");
-  let reviewSession;
+  let reviewSession, recordingIndex = 0;
   function closeViewer() {
     window.SkynetEpisodeViewer?.close("live-episode-viewer");
   }
   const status = (message) => {
     el("live-review-status").textContent = message;
+    el("live-review-status").hidden = !message;
   };
+  function reviewState(state, message = "") {
+    const content = el("live-review-content");
+    const stage = el("live-episode-viewer").querySelector(".episode-viewer-stage");
+    const loading = el("live-review-loading");
+    if (stage) {
+      stage.append(loading);
+      content.hidden = false;
+    }
+    content.dataset.reviewState = state;
+    loading.hidden = state === "ready";
+    loading.setAttribute("aria-busy", String(state === "loading"));
+    status(message);
+    el("live-review-retry").hidden = state !== "error";
+    const busy = state !== "ready";
+    el("live-review-source-copy").disabled = busy || !el("live-review-source-copy").dataset.copyValue;
+    el("live-review-episode").disabled = busy;
+    el("live-review-values-content").inert = busy;
+    const playback = el("live-episode-viewer").querySelector(".episode-viewer-playback");
+    if (playback) playback.inert = busy;
+    el("live-episode-viewer").querySelectorAll(".episode-viewer-layers > label")
+      .forEach((label) => { label.inert = busy; });
+  }
   async function request(path, options = {}, timeout = 40000) {
     const response = await fetch(path, {
       ...options,
@@ -118,6 +141,7 @@
     closeViewer();
     episode = data.episodes[Number(el("live-review-episode").value)];
     frame = 0;
+    const ownToken = token;
     window.SkynetEpisodeViewer?.open(
       "live-episode-viewer",
       null,
@@ -128,7 +152,13 @@
         robot: data.robot,
         sourceNames: data.hand_metadata?.source_names,
         timeline: episode.frames,
+        simulationHz: data.simulation_hz || 60,
+        toolbarActions: el("live-review-recording-actions"),
+        onLoadState(state, message) {
+          if (ownToken === token && dialog.open) reviewState(state, message);
+        },
         onFrame(index) {
+          if (ownToken !== token || !dialog.open) return;
           frame = index;
           if (el("live-review-data").open) draw();
         },
@@ -149,28 +179,29 @@
   }
   async function load(ownToken, start = false) {
     clearTimeout(timer);
+    const requestBase = base;
     try {
       const result = await request(
-        base + "/review",
+        requestBase + "/review",
         start ? { method: "POST" } : {},
       );
       if (ownToken !== token || !dialog.open) return;
       el("live-review-retry").hidden = true;
       if (result.state === "READY") {
+        const reviewData = await request(requestBase + "/review.json");
+        if (ownToken !== token || !dialog.open) return;
+        data = reviewData;
         const source = result.recording_source;
         if (source?.path) {
-          el("live-review-source-label").textContent =
-            "Path" + (source.gateway ? " · " + source.gateway : "");
           el("live-review-source-path").textContent = source.path;
           el("live-review-source-copy").dataset.copyValue = source.path;
           el("live-review-source").hidden = false;
+        } else {
+          el("live-review-source-path").textContent = "Path unavailable";
+          delete el("live-review-source-copy").dataset.copyValue;
         }
-        data = await request(base + "/review.json");
-        if (ownToken !== token || !dialog.open) return;
         el("live-review-content").hidden = false;
-        status(
-          `${data.episodes.length} demonstration${data.episodes.length === 1 ? "" : "s"} · ${data.episodes.reduce((sum, ep) => sum + ep.duration_seconds, 0).toFixed(1)} s · ${data.simulation_hz || 60} Hz`,
-        );
+        reviewState("ready");
         const select = el("live-review-episode");
         select.parentElement.hidden = data.episodes.length === 1;
         select.replaceChildren();
@@ -182,71 +213,78 @@
             ),
           ),
         );
-        el("live-review-original").href = base + "/recording.pkl";
-        el("live-review-summary").href = base + "/summary.json";
-        el("live-review-json").href = base + "/review.json";
+        el("live-review-original").href = requestBase + "/recording.pkl";
+        el("live-review-summary").href = requestBase + "/summary.json";
+        el("live-review-json").href = requestBase + "/review.json";
         chooseEpisode();
       } else if (result.state === "FAILED") throw new Error(result.error);
       else if (result.state === "NOT_DOWNLOADED") await load(ownToken, true);
       else {
-        status("Loading recorded values…");
+        reviewState("loading", "Loading recorded values…");
         timer = setTimeout(() => load(ownToken), 1500);
       }
     } catch (error) {
       if (ownToken !== token || !dialog.open) return;
-      status("Review unavailable: " + error.message);
-      el("live-review-retry").hidden = false;
+      reviewState("error", "Review unavailable: " + error.message);
     }
   }
   function selectRecording(index) {
+    const count = reviewSession.recordings?.length || 1;
+    if (!Number.isInteger(index) || index < 0 || index >= count) return;
     pause();
     closeViewer();
+    recordingIndex = index;
+    el("live-review-previous-recording").disabled = index === 0;
+    el("live-review-next-recording").disabled = index === count - 1;
+    const position = el("live-review-recording-position");
+    position.textContent = `${index + 1}/${count}`;
+    position.setAttribute("aria-label", `Recording ${index + 1} of ${count}`);
     const path = reviewSession.recordings?.[index];
     const remove = el("live-review-delete");
-    remove.hidden = !path;
-    if (path) remove.dataset.deleteId = `${reviewSession.id}:${btoa(encodeURIComponent(path).replace(/%([0-9A-F]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "")}`;
-    else delete remove.dataset.deleteId;
-    el("live-review-data").open = false;
+    remove.disabled = !path;
+    remove.setAttribute("aria-label", `Delete recording ${index + 1}`);
+    remove.title = `Delete recording ${index + 1}`;
+    if (path) {
+      const encodedPath = btoa(encodeURIComponent(path).replace(/%([0-9A-F]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16))))
+        .replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+      remove.dataset.deleteId = `${reviewSession.id}:${encodedPath}`;
+    } else delete remove.dataset.deleteId;
+    el("live-review-recording-actions").hidden = false;
     clearTimeout(timer);
     const ownToken = ++token;
     base = `/api/collection/live/sessions/${reviewSession.id}/recordings/${index}`;
     data = episode = null;
-    el("live-review-source").hidden = true;
-    el("live-review-source-path").textContent = "";
     delete el("live-review-source-copy").dataset.copyValue;
-    el("live-review-content").hidden = true;
-    el("live-review-retry").hidden = true;
-    status("Checking the saved recording…");
+    for (const id of ["live-review-original", "live-review-summary", "live-review-json"])
+      el(id).removeAttribute("href");
+    reviewState("loading", "Loading recording…");
     // One idempotent request per user selection retains READY copies and
     // retries saved failures with current connection settings. Polls use GET.
     load(ownToken, true);
   }
   window.openLiveReview = (session, index = 0) => {
     reviewSession = session;
-    const select = el("live-review-recording");
     const count = session.recordings?.length || 1;
-    select.replaceChildren(
-      ...Array.from(
-        { length: count },
-        (_, i) => new Option(`Recording ${(session.recording_slots?.[session.recordings?.[i]] ?? i) + 1}`, i),
-      ),
-    );
-    select.value = index >= 0 && index < count ? index : 0;
-    select.parentElement.hidden = count < 2;
+    if (!dialog.open) el("live-review-data").open = false;
     SkynetDialog.open(dialog);
-    selectRecording(Number(select.value));
+    selectRecording(index >= 0 && index < count ? index : 0);
   };
   window.refreshLiveReviewAfterDeletion = async (identifier) => {
     if (!dialog.open || reviewSession?.id !== identifier) return;
-    const selection = Number(el("live-review-recording").value);
+    const selection = recordingIndex;
+    const selectedPath = reviewSession.recordings?.[selection];
+    const ownToken = token;
     const session = await request(`/api/collection/live/sessions/${identifier}`);
-    if (!dialog.open || reviewSession?.id !== identifier) return;
+    if (!dialog.open || reviewSession?.id !== identifier || token !== ownToken) return;
     if (!session.recordings?.length) SkynetDialog.close(dialog);
-    else window.openLiveReview(session, Math.min(selection, session.recordings.length - 1));
+    else {
+      const retainedIndex = session.recordings.indexOf(selectedPath);
+      window.openLiveReview(session, retainedIndex >= 0 ? retainedIndex : Math.min(selection, session.recordings.length - 1));
+    }
   };
   el("live-review-delete").addEventListener("click", pause);
-  el("live-review-recording").onchange = (event) =>
-    selectRecording(Number(event.target.value));
+  el("live-review-previous-recording").onclick = () => selectRecording(recordingIndex - 1);
+  el("live-review-next-recording").onclick = () => selectRecording(recordingIndex + 1);
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
       pause();
@@ -259,8 +297,7 @@
     closeViewer();
   });
   el("live-review-retry").onclick = () => {
-    status("Retrying download…");
-    el("live-review-retry").hidden = true;
+    reviewState("loading", "Retrying download…");
     load(token, true);
   };
   el("live-review-episode").onchange = chooseEpisode;

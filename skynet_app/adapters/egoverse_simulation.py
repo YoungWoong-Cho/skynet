@@ -16,7 +16,7 @@ class RecordedPolicy:
 
     def __init__(self, context, repository, *, device="cuda"):
         import torch
-        from egoverse_runtime import JOINT_CONTRACT, register_joint_domain, validate_hpt_joint_inputs
+        from egoverse_runtime import JOINT_CONTRACT, register_joint_domain, validate_hpt_joint_inputs, validate_manifest, validate_checkpoint_receipt
 
         checkpoint = context["checkpoint"]
         if digest(checkpoint["path"]) != checkpoint["sha256"]:
@@ -30,9 +30,8 @@ class RecordedPolicy:
         if revision != receipt.get("revision") or revision != context["policy"]["source"]["revision"]:
             raise ValueError("Evaluation must use the checkpoint's exact EgoVerse revision")
         config = context["policy"]["native_config"]
-        if receipt.get("manifest_sha256") != config["dataset_manifest_sha256"]:
-            raise ValueError("Evaluation dataset differs from the checkpoint's training dataset")
-        self.manifest = verify(config["dataset_path"], config["dataset_manifest_sha256"])
+        validate_checkpoint_receipt(receipt, self.kind, config["dataset_manifest_sha256"])
+        self.manifest = validate_manifest(config["dataset_path"], config["dataset_manifest_sha256"], self.kind)
         if self.manifest["contract"] != JOINT_CONTRACT:
             raise ValueError("Simulator evaluation requires the recorded-joint dataset contract")
         if self.kind == "hpt_joints":
@@ -65,7 +64,7 @@ class RecordedPolicy:
             self.model.reset()
 
     def sample(self, observation):
-        """Match native Zarr decoding and checkpoint normalization exactly once."""
+        """Use shared RGB values and checkpoint normalization exactly once."""
         import numpy as np
         import torch
         from egoverse_runtime import CAMERAS

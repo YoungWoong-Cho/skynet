@@ -7,6 +7,7 @@ import pytest
 from skynet_app.database import canonical_json
 from skynet_app.cluster_runtime import WORK_ROOT
 from test_observation_preparation import context
+from test_policy_exports import create
 
 
 @pytest.mark.parametrize('local', [True, False])
@@ -65,7 +66,7 @@ def test_stage_uploads_shared_hand_once_and_preserves_manifest_checks(
         return f"{remote_root}/hands/{manifest['robot']}/{digest}"
     monkeypatch.setattr(hands, 'upload', upload)
     service = context.service
-    job = service.create('first', 'dp', 'Two recordings with one frozen hand',
+    job = create(service, 'first', 'fixture-rgb', 'Two recordings with one frozen hand',
         selections=[dict(session_id='first', indices=None), dict(session_id='second', indices=None)])
     service.prepare(job['id'])
     assert len(uploads) == 1

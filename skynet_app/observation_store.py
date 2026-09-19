@@ -7,6 +7,7 @@ continues the same submission token; only an explicitly failed attempt is retrie
 import json
 import re
 import time
+from pathlib import PurePosixPath
 from uuid import uuid4
 
 from .database import canonical_json, utc_now
@@ -155,6 +156,59 @@ class ObservationStore:
         with self.database.transaction() as c:
             c.execute("""UPDATE observation_artifacts SET state='MISSING',producer_id=NULL,error=NULL,updated_at=?
                 WHERE state='FAILED' AND artifact_key IN (SELECT artifact_key FROM observation_job_inputs WHERE job_id=?)""", (utc_now(), job_id))
+
+    def register_shared(self, job, artifacts):
+        """Register verified CPU streams and raw capture references in the same graph.
+
+        Camera producers use attach/finish. CPU preparation returns immutable file
+        receipts instead; both share source and dataset deletion protection.
+        """
+        from .cluster_runtime import WORK_ROOT
+        sources = {source['sha256']: source for source in job['sources']}
+        unique = {}
+        for artifact in artifacts:
+            key, spec = artifact.get('artifact_key'), artifact.get('spec') or {}
+            source = sources.get(spec.get('source_sha256'))
+            if (spec.get('schema') != 'skynet.recording-file/v1' or source is None
+                    or content_digest(spec) != key or artifact.get('path') != spec.get('path')
+                    or artifact.get('manifest_sha256') != spec.get('sha256')
+                    or not re.fullmatch('[a-f0-9]{64}', spec.get('sha256', ''))):
+                raise ValueError('Shared recording receipt differs from the selected source')
+            path = PurePosixPath(spec['path'])
+            if '..' in path.parts or not path.is_absolute():
+                raise ValueError('Shared recording path is unsafe')
+            if spec.get('owned') is True:
+                root = PurePosixPath(WORK_ROOT) / 'datasets/recordings' / source['sha256'] / 'state'
+                if (path.parent.parent != root or path.name != 'values.hdf5'
+                        or not re.fullmatch('[a-f0-9]{64}', path.parent.name)):
+                    raise ValueError('Shared state is outside its recording store')
+            elif spec.get('owned') is False:
+                # Raw archive capture ownership remains with its recording.
+                root = PurePosixPath(WORK_ROOT) / 'datasets/raw/dexverse-live' / source['session_id']
+                if not path.is_relative_to(root) or path.suffix != '.hdf5' or spec['sha256'] != source.get('image_sha256'):
+                    raise ValueError('Shared capture differs from its verified raw archive')
+            else:
+                raise ValueError('Shared recording ownership must be explicit')
+            if key in unique and unique[key] != artifact:
+                raise ValueError('Conflicting shared recording receipts')
+            unique[key] = artifact
+        with self.database.transaction() as c:
+            self._guard_sources(c, [source['session_id'] for source in sources.values()])
+            for key, artifact in unique.items():
+                spec = artifact['spec']
+                source = sources[spec['source_sha256']]
+                now = utc_now()
+                c.execute('''INSERT INTO observation_artifacts
+                    (artifact_key,spec_json,state,path,manifest_sha256,created_at,updated_at)
+                    VALUES (?,?,'READY',?,?,?,?) ON CONFLICT(artifact_key) DO NOTHING''',
+                    (key, canonical_json(spec), artifact['path'], artifact['manifest_sha256'], now, now))
+                row = c.execute('SELECT * FROM observation_artifacts WHERE artifact_key=?', (key,)).fetchone()
+                if (json.loads(row['spec_json']) != spec or row['state'] != 'READY'
+                        or row['path'] != artifact['path'] or row['manifest_sha256'] != artifact['manifest_sha256']):
+                    raise ValueError('Shared recording identity was already registered differently')
+                c.execute('INSERT INTO observation_sources VALUES (?,?,?) ON CONFLICT DO NOTHING',
+                          (key, source['session_id'], source['path']))
+                c.execute('INSERT INTO observation_job_inputs VALUES (?,?) ON CONFLICT DO NOTHING', (job['id'], key))
 
     @staticmethod
     def bind_version(connection, job_id, version_id):

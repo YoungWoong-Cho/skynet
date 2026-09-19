@@ -92,7 +92,7 @@ def test_dataset_specific_rules_and_checkpoint_availability_are_enforced():
     assert report['status'] == 'incompatible'
 
 
-def test_unsupported_submission_creates_no_stage_or_job():
+def test_unsupported_submission_creates_no_stage_or_job(tmp_path):
     from types import SimpleNamespace
     from skynet_app.pipeline_api import PipelineService, EvaluationRequest
     _, document, manifest = setup_case()
@@ -104,7 +104,10 @@ def test_unsupported_submission_creates_no_stage_or_job():
     service._resolve_evaluation_suite_selection = lambda *_: (target_suite, 'libero', ['task'], {})
     service._evaluation_source = lambda *_: ({}, manifest)
     def forbidden(*_, **__): raise AssertionError('No stage or job may be created for an incompatible selection')
-    service.database = SimpleNamespace(create_stage=forbidden)
+    from skynet_app.database import Database
+    db=Database(tmp_path/'evaluation-compatibility.store')
+    service.database = SimpleNamespace(create_stage=forbidden,connection=db.connection)
+    service._reconcile_lock=db.operation_lock('pipeline')
     service._submit_stage = forbidden
     service._resolve_evaluation_implementation = forbidden
     validation = service.validate_evaluation_target('run', '/cp', suite_id='suite', tasks=['task'])

@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from artifacts import verify
+from recording_dataset import verify_dataset
 from policy_contract import recorded_contract, contract_issues
 from policy_loading import load_policy
 from policy_simulator import run_simulator, validate_simulation
@@ -21,7 +21,7 @@ def main():
     write_json(report, {"status": "RUNNING", "phase": "load_policy"})
     try:
         config = context["policy"]["native_config"]
-        manifest = verify(config["dataset_path"], config["dataset_manifest_sha256"])
+        manifest = verify_dataset(config["dataset_path"], config["dataset_manifest_sha256"])
         expected = context["compatibility"]["io_contract"]
         actual = recorded_contract(manifest, images=bool(expected["cameras"]))
         if actual != expected:
