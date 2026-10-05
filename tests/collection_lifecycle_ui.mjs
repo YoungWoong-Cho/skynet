@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import {JSDOM} from "jsdom";
+import {indexHtml} from "./index_page.cjs";
 
-const dom = new JSDOM(await readFile(new URL("../static/index.html", import.meta.url), "utf8"), {runScripts:"outside-only", url:"http://localhost/"});
+const dom = new JSDOM(indexHtml(), {runScripts:"outside-only", url:"http://localhost/"});
 const w = dom.window;
 const el = id => w.document.getElementById(id);
 const app = await readFile(new URL("../static/app.js", import.meta.url), "utf8");

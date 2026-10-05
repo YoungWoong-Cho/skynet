@@ -58,6 +58,74 @@ def track_payload_reads(db, monkeypatch):
     return reads
 
 
+@pytest.mark.parametrize("external", [False, True])
+def test_run_list_uses_compact_resume_evidence_and_preserves_details(object_db, monkeypatch, external):
+    from skynet_app.pipeline_api import _attach_run_progress_summaries
+    db, _ = object_db
+    if external:
+        db.payload_store = PayloadStore(db)
+    project = db.create_project("compact-list")
+    experiment = db.create_experiment(project_id=project["id"], name="compact", requested_spec={})
+    spec = {"train": {"max_steps": 8000}, "resources": {"gpu": {"count": 1}},
+            "source": {"adapter_manifest": {"train": {"capsule_files": {"code.py": "x" * 200000},
+                "progress": {"unit": "step", "total_path": "train.max_steps", "starts_at_zero": True,
+                             "source": {"kind": "jsonl", "path": "progress.jsonl", "completed_key": "step"}}}}},
+            "data": {"bundle": {"name": "cube", "assignments": [{"role": "training_data",
+                "version": {"format": "fixture", "metadata": {"display_name": "Cube",
+                    "episodes": [{"body": "x" * 20000}] * 51, "shared_artifacts": ["x" * 200000]}}}]}}}
+    variant = db.create_variant(experiment["latest_revision"]["id"], name="one", parameters={}, resolved_spec=spec)
+    run = db.create_run(variant["id"], seed=1, adapter_name="generic", adapter_version="1",
+                        run_directory="/fixture/run", status="RUNNING")
+    stage = db.create_stage(run["id"], stage_type="TRAIN", name="train")
+    snapshot = {"plan": {"native_config": {"initial_checkpoint": "/saved.ckpt"}},
+                "code": "x" * 200000}
+    attempt = db.create_job_attempt(stage["id"], status="RUNNING", execution_snapshot_json=snapshot)
+    db.update_job_attempt(attempt["id"], started_at="2026-09-20T10:00:00Z")
+    reads = track_payload_reads(db, monkeypatch) if external else []
+    rows = db.list_runs()
+    _attach_run_progress_summaries(db, rows)
+    assert reads == [], "Listing must never download execution bodies"
+    assert len(json.dumps(rows)) < 15000
+    assert rows[0]["latest_attempt"]["has_initial_checkpoint"] is True
+    assert "execution_snapshot_json" not in rows[0]["latest_attempt"]
+    assert rows[0]["progress_summary"]["completed"] is None, "Pinned resume must not assume a zero baseline"
+    assert rows[0]["progress_summary"]["total"] == 8000
+    assert rows[0]["training_data"][0]["episodes"] == 51
+    assert rows[0]["resources"] == spec["resources"]
+    detail = db.get_run(run["id"])
+    assert detail["attempts"][0]["execution_snapshot_json"] == snapshot
+    assert detail["resolved_spec_json"] == spec
+
+
+def test_reference_projection_keeps_nested_paths_without_loading_bodies(object_db, monkeypatch):
+    from skynet_app.maintenance import Maintenance
+    db, _ = object_db
+    db.payload_store = PayloadStore(db)
+    project = db.create_project("references")
+    spec = {"nested": [{"path": "/shared/cube"}, ["/shared/other", "relative", "/"]],
+            "body": "x" * 200000}
+    experiment = db.create_experiment(project_id=project["id"], name="refs", requested_spec=spec)
+    variant = db.create_variant(experiment["latest_revision"]["id"], name="one", parameters={}, resolved_spec=spec)
+    run = db.create_run(variant["id"], seed=1, adapter_name="generic", adapter_version="1",
+                       run_directory="/fixture/run", status="SUCCEEDED")
+    stage = db.create_stage(run["id"], stage_type="TRAIN", name="train")
+    attempt = db.create_job_attempt(stage["id"], execution_snapshot_json={"large": "x" * 200000},
+                                   stdout_path="/shared/log.out")
+    reads = track_payload_reads(db, monkeypatch)
+    manager = Maintenance(db, object())
+    with db.connection() as c:
+        refs = manager._references(c)
+        retained = manager._references(c, {"job_attempts": [attempt]})
+    assert reads == []
+    for table, identifier in (("experiment_revisions", experiment["latest_revision"]["id"]),
+                              ("variants", variant["id"])):
+        assert {path for path, kind, owner in refs if (kind, owner) == (table, identifier)} == {
+            "/shared/cube", "/shared/other", "/"}
+    assert ("/shared/log.out", "job_attempts", attempt["id"]) in refs
+    assert ("/shared/log.out", "job_attempts", attempt["id"]) not in retained
+    assert manager._referenced("/shared/cube/checkpoint", refs, {})
+
+
 def test_seed_without_result_never_reads_payloads_and_default_keeps_full_history(object_db, monkeypatch):
     db, _ = object_db
     db.payload_store = PayloadStore(db)
@@ -74,7 +142,7 @@ def test_seed_without_result_never_reads_payloads_and_default_keeps_full_history
     bundle = db.upsert_seed_adapter(seed_key="qa", name="QA", manifest=manifests[-1])
     assert bundle["version_count"] == bundle["latest_version_number"] == 4
     assert [version["manifest"] for version in bundle["versions"]] == list(reversed(manifests))
-    assert len(reads) == 4, "The default public result materializes each version only once"
+    assert len(reads) <= 4 and len(reads) == len(set(reads)), "No version may be fetched twice; prepared bodies are already cached"
 
 
 def test_seed_scalar_comparison_preserves_user_edits_and_archive_state(object_db, monkeypatch):
@@ -120,7 +188,7 @@ def test_startup_seeding_reads_only_latest_catalog_body(object_db, monkeypatch):
     service = object.__new__(pipeline_api.PipelineService)
     service.database = db
     service._seed_registries()
-    assert len(reads) == 1, "Startup's current catalog must not hydrate historical seed versions"
+    assert len(reads) <= 1, "Startup must only fetch the latest body, unless preparation already cached it"
 
 
 def test_relocate_preserves_bytes_hashes_and_refuses_receipt_mutations(object_db):
@@ -227,6 +295,23 @@ def test_new_stage_writes_external_body_and_missing_or_changed_object_fails(obje
         db.list_stages(run["id"])
 
 
+def test_binary_body_round_trips_and_keeps_its_row_reference(object_db):
+    db, _ = object_db
+    db.payload_store = PayloadStore(db)
+    content = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 64
+    with db.transaction(payloads=(content,)) as connection:
+        ref = db.payload_store.put_bytes(connection, "note_attachments", "fixture", "content", content)
+    assert Path(ref["path"]).read_bytes() == content and ref["size"] == len(content)
+    _CACHE.clear()
+    assert db.payload_store.read_bytes(ref) == content
+    with db.connection() as c:
+        assert c.execute(
+            "SELECT sha256 FROM metadata_payload_refs WHERE table_name='note_attachments' AND record_id='fixture'"
+        ).fetchone()[0] == ref["sha256"]
+    with pytest.raises(ValueError, match="Invalid stored metadata reference"):
+        db.payload_store.read_bytes({**ref, "size": len(content) + 1})
+
+
 def test_append_journal_reuses_old_chunks_and_stays_small_in_db(object_db, monkeypatch):
     db, _ = object_db
     db.payload_store = PayloadStore(db)
@@ -234,13 +319,13 @@ def test_append_journal_reuses_old_chunks_and_stays_small_in_db(object_db, monke
     content = b'{"epoch":1}\n' * 100000
     journal.write_bytes(content)
     puts = []
-    original = db.payload_store.objects.put
+    original = db.payload_store.objects.put_many
 
-    def record(content, **kwargs):
-        puts.append(len(content))
-        return original(content, **kwargs)
+    def record(contents):
+        puts.extend(len(content) for content in contents)
+        return original(contents)
 
-    monkeypatch.setattr(db.payload_store.objects, "put", record)
+    monkeypatch.setattr(db.payload_store.objects, "put_many", record)
     journal.write_bytes(content + b'{"epoch":2}\n')
     assert len(puts) <= 2 and sum(puts) < 131072
     _CACHE.clear()
@@ -276,3 +361,93 @@ def test_deleted_evaluation_metrics_are_removed_without_losing_training_metrics(
     )
     assert clean["sequence"] == 5
     assert clean["payload"]["metrics"] == [{"key": "train/loss", "value": 0.2}]
+
+
+def test_journal_upload_does_not_hold_repository_write_lock(object_db, monkeypatch):
+    from skynet_app.db_backend import lock_key
+    db, _ = object_db
+    db.payload_store = PayloadStore(db)
+    journal = TrackingJournal(db, "unblocked-journal").file("wandb-state.json")
+    original = db.payload_store.objects.put_many
+    def upload(contents):
+        with db.connection() as connection:
+            key = lock_key("repository-write")
+            assert connection.execute("SELECT pg_try_advisory_lock(?)", (key,)).fetchone()[0]
+            connection.execute("SELECT pg_advisory_unlock(?)", (key,))
+        return original(contents)
+    monkeypatch.setattr(db.payload_store.objects, "put_many", upload)
+    body = json.dumps({"state": "界" * 100000}).encode()
+    journal.write_bytes(body)
+    assert journal.read_bytes() == body
+
+
+def test_failed_journal_upload_preserves_previous_committed_state(object_db, monkeypatch):
+    db, _ = object_db
+    db.payload_store = PayloadStore(db)
+    journal = TrackingJournal(db, "retry-journal").file("wandb-state.json")
+    original = b'{"acked_through":1}'
+    journal.write_bytes(original)
+    def unavailable(_):
+        raise ConnectionError("object storage unavailable")
+    monkeypatch.setattr(db.payload_store.objects, "put_many", unavailable)
+    with pytest.raises(ConnectionError, match="object storage unavailable"):
+        journal.write_bytes(b'{"acked_through":2}')
+    assert journal.read_bytes() == original
+
+
+def test_prepared_journal_cannot_overwrite_a_concurrent_change(object_db, monkeypatch):
+    db, _ = object_db
+    db.payload_store = PayloadStore(db)
+    journal = TrackingJournal(db, "changed-journal").file("wandb-state.json")
+    journal.write_bytes(b'{"acked_through":1}')
+    original = db.payload_store.objects.put_many
+    def upload(contents):
+        result = original(contents)
+        with db.transaction() as connection:
+            connection.execute("UPDATE tracking_journals SET payload=? WHERE scope=?",
+                               (b'{"acked_through":3}', "changed-journal"))
+        return result
+    monkeypatch.setattr(db.payload_store.objects, "put_many", upload)
+    with pytest.raises(RuntimeError, match="changed during object preparation"):
+        journal.write_bytes(b'{"acked_through":2}')
+    assert journal.read_bytes() == b'{"acked_through":3}'
+
+
+def test_compressed_transport_preserves_disk_bytes_and_reduces_upload(object_db, monkeypatch):
+    import base64, hashlib
+    db, _ = object_db
+    objects = MetadataObjects(db)
+    body = json.dumps({"capsule": "print('frozen code')\n" * 300000}).encode()
+    wire = []
+    exchange = objects._exchange
+    def measure(request):
+        wire.append(len(json.dumps(request)))
+        return exchange(request)
+    monkeypatch.setattr(objects, "_exchange", measure)
+    digest = hashlib.sha256(body).hexdigest()
+    path = objects.put_many([body])[digest]
+    assert Path(path).read_bytes() == body
+    assert wire[0] < len(body) // 20
+    assert objects.read(path, digest) == body
+    assert objects.read_many([{"sha256": digest, "path": path, "size": len(body)}]) == [body]
+    # Legacy identity transport remains readable without changing stored objects.
+    response = exchange({"operation": "put", "root": str(objects.root), "sha256": digest,
+        "name": "body", "content": base64.b64encode(body).decode()})
+    assert response["size"] == len(body)
+
+
+@pytest.mark.parametrize("kind", ["oversized", "truncated", "trailing", "unknown"])
+def test_compressed_metadata_rejects_invalid_or_unbounded_content(object_db, kind):
+    import base64, hashlib, zlib
+    from skynet_app.metadata_objects import MAX_BYTES, _decode_content
+    db, _ = object_db
+    objects = MetadataObjects(db)
+    body = b"x" * (MAX_BYTES + 1 if kind == "oversized" else 100)
+    packed = zlib.compress(body, 1)
+    if kind == "truncated": packed = packed[:-2]
+    if kind == "trailing": packed += b"unexpected"
+    value = {"encoding": "unknown" if kind == "unknown" else "zlib", "content": base64.b64encode(packed).decode()}
+    with pytest.raises(ValueError): _decode_content(value)
+    with pytest.raises(OSError):
+        objects._exchange({"operation": "put", "root": str(objects.root),
+            "sha256": hashlib.sha256(body).hexdigest(), "name": "body", **value})

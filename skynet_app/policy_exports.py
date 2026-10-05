@@ -25,6 +25,7 @@ from .dataset_formats import catalog, resolve_adapter
 DATASET_FORMAT = "skynet.recording-dataset/v1"
 from .live_xr import TERMINAL
 from .live_xr_review import ArrayUnpickler
+from .cluster_config import CLUSTER
 from .cluster_runtime import ClusterClient, ClusterError, WORK_ROOT
 from .policy_exports_cluster import ClusterPolicyPreparation
 from .observation_contracts import validate_requirements
@@ -84,6 +85,7 @@ class PolicyExportService(ClusterPolicyPreparation):
             max_workers=1, thread_name_prefix="dataset-preparation"
         )
         self.active = set()
+        self._lifecycle_lock = threading.RLock()
         self.stopping = False
         self.monitor_stop = threading.Event()
         self.monitor_thread = None
@@ -124,13 +126,29 @@ class PolicyExportService(ClusterPolicyPreparation):
         return job
 
     def start(self):
-        with self.lock:
-            if self.stopping:
+        with self._lifecycle_lock:
+            if self.monitor_thread is not None and self.monitor_thread.is_alive():
+                if self.stopping:
+                    raise RuntimeError("Dataset preparation workers have not stopped")
                 return
-            if self.monitor_thread is None:
-                self.monitor_thread = threading.Thread(target=self._monitor, name="dataset-preparation-monitor", daemon=True)
-                self.monitor_thread.start()
+            if self.stopping and self.executor is not None:
+                raise RuntimeError("Dataset preparation executor has not stopped")
+            if self.executor is None:
+                self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dataset-preparation")
+            self.stopping = False
+            self.monitor_stop.clear()
+            self.monitor_thread = threading.Thread(target=self._monitor, name="dataset-preparation-monitor", daemon=True)
+            self.monitor_thread.start()
+        try:
+            self._dispatch_pending()
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception("Dataset preparation recovery will retry")
+
+    def _dispatch_pending(self):
         for job in self.list():
+            if self.monitor_stop.is_set():
+                break
             if job.get("format") == DATASET_FORMAT and job["state"] not in {"READY", "FAILED", "DELETE_FAILED"}:
                 self.dispatch(job["id"])
 
@@ -141,17 +159,31 @@ class PolicyExportService(ClusterPolicyPreparation):
             except Exception:
                 import logging
                 logging.getLogger(__name__).exception("Observation monitor could not refresh cluster work")
-            for job in self.list():
-                if job.get("format") == DATASET_FORMAT and job["state"] not in {"READY", "FAILED", "DELETE_FAILED"}:
-                    self.dispatch(job["id"])
+            if self.monitor_stop.is_set():
+                break
+            try:
+                self._dispatch_pending()
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception("Dataset preparation monitor could not refresh pending work")
 
-    def stop(self):
-        with self.lock:
+    def request_stop(self):
+        with self._lifecycle_lock:
             self.stopping = True
             self.monitor_stop.set()
+
+    def stop(self):
+        self.request_stop()
         if self.monitor_thread is not None:
             self.monitor_thread.join(timeout=5)
-        self.executor.shutdown(wait=True, cancel_futures=True)
+        executor = self.executor
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+        with self._lifecycle_lock:
+            self.executor = None
+            self.active.clear()
+        if self.monitor_thread is not None and self.monitor_thread.is_alive():
+            raise RuntimeError("Dataset preparation monitor is still stopping")
 
     def sources(self, session, indices=None, *, require_images=True):
         if session["state"] not in TERMINAL:
@@ -349,6 +381,7 @@ class PolicyExportService(ClusterPolicyPreparation):
             "scene_geometry.py": (root / "skynet_app/adapters/scene_geometry.py").read_text(),
             "observation_artifacts.py": (root / "skynet_app/adapters/observation_artifacts.py").read_text(),
             "observation_contracts.py": (root / "skynet_app/observation_contracts.py").read_text(),
+            "observation_geometry.py": (root / "ops/datasets/observation_geometry.py").read_text(),
         }
         for relative, content in selection.get("capsule_files", {}).items():
             name = PurePosixPath(relative)
@@ -385,7 +418,7 @@ class PolicyExportService(ClusterPolicyPreparation):
             "contract", "observations", "action_representation", "observation_requirements", "preprocessing")}
         format = DATASET_FORMAT
         if target != "cluster":
-            raise ValueError("Collection datasets are prepared and retained on sky2")
+            raise ValueError("Collection datasets are prepared and retained on the training cluster")
         self.cluster.candidates(gateway)
         name = name.strip()
         if not name or len(name) > 100 or any(ord(c) < 32 for c in name):
@@ -449,6 +482,7 @@ class PolicyExportService(ClusterPolicyPreparation):
             resource = self.dataset(sessions[selections[0]["session_id"]], name,
                                     overfit_episode=overfit_episode)
             jobs = self.list()
+            retired_versions = self._retired_versions()
             if resource and any(j.get("resource_id") == resource["id"] and j["state"] == "DELETE_FAILED" for j in jobs):
                 raise ValueError("Finish dataset deletion before preparing it again")
             # Resources are internal provenance groups. Each prepared result
@@ -458,6 +492,8 @@ class PolicyExportService(ClusterPolicyPreparation):
                     job.get("fingerprint") == identity
                     and job.get("resource_id") == resource["id"]
                     and job["state"] != "FAILED"
+                    and not job.get('retirement')
+                    and job.get('version_id') not in retired_versions
                 ):
                     return job
             source_version = self.register_source(resource, sources, split)
@@ -494,7 +530,6 @@ class PolicyExportService(ClusterPolicyPreparation):
                 loader_validation_spec=selection["loader_validation"],
                 conversion_dependencies=selection.get("conversion_dependencies") or [],
                 target=target,
-                gateway="sky2",
                 execution="cluster",
                 sources=sources,
                 split=split,
@@ -516,9 +551,15 @@ class PolicyExportService(ClusterPolicyPreparation):
             self.dispatch(identifier)
             return job
 
+    def _retired_versions(self):
+        with self.database.connection() as connection:
+            return {row[0] for row in connection.execute('SELECT version_id FROM data_version_retirements')}
+
     def retry(self, identifier, target=None):
         with self.lock:
             job = self.get(identifier)
+            if job.get('retirement') or job.get('version_id') in self._retired_versions():
+                raise ValueError('This converted result is retired; select the replacement or request a new conversion')
             if job["state"] == "DELETE_FAILED":
                 raise ValueError("Finish dataset deletion before preparing it again")
             resource = self.database.get_data_resource(job.get("resource_id", ""))
@@ -529,7 +570,7 @@ class PolicyExportService(ClusterPolicyPreparation):
             if job.get("format") != DATASET_FORMAT:
                 raise ValueError("Prepare this recording with a current adapter; the old conversion scheme is retired")
             if target not in {None, "cluster"}:
-                raise ValueError("Collection datasets are prepared and retained on sky2")
+                raise ValueError("Collection datasets are prepared and retained on the training cluster")
             if (job.get("cluster_script") or job.get("preflight_script")) and job["state"] not in {"FAILED", "READY"}:
                 self.dispatch(identifier)
                 return job
@@ -548,6 +589,7 @@ class PolicyExportService(ClusterPolicyPreparation):
                 cluster_script=None,
                 cluster_job_id=None,
                 cluster_root=None,
+                gateway=None,
                 training_ready=False,
                 error=None,
                 detail="Retrying from verified files",
@@ -557,7 +599,7 @@ class PolicyExportService(ClusterPolicyPreparation):
             return job
 
     def dispatch(self, identifier):
-        with self.lock:
+        with self._lifecycle_lock:
             if identifier in self.active or self.stopping:
                 return
             self.active.add(identifier)
@@ -568,7 +610,7 @@ class PolicyExportService(ClusterPolicyPreparation):
         try:
             self._prepare_cluster(identifier)
         finally:
-            with self.lock:
+            with self._lifecycle_lock:
                 self.active.discard(identifier)
 
 
@@ -662,7 +704,7 @@ class PolicyExportService(ClusterPolicyPreparation):
             )
         }
         for location in locations:
-            # Source manifests can live beside archived recordings on sky2.
+            # Source manifests can live beside archived recordings on the cluster.
             # They are shared provenance, not generated training copies.
             if location["version_id"] not in prepared_ids:
                 continue
@@ -670,7 +712,7 @@ class PolicyExportService(ClusterPolicyPreparation):
                 expected = (
                     f"{WORK_ROOT}/datasets/prepared/{location['manifest_sha256']}"
                 )
-                if location["host"] != "skynet" or location["path"] != expected:
+                if location["host"] != CLUSTER.id or location["path"] != expected:
                     raise ValueError(
                         "Cluster copy is outside the prepared dataset directory"
                     )
@@ -682,39 +724,47 @@ class PolicyExportService(ClusterPolicyPreparation):
                 prepared=sorted(cluster_hashes),
                 cluster=True,
             )
-            command = shlex.join(
-                [
-                    "python3",
-                    "-c",
-                    Path(dataset_cleanup.__file__).read_text(),
-                    canonical_json(payload),
-                ]
+            self._delete_cluster_copies(
+                payload, [job for job in jobs if job['id'] in remote_jobs], timeout=60
             )
-            failures = []
-            configured = self.cluster.candidates("auto")
-            recorded = [
-                job.get("gateway") for job in jobs
-                if job["id"] in remote_jobs and job.get("gateway") in configured
-            ]
-            # Use the confirmed preparation host first; retain configured
-            # fallback without accepting arbitrary hosts from saved jobs.
-            for host in dict.fromkeys([*recorded, *configured]):
-                try:
-                    receipt = json.loads(
-                        self.cluster.ssh(
-                            self.cluster.resolve_gateway(host), command, timeout=60
-                        )
-                    )
-                    if receipt.get("removed") is not True:
-                        raise ValueError("Cluster did not confirm dataset deletion")
-                    break
-                except ClusterError as exc:
-                    failures.append(str(exc))
-            else:
-                raise ClusterError("; ".join(failures))
         dataset_cleanup.cleanup(self.root, jobs=sorted(job_ids))
         # Source manifests and the source cache describe original recordings and
         # may be shared. They contain no converted training data.
+
+    def _delete_cluster_copies(self, payload, jobs, *, timeout):
+        """Use confirmed preparation gateways for all generated-data cleanup."""
+        command = shlex.join(['python3', '-c', Path(dataset_cleanup.__file__).read_text(),
+                              canonical_json(payload)])
+        failures = []
+        configured = self.cluster.candidates('auto')
+        recorded = [job.get('gateway') for job in jobs if job.get('gateway') in configured]
+        # Preserve configured fallback without accepting arbitrary saved hosts.
+        for host in dict.fromkeys([*recorded, *configured]):
+            try:
+                receipt = json.loads(self.cluster.ssh(
+                    self.cluster.resolve_gateway(host), command, timeout=timeout))
+                if receipt.get('removed') is not True:
+                    raise ValueError('Cluster did not confirm dataset cleanup')
+                return receipt
+            except ClusterError as exc:
+                failures.append(str(exc))
+        raise ClusterError('; '.join(failures) or 'No SSH gateway is available')
+
+    def _delete_pointcloud_copies(self, artifacts, *, jobs):
+        """Remove only the verified, unshared observations in a retirement plan."""
+        from .recording_deletion import RecordingMaintenance
+        observations = []
+        for artifact in artifacts:
+            spec = json.loads(artifact['spec_json'])
+            if spec.get('modality') != 'point_cloud' or not 0 < spec['recipe']['num_points'] < 10000:
+                raise ValueError('Only obsolete point clouds belong in this cleanup')
+            observations.append(dict(path=RecordingMaintenance._observation_path(artifact),
+                artifact_key=artifact['artifact_key'], manifest_sha256=artifact['manifest_sha256'],
+                source_sha256=spec['source_sha256'], camera_id=spec['camera_id'], modality='point_cloud'))
+        if not observations:
+            return
+        self._delete_cluster_copies(
+            dict(root=str(WORK_ROOT), observations=observations, cluster=True), jobs, timeout=120)
 
     def artifact(self, identifier, name):
         self.get(identifier)

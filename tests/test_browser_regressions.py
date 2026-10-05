@@ -121,3 +121,29 @@ def test_homepage_revalidates_and_versions_changed_assets(tmp_path, monkeypatch)
         assert first.body != second.body, name
         assert f'/static/{name}?v='.encode() in second.body
         first = second
+
+
+def test_homepage_offers_the_configured_gateways(monkeypatch):
+    import re
+    from skynet_app import main
+    from skynet_app.cluster_config import CLUSTER
+    selects = ('gateway', 'collection-gateway', 'data-import-gateway')
+    def options(page, select):
+        body = re.search(rf'<select id="{select}"[^>]*>(.*?)</select>', page, re.S).group(1)
+        return re.findall(r'<option value="([^"]*)">([^<]*)</option>', body)
+    source = (main.STATIC_ROOT / 'index.html').read_text(encoding='utf-8')
+    assert source.count(main.GATEWAY_OPTIONS_PLACEHOLDER) == len(selects)
+    assert all(options(source, select) == [] for select in selects)
+    page = main.index().body.decode()
+    assert main.GATEWAY_OPTIONS_PLACEHOLDER not in page
+    hosts = list(CLUSTER.gateways)
+    expected = [('auto', 'Auto: ' + ', then '.join(hosts)), *((host, f'Prefer {host}') for host in hosts)]
+    for select in selects:
+        assert options(page, select) == expected
+    # The list follows the configuration, and host names are escaped.
+    monkeypatch.setattr(main, 'SSH_HOSTS', ('login-a', 'login<b>&"c"'))
+    escaped = 'login&lt;b&gt;&amp;&quot;c&quot;'
+    assert options(main.index().body.decode(), 'gateway') == [
+        ('auto', f'Auto: login-a, then {escaped}'), ('login-a', 'Prefer login-a'), (escaped, f'Prefer {escaped}')]
+    monkeypatch.setattr(main, 'SSH_HOSTS', ('login-a',))
+    assert options(main.index().body.decode(), 'gateway') == [('auto', 'Auto: login-a'), ('login-a', 'Prefer login-a')]

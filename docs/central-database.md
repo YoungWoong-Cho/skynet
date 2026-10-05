@@ -10,7 +10,7 @@ create `config/database.json` (ignored by Git):
 {
   "backend": "postgresql",
   "transport": "ssh-tcp",
-  "ssh_host": "sky2",
+  "ssh_host": "sky1",
   "remote_address": "127.0.0.1",
   "remote_port": 55432,
   "password_file": "database-password",
@@ -44,6 +44,12 @@ Credentials remain in each app host's credential store; they are not migrated or
 shared by this database feature. The background owner needs its own configured
 credentials to deliver notifications and tracking events.
 
+Experiment notes (Markdown, folders and attachments) are workspace-owned rows in
+this database, written only through the Notes API that the browser uses.
+Attachment bodies are immutable files in `object_store_root`; each attachment row
+keeps a reference to its body, so Storage cleanup removes a body only after its
+attachment or note is deleted.
+
 ## Install the database without sudo
 
 Install PostgreSQL binaries in a private user directory. With user lingering
@@ -58,9 +64,25 @@ host. This is required when the home directory and DB files are shared: another
 login host must never start a second PostgreSQL against the same data directory.
 
 The current deployment uses a hard-mounted NFS filesystem. It depends on that
-storage and sky2 being available; it is not a high-availability database. Keep
+storage and sky1 being available; it is not a high-availability database. Keep
 `fsync`, `full_page_writes` and `synchronous_commit` enabled. Never expose the
 underlying PostgreSQL data directory as a shared application file.
+
+## Move the service to another login host
+
+The units are pinned to one host with `ConditionHost`, and the PostgreSQL binaries
+are linked against that host's OS libraries. When the host is retired or its OS is
+reinstalled, the database does not return on its own; the app then reports
+`database_unavailable` and names the configured `ssh_host`.
+
+Confirm the old server is stopped (`data/postmaster.pid` is absent and
+`pg_controldata` reports `shut down`) and keep a cold copy of `data`. If
+`ldd <bin>/postgres` reports missing libraries, rebuild the same PostgreSQL major
+version on the new host. Enable lingering there, then rerun
+`deploy/install-postgres-user.py --root <private-db-root> --bin <new-bin> --loopback`
+on that host: it keeps the existing data directory and rewrites the units for the
+new host. Finally set `ssh_host` in `config/database.json` on every app host and
+restart the app.
 
 ## Backup and relocation
 

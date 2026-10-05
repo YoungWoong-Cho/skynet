@@ -2,6 +2,11 @@
 
 import json
 
+from .registry_reference_match import registry_reference_match
+from .payload_store import ImmutableProjectionCache
+
+_INLINE_REFERENCES = ImmutableProjectionCache()
+
 
 def suite_removal_notices(connection, target, workspace_id):
     """Supported suites are optional capabilities, not deletion dependencies."""
@@ -37,18 +42,7 @@ def suite_removal_notices(connection, target, workspace_id):
     ]
 
 
-def strings(value):
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, dict):
-        for child in value.values():
-            yield from strings(child)
-    elif isinstance(value, list):
-        for child in value:
-            yield from strings(child)
-
-
-def consumer_matcher(kind, records):
+def consumer_identity(kind, records):
     ids = {row["id"] for row in records}
     if kind == "adapter":
         ids.update(row["adapter_key"] for row in records)
@@ -59,25 +53,70 @@ def consumer_matcher(kind, records):
     else:
         aliases = {row["name"] for row in records}
 
-    def matches(value):
-        if isinstance(value, list):
-            return any(matches(child) for child in value)
-        if not isinstance(value, dict):
-            return False
-        if ids.intersection(strings(value)):
-            return True
-        if kind == "adapter":
-            source = value.get("source")
-            if isinstance(source, dict) and not any(source.get(key) for key in ("adapter_id", "adapter_version_id")):
-                if isinstance(source.get("adapter"), str) and source["adapter"] in aliases:
-                    return True
-        else:
-            evaluation = value.get("evaluation")
-            if isinstance(evaluation, dict) and aliases.intersection(strings(evaluation.get("suites", []))):
-                return True
-        return any(matches(child) for child in value.values() if isinstance(child, (dict, list)))
+    return ids, aliases
 
-    return matches
+
+def consumer_matcher(kind, records):
+    ids, aliases = consumer_identity(kind, records)
+    return lambda value: registry_reference_match(value, kind, ids, aliases)
+
+
+def consumer_flags(connection, rows, column, kind, records):
+    ids, aliases = consumer_identity(kind, records)
+    documents = [json.loads(row.get(column) or "{}") for row in rows]
+    store = getattr(connection, "payload_store", None)
+    if store:
+        return store.registry_matches(documents, kind, ids, aliases)
+    return [registry_reference_match(document, kind, ids, aliases) for document in documents]
+
+
+def inline_consumers(connection, table, kind, records):
+    """Check inline specifications on the database, returning compact identities.
+
+    Specifications embed adapter code. Downloading all revisions and variants
+    just to find references transfers gigabytes during a registry preview.
+    JSON paths select exact references while preserving nested/legacy matches.
+    """
+    columns = {"experiment_revisions": "requested_spec_json", "variants": "resolved_spec_json"}
+    column = columns[table]
+    digest_column = "requested_spec_sha256" if table == "experiment_revisions" else "resolved_spec_sha256"
+    parent_column = "experiment_id" if table == "experiment_revisions" else "experiment_revision_id"
+    ids, aliases = consumer_identity(kind, records)
+    variables = json.dumps({"ids": sorted(ids), "aliases": sorted(aliases)})
+    identity_path = 'strict $.** ? (@.type() == "string" && @ == $ids[*])'
+    fallback_path = 'strict $.** ? (@.type() == "object").** ? (@.type() == "string" && @ == $ids[*])'
+    if kind == "adapter":
+        alias_path = ('strict $.** ? (@.type() == "object" && exists(@.source)).source '
+                      '? (@.type() == "object" && exists(@.adapter) && @.adapter == $aliases[*])')
+        alias_sql = """EXISTS (SELECT 1 FROM jsonb_path_query(body, ?::jsonpath, ?::jsonb) source
+            WHERE coalesce(source->'adapter_id','null'::jsonb) IN ('null','false','0','""','[]','{}')
+              AND coalesce(source->'adapter_version_id','null'::jsonb) IN ('null','false','0','""','[]','{}'))"""
+    else:
+        alias_path = ('strict $.** ? (@.type() == "object" && exists(@.evaluation)).evaluation '
+                      '? (@.type() == "object" && exists(@.suites)).suites.** '
+                      '? (@.type() == "string" && @ == $aliases[*])')
+        alias_sql = "jsonb_path_exists(body, ?::jsonpath, ?::jsonb)"
+    headers = [dict(row) for row in connection.execute(
+        f"SELECT id, owner_id, {parent_column}, {digest_column} AS digest FROM {table}"
+    ).fetchall()]
+    info = connection.raw.info
+    namespace = (info.host, info.port, info.dbname, info.user, kind, tuple(sorted(ids)), tuple(sorted(aliases)))
+    references = {(*namespace, row['digest']): row['digest'] for row in headers}
+
+    def load(digests):
+        matched = {row['digest']: row['referenced'] for row in connection.execute(f"""
+            SELECT digest,
+                   jsonb_path_exists(body, CASE WHEN jsonb_typeof(body)='object' THEN ?::jsonpath ELSE ?::jsonpath END, ?::jsonb)
+                   OR {alias_sql} AS referenced
+            FROM (SELECT DISTINCT ON ({digest_column}) {digest_column} AS digest,
+                         {column}::jsonb AS body FROM {table} WHERE {digest_column}=ANY(?)) documents
+        """, (identity_path, fallback_path, variables, alias_path, variables, digests)).fetchall()}
+        if set(digests) != set(matched):
+            raise ValueError('Registry dependencies changed; review deletion again')
+        return [matched[digest] for digest in digests]
+
+    flags = _INLINE_REFERENCES.load(references, load)
+    return [{**row, 'referenced': flags[(*namespace, row['digest'])]} for row in headers]
 
 
 def extend_graph(connection, kind, target, graph, block, fetch):
@@ -109,10 +148,12 @@ def extend_graph(connection, kind, target, graph, block, fetch):
             if matches(json.loads(row["manifest_json"])):
                 block("adapter", {**row, "id": row["adapter_key"]}, "Delete this adapter with a pinned suite default first")
     experiments = {row["id"]: row for row in fetch(connection, "experiments")}
-    revisions = {row["id"]: row for row in fetch(connection, "experiment_revisions")}
+    revisions = {row["id"]: row for row in inline_consumers(connection, "experiment_revisions", kind, records)}
     runs = {row["id"]: row for row in fetch(connection, "runs")}
     evaluations = fetch(connection, "evaluations")
-    stages = {row["id"]: row for row in fetch(connection, "workflow_stages")}
+    # Dependency checks need identities and booleans, not executable capsules.
+    # Read immutable references without hydrating each multi-megabyte body.
+    stages = {row["id"]: row for row in fetch(connection, "workflow_stages", raw_payloads=True)}
 
     def block_stage(stage):
         consumers = [row for row in evaluations if row["stage_id"] == stage["id"]]
@@ -123,18 +164,19 @@ def extend_graph(connection, kind, target, graph, block, fetch):
             block("run", runs[stage["run_id"]], "Delete this training run first")
 
     for revision in revisions.values():
-        if matches(json.loads(revision["requested_spec_json"])):
+        if revision["referenced"]:
             block("experiment", experiments[revision["experiment_id"]], "Delete this experiment and its revisions first")
-    for variant in fetch(connection, "variants"):
-        if matches(json.loads(variant["resolved_spec_json"])):
+    for variant in inline_consumers(connection, "variants", kind, records):
+        if variant["referenced"]:
             revision = revisions[variant["experiment_revision_id"]]
             block("experiment", experiments[revision["experiment_id"]], "Delete this experiment and its pinned variants first")
             for run in runs.values():
                 if run["variant_id"] == variant["id"]:
                     block("run", run, "Delete this training run first")
-    for stage in stages.values():
-        if matches(json.loads(stage["resolved_config_json"])):
+    for stage, matched in zip(stages.values(), consumer_flags(connection, list(stages.values()), "resolved_config_json", kind, records)):
+        if matched:
             block_stage(stage)
-    for attempt in fetch(connection, "job_attempts"):
-        if matches(json.loads(attempt.get("execution_snapshot_json") or "{}")):
+    attempts = fetch(connection, "job_attempts", raw_payloads=True)
+    for attempt, matched in zip(attempts, consumer_flags(connection, attempts, "execution_snapshot_json", kind, records)):
+        if matched:
             block_stage(stages[attempt["stage_id"]])

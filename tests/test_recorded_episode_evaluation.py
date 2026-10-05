@@ -59,7 +59,7 @@ def test_pins_the_source_checksum_not_the_latest_recording(tmp_path, monkeypatch
     with database.connection() as c:
         c.execute("INSERT INTO live_xr_sessions VALUES (?, ?)", ("session", json.dumps(job)))
     monkeypatch.setattr(live_xr_archive, "CLUSTER", SimpleNamespace(paths=SimpleNamespace(datasets="/datasets")))
-    cluster = SimpleNamespace(candidates=lambda host: [host], _remote_path=lambda path: path)
+    cluster = SimpleNamespace(_remote_path=lambda path: path)
     source = recorded_episode_sources(database, cluster, spec())[0]
     assert source["path"] == root + "/recordings/one.pkl"
     assert source["sha256"] == "a" * 64
@@ -139,7 +139,7 @@ def test_run_api_keeps_single_episode_simulation_and_explains_empty_results(tmp_
     document["data"] = {"bundle": {"id":"one","name":"one","version":"v1","manifest_sha256":"a"*64,"assignments":[assignment]}}
     svc = pipeline.PipelineService(Database(tmp_path / "api.db"), object(),
         credential_store=SimpleNamespace(load=lambda _:None), session_credentials=SessionCredentialStore())
-    monkeypatch.setattr(svc.database, "get_run", lambda _: {"resolved_spec_json": document})
+    monkeypatch.setattr(svc.database, "get_run", lambda _, **kwargs: {"resolved_spec_json": document})
     monkeypatch.setattr(pipeline, "service", svc)
     monkeypatch.setattr(pipeline, "recorded_episode_sources", lambda *_: [{"path":"/original.pkl"}])
     app = FastAPI(); app.include_router(pipeline.router)

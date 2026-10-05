@@ -7,7 +7,7 @@ from pathlib import Path
 
 from skynet_app.database import Database, canonical_json, content_sha256, new_id, utc_now
 from skynet_app.adapters import builtin_adapter_manifests
-from skynet_app.pipeline_api import DataBundleAssignmentRequest, PipelineService
+from skynet_app.pipeline_api import PipelineService
 
 
 COMMIT = "e17cf98fe4bc234c564b37abc9e155f25e76d566"
@@ -100,7 +100,7 @@ class DataRegistryTestCase(unittest.TestCase):
                 converter_commit="c" * 40,
             )
 
-    def test_unsafe_bundle_mounts_are_rejected_by_request_and_storage(self) -> None:
+    def test_unsafe_bundle_mounts_are_rejected_by_storage(self) -> None:
         unsafe_paths = [
             "/absolute", "../escape", "data/../escape", "./data", "data/./file",
             "data//file", "data/", "C:/data", "data\\file", "data\nfile", "data\x00file",
@@ -109,8 +109,6 @@ class DataRegistryTestCase(unittest.TestCase):
             with self.subTest(mount_path=mount_path):
                 assignment = {"role": "simulation_assets", "version_id": self.assets_version["id"], "mount_path": mount_path}
                 with self.assertRaisesRegex(ValueError, "Mount path must be a relative directory"):
-                    DataBundleAssignmentRequest.model_validate(assignment)
-                with self.assertRaisesRegex(ValueError, "Mount path must be a relative directory"):
                     self.database.create_data_bundle(name="unsafe", version="v1", assignments=[assignment])
         self.assertEqual(self.database.list_data_bundles(), [])
 
@@ -118,7 +116,6 @@ class DataRegistryTestCase(unittest.TestCase):
         for index, (mount_path, expected) in enumerate([(None, None), ("", None), ("   ", None), (" data/nested-dir_v1 ", "data/nested-dir_v1")]):
             with self.subTest(mount_path=mount_path):
                 assignment = {"role": "simulation_assets", "version_id": self.assets_version["id"], "mount_path": mount_path}
-                self.assertEqual(DataBundleAssignmentRequest.model_validate(assignment).mount_path, expected)
                 bundle = self.database.create_data_bundle(name="relative", version=str(index), assignments=[assignment])
                 self.assertEqual(bundle["assignments"][0]["mount_path"], expected)
                 self.assertEqual(bundle["manifest"]["assignments"][0]["mount_path"], expected)

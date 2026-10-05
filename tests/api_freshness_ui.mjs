@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {JSDOM} from 'jsdom';
-const html = await readFile(new URL('../static/index.html', import.meta.url), 'utf8');
+import {indexHtml} from './index_page.cjs';
+const html = indexHtml();
 const source = await readFile(new URL('../static/app.js', import.meta.url), 'utf8');
 const flush = async () => { for (let i=0;i<8;i++) await new Promise(resolve=>setImmediate(resolve)); };
 const deferred = () => { let resolve; const promise = new Promise(r=>{resolve=r;}); return {promise,resolve}; };
@@ -26,7 +27,7 @@ w.fetch=(path,options={})=>{fetchCalls.push([String(path),options.method||'GET']
 const el=id=>w.document.getElementById(id);
 try {
  for(const file of ['dialogs.js','workspace-navigation.js','connection-settings.js'])w.eval(await readFile(new URL('../static/'+file,import.meta.url),'utf8'));
- w.eval(source+`\nwindow.testPage=page=>{activeTab=page;};window.testDataState=()=>trainingDatasetRows.map(row=>row.id);`);
+ w.eval(source+`\nwindow.testPage=page=>{activeTab=page;};window.testDataState=()=>trainingDatasetRows.map(row=>row.id);window.testFormAdapter=adapter=>{adapterRows=[adapter];populateExperimentAdapters();applySelectedAdapter({loadSource:false});};`);
  await flush();
  assert.equal(streams.length,1);
  assert.equal(streams[0].url,'/api/changes?expected_workspace=test-workspace');
@@ -87,14 +88,16 @@ try {
  closing.invalidate(['data']);await flush();closing.invalidate(['data']);closing.stop();
  closingRead.resolve();await flush();assert.equal(closingRuns,1,'workspace leave stops trailing refreshes');
  // New prepared data reaches an already-open training form and preserves edits.
- const dataset=id=>({id,name:id,assignments:[],selection:{version_id:id}});
+ const formAdapter={id:'freshness-adapter',name:'Data policy',latest_version:{id:'freshness-version',version_number:1,manifest:{schema_version:'skynet.adapter/v1',slug:'freshness',display_name:'Data policy',train:{input_fields:[{path:'native.config.dataset',label:'Dataset',kind:'string',required:true,data_binding:{role:'training_data',position:0,value_path:'version.path'}}]}}}};
+ w.testFormAdapter(formAdapter);
+ const dataset=id=>({id,name:id,assignments:[{role:'training_data',position:0,version:{id,status:'READY',path:'/data/'+id}}],selection:{version_id:id}});
  let datasets=[dataset('old')],selectionReads=0,registryReads=0;
  handle=async(path)=>{
   if(path==='/api/data/selections'){selectionReads++;return Response.json({datasets});}
   if(path.startsWith('/api/data/resources?')){registryReads++;assert.match(path,/include_versions=true/);return Response.json({resources:[{id:'r',category:'dataset',kind:'dataset',display_name:'Registered',source_key:'registered',versions:[]}],resource_types:{}});}
   if(path==='/api/data/imports')return Response.json({imports:[]});
   if(path==='/api/data/derivations')return Response.json({derivations:[]});
-  if(path==='/api/adapters?include_archived=true')return Response.json({adapters:[]});
+  if(path==='/api/adapters?include_archived=true')return Response.json({adapters:[formAdapter]});
   return Response.json({});
  };
  w.testPage('experiments');await w.loadDataBundles(true);
@@ -130,6 +133,25 @@ try {
  streams[0].emit('error');assert.equal(streams[0].closed,true);assert.equal(timers.length,1);
  timers.shift()();assert.equal(streams.length,2);
  streams[1].emit('resync');assert.equal(w.SkynetRefresh.connected,true);
+ // Returning from DevTools or another app must not download unchanged catalogs.
+ // Committed changes still reach the focused view and queue while hidden.
+ let focusReads=0;
+ w.SkynetRefresh.register('focus-probe',['data'],()=>true,async()=>{focusReads++;});
+ await w.SkynetRefresh.flush();
+ assert.equal(focusReads,1);
+ for(let i=0;i<3;i++){
+   w.dispatchEvent(new w.Event('focus'));
+   w.document.dispatchEvent(new w.Event('visibilitychange'));
+   await flush();
+ }
+ assert.equal(focusReads,1,'healthy SSE + focus/visibility creates no catalog refresh loop');
+ streams[1].emit('change',{v:1,topics:['data']});await flush();
+ assert.equal(focusReads,2,'a real data change still refreshes immediately');
+ Object.defineProperty(w.document,'visibilityState',{configurable:true,value:'hidden'});
+ streams[1].emit('change',{v:1,topics:['data']});await flush();assert.equal(focusReads,2);
+ Object.defineProperty(w.document,'visibilityState',{configurable:true,value:'visible'});
+ w.document.dispatchEvent(new w.Event('visibilitychange'));await flush();
+ assert.equal(focusReads,3,'pending hidden changes flush once on return');
  streams[1].emit('unavailable');assert.equal(streams[1].closed,true);
  w.dispatchEvent(new w.Event('pagehide'));await flush();
  console.log('API freshness: mutation/header/body races, trailing invalidation, prepared selections, preserved edits, bounded registry reads, focus and SSE reconnect passed.');

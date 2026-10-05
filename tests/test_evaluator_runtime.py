@@ -119,7 +119,7 @@ def test_dual_evaluation_runtime_preserves_policy_pin_and_snapshots_evaluator(
             "queue_policy": "normal",
             "gpu_type": "l40s",
             "gpu_count": 1,
-            "cpus_per_task": 12,
+            "cpus_per_task": 8,
             "memory_gb": 64,
             "time_limit": "02:00:00",
         },
@@ -246,7 +246,7 @@ def test_validation_surfaces_existing_runtime_blockers_without_repeating_remote_
     monkeypatch.setattr(
         service,
         "_resolve_evaluation_suite_selection",
-        lambda suite_id, environment, tasks, run=None: (suite, "isaac_sim", ["nutpouring"], {}),
+        lambda suite_id, environment, tasks, run=None, target_dataset_id=None, unseen_embodiment=False: (suite, "isaac_sim", ["nutpouring"], {}),
     )
     observed = {}
 

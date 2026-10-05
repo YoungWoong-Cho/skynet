@@ -10,6 +10,7 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
+from skynet_app.cluster_runtime import DEFAULT_GATEWAY
 from skynet_app.live_xr_review import LiveReviewService
 from skynet_app.remote_artifacts import RemoteArtifact
 from test_live_review import payload
@@ -22,8 +23,8 @@ class Files:
     def stream_file_range(self, path, gateway, *, start, end):
         yield Path(path).read_bytes()[start:end + 1]
 
-    def ssh(self, gateway, command, *, stdin=None, timeout=30):
-        return subprocess.run(shlex.split(command), input=stdin, text=True, capture_output=True, check=True).stdout
+    def run_with_fallback(self, command, gateway, *, stdin=None, **budget):
+        return 'answering-host', subprocess.run(shlex.split(command), input=stdin, text=True, capture_output=True, check=True).stdout
 
 
 def test_remote_review_preserves_checksums_without_mac_payloads(tmp_path, payload):
@@ -37,13 +38,13 @@ def test_remote_review_preserves_checksums_without_mac_payloads(tmp_path, payloa
            'archive':{'state':'READY','gateway':'sky2'}}
     transport = Files()
     archive = SimpleNamespace(cluster=transport,
-        resolve=lambda j,p:(transport,'sky2',str(cluster / 'recording.pkl')),
+        resolve=lambda j,p:(transport,DEFAULT_GATEWAY,str(cluster / 'recording.pkl')),
         derived_root=lambda j:str(cluster / 'derived'))
     live = SimpleNamespace(root=tmp_path/'mac', get=lambda _:job, archive=archive)
     reviews = LiveReviewService(live)
     reviews.prepare('session',0)
     assert reviews.status('session',0)['state'] == 'READY'
-    assert reviews.status('session',0)['recording_source'] == {'gateway':'sky2','path':str(cluster/'recording.pkl')}
+    assert reviews.status('session',0)['recording_source'] == {'gateway':DEFAULT_GATEWAY,'path':str(cluster/'recording.pkl')}
     result=json.loads(reviews.artifact('session',0,'review.json').read_text())
     assert result['sha256']==hashlib.sha256(raw).hexdigest()
     assert len(result['episodes'][0]['frames'])==4
@@ -87,7 +88,7 @@ def remote_video(tmp_path):
     transport=Files()
     def resolve(job,relative):
         assert relative in {'recordings/demo.pkl','recordings/demo.mp4'}
-        return transport,'sky2',str(original/relative)
+        return transport,DEFAULT_GATEWAY,str(original/relative)
     archive=SimpleNamespace(cluster=transport,resolve=resolve,derived_root=lambda job:str(derived))
     live=SimpleNamespace(get=lambda key:job,archive=archive,
                          conversions=SimpleNamespace(profile=lambda job:{'execution':'slurm'}))
@@ -115,7 +116,25 @@ def test_archive_and_legacy_cached_video_play_without_loading_recording_states(r
     c.videos.publish(c.directory,state='READY',kind='capture',remote_artifact={'gateway':'sky2','path':str(video)})
     artifact=c.videos.artifact('session',0)
     assert isinstance(artifact,RemoteArtifact) and artifact.read_bytes()==b'cached MP4'
+    assert artifact.transport is c.transport and artifact.gateway==DEFAULT_GATEWAY
     assert [path.name for path in c.directory.iterdir()]==['status.json']
+
+
+def test_saved_video_gateway_is_ignored_for_cluster_paths(remote_video):
+    from skynet_app.cluster_runtime import WORK_ROOT
+    c=remote_video
+    token='b'*32
+    for path,receipt in ((str(c.derived/'cached-videos/0/0/a.mp4'),{}),
+                         (f'{WORK_ROOT}/jobs/runs/{token}/video.mp4',{'generation':token})):
+        c.videos.publish(c.directory,state='READY',kind='replay',renderer_version=c.videos.version,
+                         remote_artifact={'gateway':'retired-host','path':path},**receipt)
+        artifact=c.videos.artifact('session',0)
+        assert artifact.transport is c.transport
+        assert (artifact.gateway,artifact.path)==(DEFAULT_GATEWAY,path)
+    c.videos.publish(c.directory,state='READY',kind='capture',
+                     remote_artifact={'gateway':'retired-host','path':'/elsewhere/video.mp4'})
+    with pytest.raises(ValueError,match='does not belong'):
+        c.videos.artifact('session',0)
 
 
 def test_recovered_pre_submission_stage_is_safely_cancellable_without_a_job(remote_video):
@@ -141,9 +160,9 @@ def test_review_and_video_creation_pause_while_source_is_being_archived(remote_v
     c=remote_video
     c.job['archive']['state']='COPYING'
     reviews=LiveReviewService(c.videos.live,root=c.directory.parent)
-    with pytest.raises(ValueError,match='moving to sky2'):
+    with pytest.raises(ValueError,match='moving to the training cluster'):
         reviews.create('session',0)
-    with pytest.raises(ValueError,match='moving to sky2'):
+    with pytest.raises(ValueError,match='moving to the training cluster'):
         c.videos.create('session',0)
     reviews.executor.shutdown()
 
@@ -158,21 +177,22 @@ def test_review_storage_change_cannot_publish_split_location_as_ready(tmp_path,p
          'recordings':['recordings/demo.pkl'],'recording_checksums':{'recordings/demo.pkl':hashlib.sha256(raw).hexdigest()}}
     transport=Files()
     archive=SimpleNamespace(cluster=transport,
-        resolve=lambda job,p:(transport,'sky2',str(source)),derived_root=lambda job:str(derived))
+        resolve=lambda job,p:(transport,DEFAULT_GATEWAY,str(source)),derived_root=lambda job:str(derived))
     writes=[]
-    ssh=transport.ssh
-    def changed(gateway,command,**kwargs):
+    run=transport.run_with_fallback
+    def changed(command,gateway,**kwargs):
         writes.append((gateway,shlex.split(command)[-1]))
-        result=ssh(gateway,command,**kwargs)
+        result=run(command,gateway,**kwargs)
         if len(writes)==1:
             job['archive']={'state':'READY','gateway':'sky2'}
         return result
-    transport.ssh=changed
+    transport.run_with_fallback=changed
     live=SimpleNamespace(root=tmp_path/'mac',get=lambda key:job,archive=archive,transport=lambda job:transport)
     reviews=LiveReviewService(live)
     reviews.prepare('session',0)
     assert reviews.status('session',0)['state']=='READY'
-    assert [gateway for gateway,path in writes]==['bonjour','bonjour','sky2','sky2']
+    # The receipt's recorded host is not an address: cluster writes use the default route.
+    assert [gateway for gateway,path in writes]==['bonjour','bonjour',DEFAULT_GATEWAY,DEFAULT_GATEWAY]
     assert (derived/'reviews/0/review.json').is_file() and (derived/'reviews/0/summary.json').is_file()
     assert reviews.status('session',0)['storage_path']==str(derived/'reviews/0/review.json')
     reviews.executor.shutdown()

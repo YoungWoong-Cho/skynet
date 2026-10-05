@@ -167,6 +167,10 @@ class FakeWandBBridge(WandBBridge):
             journal=journal,
         )
 
+    def _post_file_stream(self, run, payload):
+        assert payload.get("complete") is True
+        self.remote_runs[run["name"]]["state"] = "finished" if payload["exitcode"] == 0 else "failed"
+
     def _append_history_rows(self, run, rows):
         self.history_rows.extend(dict(row) for row in rows)
         run["history_offset"] = int(run.get("history_offset") or 0) + len(rows)
@@ -207,6 +211,10 @@ class FakeWandBBridge(WandBBridge):
             return {"upsertBucket": {"bucket": {
                 "id": run["id"], "name": run["name"], "displayName": run.get("displayName")
             }}}
+        if "SkynetExistingSummary" in query:
+            run = self.remote_runs.get(str(variables["name"]))
+            return {"project": {"run": {"id": run["id"], "name": run["name"],
+                "summaryMetrics": json.dumps(run["summary"])} if run else None}}
         if "SkynetUpdateSummary" in query:
             run = next(
                 item for item in self.remote_runs.values() if item["id"] == variables["id"]
@@ -486,7 +494,7 @@ class WandBDeliveryTestCase(unittest.TestCase):
             self.assertEqual(created.remote_id, local_id)
             self.assertEqual(binding["remote_id"], local_id)
             self.assertEqual(len(bridge.remote_runs), 1)
-            self.assertEqual(remote["state"], "running")
+            self.assertEqual(remote["state"], "finished")
             self.assertEqual(remote["summary"]["skynet/status"], "FINISHED")
             self.assertIn("slurm.job_id:101", remote["tags"])
             self.assertEqual(remote["config"]["batch_size"]["value"], 32)

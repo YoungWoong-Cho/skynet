@@ -67,9 +67,9 @@
         archive?.state === "READY"
           ? ""
           : ["VERIFIED", "CLEANUP_PENDING"].includes(archive?.state)
-            ? "On sky2 · cleanup pending"
+            ? "On the cluster · cleanup pending"
             : archive?.state === "COPYING"
-              ? "Moving to sky2…"
+              ? "Moving to the cluster…"
               : archive?.state === "FAILED"
                 ? "Transfer needs attention"
                 : "On collection workstation";

@@ -53,7 +53,7 @@ def test_groot_readiness_contract_binds_profile_suite_and_adapter_hook() -> None
         "queue_policy": "normal",
         "gpu_type": "l40s",
         "gpu_count": 1,
-        "cpus_per_task": 12,
+        "cpus_per_task": 8,
         "memory_gb": 64,
         "time_limit": "02:00:00",
     }
@@ -68,7 +68,7 @@ def test_rendered_readiness_job_requests_one_l40s_without_accepting_eula() -> No
     assert "#SBATCH --partition=rl2-lab" in script
     assert "#SBATCH --account=rl2-lab" in script
     assert "#SBATCH --gres=gpu:l40s:1" in script
-    assert "#SBATCH --cpus-per-task=12" in script
+    assert "#SBATCH --cpus-per-task=8" in script
     assert "#SBATCH --mem=64G" in script
     assert "#SBATCH --time=02:00:00" in script
     assert "#SBATCH --export=ALL" in script
@@ -82,8 +82,7 @@ def test_rendered_readiness_job_requests_one_l40s_without_accepting_eula() -> No
 
 
 def test_readiness_rejects_resources_below_profile_minimum() -> None:
-    with pytest.raises(ValueError, match="requires at least 12 CPUs"):
-        render_readiness_sbatch(PROFILE, SUITE, cpus_per_task=4)
+    assert "#SBATCH --cpus-per-task=8" in render_readiness_sbatch(PROFILE, SUITE, cpus_per_task=4)
     with pytest.raises(ValueError, match="requires at least 64 GB"):
         render_readiness_sbatch(PROFILE, SUITE, memory_gb=32)
     with pytest.raises(ValueError, match="time limit of at least 02:00:00"):

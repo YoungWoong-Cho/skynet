@@ -12,12 +12,14 @@ import time
 from uuid import uuid4
 
 from .cluster_runtime import (
+    DEFAULT_GATEWAY,
     ClusterClient,
     ClusterError,
     SubmissionOutcomeUnknown,
     WORK_ROOT,
 )
 from .database import canonical_json, utc_now
+from .cluster_config import CLUSTER
 from .dexverse_release import TASK, ROBOT, REVISION
 from .live_xr_catalog import selection
 from .dexverse_versions import environment_profile
@@ -441,7 +443,7 @@ class LiveXRService:
                 f"#SBATCH --account={p['account']}",
                 f"#SBATCH --partition={p['partition']}",
                 f"#SBATCH --gres=gpu:{p['gpu_type']}:1",
-                "#SBATCH --cpus-per-task=4",
+                f"#SBATCH --cpus-per-task={CLUSTER.defaults.cpus_per_gpu}",
                 "#SBATCH --mem=48G",
                 f"#SBATCH --time={minutes // 60:02}:{minutes % 60:02}:00",
                 f"#SBATCH --output={root}/stdout.log",
@@ -560,12 +562,12 @@ if p.is_file():
 print(json.dumps(value))
 """
             control = json.loads(
-                transport.ssh(
-                    job["gateway"],
+                transport.run_with_fallback(
                     "python3 - " + shlex.quote(job["root"] + "/output/status.json"),
+                    job["gateway"],
                     stdin=script,
-                    timeout=15,
-                )
+                    attempt_timeout=15,
+                )[1]
             )
             changes = dict(
                 scheduler=scheduler,
@@ -678,10 +680,10 @@ print(json.dumps(value))
             transport.cancel(job["job_id"], job["gateway"])
         else:
             dest = job["root"] + "/output/stop.request"
-            transport.ssh(
-                job["gateway"],
+            transport.run_with_fallback(
                 f"mkdir -p {shlex.quote(str(Path(dest).parent))} && touch {shlex.quote(dest)}",
-                timeout=15,
+                job["gateway"],
+                attempt_timeout=15,
             )
         return self.update(
             identifier,
@@ -695,7 +697,7 @@ print(json.dumps(value))
         transport, gateway, root = self.transport(job), job["gateway"], job["root"]
         archive = getattr(self, "archive", None)
         if archive is not None and archive.is_archived(job):
-            transport, gateway = archive.cluster, job["archive"]["gateway"]
+            transport, gateway = archive.cluster, DEFAULT_GATEWAY
             root = archive.session_root(job)
         parts = []
         for name in (
@@ -708,7 +710,7 @@ print(json.dumps(value))
             path = shlex.quote(root + "/" + name)
             parts.append(f"if test -f {path}; then tail -c 16000 {path}; fi")
         return (
-            transport.ssh(gateway, "\n".join(parts), timeout=20)
+            transport.run_with_fallback("\n".join(parts), gateway, attempt_timeout=20)[1]
             or job.get("error")
             or "No logs yet."
         )

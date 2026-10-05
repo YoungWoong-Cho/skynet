@@ -137,6 +137,9 @@ def inventory(root, identifier):
 
 def import_task(request, entry):
     revision = request["revision"]
+    gateway = request.get("gateway", "auto")
+    if not isinstance(gateway, str) or not gateway:
+        raise ValueError("gateway must name the host that imports this release")
     identifier = session_id(revision, entry["task"])
     base = safe_root(request["datasets_root"]) / "raw/dexverse-live" / identifier
     base.mkdir(parents=True, exist_ok=True)
@@ -254,7 +257,7 @@ def import_task(request, entry):
             "scheduler_final": True,
             "job_id": None,
             "profile": profile,
-            "gateway": "sky2",
+            "gateway": gateway,
             "root": str(final),
             "created_at": request["created_at"],
             "updated_at": request["created_at"],
@@ -270,7 +273,7 @@ def import_task(request, entry):
             "error": None,
             "archive": {
                 "state": "READY",
-                "gateway": "sky2",
+                "gateway": gateway,
                 "root": str(final / "output"),
                 "source_removed": True,
                 "manifest": manifest,

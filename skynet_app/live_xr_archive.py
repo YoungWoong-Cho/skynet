@@ -14,7 +14,7 @@ from uuid import UUID
 
 from .cluster_config import CLUSTER
 from .recording_guard import guarded_recording
-from .cluster_runtime import ClusterClient, ClusterError
+from .cluster_runtime import DEFAULT_GATEWAY, ClusterClient, ClusterError
 from .database import canonical_json, utc_now
 from .live_xr_archive_remote import archive_control
 
@@ -40,9 +40,9 @@ def archive_descriptor(job, cluster, *, require_available=True):
     if not re.fullmatch(r"[a-f0-9]{64}", str(storage_key)):
         raise ValueError("The saved archive storage key is invalid")
     expected = f"{CLUSTER.paths.datasets}/raw/dexverse-live/{job['id']}/{storage_key}/output"
-    if archive.get("gateway") != "sky2" or archive.get("root") != expected:
+    # The recorded gateway only says which host received the copy.
+    if not isinstance(archive.get("gateway"), str) or archive.get("root") != expected:
         raise ValueError("The saved archive storage location is invalid")
-    cluster.candidates("sky2")
     cluster._remote_path(expected)
     return archive
 
@@ -73,7 +73,7 @@ class LiveArchiveService:
             archive = self._descriptor(job)
             if not any(item["path"] == "output/" + relative_path for item in archive["manifest"]["files"]):
                 raise ValueError("This artifact is not part of the verified session archive")
-            return self.cluster, archive["gateway"], archive["root"] + "/" + relative_path
+            return self.cluster, DEFAULT_GATEWAY, archive["root"] + "/" + relative_path
         if (job.get("archive") or {}).get("source_removed"):
             raise ValueError("The archived session must be verified before its files can be used")
         return self.live.transport(job), job["gateway"], job["root"] + "/output/" + relative_path
@@ -189,7 +189,7 @@ class LiveArchiveService:
         self._check()
         transport = self.live.transport(job)
         transport.candidates(job["gateway"])
-        self.cluster.candidates("sky2")
+        receiver = self.cluster.resolve_gateway(DEFAULT_GATEWAY)
         source_request = dict(self._source(job), manifest=manifest, manifest_sha256=checksum, operation="stream")
         destination_request = dict(session_id=job["id"], datasets_root=CLUSTER.paths.datasets,
                                    manifest=manifest, manifest_sha256=checksum, operation="receive")
@@ -223,7 +223,7 @@ class LiveArchiveService:
 
         threads = []
         try:
-            destination = subprocess.Popen(self._ssh_args("sky2", self._program("receive")),
+            destination = subprocess.Popen(self._ssh_args(receiver, self._program("receive")),
                                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             for function, args in ((feed, ()), (relay, ()), (drain, (source.stderr, errors)),
                                    (drain, (destination.stderr, errors)), (drain, (destination.stdout, output))):
@@ -242,7 +242,7 @@ class LiveArchiveService:
                 thread.join(timeout=2)
             if source.returncode or destination.returncode or problems:
                 raise ClusterError(b"".join(errors).decode(errors="replace")[-2000:] or "Session transfer failed")
-            return json.loads(b"".join(output))
+            return receiver, json.loads(b"".join(output))
         finally:
             for process in (source, destination):
                 if process is not None and process.poll() is None:
@@ -266,7 +266,7 @@ class LiveArchiveService:
 
     def _verify(self, job, archive):
         try:
-            result = self._call(self.cluster, "sky2", "verify", session_id=job["id"],
+            result = self._call(self.cluster, self.cluster.resolve_gateway(DEFAULT_GATEWAY), "verify", session_id=job["id"],
                                 datasets_root=CLUSTER.paths.datasets, manifest=archive["manifest"],
                                 manifest_sha256=archive["manifest_sha256"], storage_key=archive.get("storage_key", archive["manifest_sha256"]))
             if not result.get("verified") or result.get("manifest_sha256") != archive["manifest_sha256"] or result.get("root") != archive["root"]:
@@ -290,7 +290,7 @@ class LiveArchiveService:
                 if self.busy(identifier):
                     return self._publish(identifier, state="QUEUED", error=None,
                                          detail="Waiting for active recording review or video work to finish")
-                self._publish(identifier, state="COPYING", gateway="sky2", error=None,
+                self._publish(identifier, state="COPYING", error=None,
                               detail="Copying the complete session to the training cluster")
                 if self.busy(identifier):
                     return self._publish(identifier, state="QUEUED", error=None,
@@ -303,8 +303,8 @@ class LiveArchiveService:
                 if hashlib.sha256(canonical_json(manifest).encode()).hexdigest() != checksum:
                     raise ValueError("Source manifest checksum did not match")
                 expected = f"{CLUSTER.paths.datasets}/raw/dexverse-live/{identifier}/{checksum}/output"
-                archive = dict(gateway="sky2", root=expected, manifest=manifest, manifest_sha256=checksum)
-                result = self._transfer(job, manifest, checksum)
+                receiver, result = self._transfer(job, manifest, checksum)
+                archive = dict(gateway=receiver, root=expected, manifest=manifest, manifest_sha256=checksum)
                 if not result.get("verified") or result.get("manifest_sha256") != checksum or result.get("root") != expected:
                     raise ValueError("Transferred archive verification did not match")
                 self._check()
@@ -376,14 +376,24 @@ class LiveArchiveService:
                 self.next_attempt[identifier] = time.monotonic() + 60
 
     def start(self, *, enabled=None, cleanup_enabled=None):
-        if enabled is not None:
-            self.enabled = enabled
-        if cleanup_enabled is not None:
-            self.cleanup_enabled = cleanup_enabled
-        if not self.enabled or self.monitor is not None:
-            return
-        self.monitor = threading.Thread(target=self._monitor, name="live-archive-monitor", daemon=True)
-        self.monitor.start()
+        with self.lock:
+            if enabled is not None:
+                self.enabled = enabled
+            if cleanup_enabled is not None:
+                self.cleanup_enabled = cleanup_enabled
+            if self.monitor is not None and self.monitor.is_alive():
+                if self.stopping.is_set():
+                    raise RuntimeError("Archive monitor has not stopped")
+                return
+            if self.stopping.is_set() and self.executor is not None:
+                raise RuntimeError("Archive workers have not stopped")
+            if self.executor is None:
+                self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="live-archive")
+            self.stopping.clear()
+            if not self.enabled:
+                return
+            self.monitor = threading.Thread(target=self._monitor, name="live-archive-monitor", daemon=True)
+            self.monitor.start()
 
     def _monitor(self):
         while not self.stopping.is_set():
@@ -403,8 +413,18 @@ class LiveArchiveService:
                 pass  # Next pass reconciles persisted state after connection recovery.
             self.stopping.wait(10)
 
-    def stop(self):
+    def request_stop(self):
         self.stopping.set()
+
+    def stop(self):
+        self.request_stop()
         if self.monitor is not None:
             self.monitor.join(timeout=2)
-        self.executor.shutdown(wait=False, cancel_futures=True)
+        executor = self.executor
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+        with self.lock:
+            self.executor = None
+            self.active.clear()
+        if self.monitor is not None and self.monitor.is_alive():
+            raise RuntimeError("Archive monitor is still stopping")

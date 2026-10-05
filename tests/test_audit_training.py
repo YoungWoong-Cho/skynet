@@ -82,7 +82,7 @@ def test_dataset_bound_evaluation_without_bundle_reports_actionable_validation()
 
 @pytest.mark.parametrize("assignment", [None, "legacy string", {"mount_path": "../escape"}])
 def test_consumed_legacy_bundle_assignments_are_validated_before_binding(assignment):
-    manifest = next(m for m in builtin_adapter_manifests() if m.slug == "generic")
+    manifest = next(m for m in builtin_adapter_manifests() if any(field.data_binding for field in m.train.input_fields))
     with pytest.raises(ValueError, match="assignments must be objects|Mount path"):
         PipelineService._apply_manifest_data_bindings({"data": {"bundle": {"assignments": [assignment]}}}, manifest)
 

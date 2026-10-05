@@ -177,7 +177,7 @@ def test_frozen_hand_assets_are_verified_and_do_not_use_current_catalog(tmp_path
 def test_cluster_preview_uses_task_version_pinned_repository():
     from pathlib import Path
     from types import SimpleNamespace
-    from skynet_app.cluster_runtime import WORK_ROOT
+    from skynet_app.cluster_runtime import DEFAULT_GATEWAY, WORK_ROOT
     from skynet_app.dexverse_versions import V1_REVISION, V1_REPOSITORY
     from skynet_app.episode_previews import EpisodePreviews
     root = Path(__file__).resolve().parents[1]
@@ -189,12 +189,59 @@ def test_cluster_preview_uses_task_version_pinned_repository():
         session = dict(id='recording', recordings=['recordings/live/episode.pkl'],
                        recording_checksums={'recordings/live/episode.pkl': 'a' * 64},
                        profile=dict(task=task, source_revision=revision, robot='floating_shadow_hand'))
-        live = SimpleNamespace(root=root, archive=SimpleNamespace(resolve=lambda job, path: (object(), 'sky2', '/archive/' + path)))
+        cluster = object()
+        live = SimpleNamespace(root=root, archive=SimpleNamespace(
+            cluster=cluster, resolve=lambda job, path: (cluster, DEFAULT_GATEWAY, '/archive/' + path)))
         reviews = SimpleNamespace(live=live, source=lambda *args: (session, '/unused'),
                                   remote_location=lambda *args: SimpleNamespace(path='/archive/reviews/review.json'))
         previews = EpisodePreviews(reviews)
         try:
-            _, gateway, _, request = previews.location('recording', 0, 0)
-            assert gateway == 'sky2' and request['repository'] == repository
+            transport, gateway, _, request = previews.location('recording', 0, 0)
+            assert transport is cluster and gateway == DEFAULT_GATEWAY and request['repository'] == repository
         finally:
             previews.executor.shutdown(wait=True)
+
+
+def test_recorded_hand_and_scene_are_read_through_storage_routing(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from skynet_app import simulation_hands
+    from skynet_app.cluster_runtime import DEFAULT_GATEWAY
+    from skynet_app.episode_previews import EpisodePreviews
+    monkeypatch.setattr(simulation_hands, 'cache_root', lambda: tmp_path / 'cache')
+    calls = []
+
+    class Storage:
+        def __init__(self, name, reply):
+            self.name, self.reply = name, reply
+
+        def gateway_for(self, recorded):
+            return recorded
+
+        def run_with_fallback(self, command, gateway, *, stdin=None, **budget):
+            calls.append((self.name, gateway, command))
+            if self.reply is None:
+                raise RuntimeError('Recorded hand manifest is unavailable')
+            return 'answering-host', 'login banner\n' + json.dumps(self.reply) + '\n'
+
+    cluster = Storage('cluster', None)
+    workstation = Storage('workstation', dict(path='/workstation/hand/simulation.urdf', text='<robot/>'))
+    digest = 'a' * 64
+    session = dict(id='recording', gateway='bonjour', recordings=['recordings/live/episode.pkl'],
+                   profile=dict(robot='saved', hand_bundle=dict(digest=digest, root='/workstation/hands/saved/' + digest)),
+                   archive=dict(state='READY', gateway='sky2'))
+    live = SimpleNamespace(root=tmp_path, transport=lambda job: workstation, archive=SimpleNamespace(
+        cluster=cluster, resolve=lambda job, path: (cluster, DEFAULT_GATEWAY, '/archive/' + path)))
+    previews = EpisodePreviews(SimpleNamespace(live=live, source=lambda *args: (session, '/unused')))
+    try:
+        transport, gateway, result = previews.hand_file('recording', 0, 'simulation.urdf')
+        assert transport is workstation and gateway == 'bonjour' and result['text'] == '<robot/>'
+        # Archive storage by its default route first, then the recording's own collection host.
+        assert [call[:2] for call in calls] == [('cluster', DEFAULT_GATEWAY), ('workstation', 'bonjour')]
+        cluster.reply = {'state': 'READY'}
+        key = ('recording', 0, 0)
+        previews.states[key] = dict(state='PREPARING', source_sha256='b' * 64)
+        previews.prepare(key, (cluster, DEFAULT_GATEWAY, '/runtime/bin/python', dict(source_sha256='b' * 64)))
+        assert previews.states[key] == dict(state='READY', source_sha256='b' * 64)
+        assert calls[-1] == ('cluster', DEFAULT_GATEWAY, '/runtime/bin/python -')
+    finally:
+        previews.executor.shutdown(wait=True)

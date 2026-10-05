@@ -7,7 +7,7 @@ from pathlib import Path
 from uuid import UUID
 
 from .cluster_config import CLUSTER
-from .cluster_runtime import WORK_ROOT
+from .cluster_runtime import DEFAULT_GATEWAY, WORK_ROOT
 from .dataset_catalog import recording_ids
 from .data_version_retirement import references
 from .live_xr_archive import archive_descriptor, TERMINAL_STATES
@@ -41,7 +41,7 @@ class RecordingMaintenance(Maintenance):
     def remote(self, operation, root, items=None, protected=None, gateway="auto"):
         # These are shared collection archives, independent of the caller's
         # training base path and currently selected submission gateway.
-        return super().remote(operation, root, items, protected, "sky2")
+        return super().remote(operation, root, items, protected, DEFAULT_GATEWAY)
 
     def _target(self, c, kind, identifier):
         if kind != "recording":
@@ -99,7 +99,7 @@ class RecordingMaintenance(Maintenance):
                 "recording",
                 identifier,
                 target["name"],
-                "Wait for transfer to sky2 and collection workstation cleanup to finish",
+                "Wait for transfer to the training cluster and collection workstation cleanup to finish",
             )
         if (
             identifier in self.live.archive.active
@@ -358,7 +358,7 @@ class RecordingMaintenance(Maintenance):
             expected = str(path)
         else:
             modality, camera = spec.get("modality", ""), spec.get("camera_id", "")
-            if modality not in {"rgb", "depth", "point_cloud"} or not re.fullmatch(r"[A-Za-z0-9_.-]+", camera):
+            if modality not in {"rgb", "depth", "point_cloud"} or not re.fullmatch(r"[A-Za-z0-9_.-]+", camera) or camera in {'.', '..'}:
                 raise ValueError("Invalid shared observation identity")
             expected = f"{WORK_ROOT}/datasets/recordings/{source}/{modality}/{camera}/{key}"
         if artifact.get("path") is not None and artifact["path"] != expected:

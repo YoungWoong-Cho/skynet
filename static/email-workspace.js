@@ -6,13 +6,7 @@
   const email = document.getElementById("workspace-email");
   const message = document.getElementById("workspace-message");
   const button = form.querySelector("button[type=submit]");
-  const retry = document.createElement("button");
-  retry.id = "workspace-retry";
-  retry.type = "button";
-  retry.className = "button";
-  retry.textContent = "Retry connection";
-  retry.hidden = true;
-  message.after(retry);
+  const retry = document.getElementById("workspace-retry");
   const originalFetch = window.fetch.bind(window);
   let workspace = null;
   let leaving = false;

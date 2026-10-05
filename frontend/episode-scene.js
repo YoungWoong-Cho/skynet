@@ -26,7 +26,7 @@ export class EpisodeScene {
     this.container = container;
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-    this.renderer.setClearColor(0xf1f3f4);
+    this.renderer.setClearColor(getComputedStyle(container).backgroundColor);
     container.append(this.renderer.domElement);
     this.renderer.domElement.tabIndex = 0;
     this.renderer.domElement.setAttribute(
@@ -48,6 +48,7 @@ export class EpisodeScene {
     this.controls.listenToKeyEvents(this.renderer.domElement);
     this.controls.addEventListener("change", () => this.render());
     this.groups = {};
+    this.observationGroups = {};
     this.fitted = false;
     this.observer = new ResizeObserver(() => this.render());
     this.observer.observe(container);
@@ -157,6 +158,7 @@ export class EpisodeScene {
     enabled,
     keepHand = false,
     geometry = { hand: true, scene: true },
+    observations = null,
   ) {
     for (const [key, robot] of Object.entries(this.robots)) {
       const pose = frame?.hand_poses?.[key];
@@ -253,7 +255,53 @@ export class EpisodeScene {
         this.fitted = true;
       }
     }
+    this.updateObservations(observations, geometry);
     this.render();
+  }
+
+  updateObservations(observations, geometry) {
+    this.observationGroups ||= {};
+    const present = new Set();
+    for (const modality of ["point_cloud", "depth"])
+      for (const item of observations?.[modality] || []) {
+        const key = `${modality}:${item.id}`;
+        present.add(key);
+        let object = this.observationGroups[key];
+        if (!object) {
+          object = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({
+            size: modality === "depth" ? 2.5 : 3,
+            sizeAttenuation: false,
+            color: modality === "depth" ? 0x588cbd : 0xffffff,
+          }));
+          this.observationGroups[key] = object;
+          this.scene.add(object);
+        }
+        object.visible = geometry[modality] !== false && item.positions.length > 0;
+        if (object.userData.sample !== item) {
+          object.userData.sample = item;
+          const positions = item.positions.flat();
+          this.positions(object.geometry, positions);
+          const colors = item.colors?.flat();
+          const colored = colors?.length === positions.length;
+          object.material.vertexColors = Boolean(colored);
+          object.material.color.setHex(colored ? 0xffffff : modality === "depth" ? 0x588cbd : 0x16835c);
+          object.material.needsUpdate = true;
+          if (colored) object.geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+          else object.geometry.deleteAttribute("color");
+          object.geometry.computeBoundingSphere();
+          if (!this.fitted && positions.length) {
+            const bounds = new THREE.Box3().setFromArray(positions);
+            const center = bounds.getCenter(new THREE.Vector3());
+            const radius = Math.max(bounds.getSize(new THREE.Vector3()).length(), 0.15);
+            this.controls.target.copy(center);
+            this.camera.position.copy(center).add(new THREE.Vector3(0.8, -1.4, 0.9).multiplyScalar(radius));
+            this.controls.update();
+            this.fitted = true;
+          }
+        }
+      }
+    for (const [key, object] of Object.entries(this.observationGroups))
+      if (!present.has(key)) object.visible = false;
   }
 
   positions(geometry, values) {
@@ -284,6 +332,7 @@ export class EpisodeScene {
     ++this.generation;
     Object.values(this.robots).forEach(disposeObject);
     Object.values(this.objects).forEach(disposeObject);
+    Object.values(this.observationGroups || {}).forEach(disposeObject);
     this.observer.disconnect();
     this.controls.dispose();
     for (const group of Object.values(this.groups))

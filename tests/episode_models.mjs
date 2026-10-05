@@ -106,6 +106,22 @@ assert.equal(
   "Missing Actual poses are never borrowed from Demonstration",
 );
 assert.equal(scene.robots.prediction.visible, false);
+// Dataset observations share the recorded-scene renderer without changing its
+// model/keypoint layers, and the backend supplies points in this world frame.
+const observations = {
+  point_cloud: [{id: "front", positions: [[1, 2, 3], [2, 3, 4]], colors: [[1, 0, 0], [0, 1, 0]]}],
+  depth: [{id: "left", positions: [[3, 4, 5]]}],
+};
+scene.update(frame, [], all, true, {hand: true, scene: true, point_cloud: true, depth: false}, observations);
+assert.equal(scene.observationGroups["point_cloud:front"].visible, true);
+assert.equal(scene.observationGroups["depth:left"].visible, false);
+assert.deepEqual([...scene.observationGroups["point_cloud:front"].geometry.getAttribute("position").array], [1, 2, 3, 2, 3, 4]);
+assert.equal(scene.observationGroups["point_cloud:front"].material.vertexColors, true);
+scene.update(frame, [], all, true, {hand: true, scene: true, point_cloud: false, depth: true}, observations);
+assert.equal(scene.observationGroups["point_cloud:front"].visible, false);
+assert.equal(scene.observationGroups["depth:left"].visible, true);
+scene.update(frame, [], all, true, {hand: true, scene: true});
+assert.equal(scene.observationGroups["depth:left"].visible, false, "A source/evaluation frame cannot inherit stored observations from another viewer mode");
 // Regression: the real WUJI Hands tree uses r_ names while the captured tree
 // uses h_r_. Every visual must attach and remain attached during playback.
 const wujiTree = await readFile(

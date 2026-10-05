@@ -13,7 +13,7 @@ from test_policy_exports import setup, create
 def test_job_overview_avoids_recording_catalog_and_remote_work_and_reads_current_state(setup, monkeypatch):
     service, session, _ = setup
     job = create(service, session['id'], 'fixture-rgb', 'Fresh dataset')
-    for name in ('dispatch', 'options', 'sources'):
+    for name in ('dispatch', 'sources'):
         monkeypatch.setattr(service, name, lambda *a, **k: (_ for _ in ()).throw(AssertionError('Progress read did extra work')))
     monkeypatch.setattr(service.live, 'list', lambda **kw: (_ for _ in ()).throw(AssertionError('Read recording catalog')))
     monkeypatch.setattr(service.database, 'list_data_resources', lambda **kw: (_ for _ in ()).throw(AssertionError('Read resource catalog')))

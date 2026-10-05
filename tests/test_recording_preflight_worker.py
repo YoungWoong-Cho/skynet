@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from test_recording_preparation_service import preparation,create
-from skynet_app.cluster_runtime import ClusterError,SubmissionOutcomeUnknown
+from skynet_app.cluster_runtime import DEFAULT_GATEWAY,ClusterError,SubmissionOutcomeUnknown
 from skynet_app.observation_preparation import ObservationsPending
 
 
@@ -27,6 +27,33 @@ def test_preflight_retains_submission_identity_after_uncertain_ack(preparation):
     assert len(uploads)==1 and len(sent)==2 and sent[0]==sent[1]
     assert '--gres' not in sent[0][0] and 'CUDA_VISIBLE_DEVICES=' in sent[0][0]
     assert service.get(job['id'])['preflight_job_id']=='123'
+
+
+def test_preflight_routes_every_cluster_call_with_the_configured_default(preparation):
+    service,*_=preparation;job=create(preparation)
+    routes=[];files={};state=['PENDING']
+    def served(gateway):
+        routes.append(gateway)
+        return 'serving-host'
+    def read(path,gateway,*,max_bytes):
+        host=served(gateway)
+        if path not in files:raise ClusterError('No such file')
+        return host,files[path]
+    service.cluster=SimpleNamespace(
+        write_capsule_files=lambda identifier,capsule,gateway:(served(gateway),{}),
+        submit_script=lambda script,identifier,gateway,submission_key:SimpleNamespace(job_id='123',gateway=served(gateway)),
+        job_statuses=lambda identifiers,gateway:(served(gateway),{'123':{'State':state[0]}}),read_file=read)
+    with pytest.raises(ObservationsPending):service._preflight_sources(job,job['sources'])
+    job=service.get(job['id'])
+    state[0]='FAILED'
+    with pytest.raises(ValueError,match='ended as FAILED'):service._preflight_sources(job,job['sources'])
+    state[0]='COMPLETED'
+    files[job['preflight_root']+'/result.json']=json.dumps(dict(schema='skynet.recording-preflight/v1',
+        job_id=job['id'],attempt_id=job['preflight_token'],verified=True,
+        sources=[dict(source_sha256=s['sha256'],shared_image_streams={},capture={'robot':'test'}) for s in job['sources']]))
+    assert len(service._preflight_sources(job,job['sources']))==len(job['sources'])
+    # Upload, submit and status; status and two failure reads; status and the receipt.
+    assert routes==[DEFAULT_GATEWAY]*8
 
 
 def test_preflight_bootstrap_failure_does_not_wait_forever(preparation):

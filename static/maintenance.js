@@ -13,6 +13,7 @@
     value == null ? "—" : `${(value / 1024 / 1024).toFixed(2)} MB`;
   const labels = {
     experiment: "experiment",
+    "draft-revision": "unsubmitted draft revision",
     run: "training run",
     evaluation: "evaluation and rollouts",
     adapter: "adapter",
@@ -50,13 +51,15 @@
     try {
       const result = await api(
         kind === "storage"
-          ? `/api/maintenance/storage?gateway=${encodeURIComponent(gateway())}`
+          ? `/api/maintenance/storage?gateway=${encodeURIComponent(gateway())}&scope=${encodeURIComponent(document.querySelector('#storage-inspection-scope')?.value || 'all')}`
           : `/api/maintenance/history/${kind}/${encodeURIComponent(id)}?gateway=${encodeURIComponent(gateway())}`,
       );
       if (request !== sequence) return;
       current = { ...result, kind, id };
       if (kind === "storage") {
         message.textContent = `Base path: ${result.root}. Select files to permanently remove.`;
+        if (result.truncated)
+          message.textContent += " Showing a limited batch. Inspect again after cleanup to see more files.";
         content.innerHTML = table(
           ["Select", "Path", "Size", "Reason"],
           result.items.map(
@@ -170,27 +173,23 @@
           body: JSON.stringify({
             token: plan.token,
             gateway: gateway(),
-            ...(plan.kind === "storage" ? { paths } : {}),
+            ...(plan.kind === "storage" ? { paths, scope: plan.scope || "all" } : {}),
           }),
         },
       );
-      let refreshError = null;
+      delete dialog.dataset.blockClose;
+      SkynetDialog.close(dialog);
+      showToast("Deletion completed.", false);
       if (plan.kind !== "storage") {
         closeActiveDisclosure({ restoreFocus: false });
         try {
-          await refreshAfterDeletion(plan.kind, plan.id);
+          void refreshAfterDeletion(plan.kind, plan.id).catch((error) => {
+            showToast(`Deleted. Refresh the page to update the lists: ${error.message}`, true);
+          });
         } catch (error) {
-          refreshError = error;
+          showToast(`Deleted. Refresh the page to update the lists: ${error.message}`, true);
         }
       }
-      delete dialog.dataset.blockClose;
-      SkynetDialog.close(dialog);
-      showToast(
-        refreshError
-          ? `Deleted. Refresh the page to update the lists: ${refreshError.message}`
-          : "Deletion completed.",
-        Boolean(refreshError),
-      );
     } catch (error) {
       current = null;
       message.textContent = `${error.message} Close and review deletion again to retry.`;

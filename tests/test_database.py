@@ -182,6 +182,63 @@ class DatabaseTestCase(unittest.TestCase):
              if c["is_selected_for_inference"]], [first["id"]]
         )
 
+    def test_initialize_evaluation_ledger_preserves_completed_and_partial_rows(self):
+        evaluation = self.database.create_evaluation(
+            self.run["id"], evaluator_adapter="libero", evaluator_version="1",
+            suite_name="test", suite_version="1", tasks=["pick"], seeds=[41, 42], episodes_per_task=50,
+        )
+        done = self.database.upsert_evaluation_episode(
+            evaluation["id"], task="pick", seed=41, episode_index=0,
+            status="SUCCEEDED", attempt_count=2, success=True, reward=1.0,
+        )
+        self.assertEqual(self.database.initialize_evaluation_episodes(evaluation["id"]), 99)
+        self.assertEqual(self.database.initialize_evaluation_episodes(evaluation["id"]), 0)
+        loaded = self.database.get_evaluation(evaluation["id"])
+        self.assertEqual(len(loaded["episodes"]), 100)
+        self.assertEqual(loaded["progress_completed"], 1)
+        preserved = next(row for row in loaded["episodes"] if row["id"] == done["id"])
+        self.assertEqual(preserved["status"], "SUCCEEDED")
+        self.assertTrue(preserved["success"])
+        self.assertEqual(preserved["attempt_count"], 2)
+        self.assertEqual(sum(row["status"] == "PENDING" for row in loaded["episodes"]), 99)
+
+    def test_native_reconciliation_repairs_only_incomplete_active_ledgers(self):
+        active = self.database.create_evaluation(
+            self.run["id"], evaluator_adapter="libero", evaluator_version="1",
+            suite_name="test", suite_version="1", tasks=["pick"], seeds=[41, 42],
+            episodes_per_task=50, status="PENDING",
+        )
+        completed = self.database.upsert_evaluation_episode(
+            active["id"], task="pick", seed=41, episode_index=0,
+            status="SUCCEEDED", attempt_count=2, success=True, reward=1.0,
+        )
+        cancelled = self.database.create_evaluation(
+            self.run["id"], evaluator_adapter="libero", evaluator_version="1",
+            suite_name="test", suite_version="1", tasks=["pick"], seeds=[42],
+            episodes_per_task=20, status="CANCELLED",
+        )
+        self.assertEqual(self.database.repair_workflow_state_invariants()["evaluation_ledgers_repaired"], 1)
+        self.assertEqual(self.database.repair_workflow_state_invariants()["evaluation_ledgers_repaired"], 0)
+        loaded = self.database.get_evaluation(active["id"])
+        self.assertEqual(len(loaded["episodes"]), 100)
+        self.assertEqual(loaded["status"], "PENDING")
+        existing = next(x for x in loaded["episodes"] if x["id"] == completed["id"])
+        self.assertEqual(existing["attempt_count"], 2)
+        self.assertTrue(existing["success"])
+        self.assertEqual(self.database.get_evaluation(cancelled["id"])["episodes"], [])
+        self.assertEqual(self.database.initialize_evaluation_episodes(
+            cancelled["id"], expected_parent_states=("PENDING",)), 0)
+        self.assertEqual(self.database.get_evaluation(cancelled["id"])["episodes"], [])
+
+    def test_initialize_evaluation_ledger_rolls_back_all_rows_on_error(self):
+        evaluation = self.database.create_evaluation(
+            self.run["id"], evaluator_adapter="libero", evaluator_version="1",
+            suite_name="test", suite_version="1", tasks=["pick", None], seeds=[41], episodes_per_task=2,
+        )
+        with self.assertRaises(INTEGRITY_ERRORS):
+            self.database.initialize_evaluation_episodes(evaluation["id"])
+        self.assertEqual(self.database.get_evaluation(evaluation["id"])["episodes"], [])
+
     def test_evaluation_suite_and_episode_resume_ledger(self) -> None:
         suite = self.database.register_evaluation_suite(
             evaluator_adapter="libero",

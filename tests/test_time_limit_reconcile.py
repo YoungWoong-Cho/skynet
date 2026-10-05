@@ -26,13 +26,13 @@ def test_time_limit_warning_retries_only_the_matching_attempt(tmp_path, monkeypa
                    reason='time_limit_warning', exit_code=124)
     if scenario == 'different_job': receipt['job_id'] = 'another-job'
     if scenario == 'different_run': receipt['run_id'] = 'another-run'
-    original_read = cluster.read_log
+    original_read = cluster.read_optional_file
     expected_path = f"{run['run_directory']}/attempts/{attempt['slurm_job_id']}/state/interruption.json"
-    def read_log(path, *args, **kwargs):
-        if path == expected_path and scenario != 'missing':
-            return 'sky1', 'invalid' if scenario == 'malformed' else json.dumps(receipt)
+    def read_optional_file(path, *args, **kwargs):
+        if path == expected_path:
+            return 'sky1', None if scenario == 'missing' else 'invalid' if scenario == 'malformed' else json.dumps(receipt)
         return original_read(path, *args, **kwargs)
-    cluster.read_log = read_log
+    cluster.read_optional_file = read_optional_file
     cluster.state = 'CANCELLED' if scenario == 'cancelled' else 'FAILED'
     cluster.status_details = {'ExitCode': '1:0' if scenario == 'ordinary_failure' else '124:0'}
     service.reconcile()

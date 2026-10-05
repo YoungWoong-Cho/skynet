@@ -1,6 +1,7 @@
 """Exercise personal path routing through real PostgreSQL, compilation and SSH commands."""
 
 import json
+import shlex
 from skynet_app.db_backend import INTEGRITY_ERRORS
 import subprocess
 from unittest.mock import Mock
@@ -121,7 +122,7 @@ def test_authenticated_api_validation_and_workspace_isolation(services):
         assert settings["paths"]["work_root"] == "/team/alice"
         assert settings["cluster"]["paths"]["jobs"] == "/team/alice/jobs"
         assert settings["cluster"]["paths"]["datasets"] == CLUSTER.paths.datasets
-        assert client.get("/api/capabilities").json()["cluster"]["paths"]["logs"] == "/team/alice/logs"
+        assert settings["cluster"]["paths"]["logs"] == "/team/alice/logs"
         assert client.put("/api/workspace/storage", json=payload).status_code == 409
         client.post("/api/workspace/session", json={"email": "bob@example.com"})
         assert client.get("/api/settings").json()["paths"]["work_root"] is None
@@ -178,6 +179,7 @@ def test_materialized_runs_and_checkpoints_survive_preference_change(tmp_path, m
             super().__init__()
             self.simulation = FakeCluster()
             self.log_content = ""
+            self.capsule_upload_roots = []
 
         def ssh(self, host, command, *, stdin=None, timeout=30):
             self.commands.append((host, command, stdin))
@@ -185,6 +187,16 @@ def test_materialized_runs_and_checkpoints_survive_preference_change(tmp_path, m
                 return "9001\n"
             if "SKYNET_LOG_NOT_READY" in command:
                 return self.log_content
+            if "SKYNET_FILE_MISSING" in command:
+                return "SKYNET_FILE_PRESENT\n" + self.log_content if self.log_content else "SKYNET_FILE_MISSING\n"
+            if "print(json.dumps(receipts))" in command:
+                # Exercise the actual remote upload/checksum worker locally.
+                # Only its storage root is redirected into this test's sandbox.
+                request = json.loads(stdin)
+                self.capsule_upload_roots.append(request["root"])
+                request["root"] = str(tmp_path.resolve() / "cluster" / request["root"].lstrip("/"))
+                return subprocess.run(shlex.split(command), input=json.dumps(request),
+                                      text=True, capture_output=True, check=True).stdout
             return self.simulation.run_with_fallback(command, host, stdin=stdin, timeout=timeout)[1]
 
     global_service = make_pipeline_service(Database(tmp_path / "jobs.db"), Transport())
@@ -226,6 +238,8 @@ def test_materialized_runs_and_checkpoints_survive_preference_change(tmp_path, m
     job_commands = [item for item in cluster.commands if "sbatch --parsable" in item[1]]
     assert len(job_commands) == 2
     assert f"export WORK_ROOT={root}" in job_commands[-1][2]
+    assert len(cluster.capsule_upload_roots) == 2
+    assert all(path == f"{root}/jobs/runs/{run_id}" for path in cluster.capsule_upload_roots)
     new_spec = canonical_spec()
     new_spec["identity"]["experiment"] = "new-root"
     new_experiment = service.create_experiment(new_spec)
@@ -268,6 +282,9 @@ def test_required_storage_gate_blocks_jobs_but_keeps_reads_and_settings(services
             assert response.status_code == 409
             assert response.json()["code"] == "storage_required"
         assert client.post("/api/runs/example/cancel").status_code != 409
+        # Notes live in the central database, not in the workspace's cluster storage.
+        assert client.post("/api/notes", json={}).status_code != 409
+        assert client.put("/api/notes/example/attachments/plot.svg", content=b"<svg/>").status_code != 409
         response = client.put("/api/workspace/storage", json={"work_root": "/team/new"})
         assert response.status_code == 200, response.text
         assert client.get("/api/workspace/session").json()["workspace"]["storage_configured"] is True

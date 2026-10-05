@@ -308,7 +308,7 @@ class CollectionResources(BaseModel):
     partition: str = "rl2-lab"
     gpu_count: int = Field(default=1, ge=1, le=16)
     gpu_type: str | None = Field(default="l40s", pattern=r"^[A-Za-z0-9_.-]+$")
-    cpu_count: int = Field(default=16, ge=1, le=256)
+    cpu_count: int = Field(default=8, ge=1, le=256)
     memory_gb: int = Field(default=64, ge=1, le=2048)
     time_limit: str = "04:00:00"
     node: str | None = None
@@ -334,6 +334,8 @@ class CollectionResources(BaseModel):
 
     @model_validator(mode="after")
     def validate_queue(self) -> "CollectionResources":
+        from .cluster_config import cpus_for_gpus
+        self.cpu_count = cpus_for_gpus(self.gpu_count)
         queue = CLUSTER.queue_for_partition(self.partition)
         if self.account != queue.account:
             raise ValueError(

@@ -121,7 +121,7 @@ def test_submission_gate_blocks_retired_stored_plans_without_cluster_calls(mode,
     service = PipelineService.__new__(PipelineService)
     database = Database(tmp_path / "retired-plan.store")
     service.database = SimpleNamespace(
-        get_run=lambda _: copy.deepcopy(run), transition_workflow_state=lambda **kw: transitions.append(kw),
+        get_run=lambda _, **kwargs: copy.deepcopy(run), transition_workflow_state=lambda **kw: transitions.append(kw),
         connection=database.connection,
     )
     kwargs = {"manual_mode": "resume", "resume_checkpoint": "/saved.ckpt",

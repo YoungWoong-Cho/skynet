@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {JSDOM} from 'jsdom';
-const w=new JSDOM(await readFile(new URL('../static/index.html',import.meta.url),'utf8'),{runScripts:'outside-only',pretendToBeVisual:true,url:'http://localhost:8080/#runs'}).window;
+import {indexHtml} from './index_page.cjs';
+const w=new JSDOM(indexHtml(),{runScripts:'outside-only',pretendToBeVisual:true,url:'http://localhost:8080/#runs'}).window;
 const observers=[];const Observer=w.MutationObserver;
 w.MutationObserver=class extends Observer{constructor(cb){super(cb);observers.push(this);}};
 w.fetch=()=>new Promise(()=>{});
@@ -21,7 +22,7 @@ try {
  w.api=async(path,options={})=>{
   if(options.method==='POST'){posts++;await new Promise(resolve=>{release=resolve;});submitted=true;return {run_id:'run',status:'SUBMITTING'};}
   if(path==='/api/runs')return {runs:[run()]};
-  if(path==='/api/runs/run')return {run:run()};
+  if(path==='/api/runs/run?include_payloads=false')return {run:run()};
   return {content:'log'};
  };
  await w.loadRuns(true);

@@ -5,7 +5,7 @@ import json
 import pytest
 
 from skynet_app.database import canonical_json
-from skynet_app.cluster_runtime import WORK_ROOT
+from skynet_app.cluster_runtime import DEFAULT_GATEWAY, WORK_ROOT
 from test_observation_preparation import context
 from test_policy_exports import create
 
@@ -24,7 +24,7 @@ def test_observation_profile_pins_original_hand_manifest(context, tmp_path, monk
     def find(*args, **kwargs):
         if local:
             return directory
-        raise ValueError('Archived hand is only on sky2')
+        raise ValueError('Archived hand is only in cluster storage')
     monkeypatch.setattr(hands, 'find_bundle', find)
     path = f"{WORK_ROOT}/hands/{session['profile']['robot']}/{digest}/manifest.json"
     context.cluster.files[path] = raw
@@ -58,7 +58,7 @@ def test_stage_uploads_shared_hand_once_and_preserves_manifest_checks(
     monkeypatch.setattr(hands, 'find_bundle', lambda *args, **kwargs: directory)
     uploads = []
     def upload(local, remote_root, transport, gateway):
-        assert local == directory and transport is context.cluster and gateway == 'sky2'
+        assert local == directory and transport is context.cluster and gateway == DEFAULT_GATEWAY
         uploads.append((str(local), manifest_sha))
         if change_manifest_after_upload:
             changed = dict(manifest, files={'changed.urdf': dict(sha256='c' * 64, size_bytes=1)})

@@ -32,6 +32,7 @@ class Owner:
 @pytest.fixture
 def local_app(monkeypatch):
     from skynet_app import main
+    from skynet_app.availability import STARTING
 
     # Patch the instance already mounted in main.app; replacing the global alone
     # would leave requests going to the original instance.
@@ -39,6 +40,7 @@ def local_app(monkeypatch):
     monkeypatch.setattr(runtime, "application", None)
     monkeypatch.setattr(runtime, "owner", None)
     monkeypatch.setattr(runtime, "status", "starting")
+    monkeypatch.setattr(runtime, "detail", STARTING)
     monkeypatch.setattr(runtime, "retry_interval", 0.01)
     return main, runtime
 
@@ -68,7 +70,7 @@ from skynet_app import main
 assert not blocked.intersection(sys.modules)
 assert main.cluster_application.application is None
 assert main.index().status_code == 200
-assert main.health().status_code == 503
+assert main.cluster_application.pending_response().status_code == 503
 print("Local application imports without cluster access")
 '''
     result = subprocess.run(
@@ -107,15 +109,15 @@ def test_local_page_and_assets_respond_while_cluster_connection_blocks(local_app
                         client.get("/"),
                         client.get("/static/email-workspace.js"),
                         client.get("/api/workspace/session"),
-                        client.get("/api/health"),
+                        client.get("/api/cluster"),
                     ]
                 )
                 try:
-                    page, asset, session, health = responses.result(timeout=2)
+                    page, asset, session, cluster = responses.result(timeout=2)
                 finally:
                     release.set()
             assert page.status_code == asset.status_code == 200
-            for response in (session, health):
+            for response in (session, cluster):
                 assert response.status_code == 503
                 assert response.json()["code"] == "starting"
                 assert "initializing" in response.json()["detail"]
@@ -172,7 +174,7 @@ def test_recovery_keeps_cookie_and_does_not_replay_failed_mutations(local_app, m
                 time.sleep(0.01)
             assert response.status_code == 200
             assert response.json() == {"token": "existing-session"}
-            assert client.get("/api/health").json()["ok"] is True
+            assert client.get("/api/health").status_code == 404
             assert mutations == [], "An operation rejected during outage was replayed"
             assert client.post("/api/changes").status_code == 200
             assert mutations == ["explicit request"]
@@ -183,19 +185,29 @@ def test_recovery_keeps_cookie_and_does_not_replay_failed_mutations(local_app, m
     assert owner.stops == 1
 
 
-@pytest.mark.parametrize("kind", ["connection", "postgres", "interface", "timeout", "cluster", "lock"])
-def test_expected_connection_failures_retry_until_ready(kind):
+@pytest.mark.parametrize("kind,code,named", [
+    ("connection", "cluster_unavailable", "Cannot access the Skynet cluster"),
+    ("timeout", "cluster_unavailable", "Cannot access the Skynet cluster"),
+    ("cluster", "cluster_unavailable", "Cannot access the Skynet cluster"),
+    ("tunnel", "database_unavailable", "database through SSH host db-gateway"),
+    ("postgres", "database_unavailable", "Skynet database did not respond"),
+    ("interface", "database_unavailable", "Skynet database did not respond"),
+    ("lock", "database_busy", "earlier database operation"),
+])
+def test_expected_connection_failures_retry_until_ready(kind, code, named):
     from psycopg import InterfaceError, OperationalError
     from psycopg.errors import LockNotAvailable
     from skynet_app.availability import ClusterApplication
     from skynet_app.cluster_runtime import ClusterError
+    from skynet_app.database_endpoint import DatabaseUnreachable
 
     errors = {
-        "connection": ConnectionError("connection failed"),
-        "postgres": OperationalError("connection failed"),
-        "interface": InterfaceError("connection failed"),
+        "connection": ConnectionError("private connection diagnostic"),
+        "tunnel": DatabaseUnreachable("db-gateway"),
+        "postgres": OperationalError("private database diagnostic"),
+        "interface": InterfaceError("private database diagnostic"),
         "timeout": subprocess.TimeoutExpired("ssh", 1),
-        "cluster": ClusterError("gateway failed"),
+        "cluster": ClusterError("private gateway diagnostic"),
         "lock": LockNotAvailable("private database lock diagnostic"),
     }
     owner, api = Owner(), FastAPI()
@@ -215,13 +227,11 @@ def test_expected_connection_failures_retry_until_ready(kind):
     response = retry_responses[0]
     body = json.loads(response.body)
     assert response.status_code == 503
-    assert body["code"] == ("startup_busy" if kind == "lock" else "cluster_unavailable")
-    if kind == "lock":
-        assert "earlier database operation" in body["detail"]
-        assert "VPN" not in body["detail"]
-        assert "private database" not in body["detail"]
-    else:
-        assert "Cannot access the Skynet cluster" in body["detail"]
+    assert body["code"] == code
+    assert named in body["detail"]
+    assert "private" not in body["detail"]
+    # Only a gateway outage is a network problem the user can fix with VPN.
+    assert ("VPN" in body["detail"]) == (code == "cluster_unavailable")
     assert runtime.status == "ready"
     assert owner.starts == 1
     runtime.stop()
@@ -278,13 +288,13 @@ def test_both_gateway_failures_return_friendly_cluster_error(monkeypatch, timeou
 
     attempted = []
 
-    def offline(host, command, **kwargs):
-        attempted.append(host)
+    def offline(arguments, **kwargs):
+        attempted.append(arguments[-2])
         if timeout:
             raise subprocess.TimeoutExpired("ssh internal details", 1)
-        raise main.ClusterUnavailable("private SSH diagnostic")
+        return subprocess.CompletedProcess(arguments, 255, "", "private SSH diagnostic")
 
-    monkeypatch.setattr(main, "_ssh", offline)
+    monkeypatch.setattr(subprocess, "run", offline)
     response = main.cluster("auto")
     assert attempted == list(main.SSH_HOSTS)
     assert response.status_code == 503
@@ -326,7 +336,7 @@ def test_workspace_lookup_outage_does_not_block_local_page(local_app, monkeypatc
             response = private_request.result(timeout=2)
             assert response.status_code == 503
             assert response.json()["code"] == "database_unavailable"
-            assert "Skynet cluster" in response.json()["detail"]
+            assert "Skynet database" in response.json()["detail"]
             assert "private database" not in response.text
             assert client.cookies.get("skynet_workspace_session") == "existing-session"
     assert owner.stops == 1
@@ -338,15 +348,66 @@ def test_cluster_query_uses_sky2_when_sky1_is_unavailable(monkeypatch):
     attempted = []
     monkeypatch.setattr(main, "SSH_HOSTS", ("sky1", "sky2"))
 
-    def fallback(host, command, **kwargs):
+    def fallback(self, host, command, **kwargs):
         attempted.append(host)
         if host == "sky1":
-            raise main.ClusterUnavailable("sky1 is unreachable")
+            raise main.ClusterError("sky1 is unreachable")
         return "\n__SKYNET_JOBS__\n\n__SKYNET_USAGE__\n\n__SKYNET_USER_USAGE__\n"
 
-    monkeypatch.setattr(main, "_ssh", fallback)
+    monkeypatch.setattr(main.ClusterClient, "ssh", fallback)
     result = main.cluster("auto")
     assert attempted == ["sky1", "sky2"]
     assert result["gateway"] == "sky2"
     assert result["jobs"] == []
     assert result["account_usage"] == []
+
+
+def test_unknown_gateway_is_rejected_before_ssh(monkeypatch):
+    from fastapi import HTTPException
+    from skynet_app import main
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("An unknown gateway must not start SSH")
+
+    monkeypatch.setattr(subprocess, "run", unexpected)
+    with pytest.raises(HTTPException) as rejected:
+        main.cluster("-oProxyCommand=bad")
+    assert rejected.value.status_code == 422
+
+
+def test_rejected_database_tunnel_backs_off_instead_of_reconnecting_per_caller(monkeypatch):
+    from skynet_app import database_endpoint
+    from skynet_app.database_endpoint import DatabaseUnreachable, SSHEndpoint
+
+    class Rejected:
+        stdin = None
+
+        def poll(self):
+            return 255
+
+        def wait(self, timeout=None):
+            return 255
+
+    attempts, clock = [], [100.0]
+    monkeypatch.setattr(
+        database_endpoint.subprocess, "Popen",
+        lambda arguments, **kwargs: attempts.append(arguments) or Rejected(),
+    )
+    monkeypatch.setattr(database_endpoint.time, "monotonic", lambda: clock[0])
+    endpoint = SSHEndpoint({"ssh_host": "db-gateway", "remote_socket": "/test/socket", "user": "test"})
+    try:
+        for _ in range(3):
+            with pytest.raises(DatabaseUnreachable) as unreachable:
+                endpoint.connection_string()
+            assert unreachable.value.host == "db-gateway"
+        assert len(attempts) == 1, "Callers during the delay must not start SSH"
+        clock[0] += SSHEndpoint.RETRY_DELAYS[0]
+        with pytest.raises(DatabaseUnreachable):
+            endpoint.connection_string()
+        assert len(attempts) == 2
+        clock[0] += SSHEndpoint.RETRY_DELAYS[0]
+        with pytest.raises(DatabaseUnreachable):
+            endpoint.connection_string()
+        assert len(attempts) == 2, "Repeated failures wait longer before the next attempt"
+    finally:
+        endpoint.close()

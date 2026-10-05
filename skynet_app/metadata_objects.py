@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import inspect
 import json
 import re
 import shlex
 import subprocess
+import zlib
 from pathlib import PurePosixPath
 
+from .registry_reference_match import registry_reference_match
+
 MAX_BYTES = 16 * 1024 * 1024
-_REMOTE = r"""
-import base64, hashlib, json, os, pathlib, sys, tempfile
+_REMOTE = inspect.getsource(registry_reference_match) + r"""
+import base64, hashlib, json, os, pathlib, sys, tempfile, zlib
 
 def handle(request):
     root = pathlib.Path(request["root"])
@@ -22,6 +26,14 @@ def handle(request):
         raise ValueError("Invalid metadata storage path")
     if request["operation"] == "put":
         content = base64.b64decode(request["content"], validate=True)
+        encoding = request.get("encoding", "identity")
+        if encoding == "zlib":
+            decoder = zlib.decompressobj()
+            content = decoder.decompress(content, 16 * 1024 * 1024 + 1)
+            if not decoder.eof or decoder.unconsumed_tail or decoder.unused_data:
+                raise ValueError("Invalid compressed metadata object")
+        elif encoding != "identity":
+            raise ValueError("Unsupported metadata encoding")
         if len(content) > 16 * 1024 * 1024 or hashlib.sha256(content).hexdigest() != digest:
             raise ValueError("Invalid metadata object")
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -45,11 +57,52 @@ def handle(request):
     content = path.read_bytes()
     if len(content) > 16 * 1024 * 1024 or hashlib.sha256(content).hexdigest() != digest:
         raise ValueError("Metadata object checksum mismatch")
-    return {"sha256": digest, "size": len(content), "content":
-        base64.b64encode(content).decode() if request["operation"] == "get" else None}
+    if request["operation"] == "registry_matches":
+        found = registry_reference_match(json.loads(content), request["kind"], request["identifiers"], request["aliases"])
+        return {"sha256": digest, "size": len(content), "found": found}
+    if request["operation"] == "project":
+        document = json.loads(content)
+        projected = {}
+        for path in request["paths"]:
+            value = document
+            for key in path.split("."):
+                value = value.get(key) if isinstance(value, dict) else None
+            projected[path] = value
+        return {"sha256": digest, "size": len(content), "values": projected}
+    if request["operation"] == "truthy_paths":
+        document = json.loads(content)
+        found = False
+        for path in request["paths"]:
+            value = document
+            for key in path.split("."):
+                value = value.get(key) if isinstance(value, dict) else None
+            found = found or bool(value)
+        return {"sha256": digest, "size": len(content), "found": found}
+    return {"sha256": digest, "size": len(content), "encoding": "zlib", "content":
+        base64.b64encode(zlib.compress(content, 1)).decode() if request["operation"] == "get" else None}
 request = json.load(sys.stdin)
 print(json.dumps([handle(item) for item in request] if isinstance(request, list) else handle(request)))
 """
+
+
+def _encode_content(content):
+    """Compress transport only; persisted bytes and checksum identities stay fixed."""
+    return {"encoding": "zlib", "content": base64.b64encode(zlib.compress(content, 1)).decode()}
+
+
+def _decode_content(value):
+    content = base64.b64decode(value["content"], validate=True)
+    encoding = value.get("encoding", "identity")
+    if encoding == "zlib":
+        decoder = zlib.decompressobj()
+        content = decoder.decompress(content, MAX_BYTES + 1)
+        if not decoder.eof or decoder.unconsumed_tail or decoder.unused_data:
+            raise ValueError("Invalid compressed metadata object")
+    elif encoding != "identity":
+        raise ValueError("Unsupported metadata encoding")
+    if len(content) > MAX_BYTES:
+        raise ValueError("Supporting metadata file exceeds 16 MiB")
+    return content
 
 
 class MetadataObjects:
@@ -116,8 +169,70 @@ class MetadataObjects:
             "name": name,
         }
         if content is not None:
-            request["content"] = base64.b64encode(content).decode()
+            request.update(_encode_content(content))
         return self._exchange(request)
+
+    def truthy_paths(self, references, paths):
+        """Inspect verified immutable bodies remotely, returning only booleans."""
+        result = []
+        for start in range(0, len(references), 128):
+            batch = references[start:start + 128]
+            for ref in batch:
+                if ref["path"] != self.path(ref["sha256"], "body"):
+                    raise ValueError("Invalid metadata object path")
+            values = self._exchange([
+                {"operation": "truthy_paths", "root": str(self.root),
+                 "sha256": ref["sha256"], "name": "body", "paths": list(paths)}
+                for ref in batch
+            ])
+            if len(values) != len(batch):
+                raise ValueError("Incomplete metadata object batch")
+            for value, ref in zip(values, batch):
+                if value["sha256"] != ref["sha256"] or value["size"] != ref["size"]:
+                    raise ValueError("Metadata object checksum mismatch")
+                result.append(value["found"])
+        return result
+
+    def registry_matches(self, references, kind, identifiers, aliases):
+        """Return checksum-verified dependency flags, never execution bodies."""
+        result = []
+        for start in range(0, len(references), 128):
+            batch = references[start:start + 128]
+            for ref in batch:
+                if ref["path"] != self.path(ref["sha256"], "body"):
+                    raise ValueError("Invalid metadata object path")
+            values = self._exchange([
+                {"operation": "registry_matches", "root": str(self.root), "sha256": ref["sha256"],
+                 "name": "body", "kind": kind, "identifiers": list(identifiers), "aliases": list(aliases)}
+                for ref in batch
+            ])
+            if len(values) != len(batch):
+                raise ValueError("Incomplete metadata object batch")
+            for value, ref in zip(values, batch):
+                if value["sha256"] != ref["sha256"] or value["size"] != ref["size"]:
+                    raise ValueError("Metadata object checksum mismatch")
+                result.append(value["found"])
+        return result
+
+    def project(self, references, paths):
+        """Return selected fields from verified bodies, without transporting code/data."""
+        result = []
+        for start in range(0, len(references), 128):
+            batch = references[start:start + 128]
+            for ref in batch:
+                if ref["path"] != self.path(ref["sha256"], "body"):
+                    raise ValueError("Invalid metadata object path")
+            values = self._exchange([
+                {"operation": "project", "root": str(self.root), "sha256": ref["sha256"],
+                 "name": "body", "paths": list(paths)} for ref in batch
+            ])
+            if len(values) != len(batch):
+                raise ValueError("Incomplete metadata object batch")
+            for value, ref in zip(values, batch):
+                if value["sha256"] != ref["sha256"] or value["size"] != ref["size"]:
+                    raise ValueError("Metadata object checksum mismatch")
+                result.append(value["values"])
+        return result
 
     def put(self, content: bytes, *, name="content"):
         if len(content) > MAX_BYTES:
@@ -144,7 +259,7 @@ class MetadataObjects:
                         "root": str(self.root),
                         "sha256": digest,
                         "name": "body",
-                        "content": base64.b64encode(content).decode(),
+                        **_encode_content(content),
                     }
                     for digest, content in batch
                 ]
@@ -161,7 +276,7 @@ class MetadataObjects:
         if path != self.path(digest, name):
             raise ValueError("Saved metadata path does not match its checksum")
         result = self._request("get", digest, name=name)
-        content = base64.b64decode(result["content"], validate=True)
+        content = _decode_content(result)
         if hashlib.sha256(content).hexdigest() != digest:
             raise ValueError(
                 "Saved submission script changed: central metadata checksum mismatch"
@@ -191,7 +306,7 @@ class MetadataObjects:
             if len(values) != len(batch):
                 raise ValueError("Incomplete metadata object batch")
             for value, ref in zip(values, batch):
-                content = base64.b64decode(value["content"], validate=True)
+                content = _decode_content(value)
                 if (
                     len(content) != ref["size"]
                     or hashlib.sha256(content).hexdigest() != ref["sha256"]

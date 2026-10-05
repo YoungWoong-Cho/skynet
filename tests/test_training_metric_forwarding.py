@@ -106,14 +106,14 @@ def expected_metrics(adapter, epoch=0):
 
 
 def test_every_builtin_jsonl_adapter_participates():
-    assert len(JSONL_ADAPTERS) == 6
+    assert len(JSONL_ADAPTERS) == 8
     assert {adapter.slug for adapter in JSONL_ADAPTERS} == {
         "egoverse-act", "egoverse-hpt", "egoverse-pi", "xpolicylab-act",
-        "xpolicylab-act-native", "unidex",
+        "xpolicylab-act-native", "unidex", "human-policy-hat", "diffusion-policy",
     }
 
 
-@pytest.mark.parametrize("adapter", JSONL_ADAPTERS, ids=lambda adapter: adapter.slug)
+@pytest.mark.parametrize("adapter", [a for a in JSONL_ADAPTERS if a.train.progress.unit == "epoch"], ids=lambda adapter: adapter.slug)
 def test_all_jsonl_adapters_forward_native_scalars_nested_metrics_and_aliases(adapter):
     records = pipeline.parse_declared_training_progress(
         json.dumps(produced_row()) + "\n",
@@ -133,7 +133,7 @@ def test_all_jsonl_adapters_forward_native_scalars_nested_metrics_and_aliases(ad
         assert records[0]["metrics"][alias] == LARGE_STEP
 
 
-@pytest.mark.parametrize("adapter", JSONL_ADAPTERS, ids=lambda adapter: adapter.slug)
+@pytest.mark.parametrize("adapter", [a for a in JSONL_ADAPTERS if a.train.progress.unit == "epoch"], ids=lambda adapter: adapter.slug)
 def test_invalid_or_missing_alias_values_do_not_hide_other_produced_metrics(adapter):
     row = {
         "epoch": 0,
@@ -364,17 +364,17 @@ def test_concurrent_enrichment_publishers_emit_overlapping_metric_names_only_onc
     release_first = Event()
     second_started = Event()
     second_before_append = Event()
-    real_log_metrics = WandBBridge.log_metrics
+    real_log_metrics = WandBBridge.log_metrics_batch
 
-    def hold_first_append(bridge, local_run_id, metrics, **kwargs):
-        if metrics == {"extra/x": 1}:
+    def hold_first_append(bridge, local_run_id, samples):
+        if samples and samples[0]["metrics"] == {"extra/x": 1}:
             first_before_append.set()
             assert release_first.wait(timeout=5), "First publisher was never released"
         else:
             second_before_append.set()
-        return real_log_metrics(bridge, local_run_id, metrics, **kwargs)
+        return real_log_metrics(bridge, local_run_id, samples)
 
-    monkeypatch.setattr(WandBBridge, "log_metrics", hold_first_append)
+    monkeypatch.setattr(WandBBridge, "log_metrics_batch", hold_first_append)
     second_service = fixture.new_service()
 
     def publish_second():
@@ -408,3 +408,17 @@ def test_concurrent_enrichment_publishers_emit_overlapping_metric_names_only_onc
         assert event["payload"]["timestamp_ms"] == original_events[0]["payload"]["timestamp_ms"]
     assert fixture.new_service()._publish_training_progress_tracking(fixture.run_id) == 0
     assert spool_events(fixture) == events
+
+
+def test_hat_step_metrics_use_pinned_step_budget():
+    adapter = next(a for a in JSONL_ADAPTERS if a.slug == 'human-policy-hat')
+    row = produced_row()
+    row['global_step'] = 8000
+    records = pipeline.parse_declared_training_progress(
+        json.dumps(row) + '\n', adapter.train.progress,
+        resolved_spec={'train': {'max_steps': 8000}},
+    )
+    assert len(records) == 1
+    assert records[0]['completed'] == records[0]['total'] == 8000
+    assert records[0]['metrics']['train_loss'] == row['train_loss']
+    assert records[0]['metrics']['Optimizer/LR'] == row['metrics']['Optimizer']['LR']

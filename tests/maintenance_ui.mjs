@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import {JSDOM} from "jsdom";
-const w = new JSDOM(await readFile(new URL("../static/index.html", import.meta.url), "utf8"), {runScripts:"outside-only", url:"http://skynet/#settings"}).window;
+import {indexHtml} from "./index_page.cjs";
+const w = new JSDOM(indexHtml(), {runScripts:"outside-only", url:"http://skynet/#settings"}).window;
 const el = id => w.document.getElementById(id);
 w.HTMLDialogElement.prototype.showModal = function(){this.open=true;};
 w.HTMLDialogElement.prototype.close = function(){this.open=false;this.dispatchEvent(new w.Event("close"));};
@@ -19,6 +20,15 @@ w.api = (url, options={})=>{calls.push({url,...options});return handler(url, opt
 for (const file of ["dialogs.js","maintenance.js"]) w.eval(await readFile(new URL("../static/"+file, import.meta.url), "utf8"));
 const launch=w.document.createElement("button");launch.dataset.deleteKind="run";launch.dataset.deleteId="run";w.document.body.append(launch);
 try {
+ handler=async()=>({label:"Run",token:"d".repeat(64),blockers:[{id:"draft",kind:"draft-revision",label:"Draft revision 3",reason:"Discard the unused draft first"}],counts:{runs:1},files:[]});
+ launch.click();await flush();
+ const draftButton=el("maintenance-content").querySelector('[data-delete-kind="draft-revision"]');
+ assert.ok(draftButton,"unused draft dependencies expose the shared deletion UI");
+ handler=async()=>({label:"Draft",token:"e".repeat(64),blockers:[],counts:{experiment_revisions:1,variants:1},files:[]});
+ draftButton.click();await flush();
+ assert.match(calls.at(-1).url,/\/api\/maintenance\/history\/draft-revision\/draft/);
+ assert.equal(el("maintenance-confirm").disabled,false);
+ assert.match(el("maintenance-title").textContent,/unsubmitted draft revision/);
  handler=async()=>({label:"Run",token:"a".repeat(64),blockers:[{id:"eval",kind:"evaluation",label:"<unsafe>",reason:"Delete evaluation first"}],counts:{runs:1},files:[]});
  launch.click();await flush();
  assert.equal(el("maintenance-confirm").disabled,true);
@@ -35,17 +45,27 @@ try {
  assert.equal(calls.filter(c=>c.method==="DELETE").length,1,"double clicks submit once");
  w.document.dispatchEvent(new w.KeyboardEvent("keydown",{key:"Escape",bubbles:true}));
  assert.equal(el("maintenance-dialog").open,true,"deletion stays visible until completion");
+ let finishRefresh;
+ w.refreshAfterDeletion = ()=>{
+   refresh.push(1,1,1);
+   return new Promise(resolve=>{finishRefresh=resolve;});
+ };
  finish({deleted:true});await flush();
  assert.equal(refresh.length,3,"all related histories refresh");
- assert.equal(el("maintenance-dialog").open,false);
- handler=async()=>({root:"/cluster",token:"c".repeat(64),items:[{path:"/cluster/tmp",selectable:true,size_bytes:10,reason:"Unreferenced"},{path:"/cluster/new",selectable:false,size_bytes:12,reason:"Recent"}],pending_deletions:[]});
+ assert.equal(el("maintenance-dialog").open,false,"a slow list refresh must not keep deletion open");
+ finishRefresh();await flush();
+ el('storage-inspection-scope').value='pretrained';
+ handler=async()=>({root:"/cluster",scope:'pretrained',token:"c".repeat(64),truncated:true,items:[{path:"/cluster/tmp",selectable:true,size_bytes:10,reason:"Unreferenced"},{path:"/cluster/new",selectable:false,size_bytes:12,reason:"Recent"}],pending_deletions:[]});
  el("inspect-cluster-storage").click();await flush();
+ assert.match(calls.at(-1).url,/scope=pretrained/);
+ assert.match(el("maintenance-message").textContent,/limited batch/);
  assert.equal(el("maintenance-confirm").disabled,true,"no default destructive selection");
  const check=el("maintenance-content").querySelector("input");check.click();
  assert.equal(el("maintenance-confirm").disabled,false);
  assert.equal(el("maintenance-content").querySelectorAll("input")[1].disabled,true);
  handler=async()=>{throw Error("Storage changed");};
  el("maintenance-confirm").click();await flush();
+ assert.equal(JSON.parse(calls.at(-1).body).scope,'pretrained');
  assert.match(el("maintenance-message").textContent,/Storage changed/);
  assert.equal(el("maintenance-confirm").disabled,true,"stale plan cannot be re-submitted");
  el("maintenance-dialog").querySelector("[data-dialog-close]").click();

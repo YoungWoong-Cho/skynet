@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {JSDOM, VirtualConsole} from 'jsdom';
+import {indexHtml} from './index_page.cjs';
 
-const html = await readFile(new URL('../static/index.html', import.meta.url), 'utf8');
+const html = indexHtml();
 assert.doesNotMatch(html, /For your trusted team\. Anyone entering this email/);
 assert.doesNotMatch(html, /Enter your email to open your configurations/);
 const bootstrap = await readFile(new URL('../static/email-workspace.js', import.meta.url), 'utf8');
@@ -243,6 +244,15 @@ for (const phase of ['headers', 'body']) {
   assert.equal(f.w.localStorage.getItem('skynet:ssh-gateway:workspace:legacy'),'sky2');
   assert.equal(f.w.localStorage.getItem('skynet.tutorial.completed.runs:workspace:legacy'),'1');
   assert.equal(f.w.localStorage.getItem('skynet:ssh-gateway'),null);
+  assert.deepEqual(f.errors,[]); f.close();
+}
+// A saved gateway that the page no longer offers leaves the automatic default selected.
+{
+  const f=setup({id:'legacy',email:'ycho420@gatech.edu'},{'skynet:ssh-gateway':'retired-host'});
+  await flush();
+  for(const id of ['gateway','collection-gateway','data-import-gateway'])
+    assert.deepEqual([...f.el(id).options].map(option=>option.value),['auto','sky1','sky2']);
+  assert.equal(f.el('gateway').value,'auto');
   assert.deepEqual(f.errors,[]); f.close();
 }
 {

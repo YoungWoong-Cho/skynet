@@ -6,9 +6,11 @@ from skynet_app.cluster_runtime import ClusterClient
 
 
 class RestartAccountingClient(ClusterClient):
+    """Accounting answers; the controller cannot be asked, so accounting stands alone."""
+
     def __init__(self, output: str) -> None:
         super().__init__(("sky2",))
-        self.output = output
+        self.output = f"__SKYNET_ACCOUNTING__ 0\n{output}\n__SKYNET_CONTROLLER__ 1\nslurm_load_jobs error\n"
         self.accounting_calls: list[tuple[str, str, int]] = []
         self.queue_calls: list[tuple[str, str]] = []
 
@@ -18,7 +20,7 @@ class RestartAccountingClient(ClusterClient):
 
     def ssh(self, host, command, **kwargs):
         self.queue_calls.append((host, command))
-        return "102|PENDING|Resources\n"
+        raise AssertionError("One connection answers the whole status query")
 
 
 def accounting_row(job: str, state: str, restarts: str | None) -> str:
@@ -43,8 +45,7 @@ def test_restart_counts_share_one_batched_accounting_query() -> None:
     command, _, _ = client.accounting_calls[0]
     assert "-j 101,102,103_7" in command
     assert "Partition,Account,Restarts" in command
-    assert len(client.queue_calls) == 1
-    assert rows["102"]["Reason"] == "Resources"
+    assert client.queue_calls == []
     assert all("scontrol" not in call[0] for call in client.accounting_calls)
 
 

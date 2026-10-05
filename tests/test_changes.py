@@ -111,10 +111,11 @@ def test_rollback_and_reapply_only_remove_notification_objects(database):
     # This is the migration-11 downgrade. Newer schemas must be rolled back
     # first; otherwise removing their triggers would silently lose freshness.
     with database.connection() as connection:
-        with pytest.raises(Exception, match='Rollback later observation/retirement'):
+        with pytest.raises(Exception, match='Rollback later notification'):
             connection.executescript(rollback)
     with database.connection() as connection:
-        for table in ('observation_artifacts', 'observation_version_inputs', 'data_version_retirements'):
+        for table in ('observation_artifacts', 'observation_version_inputs', 'data_version_retirements', 'data_dataset_presentations',
+                      'note_folders', 'notes', 'note_attachments'):
             connection.execute(f'DROP TRIGGER skynet_change ON {table}')
     with listening(database) as listener, database.connection() as connection:
         before = connection.execute("SELECT payload_json FROM policy_exports WHERE id='export-fixture'").fetchone()[0]

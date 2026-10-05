@@ -13,7 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from skynet_app.cluster_runtime import ClusterClient, ClusterError, WORK_ROOT
+from skynet_app.cluster_config import cpus_for_gpus
+from skynet_app.cluster_runtime import DEFAULT_GATEWAY, ClusterClient, ClusterError, WORK_ROOT
 from skynet_app.database import Database, canonical_json
 from test_policy_exports import create, install_adapters, set_requirements
 from skynet_app.live_xr_review import LiveReviewService
@@ -26,6 +27,9 @@ REVISION = '30cc673e27684b9f10186fa6bea731aed246bc9f'
 
 
 class Cluster:
+    # The cluster, not its caller, chooses the login host that serves a request.
+    host = 'serving-host'
+
     def __init__(self):
         self.files, self.submissions, self.states, self.tokens = {}, [], {}, {}
         self.lock = threading.Lock()
@@ -35,10 +39,14 @@ class Cluster:
             schema_version='dataset-bundle/v1', integrity=dict(inventory_sha256='e' * 64)))
 
     def candidates(self, gateway):
-        return ['sky2']
+        return [self.host]
+
+    def served(self, gateway):
+        assert gateway == DEFAULT_GATEWAY, 'Preparation routes with the configured default'
+        return self.host
 
     def write_capsule_files(self, identifier, files, gateway):
-        assert gateway == 'sky2'
+        host = self.served(gateway)
         paths = {}
         with self.lock:
             for relative, value in files.items():
@@ -46,44 +54,43 @@ class Cluster:
                 assert path not in self.files or self.files[path] == value
                 self.files[path] = value
                 paths[relative] = path
-        return gateway, paths
+        return host, paths
 
     def submit_script(self, script, identifier, gateway, *, submission_key):
-        assert gateway == 'sky2'
+        host = self.served(gateway)
         ClusterClient._run_id(identifier)
         ClusterClient._submission_token(submission_key)
         with self.lock:
             if submission_key in self.tokens:
-                return SimpleNamespace(job_id=self.tokens[submission_key])
+                return SimpleNamespace(job_id=self.tokens[submission_key], gateway=host)
             job_id = str(len(self.submissions) + 100)
             self.tokens[submission_key] = job_id
             self.submissions.append(dict(script=script, id=identifier, key=submission_key, job_id=job_id))
             self.states[job_id] = 'PENDING'
-        return SimpleNamespace(job_id=job_id)
+        return SimpleNamespace(job_id=job_id, gateway=host)
 
     def job_statuses(self, identifiers, gateway):
-        assert gateway == 'sky2'
+        host = self.served(gateway)
         self.status_calls.append(list(identifiers))
-        return gateway, {identifier: dict(State=self.states[identifier]) for identifier in identifiers}
+        return host, {identifier: dict(State=self.states[identifier]) for identifier in identifiers}
 
     def read_file(self, path, gateway, *, max_bytes):
-        assert gateway == 'sky2'
+        host = self.served(gateway)
         if path not in self.files:
             raise ClusterError('No file: ' + path)
         value = self.files[path]
         assert len(value.encode()) <= max_bytes
-        return gateway, value
+        return host, value
 
     def read_optional_file(self, path, gateway, *, max_bytes):
-        assert gateway == 'sky2'
-        return self.read_file(path, gateway, max_bytes=max_bytes) if path in self.files else (gateway, None)
+        return self.read_file(path, gateway, max_bytes=max_bytes) if path in self.files else (self.served(gateway), None)
 
     def read_log(self, path, gateway, *, lines=500, max_bytes=1_000_000):
-        assert gateway == 'sky2'
+        host = self.served(gateway)
         if path not in self.files:
             raise ClusterError('No log: ' + path)
         tail = ''.join(self.files[path].splitlines(keepends=True)[-lines:])
-        return gateway, tail.encode()[-max_bytes:].decode(errors='replace')
+        return host, tail.encode()[-max_bytes:].decode(errors='replace')
 
     def requests(self, mode):
         return [json.loads(raw) for path, raw in self.files.items()
@@ -129,9 +136,10 @@ def context(tmp_path, monkeypatch):
         return session
     add_session()
     def resolve(session, relative):
-        return cluster, 'sky2', session['archive']['root'] + '/' + relative
+        return cluster, DEFAULT_GATEWAY, session['archive']['root'] + '/' + relative
     live = SimpleNamespace(root=ROOT, database=db, get=sessions.__getitem__, list=lambda **kw: list(sessions.values()),
-                           archive=SimpleNamespace(resolve=resolve, ensure=lambda _: pytest.fail('archive already ready')))
+                           archive=SimpleNamespace(cluster=cluster, resolve=resolve,
+                                                   ensure=lambda _: pytest.fail('archive already ready')))
     service = PolicyExportService(LiveReviewService(live, root=tmp_path / 'reviews'), root=tmp_path / 'exports', cluster=cluster)
     install_adapters(service)
     monkeypatch.setattr(PolicyExportService, '_preflight_sources', lambda self, job, sources: sources)
@@ -208,6 +216,7 @@ def test_plan_claim_render_derive_then_cpu_and_version_refs(context, monkeypatch
     pending = service.get(job['id'])
     assert pending['state'] == 'PENDING', pending
     assert len(cluster.submissions) == 3
+    assert pending['gateway'] == cluster.host, 'The job records the login host that accepted it'
     assert '#SBATCH --cpus-per-task=4' in pending['cluster_script'] and '#SBATCH --gres' not in pending['cluster_script']
     cpu_request = json.loads(cluster.files[pending['cluster_root'] + '/request.json'])
     source = cpu_request['sources'][0]
@@ -225,6 +234,30 @@ def test_plan_claim_render_derive_then_cpu_and_version_refs(context, monkeypatch
         refs = {row['artifact_key'] for row in connection.execute('SELECT * FROM observation_version_inputs WHERE version_id=?', (ready['version_id'],))}
     assert refs == keys and len(refs) == 3
     assert not list(service.root.rglob('*.pkl')) and not list(service.root.rglob('*.hdf5'))
+
+
+def test_render_job_requests_the_configured_cpus_per_gpu(context, monkeypatch):
+    from skynet_app import observation_preparation as module
+    service, cluster = context.service, context.cluster
+    set_requirements(service, 'test-recording-inputs', cloud_contract())
+    job = create(service, 'first', 'fixture-rgb', 'Configured CPU policy')
+    service.prepare(job['id'])
+    render = service.observations.store.producers()[0]
+    assert f'#SBATCH --cpus-per-task={cpus_for_gpus(1)}\n' in render['script']
+    cluster.publish(render)
+    service.observations.tick()
+    monkeypatch.setattr(module, 'cpus_for_gpus', lambda count: pytest.fail('Point-cloud derivation holds no GPU'))
+    service.prepare(job['id'])
+    derive = service.observations.store.producers()[0]
+    assert derive['request']['mode'] == 'derive' and '#SBATCH --cpus-per-task=8\n' in derive['script']
+    # A changed policy reaches the next GPU job, including its thread limits.
+    monkeypatch.setattr(module, 'cpus_for_gpus', lambda count: 6 * count)
+    context.add_session('second', checksum='b' * 64)
+    other = create(service, 'second', 'fixture-rgb', 'Changed CPU policy')
+    service.prepare(other['id'])
+    changed = next(p for p in service.observations.store.producers() if p['request']['mode'] == 'render')
+    assert '#SBATCH --cpus-per-task=6\n' in changed['script'] and '#SBATCH --gres=gpu:' in changed['script']
+    assert 'export OMP_NUM_THREADS=6 OPENBLAS_NUM_THREADS=6 MKL_NUM_THREADS=6\n' in changed['script']
 
 
 def test_concurrent_formats_share_one_rgb_producer(context):

@@ -109,6 +109,7 @@ def run_simulator(context, context_path, policy):
     env["SKYNET_POLICY_AUTH"] = auth.hex()
     env["SKYNET_POLICY_PORT"] = str(listener.address[1])
     env["SKYNET_POLICY_IMAGES"] = "1" if policy.mode == "rgb" else "0"
+    env["SKYNET_POLICY_MODE"] = policy.mode
     env["SKYNET_POLICY_CONTROL_HZ"] = str(control_hz)
     temporary_root = Path(context["result_path"]).parent
     temporary_root.mkdir(parents=True, exist_ok=True)

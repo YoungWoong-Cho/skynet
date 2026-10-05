@@ -7,8 +7,14 @@ DO $$ BEGIN
     IF EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
                JOIN pg_class c ON c.oid=t.tgrelid
                WHERE p.proname='skynet_notify_change'
-                 AND c.relname IN ('observation_artifacts','observation_version_inputs','data_version_retirements')) THEN
-        RAISE EXCEPTION 'Rollback later observation/retirement notification triggers before migration 11';
+                 AND c.relname NOT IN (
+                     'data_resources','data_resource_versions','data_locations',
+                     'data_derivations','data_derivation_inputs','data_imports',
+                     'data_bundles','data_bundle_assignments','policy_exports',
+                     'live_xr_sessions','adapters','workspace_storage',
+                     'tracking_connections','slack_notifications','workspace_sessions',
+                     'experiments','experiment_revisions','variants','runs')) THEN
+        RAISE EXCEPTION 'Rollback later notification migrations before migration 11';
     END IF;
 END $$;
 DROP TRIGGER IF EXISTS skynet_change ON data_resources;

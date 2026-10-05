@@ -48,6 +48,17 @@ def paths_for_root(work_root: str) -> ClusterPaths:
     return ClusterPaths.model_validate(paths)
 
 
+def evaluation_execution_directory(run_directory: str, execution_key: str | None) -> str:
+    """Scope new evaluations without moving pinned historical executions."""
+    if execution_key is None:
+        return run_directory
+    if not isinstance(execution_key, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", execution_key
+    ):
+        raise ValueError("evaluation execution key must be a safe stable identifier")
+    return str(PurePosixPath(run_directory) / "evaluations" / execution_key)
+
+
 class WorkspaceStorage:
     def __init__(self, database: Database):
         self.database = database

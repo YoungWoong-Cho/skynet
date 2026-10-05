@@ -8,6 +8,13 @@
     timer;
   const dialog = el("live-review-dialog");
   let reviewSession, recordingIndex = 0;
+  const navigation = window.SkynetEpisodeViewer.sequenceNavigation({
+    host: el("live-review-recording-actions"),
+    position: el("live-review-recording-position"),
+    previous: el("live-review-previous-recording"),
+    next: el("live-review-next-recording"),
+    onSelect: index => selectRecording(index),
+  });
   function closeViewer() {
     window.SkynetEpisodeViewer?.close("live-episode-viewer");
   }
@@ -234,11 +241,7 @@
     pause();
     closeViewer();
     recordingIndex = index;
-    el("live-review-previous-recording").disabled = index === 0;
-    el("live-review-next-recording").disabled = index === count - 1;
-    const position = el("live-review-recording-position");
-    position.textContent = `${index + 1}/${count}`;
-    position.setAttribute("aria-label", `Recording ${index + 1} of ${count}`);
+    navigation.update(index, count);
     const path = reviewSession.recordings?.[index];
     const remove = el("live-review-delete");
     remove.disabled = !path;
@@ -283,8 +286,6 @@
     }
   };
   el("live-review-delete").addEventListener("click", pause);
-  el("live-review-previous-recording").onclick = () => selectRecording(recordingIndex - 1);
-  el("live-review-next-recording").onclick = () => selectRecording(recordingIndex + 1);
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
       pause();

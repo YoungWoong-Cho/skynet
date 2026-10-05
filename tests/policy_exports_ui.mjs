@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import {JSDOM} from "jsdom";
-const dom = new JSDOM(await readFile(new URL('../static/index.html', import.meta.url), 'utf8'), {
+import {indexHtml} from "./index_page.cjs";
+const dom = new JSDOM(indexHtml(), {
   runScripts:'outside-only', url:'http://localhost:8080/#data', pretendToBeVisual:true,
 });
 const w=dom.window, el=id=>w.document.getElementById(id), calls=[];
@@ -23,6 +24,8 @@ w.document.addEventListener('dataset-preparation-changed',event=>{w.dataPreparat
 let inspectedResource;
 w.openDataInspection=id=>{inspectedResource=id;};
 w.showToast=()=>{};
+const previewEvents=[];
+w.SkynetEpisodeViewer={openDataset:(host,id)=>previewEvents.push(['open',host,id]),closeDataset:host=>previewEvents.push(['close',host])};
 const copied=[];w.navigator.clipboard={writeText:async value=>copied.push(value)};
 let selectedDataset;
 w.useDataset=async id=>{selectedDataset=id;};
@@ -102,6 +105,8 @@ try{
   assert.equal(el('prepared-dataset-content').querySelector('[data-input-modality="rgb"]').classList.contains('is-used'),true);
   el('prepared-dataset-actions').querySelector('[data-use-dataset]').click();await flush();assert.equal(selectedDataset,'hpt');
   await w.openPreparedDataset('unidex');
+  assert.equal(el('prepared-dataset-preview').hidden,false);
+  assert.deepEqual(previewEvents.at(-1),['open','prepared-dataset-preview','unidex'],'Dataset View embeds the shared episode preview');
   assert.equal(el('prepared-dataset-title').textContent,'Shadow UniDex');
   assert.equal(el('prepared-dataset-content').querySelector('[data-input-modality="rgb"]').classList.contains('is-used'),false);
   assert.equal(el('prepared-dataset-content').querySelector('[data-input-modality="point_cloud"]').classList.contains('is-used'),true);
@@ -126,6 +131,7 @@ try{
   el('prepared-dataset-content').querySelector('[data-preparation-retry]').click();await flush();
   assert.ok(calls.some(([path,options])=>path==='/api/data/exports/failed-job/retry' && options.method==='POST'));
   assert.equal(failedRow.querySelector('[data-preparation-retry]'),null,'Changed state updates shared row actions');
+  assert.match(failedRow.textContent,/Slurm job 12/);assert.doesNotMatch(failedRow.textContent,/sky\d/,'A job without a recorded gateway names no login host');
   assert.equal(el('policy-export-history'),null,'Conversion history has no separate inline panel');
   assert.equal(el('policy-export-jobs'),null);
   w.api=async(path,request={})=>{if(path==='/api/data/exports/jobs')throw new Error('History down');return api(path,request);};

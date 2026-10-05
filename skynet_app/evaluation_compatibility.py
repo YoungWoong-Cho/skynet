@@ -10,9 +10,13 @@ from pathlib import Path
 
 from .adapters.policy_contract import contract_issues, recorded_contract
 from .evaluation_contracts import bind_suite_to_dataset
+from .evaluation_targets import validate_unidex_target
 
 RECORDED_SUITES = frozenset({("isaac_lab", "dexverse_recorded"), ("isaac_lab", "dexverse_training_episode")})
 RECORDED_POLICY_MODELS = {
+    "unidex": ("unidex_faas", None),
+    "human-policy-hat": ("hat_cartesian", None),
+    "diffusion-policy": ("diffusion_policy_joints", None),
     "egoverse-hpt": ("egoverse_joints", {"hpt_joints"}),
     "egoverse-hpt-joints": ("egoverse_joints", {"hpt_joints"}),
     "egoverse-act": ("egoverse_joints", {"act"}),
@@ -71,18 +75,59 @@ def inspect_compatibility(spec, manifest, suite, checkpoint=None):
             check("loader", "No recorded-joint policy loader is registered for this model preset.", "mapping_required")
         else:
             check("loader", f"Policy loader: {loader}.")
-            metadata = dataset_metadata(spec)
+            target = (suite.get("config_json") or {}).get("target_dataset")
+            metadata = (target or {}).get("metadata", {}) if loader in {"unidex_faas", "hat_cartesian", "diffusion_policy_joints"} and target else dataset_metadata(spec)
             config = (spec.get("native") or {}).get("config") or {}
             try:
-                binding = recorded_contract(metadata, control_hz=config.get("control_hz"))
+                if loader == "unidex_faas":
+                    from .adapters.policy_contract import unidex_contract
+                    from .adapters.dataset_inputs import resolve_data_selections
+                    from .adapters.recording_time import resolve_collection_sampling
+                    from .adapters.unidex_input import collection_pointcloud_recipe
+                    validate_unidex_target(spec, target, suite["config_json"].get("unseen_embodiment", False))
+                    selections = resolve_data_selections(spec)
+                    sampling = resolve_collection_sampling(selections, control_hz=config.get("control_hz"),
+                        action_steps=config.get("action_steps", 30), window_policy="complete", require_validation=True)
+                    binding = unidex_contract(metadata, control_hz=sampling["control_hz"])
+                    if collection_pointcloud_recipe(selections) != binding["pointcloud_recipe"]:
+                        raise ValueError("Evaluation point-cloud recipe differs from this run's frozen training inputs")
+                    check("target", "The target hand, camera and scene are frozen independently of training.")
+                    check("pointcloud", "The target point-cloud recipe matches the frozen training inputs; checkpoint verification runs on the compute node.")
+                elif loader == "hat_cartesian":
+                    from .adapters.hat_evaluation import hat_contract
+                    from .adapters.dataset_inputs import resolve_data_selections
+                    from .adapters.recording_time import resolve_collection_sampling
+                    if target:
+                        validate_unidex_target(spec, target, suite["config_json"].get("unseen_embodiment", False))
+                    # Old single-input checkpoints carry their original frequency.
+                    hz = config.get("control_hz")
+                    if config.get("datasets"):
+                        selections = resolve_data_selections(spec)
+                        hz = resolve_collection_sampling(selections, control_hz=hz,
+                            action_steps=config.get("action_steps", 30),
+                            window_policy=config.get("window_policy", "complete"))["control_hz"]
+                    binding = hat_contract(metadata, control_hz=hz)
+                else:
+                    if loader == "diffusion_policy_joints":
+                        from .adapters.dp_simulation import validate_target, validate_cameras
+                        if target:
+                            validate_target(target, config)
+                        validate_cameras(recorded_contract(metadata, control_hz=config.get("control_hz")))
+                    binding = recorded_contract(metadata, control_hz=config.get("control_hz"))
                 checks.extend(contract_issues(binding))
             except ValueError as error:
-                check("timing", str(error), "incompatible")
+                check("target" if loader == "unidex_faas" else "timing", str(error), "unknown" if loader == "unidex_faas" and not target else "incompatible")
             if spec.get("source", {}).get("adapter") == "xpolicylab-act-native" and metadata.get("contract") != "skynet.act-rgb-joints/v1":
                 check("dataset", "Native ACT simulator evaluation requires a recorded RGB/joint dataset.", "incompatible")
+            if loader == "diffusion_policy_joints":
+                from .adapters.dp_data import validate_joint_manifest
+                try:
+                    validate_joint_manifest(metadata)
+                except (ValueError, KeyError, TypeError) as error:
+                    check("dataset", str(error), "incompatible")
             if loader == "egoverse_joints" and metadata.get("contract") != "skynet.egoverse-rgb-joints/v1":
                 check("dataset", "The EgoVerse loader requires a recorded RGB/joint dataset.", "incompatible")
-            if not config.get("dataset_path") or not config.get("dataset_manifest_sha256"):
+            if loader not in {"unidex_faas", "hat_cartesian"} and (not config.get("dataset_path") or not config.get("dataset_manifest_sha256")):
                 check("dataset", "The training dataset path or checksum is missing.", "unknown")
             if not checks[1:]:
                 check("io", "Named joints, action scaling, control period and camera inputs are recorded.")
@@ -123,7 +168,16 @@ def compose_evaluator(spec, manifest, suite):
         return manifest
     from .adapters import CommandTemplate, EvaluationAdapterMetadata
     from .adapters.xpolicy_manifest import simulation_support_files, support_files
-    if loader == "egoverse_joints":
+    if loader == "unidex_faas":
+        from .adapters.unidex_manifest import support_files as unidex_support
+        files = unidex_support()
+    elif loader == "hat_cartesian":
+        from .adapters.hat_manifest import support_files as hat_support
+        files = hat_support()
+    elif loader == "diffusion_policy_joints":
+        from .adapters.dp_manifest import support_files as dp_support
+        files = dp_support()
+    elif loader == "egoverse_joints":
         from .adapters.egoverse_manifest import support_files as egoverse_support
         files = egoverse_support()
     else:
@@ -135,13 +189,25 @@ def compose_evaluator(spec, manifest, suite):
     directory = Path(__file__).with_name("adapters")
     for name in ("recorded_policy_evaluation.py", "policy_loading.py", "policy_contract.py", "egoverse_simulation.py"):
         files["adapter-support/" + name] = (directory / name).read_text()
+    if loader == "hat_cartesian":
+        files["adapter-support/hat_evaluation.py"] = (directory / "hat_evaluation.py").read_text()
+    if loader == "diffusion_policy_joints":
+        files["adapter-support/dp_simulation.py"] = (directory / "dp_simulation.py").read_text()
+    if loader in {"unidex_faas", "hat_cartesian"}:
+        files["adapter-support/unidex_evaluation.py"] = (directory / "unidex_evaluation.py").read_text()
+    if loader in {"unidex_faas", "hat_cartesian", "diffusion_policy_joints"}:
+        datasets_directory = directory.parents[1] / "ops" / "datasets"
+        for name in ("observation_render.py", "observation_geometry.py"):
+            files["adapter-support/" + name] = (datasets_directory / name).read_text()
+    dataset_values = (["evaluation.target_dataset.path", "evaluation.target_dataset.manifest_sha256"]
+                      if loader in {"unidex_faas", "hat_cartesian", "diffusion_policy_joints"} else ["evaluation.policy.native_config.dataset_path", "evaluation.policy.native_config.dataset_manifest_sha256"])
     entry = EvaluationAdapterMetadata(
         environment=suite["evaluator_adapter"], suites=[suite["name"]], maximum_parallelism=8,
         runtime_profile_id="isaacsim-5.1.0_isaaclab-2.3.2_py311",
         command=CommandTemplate(
             argv=["python", "{{tokens.run_dir}}/adapter-support/evaluation_workers.py", "--context", "{{tokens.run_dir}}/adapter-support/evaluation-context.json", "--source-dir", "{{tokens.source_dir}}"],
             capsule_files=files, environment={"SKYNET_EVAL_RESUME_GRANULARITY": "episode"},
-            required_values=["evaluation.checkpoint.sha256", "evaluation.policy.native_config.dataset_path", "evaluation.policy.native_config.dataset_manifest_sha256", "evaluation.evaluator_runtime.python_executable", "evaluation.evaluator_runtime.source_dir"],
+            required_values=["evaluation.checkpoint.sha256", *dataset_values, "evaluation.evaluator_runtime.python_executable", "evaluation.evaluator_runtime.source_dir"],
         ),
     )
     return manifest.model_copy(update={"evaluations": [entry]})

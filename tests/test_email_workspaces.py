@@ -191,14 +191,14 @@ def test_background_reconciliation_selects_only_its_own_jobs(services, monkeypat
     monkeypatch.setattr(service, '_flush_tracking_provider', lambda *a, **k: None)
     monkeypatch.setattr(service, '_repair_missing_active_tracking_bindings', lambda rows: 0)
     # Stop at the actual external boundary, after real owner-filtered SQL runs.
-    services.system.cluster.job_statuses.side_effect = RuntimeError('external boundary')
+    services.system.cluster.job_status_snapshot.side_effect = RuntimeError('external boundary')
     token = CURRENT_WORKSPACE.set(bob.workspace_id)
     try:
         with pytest.raises(RuntimeError, match='external boundary'):
             service.reconcile()
     finally:
         CURRENT_WORKSPACE.reset(token)
-    services.system.cluster.job_statuses.assert_called_once_with(['111'])
+    services.system.cluster.job_status_snapshot.assert_called_once_with(['111'])
     assert bob.get_run(b['run']['id'])['status'] == b['run']['status']
     assert bob.run_progress_evidence([a['run']['id']]) == {}
     assert bob.evaluation_progress_evidence([a['evaluation']['id']]) == {}

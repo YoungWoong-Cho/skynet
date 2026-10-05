@@ -36,10 +36,37 @@ RUN_STATUS_TAG = "skynet.status"
 ATTEMPT_NUMBER_TAG = "skynet.attempt_number"
 WANDB_SPOOL_FILENAME = "wandb-spool.jsonl"
 WANDB_STATE_FILENAME = "wandb-state.json"
+WANDB_ENQUEUE_BATCH_SIZE = 1000
 WANDB_LOCK_FILENAME = ".wandb-spool.lock"
 WANDB_TAG_MAX_LENGTH = 64
 WANDB_TAG_HASH_LENGTH = 12
 WANDB_TAG_METADATA_CONFIG_KEY = "skynet_tag_metadata"
+
+
+def compact_tracking_parameters(values: Mapping[str, Any]) -> dict[str, Any]:
+    """Tracking references immutable data by identity, never by its full manifest."""
+    result = dict(values)
+    bundle = result.get("data_bundle_id")
+    if isinstance(bundle, Mapping):
+        digest = bundle.get("manifest_sha256") or hashlib.sha256(
+            json.dumps(bundle, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+        ).hexdigest()
+        result["data_bundle_id"] = bundle.get("id") or bundle.get("bundle_id") or "sha256:" + digest
+        result["data_bundle_manifest_sha256"] = digest
+    return result
+
+
+def _compact_wandb_event_parameters(events) -> bool:
+    changed = False
+    for event in events:
+        field = {"ensure_run": "config", "log_params": "params"}.get(event.get("operation"))
+        payload = event.get("payload") or {}
+        if field and isinstance(payload.get(field), Mapping):
+            compact = compact_tracking_parameters(payload[field])
+            if compact != payload[field]:
+                payload[field] = compact
+                changed = True
+    return changed
 
 
 def _utc_now() -> str:
@@ -523,6 +550,7 @@ class MLflowBridge:
         artifact_type: str | None = None,
         sha256: str | None = None,
         metadata: Mapping[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> TrackingResult:
         return self._enqueue("artifact_link", {
             "local_run_id": local_run_id,
@@ -531,6 +559,7 @@ class MLflowBridge:
             "artifact_type": artifact_type,
             "sha256": sha256,
             "metadata": metadata or {},
+            **({"idempotency_key": idempotency_key} if idempotency_key else {}),
         })
 
     def finish_run(
@@ -539,11 +568,13 @@ class MLflowBridge:
         *,
         status: str = "FINISHED",
         end_time_ms: int | None = None,
+        idempotency_key: str | None = None,
     ) -> TrackingResult:
         return self._enqueue("finish_run", {
             "local_run_id": local_run_id,
             "status": status.upper(),
             "end_time": end_time_ms or _milliseconds_now(),
+            **({"idempotency_key": idempotency_key} if idempotency_key else {}),
         })
 
     def reopen_run(self, local_run_id: str, attempt_number: int) -> TrackingResult:
@@ -1227,11 +1258,13 @@ class WandBBridge:
             (json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode(),
         )
 
-    def _events_unlocked(self) -> list[dict[str, Any]]:
+    def _events_unlocked(self, payload: bytes | None = None) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
-        for line_number, line in enumerate(
-            self.spool_path.read_text(encoding="utf-8").splitlines(), start=1
-        ):
+        text = (
+            self.spool_path.read_text(encoding="utf-8")
+            if payload is None else payload.decode("utf-8")
+        )
+        for line_number, line in enumerate(text.splitlines(), start=1):
             if not line.strip():
                 continue
             try:
@@ -1244,51 +1277,90 @@ class WandBBridge:
         return events
 
     def _enqueue(self, operation: str, payload: Mapping[str, Any]) -> TrackingResult:
-        safe_payload = sanitize(payload, secrets=(self.settings.api_key,))
+        return self._enqueue_batch([(operation, payload)])[0]
+
+    def _enqueue_batch(
+        self, requests: Sequence[tuple[str, Mapping[str, Any]]]
+    ) -> list[TrackingResult]:
+        """Atomically append bounded batches with existing per-event retry identities."""
+        results = []
+        for offset in range(0, len(requests), WANDB_ENQUEUE_BATCH_SIZE):
+            results.extend(self._enqueue_chunk(
+                requests[offset:offset + WANDB_ENQUEUE_BATCH_SIZE]
+            ))
+        return results
+
+    def _enqueue_chunk(
+        self, requests: Sequence[tuple[str, Mapping[str, Any]]]
+    ) -> list[TrackingResult]:
+        safe_requests = [
+            (operation, sanitize(payload, secrets=(self.settings.api_key,)))
+            for operation, payload in requests
+        ]
         with self._locked():
-            events = self._events_unlocked()
-            idempotency_key = safe_payload.get("idempotency_key")
-            event = next(
-                (
-                    item
-                    for item in events
-                    if idempotency_key
-                    and item.get("operation") == operation
-                    and isinstance(item.get("payload"), Mapping)
-                    and item["payload"].get("idempotency_key") == idempotency_key
-                ),
-                None,
-            )
-            if event is None:
-                sequence = max((int(item["sequence"]) for item in events), default=0) + 1
-                event = {
-                    "schema_version": SPOOL_SCHEMA_VERSION,
-                    "id": str(uuid.uuid4()),
-                    "sequence": sequence,
-                    "operation": operation,
-                    "payload": safe_payload,
-                    "created_at": _utc_now(),
-                }
-                existing = self.spool_path.read_bytes()
-                line = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-                self._atomic_write(self.spool_path, existing + line.encode() + b"\n")
-            else:
-                sequence = int(event["sequence"])
-        report = self.drain_spool() if self.settings.auto_flush else DrainReport(
-            0, 0, self.pending_count(), False
-        )
+            existing = self.spool_path.read_bytes()
+            events = self._events_unlocked(existing)
+            compacted = _compact_wandb_event_parameters(events)
+            if compacted:
+                existing = b"".join(json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
+                                    for event in events)
+            by_key = {
+                (item.get("operation"), item["payload"]["idempotency_key"]): item
+                for item in events
+                if isinstance(item.get("payload"), Mapping)
+                and item["payload"].get("idempotency_key")
+            }
+            sequence = max((int(item["sequence"]) for item in events), default=0)
+            selected = []
+            lines = []
+            for operation, safe_payload in safe_requests:
+                key = safe_payload.get("idempotency_key")
+                if operation == "finish_run" and key:
+                    # Late data needs a fresh completion, under this same lock.
+                    last_data = max((int(item["sequence"]) for item in [*events, *selected]
+                        if item.get("operation") != "finish_run"
+                        and item.get("payload", {}).get("local_run_id") == safe_payload.get("local_run_id")), default=0)
+                    key = f"{key}:through:{last_data}"
+                    safe_payload["idempotency_key"] = key
+                event = by_key.get((operation, key)) if key else None
+                if event is None:
+                    sequence += 1
+                    event = {
+                        "schema_version": SPOOL_SCHEMA_VERSION,
+                        "id": str(uuid.uuid4()),
+                        "sequence": sequence,
+                        "operation": operation,
+                        "payload": safe_payload,
+                        "created_at": _utc_now(),
+                    }
+                    lines.append(
+                        json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+                        + b"\n"
+                    )
+                    if key:
+                        by_key[(operation, key)] = event
+                selected.append(event)
+            if lines or compacted:
+                # The shared journal and filesystem both atomically publish the
+                # append. No caller advances its source cursor before this succeeds.
+                self._atomic_write(self.spool_path, existing + b"".join(lines))
+        report = self.drain_spool() if self.settings.auto_flush else None
         with self._locked():
             state = self._load_state_unlocked()
-            delivered = int(state.get("acked_through", 0)) >= sequence
-            run = state.get("runs", {}).get(str(payload.get("local_run_id", "")), {})
-        return TrackingResult(
-            event_id=str(event["id"]),
-            sequence=sequence,
-            delivered=delivered,
-            queued=not delivered,
-            remote_id=str(run.get("remote_id")) if run.get("remote_id") else None,
-            error=report.errors[0] if report.errors else None,
-        )
+            cursor = int(state.get("acked_through", 0))
+            results = []
+            for event in selected:
+                delivered = cursor >= int(event["sequence"])
+                run = state.get("runs", {}).get(str(event["payload"].get("local_run_id", "")), {})
+                results.append(TrackingResult(
+                    event_id=str(event["id"]),
+                    sequence=int(event["sequence"]),
+                    delivered=delivered,
+                    queued=not delivered,
+                    remote_id=str(run.get("remote_id")) if run.get("remote_id") else None,
+                    error=report.errors[0] if report and report.errors else None,
+                ))
+        return results
 
     def validate_connection(self) -> dict[str, Any]:
         if not self.settings.configured:
@@ -1343,11 +1415,11 @@ class WandBBridge:
             "run_name": run_name,
             "group": group,
             "tags": tags or {},
-            "config": config or {},
+            "config": compact_tracking_parameters(config or {}),
         })
 
     def log_params(self, local_run_id: str, params: Mapping[str, Any]) -> TrackingResult:
-        return self._enqueue("log_params", {"local_run_id": local_run_id, "params": params})
+        return self._enqueue("log_params", {"local_run_id": local_run_id, "params": compact_tracking_parameters(params)})
 
     def log_metrics(
         self,
@@ -1358,15 +1430,29 @@ class WandBBridge:
         timestamp_ms: int | None = None,
         idempotency_key: str | None = None,
     ) -> TrackingResult:
-        return self._enqueue("log_metrics", {
-            "local_run_id": local_run_id,
-            "metrics": metrics,
-            "step": step,
-            "timestamp_ms": (
-                timestamp_ms if timestamp_ms is not None else _milliseconds_now()
-            ),
-            **({"idempotency_key": idempotency_key} if idempotency_key else {}),
-        })
+        return self.log_metrics_batch(local_run_id, [{
+            "metrics": metrics, "step": step, "timestamp_ms": timestamp_ms,
+            "idempotency_key": idempotency_key,
+        }])[0]
+
+    def log_metrics_batch(
+        self, local_run_id: str, samples: Sequence[Mapping[str, Any]]
+    ) -> list[TrackingResult]:
+        """Append training samples in bounded durable batches, preserving time/step."""
+        return self._enqueue_batch([
+            ("log_metrics", {
+                "local_run_id": local_run_id,
+                "metrics": sample["metrics"],
+                "step": sample.get("step", 0),
+                "timestamp_ms": (
+                    sample["timestamp_ms"]
+                    if sample.get("timestamp_ms") is not None else _milliseconds_now()
+                ),
+                **({"idempotency_key": sample["idempotency_key"]}
+                   if sample.get("idempotency_key") else {}),
+            })
+            for sample in samples
+        ])
 
     def set_tags(self, local_run_id: str, tags: Mapping[str, Any]) -> TrackingResult:
         return self._enqueue("set_tags", {"local_run_id": local_run_id, "tags": tags})
@@ -1375,11 +1461,25 @@ class WandBBridge:
         self, local_run_id: str, metrics: Mapping[str, float | int], *,
         timestamp_ms: int, runtime_seconds: float, idempotency_key: str,
     ) -> TrackingResult:
-        return self._enqueue("log_system_metrics", {
-            "local_run_id": local_run_id, "metrics": metrics,
-            "timestamp_ms": timestamp_ms, "runtime_seconds": runtime_seconds,
-            "idempotency_key": idempotency_key,
-        })
+        return self.log_system_metrics_batch(local_run_id, [{
+            "metrics": metrics, "timestamp_ms": timestamp_ms,
+            "runtime_seconds": runtime_seconds, "idempotency_key": idempotency_key,
+        }])[0]
+
+    def log_system_metrics_batch(
+        self, local_run_id: str, samples: Sequence[Mapping[str, Any]]
+    ) -> list[TrackingResult]:
+        """Use the same durable batch path for allocation-scoped GPU samples."""
+        return self._enqueue_batch([
+            ("log_system_metrics", {
+                "local_run_id": local_run_id,
+                "metrics": sample["metrics"],
+                "timestamp_ms": sample["timestamp_ms"],
+                "runtime_seconds": sample["runtime_seconds"],
+                "idempotency_key": sample["idempotency_key"],
+            })
+            for sample in samples
+        ])
 
     def log_artifact_link(
         self,
@@ -1390,6 +1490,7 @@ class WandBBridge:
         artifact_type: str | None = None,
         sha256: str | None = None,
         metadata: Mapping[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> TrackingResult:
         return self._enqueue("artifact_link", {
             "local_run_id": local_run_id,
@@ -1398,12 +1499,22 @@ class WandBBridge:
             "artifact_type": artifact_type,
             "sha256": sha256,
             "metadata": metadata or {},
+            **({"idempotency_key": idempotency_key} if idempotency_key else {}),
         })
 
-    def finish_run(self, local_run_id: str, *, status: str = "FINISHED") -> TrackingResult:
+    def log_artifact_links(self, local_run_id: str, links: Sequence[Mapping[str, Any]]) -> list[TrackingResult]:
+        """Persist final artifact links once; delivery coalesces their summary update."""
+        return self._enqueue_batch([("artifact_link", {"local_run_id": local_run_id, **dict(link)})
+                                    for link in links])
+
+    def finish_run(
+        self, local_run_id: str, *, status: str = "FINISHED",
+        idempotency_key: str | None = None,
+    ) -> TrackingResult:
         return self._enqueue("finish_run", {
             "local_run_id": local_run_id,
             "status": status.upper(),
+            **({"idempotency_key": idempotency_key} if idempotency_key else {}),
         })
 
     def reopen_run(self, local_run_id: str, attempt_number: int) -> TrackingResult:
@@ -1459,7 +1570,19 @@ class WandBBridge:
         errors: list[str] = []
         with self._locked():
             events = self._events_unlocked()
+            if _compact_wandb_event_parameters(events):
+                self._atomic_write(self.spool_path, b"".join(
+                    json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
+                    for event in events))
             state = self._load_state_unlocked()
+            compacted = False
+            for run in state.get("runs", {}).values():
+                compact = compact_tracking_parameters(run.get("config") or {})
+                if compact != run.get("config"):
+                    run["config"] = compact
+                    compacted = True
+            if compacted:
+                self._write_state_unlocked(state)
             pending = [event for event in events
                        if int(event["sequence"]) > int(state.get("acked_through", 0))]
             if pending and time.time() < float(state.get("retry_not_before", 0)):
@@ -1471,7 +1594,7 @@ class WandBBridge:
             while index < len(pending):
                 batch = [pending[index]]
                 event = batch[0]
-                if event.get("operation") in {"log_metrics", "log_system_metrics"}:
+                if event.get("operation") in {"log_metrics", "log_system_metrics", "artifact_link"}:
                     operation = event["operation"]
                     run_id = event["payload"].get("local_run_id")
                     for following in pending[index + 1:index + 100]:
@@ -1561,10 +1684,32 @@ class WandBBridge:
                 "history_offset": int(existing.get("history_offset") or 0),
                 "events_offset": int(existing.get("events_offset") or 0),
                 **({"state": existing["state"]} if existing.get("state") else {}),
+                **({"completion_sent": existing["completion_sent"]} if existing.get("completion_sent") else {}),
             }
             return
         if not isinstance(run, dict):
             raise TrackingRequestError(f"No remote W&B run exists for local run {local_run_id}")
+        # Historical/adopted bindings may predate cached summaries. Recover the
+        # existing remote value before any append/update, never replace it with
+        # an empty summary or reset the durable history cursor.
+        if not isinstance(run.get("summary"), dict):
+            result = self._graphql(
+                """query SkynetExistingSummary($entity: String!, $project: String!, $name: String!) {
+                    project(name: $project, entityName: $entity) {
+                        run(name: $name) { id name summaryMetrics }
+                    }
+                }""",
+                {"entity": run["entity"], "project": run["project"], "name": run["name"]},
+            )
+            remote = (result.get("project") or {}).get("run")
+            if not remote or str(remote.get("id")) != str(run["storage_id"]):
+                raise TrackingRequestError("Cannot recover the pinned W&B run summary")
+            summary = remote.get("summaryMetrics") or {}
+            if isinstance(summary, str):
+                summary = json.loads(summary)
+            if not isinstance(summary, dict):
+                raise TrackingRequestError("W&B returned an invalid existing summary")
+            run["summary"] = summary
 
         if operation == "log_params":
             run["config"].update(dict(payload.get("params") or {}))
@@ -1578,6 +1723,8 @@ class WandBBridge:
             ])
             for sample in samples:
                 run["summary"].update(dict(sample.get("metrics") or {}))
+            self._update_summary(str(run["storage_id"]), run["summary"])
+            return
         elif operation in {"log_system_metrics", "log_system_metrics_batch"}:
             samples = payload["samples"] if operation.endswith("_batch") else [payload]
             # W&B's system stream has its own cursor and clock, independent of
@@ -1591,15 +1738,18 @@ class WandBBridge:
             return
         elif operation == "set_tags":
             run["tags"].update(dict(payload.get("tags") or {}))
-        elif operation == "artifact_link":
-            slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(payload.get("name") or "artifact"))
-            run["summary"][f"skynet/artifact/{slug}"] = str(payload.get("uri") or "")
+        elif operation in {"artifact_link", "artifact_link_batch"}:
+            links = payload["samples"] if operation == "artifact_link_batch" else [payload]
+            for link in links:
+                slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(link.get("name") or "artifact"))
+                run["summary"][f"skynet/artifact/{slug}"] = str(link.get("uri") or "")
+            self._update_summary(str(run["storage_id"]), run["summary"])
+            return
         elif operation == "finish_run":
             status = str(payload.get("status") or "FINISHED").upper()
             run["state"] = "finished" if status == "FINISHED" else "failed"
-            # W&B's supported public update API has no running -> finished
-            # transition. Persist the canonical terminal outcome as summary and
-            # tags rather than relying on an undocumented GraphQL transition.
+            # Metadata alone does not finish a W&B run. The file-stream
+            # completion receipt is sent after its final summary below.
             run["summary"]["skynet/status"] = status
             run["tags"][RUN_STATUS_TAG] = status.lower()
         elif operation == "reopen_run":
@@ -1608,6 +1758,7 @@ class WandBBridge:
             storage_id = str(run.get("storage_id") or "")
             history_offset = int(run.get("history_offset") or 0)
             run["state"] = "running"
+            run.pop("completion_sent", None)
             run["summary"]["skynet/status"] = "RUNNING"
             run["tags"][RUN_STATUS_TAG] = "running"
             run["tags"][ATTEMPT_NUMBER_TAG] = attempt
@@ -1650,6 +1801,12 @@ class WandBBridge:
             config=run.get("config", {}),
             summary=run.get("summary", {}),
         )
+        if operation == "finish_run":
+            self._post_file_stream(run, {
+                "complete": True,
+                "exitcode": 0 if payload.get("status", "FINISHED").upper() == "FINISHED" else 1,
+            })
+            run["completion_sent"] = run["state"]
 
     def _append_history_rows(self, run: dict[str, Any], rows: Sequence[Mapping[str, Any]]) -> None:
         """Upload queued samples together while retaining each step and timestamp."""
@@ -1662,54 +1819,39 @@ class WandBBridge:
         offset = int(run.get(offset_key) or 0)
         lines = [json.dumps(sanitize(row), sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
                  for row in rows]
+        self._post_file_stream(run, {"files": {
+            filename: {"offset": offset, "content": lines},
+        }})
+        run[offset_key] = offset + len(lines)
+
+    def _post_file_stream(self, run: Mapping[str, Any], payload: Mapping[str, Any]) -> None:
+        """Send history or the SDK's terminal receipt; acknowledge only on success."""
         entity = urllib.parse.quote(str(run["entity"]), safe="")
         project = urllib.parse.quote(str(run["project"]), safe="")
         remote_name = urllib.parse.quote(str(run["name"]), safe="")
-        uri = (
-            f"{self.settings.base_url.rstrip('/')}/files/"
-            f"{entity}/{project}/{remote_name}/file_stream"
-        )
+        uri = f"{self.settings.base_url.rstrip('/')}/files/{entity}/{project}/{remote_name}/file_stream"
         token = base64.b64encode(f"api:{self.settings.api_key}".encode()).decode("ascii")
-        body = json.dumps(
-            {
-                "files": {
-                    filename: {
-                        "offset": offset,
-                        "content": lines,
-                    }
-                }
-            },
-            separators=(",", ":"),
-        ).encode()
         request = urllib.request.Request(
-            uri,
-            data=body,
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "Authorization": f"Basic {token}",
-                "User-Agent": "skynet-slurm-console/0.2",
-            },
+            uri, data=json.dumps(payload, separators=(",", ":")).encode(),
+            headers={"Accept": "application/json", "Content-Type": "application/json",
+                     "Authorization": f"Basic {token}", "User-Agent": "skynet-slurm-console/0.2"},
             method="POST",
         )
         context = None
         if urllib.parse.urlsplit(uri).scheme == "https" and not self.settings.verify_tls:
             context = ssl._create_unverified_context()
         try:
-            with urllib.request.urlopen(
-                request, timeout=self.settings.timeout_seconds, context=context
-            ) as response:
+            with urllib.request.urlopen(request, timeout=self.settings.timeout_seconds, context=context) as response:
                 response.read()
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")[:2000]
             raise TrackingRequestError(
-                f"W&B {filename} returned HTTP {error.code}: {detail}",
+                f"W&B file stream returned HTTP {error.code}: {detail}",
                 status_code=error.code,
                 retry_after=_retry_after_seconds((error.headers or {}).get("Retry-After")),
             ) from error
         except (urllib.error.URLError, TimeoutError, OSError) as error:
-            raise TrackingRequestError(f"W&B {filename} transport unavailable: {error}") from error
-        run[offset_key] = offset + len(lines)
+            raise TrackingRequestError(f"W&B file stream transport unavailable: {error}") from error
 
     @staticmethod
     def _wandb_config(
@@ -1805,28 +1947,24 @@ class WandBBridge:
             },
         )
         if summary:
-            # This is the mutation used by wandb.apis.public.summary.HTTPSummary.
-            self._graphql(
-                """
-                mutation SkynetUpdateSummary($id: String, $summaryMetrics: JSONString) {
-                    upsertBucket(input: {id: $id, summaryMetrics: $summaryMetrics}) {
-                        bucket { id }
-                    }
-                }
-                """,
-                {
-                    "id": storage_id,
-                    "summaryMetrics": json.dumps(
-                        sanitize(summary),
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        ensure_ascii=True,
-                    ),
-                },
-            )
+            self._update_summary(storage_id, summary)
         if not isinstance(value, Mapping):
             raise TrackingRequestError("W&B upsert-run returned an unexpected response")
         return dict(value)
+
+    def _update_summary(self, storage_id: str, summary: Mapping[str, Any]) -> None:
+        # Scalar metrics and artifact links do not change the run configuration.
+        self._graphql(
+            """
+            mutation SkynetUpdateSummary($id: String, $summaryMetrics: JSONString) {
+                upsertBucket(input: {id: $id, summaryMetrics: $summaryMetrics}) {
+                    bucket { id }
+                }
+            }
+            """,
+            {"id": storage_id, "summaryMetrics": json.dumps(
+                sanitize(summary), sort_keys=True, separators=(",", ":"), ensure_ascii=True)},
+        )
 
     def _graphql(self, query: str, variables: Mapping[str, Any]) -> dict[str, Any]:
         if not self.settings.api_key:

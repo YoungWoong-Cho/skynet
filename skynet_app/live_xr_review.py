@@ -12,6 +12,7 @@ import threading
 import numpy as np
 
 from .recording_guard import guarded_recording
+from .cluster_runtime import DEFAULT_GATEWAY
 from .database import canonical_json, utc_now
 from .live_xr_catalog import selection
 from .remote_artifacts import RemoteArtifact
@@ -300,7 +301,7 @@ class LiveReviewService:
                 "state"
             ) == "COPYING":
                 raise ValueError(
-                    "Recordings are moving to sky2. Retry review after transfer completes."
+                    "Recordings are moving to the training cluster. Retry review after transfer completes."
                 )
             current = self.status(identifier, index)
             key = (identifier, index)
@@ -356,7 +357,7 @@ class LiveReviewService:
             "READY",
         }:
             root = archive.derived_root(job)
-            transport, gateway = archive.cluster, job["archive"]["gateway"]
+            transport, gateway = archive.cluster, DEFAULT_GATEWAY
         else:
             transport, gateway = self.live.transport(job), job["gateway"]
             root = job["root"] + "/output"
@@ -395,14 +396,14 @@ class LiveReviewService:
             ):
                 target = targets[name]
                 program = "import json,sys; from pathlib import Path; p=Path(sys.argv[1]); p.parent.mkdir(parents=True,exist_ok=True); t=p.with_suffix('.tmp'); t.write_text(sys.stdin.read()); t.replace(p)"
-                target.transport.ssh(
-                    target.gateway,
+                target.transport.run_with_fallback(
                     "python3 -c "
                     + shlex.quote(program)
                     + " "
                     + shlex.quote(target.path),
+                    target.gateway,
                     stdin=content,
-                    timeout=40,
+                    attempt_timeout=40,
                 )
             current = self.remote_location(identifier, index, "review.json")
             if (current.gateway, current.path) == (

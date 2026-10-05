@@ -15,6 +15,25 @@ from xpolicy_runtime import write_json
 from policy_transport import receive_message, send_message
 
 
+def policy_control_step(contract, observation, pending, request, *, unidex=False, include_images=True, cartesian=False):
+    """Consume one command while retaining each adapter's observation contract."""
+    from policy_contract import validate_observation, validate_actions
+    predict = not pending
+    if contract:
+        validate_observation(contract, observation, require_pointcloud=not unidex or predict)
+    # UniDex's non-prediction step returns None without reading observations or
+    # updating policy state. Other adapters retain their existing per-tick calls.
+    if predict or not (unidex or cartesian):
+        policy_observation = observation if (unidex or cartesian) else {
+            "state": observation["state"], "images": observation["images"] if include_images else {}}
+        predicted = request({"command": "step", "observation": policy_observation, "predict": predict})
+        if predict:
+            if contract:
+                validate_actions(contract, predicted)
+            pending.extend(predicted)
+    return pending.pop(0)
+
+
 def identity(context):
     selected = {
         k: context.get(k)
@@ -28,6 +47,9 @@ def identity(context):
             "policy",
             "episode_assignments",
             "recorded_episode_sources",
+            "target_dataset",
+            "target_simulation_profile",
+            "unseen_embodiment",
         ]
     }
     return hashlib.sha256(
@@ -151,12 +173,50 @@ def main():
     p.add_argument("--context", required=True)
     args = p.parse_args()
     context = json.loads(Path(args.context).read_text())
-    manifest = json.loads(
-        (
-            Path(context["policy"]["native_config"]["dataset_path"]) / "manifest.json"
-        ).read_text()
-    )
-    capture = manifest["capture"]
+    unidex = context.get("compatibility", {}).get("policy_loader") == "unidex_faas"
+    contract = context.get("compatibility", {}).get("io_contract")
+    hat = context.get("compatibility", {}).get("policy_loader") == "hat_cartesian"
+    dp = context.get("compatibility", {}).get("policy_loader") == "diffusion_policy_joints"
+    asset_bound = unidex or hat or dp
+    decoder = None
+    if asset_bound:
+        from recording_dataset import verify_dataset
+        from policy_contract import unidex_contract
+        if dp:
+            from dp_simulation import load_target
+            manifest = load_target(context)
+        elif hat:
+            selected = context.get("target_dataset") or {}
+            if not selected.get("path") or not selected.get("manifest_sha256"):
+                raise ValueError("HAT rollout requires its frozen target dataset")
+            manifest = verify_dataset(selected["path"], selected["manifest_sha256"])
+        else:
+            from unidex_evaluation import target_manifest_path
+            manifest = verify_dataset(*target_manifest_path(context))
+        if dp:
+            from policy_contract import recorded_contract
+            expected_contract = recorded_contract(manifest, control_hz=1 / contract["step_dt"])
+        elif hat:
+            from hat_evaluation import hat_contract
+            expected_contract = hat_contract(manifest, control_hz=1 / contract["step_dt"])
+        else:
+            expected_contract = unidex_contract(manifest, control_hz=1 / contract["step_dt"])
+        if expected_contract != contract:
+            raise ValueError("Evaluation target changed after the compatibility check")
+        capture = manifest["episodes"][0]["capture"]
+        profile = context.get("target_simulation_profile") or {}
+        runtime = context["evaluator_runtime"]
+        expected_profile = dict(repository=runtime["source_dir"], runtime=runtime["environment_path"],
+                                source_revision=capture["source_revision"], robot=capture["robot"],
+                                hand=capture["hand"], task=capture["task"])
+        if any(profile.get(key) != value for key, value in expected_profile.items()):
+            raise ValueError("Evaluation requires the exact frozen target simulation profile")
+        from observation_render import _verify_assets, check_renderer_driver
+        check_renderer_driver(profile["runtime"])
+        asset_receipts = _verify_assets(profile)
+    else:
+        manifest = json.loads((Path(context["policy"]["native_config"]["dataset_path"]) / "manifest.json").read_text())
+        capture = manifest["capture"]
     sources = context.get("recorded_episode_sources") or []
     initial_state = None
     recorded_episode = None
@@ -167,7 +227,7 @@ def main():
         recorded_episode = load_recorded_episode(sources[0], capture)
         initial_state = recorded_episode[1]["states"][0]
     task = context["tasks"][0]
-    order = manifest["policy_to_source_indices"]
+    order = contract["policy_to_source_indices"] if asset_bound else manifest["policy_to_source_indices"]
     import pinocchio  # Load before Isaac's plugins, as in collection.
     from isaaclab.app import AppLauncher
 
@@ -175,16 +235,19 @@ def main():
         multi_gpu=False,
         headless=context["headless"],
         enable_cameras=True,
+        enable_pinocchio=asset_bound,
         device="cuda:0",
         # Isolate writable Kit caches/configuration between concurrent simulators.
         kit_args=(
             "--portable-root "
             + str(Path(context["result_path"]).parent / "kit")
             + " --/rtx/verifyDriverVersion/enabled=false"
+            + (" --/app/settings/loadUserConfig=false --/app/settings/persistent=false" if asset_bound else "")
         ),
     )
     app = launcher.app
     env = None
+    hand_work = hand_manifest = validate_hand_environment = None
     try:
         import numpy as np
         import torch
@@ -203,6 +266,24 @@ def main():
         from wrist import configure_virtual_wrist
         import omni.usd
 
+        if asset_bound:
+            from observation_render import install_frozen_hand, bind_scene_assets, verify_scene_assets, configure_capture_settings
+            configure_capture_settings()
+            hand_work, hand_manifest, validate_hand_environment = install_frozen_hand(
+                profile, staging_root=os.environ.get("TMPDIR"), asset_receipts=asset_receipts)
+            if not dp:
+                from action_codecs.unidex import load_codec
+                codec = load_codec(capture["robot"], capture)
+                codec.spec.verify_runtime_controller(Path(__file__).with_name("wrist.py"))
+                hand_path = (Path(hand_work.name) / "simulation.urdf" if hand_work else
+                             Path(runtime["source_dir"]) / "source/dexverse/dexverse/robot_agents/shadow/retarget" / (capture["robot"] + ".urdf"))
+                codec.spec.verify_runtime_asset(hand_path)
+                if hat:
+                    from hat_evaluation import ActionDecoder
+                    decoder = ActionDecoder(capture, hand_path)
+            if hand_work:
+                context = {**context, "hand_bundle_path": hand_work.name}
+
         if omni.usd.get_context().get_stage() is None:
             omni.usd.get_context().new_stage()
         cfg = parse_env_cfg(task, device="cuda:0", num_envs=1)
@@ -215,21 +296,30 @@ def main():
             getattr(cfg, "commands", None), "object_pose"
         ):
             cfg.commands.object_pose.resampling_time_range = (1.0e9, 1.0e9)
-        cfg.observations.policy.concatenate_terms = False
-        recipe = camera_recipe(cfg)
-        from policy_contract import observation_camera_recipe_matches
-        frozen_cameras = capture.get("observation_camera_recipes")
-        matching_cameras = (
-            observation_camera_recipe_matches(frozen_cameras, recipe) if frozen_cameras else
-            training_image_request(recipe)["recipe_sha256"] == capture.get("image_recipe_sha256")
-        )
-        if (
-            task == capture["task"]
-            and os.environ["SKYNET_POLICY_IMAGES"] == "1"
-            and not matching_cameras
-        ):
-            raise ValueError("Evaluation cameras differ from recorded training images")
-        configure_cameras(cfg)
+        if asset_bound:
+            if dp:
+                from dp_simulation import configure_scene
+                camera_sensors = configure_scene(cfg, contract)
+            elif hat:
+                from hat_evaluation import configure_scene
+                camera_sensors = configure_scene(cfg, contract)
+            else:
+                from unidex_evaluation import configure_pointcloud_scene
+                camera_sensors = configure_pointcloud_scene(cfg, contract)
+            bind_scene_assets(cfg.scene, asset_receipts)
+        else:
+            cfg.observations.policy.concatenate_terms = False
+            recipe = camera_recipe(cfg)
+            from policy_contract import observation_camera_recipe_matches
+            frozen_cameras = capture.get("observation_camera_recipes")
+            matching_cameras = (
+                observation_camera_recipe_matches(frozen_cameras, recipe) if frozen_cameras else
+                training_image_request(recipe)["recipe_sha256"] == capture.get("image_recipe_sha256")
+            )
+            if task == capture["task"] and os.environ["SKYNET_POLICY_IMAGES"] == "1" and not matching_cameras:
+                raise ValueError("Evaluation cameras differ from recorded training images")
+            configure_cameras(cfg)
+            camera_sensors = CAMERAS
         cfg = prune_stale_obs_refs(cfg)
         cfg.observations.contact = None
         cfg.recorders = {}
@@ -243,13 +333,16 @@ def main():
             if isinstance(term, TerminationTermCfg) and term.time_out:
                 setattr(cfg.terminations, name, None)
         env = gym.make(task, cfg=cfg).unwrapped
+        if validate_hand_environment:
+            validate_hand_environment(env, hand_manifest)
         env.reset()
         configure_virtual_wrist(
             env.scene["robot"],
-            None,
+            hand_manifest,
             ["left", "right"] if capture["hand"] == "both" else [capture["hand"]],
         )
-        contract = context.get("compatibility", {}).get("io_contract")
+        if asset_bound:
+            verify_scene_assets(profile, asset_receipts, Path(hand_work.name) / "usd" if hand_work else None)
         if contract:
             ids, order = validate_layout(env, capture, order, contract)
         else:
@@ -284,12 +377,35 @@ def main():
                 response = receive_message(conn)
                 if "error" in response:
                     raise RuntimeError(response["error"])
-                return response["result"]
+                result = response["result"]
+                if hat and value["command"] == "step" and value["predict"]:
+                    result = decoder.decode(result, value["observation"])
+                return result
 
-            def observation():
+            observation_frame = 0
+            if unidex:
+                from unidex_evaluation import observation_sampling_identity
+                observation_identity = observation_sampling_identity(contract, task, context["seeds"][0], 0)
+            else:
+                observation_identity = None
+
+            def observation(*, include_pointcloud=True):
+                nonlocal observation_frame
                 env.sim.render()
+                if dp:
+                    from dp_simulation import observation_from_sensors
+                    return observation_from_sensors(env, contract, ids)
+                if hat:
+                    from hat_evaluation import observation_from_sensors as hat_observation
+                    return hat_observation(env, contract, ids)
+                if unidex:
+                    from unidex_evaluation import observation_from_sensors
+                    value = observation_from_sensors(env, contract, ids, identity=observation_identity,
+                                                     frame_id=observation_frame, include_pointcloud=include_pointcloud)
+                    observation_frame += 1
+                    return value
                 images = {}
-                for scene, sensor_name in CAMERAS.items():
+                for scene, sensor_name in camera_sensors.items():
                     sensor = env.scene[sensor_name]
                     sensor.update(0.0, force_recompute=True)
                     images[scene] = sensor.data.output["rgb"][0, :, :, :3].detach().cpu().numpy().copy()
@@ -312,6 +428,8 @@ def main():
                 first_seed = context["seeds"][0] * 1000003
 
                 def reset_probe():
+                    nonlocal observation_frame
+                    observation_frame = 0
                     env.reset(seed=first_seed)
                     if initial_state is not None:
                         from recorded_scene import restore_state
@@ -326,6 +444,10 @@ def main():
                     receipt = {**value, "checkpoint_sha256": context["checkpoint"]["sha256"],
                                "implementation_sha256": context["compatibility"]["implementation_sha256"],
                                "node": os.environ.get("SLURMD_NODENAME"), "slurm_job_id": os.environ.get("SLURM_JOB_ID")}
+                    if hat:
+                        receipt["retargeting"] = decoder.receipt
+                    if unidex:
+                        receipt["observation_sampling"] = observation_identity
                     write_json(root / "preflight.json", receipt)
                     print(json.dumps({"event": "evaluation_preflight", **receipt}), flush=True)
 
@@ -343,6 +465,9 @@ def main():
                     if key in completed:
                         continue
                     effective_seed = seed * 1000003 + index
+                    observation_frame = 0
+                    if unidex:
+                        observation_identity = observation_sampling_identity(contract, task, seed, index)
                     worker_metrics = {
                         "worker_index": float(context.get("worker_index", 0)),
                         "slurm_job_id": float(os.environ.get("SLURM_JOB_ID", 0)),
@@ -372,8 +497,8 @@ def main():
                     request({"command": "reset", "seed": effective_seed})
                     video = video_root / f"episode-seed-{seed}-{index:04d}.mp4"
                     from episode_trace import EpisodeTrace
-                    trace_cameras = CAMERAS if os.environ["SKYNET_POLICY_IMAGES"] == "1" else {"scene_front": CAMERAS["scene_front"]}
-                    observation()  # Refresh camera poses after restoring the episode.
+                    trace_cameras = camera_sensors if os.environ["SKYNET_POLICY_IMAGES"] == "1" else {"scene_front": camera_sensors["scene_front"]}
+                    observation(include_pointcloud=False)  # Refresh camera poses after restoring the episode.
                     trace_context = context if task == capture["task"] else {**context, "recorded_episode_sources": []}
                     trace = EpisodeTrace(trace_context, capture, env, trace_cameras, video, policy_order=order)
                     pending = []
@@ -393,7 +518,8 @@ def main():
                         torch.no_grad(),
                     ):
                         for step in range(max_steps):
-                            obs = observation()
+                            needs_prediction = step % control_stride == 0 and not pending
+                            obs = observation(include_pointcloud=not unidex or needs_prediction)
                             images = obs["images"]
                             if step % 2 == 0:
                                 video_views = (images if os.environ["SKYNET_POLICY_IMAGES"] == "1"
@@ -402,18 +528,8 @@ def main():
                             # Simulator timing stays at collection rate. A learned
                             # position target is held between selected control ticks.
                             if step % control_stride == 0:
-                                if contract:
-                                    from policy_contract import validate_observation, validate_actions
-                                    validate_observation(contract, obs)
-                                predicted = request({"command": "step", "observation": {
-                                    "state": obs["state"],
-                                    "images": images if os.environ["SKYNET_POLICY_IMAGES"] == "1" else {},
-                                }, "predict": not pending})
-                                if not pending:
-                                    if contract:
-                                        validate_actions(contract, predicted)
-                                    pending = list(predicted)
-                                packed = pending.pop(0)
+                                packed = policy_control_step(contract, obs, pending, request, unidex=unidex,
+                                                             include_images=os.environ["SKYNET_POLICY_IMAGES"] == "1", cartesian=hat)
                             if step % 2 == 0:
                                 trace.append(step, packed)
                             _, reward, terminated, truncated, _ = advance(packed)
@@ -505,7 +621,11 @@ def main():
     finally:
         if env is not None:
             env.close()
-        app.close()
+        try:
+            app.close()
+        finally:
+            if hand_work is not None:
+                hand_work.cleanup()
 
 
 if __name__ == "__main__":

@@ -8,7 +8,6 @@ from fastapi.responses import PlainTextResponse
 
 from .cluster_runtime import ClusterError
 from .collection import (
-    SESSION_STATES,
     CollectionAdapterManifest,
     CollectionCompleteRequest,
     CollectionErrorRequest,
@@ -35,18 +34,6 @@ def _http_error(error: Exception) -> HTTPException:
     if isinstance(error, ClusterError):
         return HTTPException(status_code=503, detail=str(error))
     return HTTPException(status_code=500, detail=str(error))
-
-
-@router.get("/capabilities")
-def collection_capabilities() -> dict[str, Any]:
-    return {
-        "adapter_manifest_schema": CollectionAdapterManifest.model_json_schema(),
-        "session_create_schema": CollectionSessionCreate.model_json_schema(),
-        "session_states": list(SESSION_STATES),
-        "stream_kinds": ["action", "proprio", "sensor"],
-        "raw_capture_policy": "preserve-native",
-        "transforms": "register as data-registry derivation jobs",
-    }
 
 
 @router.get("/adapters")
@@ -76,7 +63,6 @@ def get_collection_adapter(adapter_id: str) -> dict[str, Any]:
 
 
 @router.put("/adapters/{adapter_id}")
-@router.patch("/adapters/{adapter_id}")
 def update_collection_adapter(
     adapter_id: str, manifest: CollectionAdapterManifest
 ) -> dict[str, Any]:
@@ -132,17 +118,6 @@ def get_collection_session(session_id: str) -> dict[str, Any]:
     if session is None:
         raise HTTPException(status_code=404, detail="Collection session not found")
     return {"session": session}
-
-
-@router.get("/sessions/{session_id}/manifest")
-def get_collection_session_manifest(session_id: str) -> dict[str, Any]:
-    session = service.store.get_session(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="Collection session not found")
-    return {
-        "manifest": session["canonical_manifest"],
-        "sha256": session["manifest_sha256"],
-    }
 
 
 @router.post("/sessions/{session_id}/preflight")

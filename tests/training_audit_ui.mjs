@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {JSDOM} from 'jsdom';
+import {indexHtml} from './index_page.cjs';
 
-const w = new JSDOM(await readFile(new URL('../static/index.html', import.meta.url), 'utf8'), {
+const w = new JSDOM(indexHtml(), {
   runScripts: 'outside-only', pretendToBeVisual: true, url: 'http://localhost:8080/#experiments',
 }).window;
 const observers = [];
@@ -109,6 +110,15 @@ try {
   await flush();
   assert.deepEqual([...w.audit.options().get('native.config.config_name').choices], ['debug', 'train']);
   assert.deepEqual(inspectionRequests, ['openpi', 'generic'], 'restored catalog reuses its original response');
+  const configControl = el('adapter-field-native-config-config_name');
+  configControl.value = JSON.stringify('train');
+  configControl.dispatchEvent(new w.Event('change', {bubbles: true}));
+  w.clearRepositoryInputOptions({render: true});
+  assert.equal(el('adapter-field-native-config-config_name').value, JSON.stringify('train'), 'code reinspection retains the typed choice');
+  assert.equal(w.validateAdapterDeclaredFields({focus: false, notify: false}), false, 'a retained but unavailable choice cannot validate');
+  await w.inspectRepositoryRuntime();
+  assert.equal(el('adapter-field-native-config-config_name').value, JSON.stringify('train'));
+  assert.equal(w.validateAdapterDeclaredFields({focus: false, notify: false}), true);
   let releaseOld;
   w.api = () => new Promise(resolve => { releaseOld = resolve; });
   const staleInspection = w.inspectRepositoryRuntime(true);
@@ -118,13 +128,24 @@ try {
   await staleInspection;
   assert.equal(w.audit.options().size, 0, 'the previous adapter response cannot overwrite the selected catalog');
 
+  for (const [status, label] of [['QUEUED','Waiting to sync'],['ERROR','Sync failed'],['BLOCKED','Connection blocked']]) {
+    const markup = w.trackingLinksHtml({tracking_links:[{provider:'wandb',status}]});
+    assert.ok(markup.includes(label));
+    assert.ok(!markup.includes('<a '));
+  }
+  assert.match(w.trackingLinksHtml({tracking_links:[{provider:'wandb',status:'CONNECTED',url:'https://wandb.ai/team/project/runs/one'}]}), /href="https:\/\/wandb.ai\/team\/project\/runs\/one"/);
+
   // Loading another run removes the previous external tracking destination immediately.
   w.audit.setRuns([{id: 'new-run', status: 'PENDING'}]);
   el('run-detail-tracking').innerHTML = '<a href="https://example.com/old">Old tracking</a>';
+  el('run-checkpoint-list').innerHTML = '<p>previous-run-checkpoint</p>';
+  el('run-checkpoints').hidden = false;
   let releaseRun;
   w.api = () => new Promise(resolve => { releaseRun = resolve; });
   const runRequest = w.viewRun('new-run', el('runs-body').querySelector('[data-run-action="view"]'));
   assert.equal(el('run-detail-tracking').textContent, '');
+  assert.equal(el('run-checkpoint-list').textContent, '');
+  assert.equal(el('run-checkpoints').hidden, true);
   releaseRun({run: {id: 'new-run', status: 'CANCELLED', attempts: []}});
   await runRequest;
 
@@ -202,7 +223,7 @@ try {
   el('hp-learning-rate').disabled = false;
   el('hp-learning-rate').value = '0';
   w.validateExperiment({notify: false});
-  assert.match(el('hp-learning-rate').validationMessage, /greater than zero/);
+  assert.equal(el('hp-learning-rate').validity.customError, true, 'invalid training values retain their error while an earlier step is incomplete');
   el('hp-learning-rate').value = '0.001';
   w.validateExperiment({notify: false});
   assert.equal(el('hp-learning-rate').validationMessage, '');

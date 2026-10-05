@@ -1439,3 +1439,16 @@ def test_old_openpi_manifest_cannot_silently_inherit_dataset_bridge():
         native={"config":{"config_name":"pi05_libero","dataset_path":"/selected","dataset_norm_stats_path":"/stats/norm_stats.json"}},
     ))
     assert any("unsupported by this pinned OpenPI adapter" in message for message in plan.blockers)
+
+
+@pytest.mark.parametrize("policy,account", [("normal", "rl2-lab"), ("overcap", "overcap")])
+def test_browser_queue_policy_resolves_omitted_account_and_partition(policy, account):
+    from skynet_app.experiments import ResourceSpec
+    from skynet_app.pipeline_api import EvaluationRequest
+    resources={"queue_policy":policy,"gpu":{"mode":"explicit","count":1,"type":"l40s"}}
+    for resolved in (ResourceSpec.model_validate(resources), EvaluationRequest.model_validate({"run_id":"run","suite_id":"suite","resources":resources}).resources):
+        assert resolved.account == resolved.partition == account
+        assert resolved.queue_policy == policy
+    assert resources.get("account") is None
+    with pytest.raises(ValidationError,match="requires account"):
+        ResourceSpec.model_validate({**resources,"account":"overcap" if policy=="normal" else "rl2-lab","partition":"overcap" if policy=="normal" else "rl2-lab"})

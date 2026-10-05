@@ -9,6 +9,8 @@ from .payload_store import MARKER
 
 CHUNKS = "$skynet_chunks_v1"
 CHUNK_BYTES = 64 * 1024
+# Stored as one object so its path can be handed to a job; every other journal is chunked.
+SINGLE_OBJECT_FILE = "tracking-artifact-links.json"
 
 JOURNAL_FILES = frozenset(
     {
@@ -29,7 +31,7 @@ class JournalFile:
 
     def __str__(self):
         row = self._row()
-        if row and self.name == "tracking-artifact-links.json":
+        if row and self.name == SINGLE_OBJECT_FILE:
             value = json.loads(bytes(row[0]))
             if MARKER in value:
                 return value[MARKER]["path"]
@@ -58,50 +60,76 @@ class JournalFile:
 
     def write_bytes(self, payload):
         journal = self.journal
+        database = journal.database
         size = len(payload)
-        with journal.database.transaction() as connection:
-            run = connection.execute(
-                "SELECT owner_id FROM runs WHERE id=?", (journal.scope,)
-            ).fetchone()
-            if run and run[0] != journal.owner:
-                raise ValueError("Tracking journal belongs to another workspace")
-            if journal.database.payload_store:
-                identifier = (
-                    journal.scope if run else journal.owner + ":" + journal.scope
+        # The bridge may already hold this reentrant lock. Serialize each journal,
+        # while keeping remote object transfers outside the repository write lock.
+        with journal.lock, database.metadata_lock:
+            with database.connection() as connection:
+                original_run = connection.execute(
+                    "SELECT owner_id FROM runs WHERE id=?", (journal.scope,)
+                ).fetchone()
+                if original_run and original_run[0] != journal.owner:
+                    raise ValueError("Tracking journal belongs to another workspace")
+            before = self._row()
+            original = bytes(before[0]) if before else None
+            store = database.payload_store
+            prepared = []
+            if store:
+                text = payload.decode("utf-8")
+                chunks = ([text] if self.name == SINGLE_OBJECT_FILE else
+                          [text[start:start + CHUNK_BYTES]
+                           for start in range(0, len(text), CHUNK_BYTES)])
+                contents = {hashlib.sha256(chunk.encode()).hexdigest(): chunk.encode()
+                            for chunk in chunks}
+                with database.connection() as connection:
+                    known = {row["sha256"]: row["path"] for row in connection.execute(
+                        "SELECT sha256,path FROM metadata_payloads WHERE sha256=ANY(?)",
+                        (list(contents),),
+                    ).fetchall()}
+                uploaded = store.objects.put_many(
+                    [content for digest, content in contents.items() if digest not in known]
                 )
-                existing = connection.execute(
+                prepared = [(digest, (known | uploaded)[digest], content)
+                            for digest, content in contents.items()]
+            with database.transaction() as connection:
+                run = connection.execute(
+                    "SELECT owner_id FROM runs WHERE id=?", (journal.scope,)
+                ).fetchone()
+                if run and run[0] != journal.owner:
+                    raise ValueError("Tracking journal belongs to another workspace")
+                if original_run and not run:
+                    raise RuntimeError("Run was deleted during journal preparation")
+                current = connection.execute(
                     "SELECT payload FROM tracking_journals WHERE owner_id=? AND scope=? AND filename=?",
                     (journal.owner, journal.scope, self.name),
                 ).fetchone()
-                if self.name == "tracking-artifact-links.json":
-                    payload = journal.database.payload_store.put(
-                        connection,
-                        "tracking_journals",
-                        identifier,
-                        self.name,
-                        payload.decode(),
-                    ).encode()
-                else:
-                    payload = encode_payload(
-                        connection,
-                        journal.database.payload_store,
-                        identifier,
-                        self.name,
-                        payload,
-                        bytes(existing[0]) if existing else b"",
+                if (bytes(current[0]) if current else None) != original:
+                    raise RuntimeError("Tracking journal changed during object preparation; retry required")
+                if store:
+                    # A concurrent deletion of a previously indexed object must
+                    # fail closed, rather than resurrecting a stale file pointer.
+                    current_known = {row["sha256"]: row["path"] for row in connection.execute(
+                        "SELECT sha256,path FROM metadata_payloads WHERE sha256=ANY(?)",
+                        (list(known),),
+                    ).fetchall()}
+                    if current_known != known:
+                        raise RuntimeError("Tracking objects changed during preparation; retry required")
+                    connection.executemany(
+                        "INSERT INTO metadata_payloads(sha256,path,size_bytes) VALUES (?,?,?) ON CONFLICT DO NOTHING",
+                        [(digest, path, len(content)) for digest, path, content in prepared],
                     )
-            connection.execute(
-                """INSERT INTO tracking_journals(owner_id,scope,filename,run_id,payload)
-                   VALUES (?,?,?,?,?) ON CONFLICT(owner_id,scope,filename)
-                   DO UPDATE SET payload=excluded.payload""",
-                (
-                    journal.owner,
-                    journal.scope,
-                    self.name,
-                    journal.scope if run else None,
-                    payload,
-                ),
-            )
+                    for digest, _, content in prepared:
+                        store._cache(digest, content)
+                    identifier = journal.scope if run else journal.owner + ":" + journal.scope
+                    payload = encode_payload(connection, store, identifier, self.name,
+                                             payload, original or b"")
+                connection.execute(
+                    """INSERT INTO tracking_journals(owner_id,scope,filename,run_id,payload)
+                       VALUES (?,?,?,?,?) ON CONFLICT(owner_id,scope,filename)
+                       DO UPDATE SET payload=excluded.payload""",
+                    (journal.owner, journal.scope, self.name, journal.scope if run else None, payload),
+                )
         return size
 
 
@@ -127,6 +155,8 @@ def decode_payload(store, payload):
 
 def encode_payload(connection, store, identifier, name, payload, existing=b""):
     """Appending to a spool uploads only the changed tail, not every old event."""
+    if name == SINGLE_OBJECT_FILE:
+        return store.put(connection, "tracking_journals", identifier, name, payload.decode()).encode()
     old = chunk_document(existing) or {"chunks": []}
     # Split on Unicode boundaries; JSONL queues may include non-ASCII text.
     text = payload.decode("utf-8")

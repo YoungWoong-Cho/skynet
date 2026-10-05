@@ -18,6 +18,7 @@ class AdapterRegistry:
     def __init__(self, manifest):
         self.version = {
             "id": "adapter-version-openpi-v1",
+            "adapter_id": "adapter-openpi",
             "version_number": 1,
             "manifest": canonical_adapter_manifest(manifest),
         }
@@ -26,6 +27,15 @@ class AdapterRegistry:
             "selected_version": self.version,
             "versions": [self.version],
         }
+
+    def get_adapter_version(self, adapter_id, *, version_id=None, version_number=None):
+        if adapter_id != self.record["id"]:
+            return None
+        if version_id is not None and version_id != self.version["id"]:
+            return None
+        if version_number is not None and version_number != self.version["version_number"]:
+            return None
+        return self.version
 
     def get_adapter(self, adapter_id, *, include_versions=False):
         assert include_versions is True

@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {JSDOM} from 'jsdom';
+import {indexHtml} from './index_page.cjs';
 
-const w = new JSDOM(await readFile(new URL('../static/index.html', import.meta.url), 'utf8'), {
+const w = new JSDOM(indexHtml(), {
   runScripts: 'outside-only', pretendToBeVisual: true, url: 'http://localhost:8080/#runs',
 }).window;
 const observers = [], Observer = w.MutationObserver;
@@ -23,7 +24,7 @@ try {
   const run = {id: 'run', status: 'SUBMITTING', display_status: 'SUBMISSION UNCONFIRMED',
     status_detail: 'Connection failed before Slurm acceptance could be confirmed. Recover the existing submission or cancel it.',
     latest_attempt: attempt, attempts: [attempt], manual_actions: {recover_submission: {enabled: true}, cancel: {enabled: true}}};
-  w.api = async path => path === '/api/runs' ? {runs: [run]} : path === '/api/runs/run' ? {run} : {content: ''};
+  w.api = async path => path === '/api/runs' ? {runs: [run]} : path === '/api/runs/run?include_payloads=false' ? {run} : {content: ''};
   await w.loadRuns(true);
   assert.match(el('runs-body').textContent, /SUBMISSION UNCONFIRMED/);
   assert.doesNotMatch(el('runs-body').textContent, /Waiting for epoch data|SUBMITTING/);

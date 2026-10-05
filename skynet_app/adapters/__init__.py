@@ -14,6 +14,7 @@ from skynet_app.experiments import AdapterName, CanonicalModel, ExperimentSpec, 
 from skynet_app.training_contracts import DatasetRequirement, TrainingPreset
 from skynet_app.model_io import ModelIOContract
 
+from .dataset_inputs import evaluation_context_json
 from .groot_isaaclab_bridge import GROOT_ISAACLAB_BRIDGE_SOURCE
 from .groot_robocasa_bridge import GROOT_ROBOCASA_BRIDGE_SOURCE
 from .openpi_libero_bridge import OPENPI_LIBERO_BRIDGE_SOURCE
@@ -219,6 +220,7 @@ class TrainingProgressContract(CanonicalModel):
     total_path: Literal["train.max_steps", "native.config.epochs"] = "train.max_steps"
     starts_at_zero: bool = False
     source: TrainingProgressLogSource | TrainingProgressJsonlSource = Field(discriminator="kind")
+    step_source: TrainingProgressJsonlSource | None = None
 
     @field_validator("source", mode="before")
     @classmethod
@@ -230,10 +232,41 @@ class TrainingProgressContract(CanonicalModel):
     @model_serializer(mode="wrap")
     def serialize_contract(self, handler):
         document = handler(self)
+        if self.step_source is None:
+            document.pop("step_source", None)
         if not self.starts_at_zero:
             # Keep existing log-reader snapshots and fingerprints unchanged.
             document.pop("starts_at_zero", None)
         return document
+
+
+def resolve_training_progress_contract(
+    contract: TrainingProgressContract | Mapping[str, Any], resolved_spec: Any = None,
+) -> TrainingProgressContract:
+    """Choose the declared step reader only for a positive integral step budget."""
+    resolved = (contract if isinstance(contract, TrainingProgressContract)
+                else TrainingProgressContract.model_validate(contract))
+    if resolved.step_source is None:
+        return resolved
+    if isinstance(resolved_spec, str):
+        try:
+            resolved_spec = json.loads(resolved_spec)
+        except json.JSONDecodeError:
+            return resolved
+    train = resolved_spec.get("train") if isinstance(resolved_spec, Mapping) else None
+    value = train.get("max_steps") if isinstance(train, Mapping) else None
+    if isinstance(value, bool):
+        return resolved
+    try:
+        steps = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return resolved
+    if not math.isfinite(steps) or steps <= 0 or not steps.is_integer():
+        return resolved
+    return resolved.model_copy(update={
+        "unit": "step", "total_path": "train.max_steps",
+        "source": resolved.step_source, "starts_at_zero": True,
+    })
 
 
 _RESERVED_CAPSULE_FILES = {
@@ -1528,12 +1561,19 @@ class RepositoryYamlCatalogSource(CanonicalModel):
 class DataBundleInputBinding(CanonicalModel):
     role: str = Field(min_length=1, max_length=128)
     position: int = Field(default=0, ge=0)
+    cardinality: Literal["one", "many"] = "one"
     formats: list[str] = Field(default_factory=list, max_length=32)
-    value_path: Literal["version.path", "mount_path", "location.path", "version.manifest_sha256"] = "version.path"
+    value_path: Literal["version.path", "mount_path", "location.path", "version.manifest_sha256", "selection"] = "version.path"
     contract: str | None = None
     contracts: list[str] = Field(default_factory=list)
     contract_selector: str | None = None
     contract_choices: dict[str, list[str]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_cardinality(self) -> "DataBundleInputBinding":
+        if self.cardinality == "many" and (self.position != 0 or self.value_path != "selection"):
+            raise ValueError("many data bindings consume the complete role as selections at position zero")
+        return self
 
     @field_validator("role")
     @classmethod
@@ -1622,8 +1662,10 @@ class AdapterInputField(CanonicalModel):
             raise ValueError("adapter input fields cannot declare both choices and choice_source")
         if self.choice_source is not None and self.kind != "string":
             raise ValueError("repository-discovered choices currently require input kind string")
-        if self.data_binding is not None and self.kind != "string":
-            raise ValueError("data bundle input bindings currently require input kind string")
+        if self.data_binding is not None:
+            expected = "json" if self.data_binding.value_path == "selection" else "string"
+            if self.kind != expected:
+                raise ValueError(f"data bundle input binding requires input kind {expected}")
         if self.data_binding is not None and self.default is not None:
             raise ValueError(
                 "data-bound adapter inputs cannot declare a fallback default; "
@@ -2017,6 +2059,21 @@ class AdapterPrerequisite(CanonicalModel):
         return value
 
 
+def _declared_canonical_hyperparameter_defaults(defaults: AdapterDefaults) -> dict[str, Any]:
+    hyper = defaults.hyperparameters
+    return {
+        "train.learning_rate": hyper.learning_rate,
+        "train.batch.declared_semantics": hyper.batch_semantics,
+        "train.batch.value": hyper.batch_size,
+        "train.batch.gradient_accumulation_steps": hyper.gradient_accumulation_steps,
+        "train.num_workers_per_rank": hyper.num_workers_per_rank,
+        "train.max_steps": hyper.max_steps,
+        "train.max_epochs": hyper.max_epochs,
+        "train.seed": hyper.seed,
+        "train.precision": hyper.precision,
+    }
+
+
 class AdapterManifest(CanonicalModel):
     schema_version: Literal["skynet.adapter/v1"] = "skynet.adapter/v1"
     slug: str = Field(min_length=1, max_length=96)
@@ -2063,23 +2120,7 @@ class AdapterManifest(CanonicalModel):
         if len(preset_ids) != len(set(preset_ids)) or (self.train.default_preset and self.train.default_preset not in preset_ids):
             raise ValueError("Training presets require unique IDs and a declared default")
         supported = set(self.train.supported_canonical_fields)
-        declared_defaults = {
-            "train.learning_rate": self.defaults.hyperparameters.learning_rate,
-            "train.batch.declared_semantics": (
-                self.defaults.hyperparameters.batch_semantics
-            ),
-            "train.batch.value": self.defaults.hyperparameters.batch_size,
-            "train.batch.gradient_accumulation_steps": (
-                self.defaults.hyperparameters.gradient_accumulation_steps
-            ),
-            "train.num_workers_per_rank": (
-                self.defaults.hyperparameters.num_workers_per_rank
-            ),
-            "train.max_steps": self.defaults.hyperparameters.max_steps,
-            "train.max_epochs": self.defaults.hyperparameters.max_epochs,
-            "train.seed": self.defaults.hyperparameters.seed,
-            "train.precision": self.defaults.hyperparameters.precision,
-        }
+        declared_defaults = _declared_canonical_hyperparameter_defaults(self.defaults)
         unmapped_defaults = [
             path
             for path, value in declared_defaults.items()
@@ -2105,6 +2146,7 @@ def canonical_adapter_manifest(value: AdapterManifest | dict[str, Any]) -> dict[
                 for key, child in item.items()
                 if not (
                     (key == "companion_arguments" and child == [])
+                    or (key == "cardinality" and child == "one")
                     or (key in {"argument_validation", "data_requirements", "model_io", "default_preset", "contract_selector", "minimum", "maximum", "maximum_path", "canonical_path"} and child is None)
                     or (key in {"presets", "contracts"} and child == [])
                     or (key == "contract_choices" and child == {})
@@ -2350,6 +2392,21 @@ def _canonical_path_is_supported(path: str, supported: set[str]) -> bool:
     return any(path == item or path.startswith(f"{item}.") for item in supported)
 
 
+def _canonical_path_was_supplied(spec: ExperimentSpec, path: str) -> bool:
+    """Distinguish supplied canonical values from Pydantic placeholder defaults."""
+    current: Any = spec
+    for part in path.split("."):
+        if isinstance(current, CanonicalModel):
+            if part not in current.model_fields_set:
+                return False
+            current = getattr(current, part)
+        elif isinstance(current, dict) and part in current:
+            current = current[part]
+        else:
+            return False
+    return True
+
+
 def _unsupported_canonical_train_overrides(
     spec: ExperimentSpec,
     manifest: AdapterManifest,
@@ -2363,45 +2420,51 @@ def _unsupported_canonical_train_overrides(
     actual = spec.model_dump(mode="python", by_alias=False)
     baseline_train = spec.train.__class__().model_dump(mode="python")
     hyper_defaults = manifest.defaults.hyperparameters
-    default_values = {
-        "learning_rate": hyper_defaults.learning_rate,
-        "batch_size": hyper_defaults.batch_size,
-        "gradient_accumulation_steps": hyper_defaults.gradient_accumulation_steps,
-        "num_workers_per_rank": hyper_defaults.num_workers_per_rank,
-        "max_steps": hyper_defaults.max_steps,
-        "max_epochs": hyper_defaults.max_epochs,
-        "seed": hyper_defaults.seed,
-        "precision": hyper_defaults.precision,
-    }
-    if default_values["learning_rate"] is not None:
-        baseline_train["learning_rate"] = default_values["learning_rate"]
-    if default_values["batch_size"] is not None:
-        baseline_train["batch"]["value"] = default_values["batch_size"]
-    if default_values["gradient_accumulation_steps"] is not None:
-        baseline_train["batch"]["gradient_accumulation_steps"] = default_values[
-            "gradient_accumulation_steps"
-        ]
-    for field in (
-        "num_workers_per_rank",
-        "max_steps",
-        "max_epochs",
-        "seed",
-        "precision",
-    ):
-        if default_values[field] is not None:
-            baseline_train[field] = default_values[field]
+    declared_defaults = _declared_canonical_hyperparameter_defaults(manifest.defaults)
+    declared_defaults["train.checkpoint.save_every_steps"] = manifest.defaults.checkpoint.save_every_steps
+    declared_defaults["train.checkpoint.keep_last"] = manifest.defaults.checkpoint.keep_last
+    for path, default in declared_defaults.items():
+        if default is None or path == "train.batch.declared_semantics":
+            continue
+        parts = path.split(".")[1:]
+        target = baseline_train
+        for part in parts[:-1]:
+            target = target[part]
+        target[parts[-1]] = default
     if hyper_defaults.max_epochs is not None and hyper_defaults.max_steps is None:
         baseline_train["max_steps"] = None
-    if manifest.defaults.checkpoint.save_every_steps is not None:
-        baseline_train["checkpoint"]["save_every_steps"] = (
-            manifest.defaults.checkpoint.save_every_steps
-        )
     baseline = {"train": baseline_train}
 
     blockers: list[str] = []
-    for path in _CANONICAL_TRAIN_OVERRIDE_PATHS:
+    paths = dict.fromkeys([
+        *_CANONICAL_TRAIN_OVERRIDE_PATHS,
+        *(path for path in manifest.train.parameter_flags if path.startswith("train.")),
+    ])
+    for path in paths:
         value = _path_value(actual, path)
         expected = _path_value(baseline, path)
+        # Skynet's flag compiler intentionally omits inherited settings. A
+        # supplied value contradicting a declared default must not silently
+        # disappear merely because a caller forgot its explicit intent marker.
+        declared = declared_defaults.get(path)
+        if (not spec.intent.is_explicit(path) and not spec.native.argv
+                and manifest.train.argv and path in manifest.train.parameter_flags
+                and declared is not None and value is not None
+                and _canonical_path_was_supplied(spec, path)
+                and canonical_sha256(value) != canonical_sha256(declared)):
+            blockers.append(
+                f"canonical value {path}={_serialize_override(value)} conflicts with "
+                f"adapter {manifest.slug}'s inherited default {_serialize_override(declared)} "
+                "but is not marked explicit; add the field to intent.explicit_parameters "
+                "or remove the supplied override"
+            )
+            continue
+        # Other checkpoint policies are owned by the shared runner even when
+        # an adapter does not map them. Only check contradictory inherited
+        # values for extra adapter flags, without requiring every adapter to
+        # expose a native flag for the runner's retention/finalization policy.
+        if path not in _CANONICAL_TRAIN_OVERRIDE_PATHS:
+            continue
         if not spec.intent.is_explicit(path) and (not manifest.train.strict_canonical_inputs or canonical_sha256(value) == canonical_sha256(expected)):
             continue
         if not manifest.train.strict_canonical_inputs and canonical_sha256(value) == canonical_sha256(expected):
@@ -2571,9 +2634,7 @@ class ManifestAdapter(RepositoryAdapter):
         if context_path in capsule_files:
             blockers.append(f"adapter capsule file conflicts with canonical context: {context_path}")
         else:
-            capsule_files[context_path] = json.dumps(
-                canonical_context, indent=2, sort_keys=True
-            ) + "\n"
+            capsule_files[context_path] = evaluation_context_json(canonical_context)
         rendered_environment = {
             key: _render_argument(value, document, blockers)
             for key, value in command.environment.items()
@@ -2865,11 +2926,15 @@ def _builtin_manifest(
 
 def builtin_adapter_manifests() -> list[AdapterManifest]:
     from .act_manifest import manifest as act_manifest
+    from .hat_manifest import manifest as hat_manifest
+    from .dp_manifest import manifest as dp_manifest
     from .egoverse_manifest import manifests as egoverse_manifests
     from .xpolicy_native_manifest import manifests as xpolicy_native_manifests
     from .unidex_manifest import manifest as unidex_manifest
     return [
         act_manifest(),
+        hat_manifest(),
+        dp_manifest(),
         *xpolicy_native_manifests(),
         *egoverse_manifests(),
         unidex_manifest(),

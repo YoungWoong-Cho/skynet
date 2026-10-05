@@ -20,7 +20,7 @@ from .live_xr_review import ArrayUnpickler
 from .live_xr_video_worker import control
 from .live_xr_video_cluster import control_cluster
 from .remote_artifacts import RemoteArtifact
-from .cluster_runtime import WORK_ROOT
+from .cluster_runtime import DEFAULT_GATEWAY, WORK_ROOT
 from .dexverse_versions import environment_profile
 from .simulation_hands import upload as upload_hand
 
@@ -72,7 +72,6 @@ class LiveVideoService:
         """Resolve the archived recording's renderer without a conversion service."""
         profile = json.loads((self.live.root / "config/live_video.json").read_text())
         cluster = self.live.archive.cluster
-        cluster.candidates(profile["gateway"])
         for name in ("repository", "runtime", "asset_bundle"):
             cluster._remote_path(profile[name])
         profile = dict(profile, execution="slurm", work_root=WORK_ROOT)
@@ -226,7 +225,7 @@ class LiveVideoService:
     def create(self, identifier, index, episode=0):
         with self.lock:
             if (self.live.get(identifier).get("archive") or {}).get("state") == "COPYING":
-                raise ValueError("Recordings are moving to sky2. Retry video after transfer completes.")
+                raise ValueError("Recordings are moving to the training cluster. Retry video after transfer completes.")
             state = self.status(identifier, index, episode)
             key = (identifier, index, episode)
             if state["state"] in {"READY", "INTERRUPTED"} or key in self.active:
@@ -321,7 +320,7 @@ class LiveVideoService:
                     cluster_root = f"{WORK_ROOT}/jobs/runs/{token}"
                     if root == cluster_root and getattr(self.live, "archive", None) is not None:
                         profile = self.cluster_profile(job)
-                        recovered_remote = (self.live.archive.cluster, dict(job, profile=profile, gateway="sky2"), root)
+                        recovered_remote = (self.live.archive.cluster, dict(job, profile=profile, gateway=DEFAULT_GATEWAY), root)
                     elif not re.fullmatch(re.escape(prefix) + r"[a-f0-9]{16}" + re.escape(suffix), root):
                         raise ValueError("The saved video process identity does not match this recording")
                     else:
@@ -369,7 +368,7 @@ class LiveVideoService:
         archived = (job.get("archive") or {}).get("state") in {"VERIFIED", "CLEANUP_PENDING", "READY"}
         if archived:
             profile = self.cluster_profile(job)
-            job = dict(job, profile=profile, gateway=job["archive"]["gateway"])
+            job = dict(job, profile=profile, gateway=DEFAULT_GATEWAY)
             transport = self.live.archive.cluster
             self.ensure_hand(profile, transport, job["gateway"])
         elif profile.get("execution") != "workstation":
@@ -594,7 +593,8 @@ class LiveVideoService:
         if result.get("remote_artifact"):
             job = self.live.get(identifier)
             remote = result["remote_artifact"]
-            path, gateway = remote["path"], remote["gateway"]
+            # Only the saved path is used; routing comes from where it resolves now.
+            path = remote["path"]
             original_prefix = job["root"] + "/output/"
             archive = getattr(self.live, "archive", None)
             archived_prefix = (job.get("archive") or {}).get("root", "")
@@ -603,9 +603,9 @@ class LiveVideoService:
             elif archive is not None and archived_prefix and path.startswith(archived_prefix + "/"):
                 transport, gateway, path = archive.resolve(job, path[len(archived_prefix) + 1:])
             elif re.fullmatch(r"[a-f0-9]{32}", result.get("generation", "")) and path.startswith(WORK_ROOT + "/jobs/runs/" + result["generation"] + "/"):
-                transport = self.live.archive.cluster
+                transport, gateway = self.live.archive.cluster, DEFAULT_GATEWAY
             elif getattr(self.live, "archive", None) is not None and path.startswith(self.live.archive.derived_root(job) + "/"):
-                transport = self.live.archive.cluster
+                transport, gateway = self.live.archive.cluster, DEFAULT_GATEWAY
             else:
                 raise ValueError("The video location does not belong to this recording")
             return RemoteArtifact(transport, gateway, path, MAX_BYTES)
@@ -614,6 +614,6 @@ class LiveVideoService:
     @staticmethod
     def verify_remote_video(transport, gateway, path, metadata):
         program = "import hashlib,json,sys; from pathlib import Path; p=Path(sys.argv[1]); s=p.stat().st_size; assert 0<s<=268435456; f=p.open('rb'); header=f.read(12); f.seek(0); h=hashlib.sha256(); [h.update(b) for b in iter(lambda:f.read(1048576),b'')]; print(json.dumps({'sha256':h.hexdigest(),'size_bytes':s,'mp4':header[4:8]==b'ftyp'}))"
-        result = json.loads(transport.ssh(gateway, "python3 -c " + shlex.quote(program) + " " + shlex.quote(path), timeout=40))
+        result = json.loads(transport.run_with_fallback("python3 -c " + shlex.quote(program) + " " + shlex.quote(path), gateway, attempt_timeout=40)[1])
         if not result.get("mp4") or any(result.get(key) != metadata.get(key) for key in ("sha256", "size_bytes")):
             raise ValueError("The remote video differs from its saved checksum or size")

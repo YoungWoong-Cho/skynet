@@ -112,7 +112,6 @@ window.dataNavigation = createWorkspaceNavigation({
     const collectionView = {
       collect: "live",
       recording: "recordings",
-      setup: "setup",
     }[view];
     document.querySelectorAll("[data-collection-view]").forEach((panel) => {
       panel.hidden = panel.dataset.collectionView !== collectionView;
@@ -124,12 +123,10 @@ window.dataNavigation = createWorkspaceNavigation({
     if (typeof refreshDataResourceTables === "function")
       refreshDataResourceTables();
     document.getElementById("refresh-collection").hidden = [
-      "registry",
-      "files",
+      "registry", "files",
     ].includes(view);
     document.getElementById("refresh-data-registry").hidden = ![
-      "registry",
-      "files",
+      "registry", "files",
     ].includes(view);
   },
 });
@@ -138,9 +135,9 @@ window.experimentNavigation = createWorkspaceNavigation({
   page: "experiments",
   parameter: "experiment_view",
   selector: "[data-experiment-tab]",
-  views: ["presets", "submit", "adapters", "runs"],
+  views: ["presets", "submit", "adapters", "runs", "notes"],
   initial: "submit",
-  legacyView: (tab) => (["adapters", "runs"].includes(tab) ? tab : null),
+  legacyView: (tab) => (["adapters", "runs", "notes"].includes(tab) ? tab : null),
   renderView(view) {
     for (const [page, selected] of [
       ["experiments", "submit"],
@@ -148,7 +145,7 @@ window.experimentNavigation = createWorkspaceNavigation({
       ["runs", "runs"],
     ]) {
       document.getElementById(`refresh-${page}`).hidden =
-        view !== selected && !(page === "experiments" && view === "presets");
+        view !== selected && !(page === "experiments" && ["presets", "notes"].includes(view));
       const tutorial = document.getElementById(`${page}-tutorial-button`);
       if (tutorial) tutorial.hidden = view !== selected;
     }

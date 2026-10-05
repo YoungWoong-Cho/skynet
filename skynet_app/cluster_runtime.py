@@ -24,10 +24,65 @@ if TYPE_CHECKING:
 HOME_ROOT = CLUSTER.paths.home_root
 WORK_ROOT = CLUSTER.paths.work_root
 SLURM_BIN = CLUSTER.commands.slurm_bin
+# How cluster work is routed when nothing chose a gateway: "auto" or one configured host.
+DEFAULT_GATEWAY = CLUSTER.defaults.gateway
+
+
+# Slurm states in which a job still occupies the scheduler; every other state is final.
+ACTIVE_STATES = frozenset({
+    "PENDING",
+    "CONFIGURING",
+    "RUNNING",
+    "COMPLETING",
+    "REQUEUED",
+    "RESIZING",
+    "SUSPENDED",
+})
+# Queued again or not yet started: the controller's start time is only a forecast.
+_UNSTARTED_STATES = frozenset({"PENDING", "REQUEUED"})
+# The controller names conditions that accounting reports under these base states.
+_CONTROLLER_STATES = {
+    "REQUEUE_HOLD": "PENDING", "REQUEUE_FED": "PENDING", "RESV_DEL_HOLD": "PENDING",
+    "SIGNALING": "RUNNING", "STAGE_OUT": "COMPLETING", "STOPPED": "SUSPENDED",
+}
+# How long a gateway that refused its connection is tried last and reserves no time.
+GATEWAY_UNREACHABLE_SECONDS = 600
+_ACCOUNTING_FIELDS = (
+    ("JobIDRaw", "JobIDRaw"),
+    ("State", "State%64"),
+    ("ExitCode", "ExitCode"),
+    ("Reason", "Reason"),
+    ("NodeList", "NodeList"),
+    ("Elapsed", "Elapsed"),
+    ("Start", "Start"),
+    ("End", "End"),
+    ("AllocTRES", "AllocTRES"),
+    ("Partition", "Partition"),
+    ("Account", "Account"),
+    ("Restarts", "Restarts"),
+)
+# squeue -O names, in the order of the record keys they fill.
+_CONTROLLER_FIELDS = (
+    ("JobID", "JobID"),
+    ("State", "State"),
+    ("ExitCode", "exit_code"),
+    ("Reason", "Reason"),
+    ("NodeList", "NodeList"),
+    ("Start", "StartTime"),
+    ("End", "EndTime"),
+    ("Restarts", "Restartcnt"),
+)
+_ACCOUNTING_MARKER = "__SKYNET_ACCOUNTING__"
+_CONTROLLER_MARKER = "__SKYNET_CONTROLLER__"
+ACCOUNTING_UNAVAILABLE_MARKER = "__SKYNET_ACCOUNTING_UNAVAILABLE__"
 
 
 class ClusterError(RuntimeError):
     """A gateway or Slurm operation failed."""
+
+
+class GatewayUnreachable(ClusterError):
+    """SSH could not reach or log in to the gateway; the command did not run."""
 
 
 class SubmissionOutcomeUnknown(ClusterError):
@@ -133,6 +188,20 @@ def _strip_known_ssh_banner(value: str) -> str:
 
 
 @dataclass(frozen=True)
+class JobStatusSnapshot:
+    """What Slurm accounting and the live controller report for a batch of jobs.
+
+    A job missing from ``statuses`` is gone from the scheduler only when
+    ``controller_error`` is None: the controller answered and no longer lists it.
+    """
+
+    gateway: str
+    statuses: dict[str, dict[str, str]]
+    accounting_error: str | None = None
+    controller_error: str | None = None
+
+
+@dataclass(frozen=True)
 class Submission:
     job_id: str
     raw_job_id: str
@@ -150,7 +219,10 @@ class ClusterClient:
         if not configured:
             raise ValueError("At least one SSH gateway is required")
         self.hosts = tuple(dict.fromkeys(configured))
+        # Shared by the per-workspace copies: one refused login informs them all.
+        self._unreachable_until: dict[str, float] = {}
         self.storage: WorkspaceStorage | None = None
+        self._node_inventory_cache: dict[str, tuple[float, list[str]]] = {}
 
     def with_storage(self, storage: WorkspaceStorage) -> ClusterClient:
         client = copy.copy(self)
@@ -167,11 +239,24 @@ class ClusterClient:
 
 
     def candidates(self, gateway: str) -> tuple[str, ...]:
+        """Hosts to try, in order.
+
+        Every gateway reaches the same scheduler and shared storage, so a named
+        gateway is tried first and the others remain as fallback.
+        """
         if gateway == "auto":
             return self.hosts
         if gateway not in self.hosts:
             raise ValueError(f"Unknown SSH gateway: {gateway}")
-        return (gateway,)
+        return (gateway, *(host for host in self.hosts if host != gateway))
+
+    def gateway_for(self, recorded: str | None) -> str:
+        """Routing for a gateway recorded earlier with an attempt, an archive or a preference.
+
+        The record is provenance, not an address: a host that is no longer
+        configured must not strand the work it once served.
+        """
+        return recorded if recorded == "auto" or recorded in self.hosts else DEFAULT_GATEWAY
 
     def ssh(
         self,
@@ -208,8 +293,13 @@ class ClusterClient:
         if process.returncode != 0:
             stderr = _strip_known_ssh_banner(process.stderr or "")
             detail = (stderr or process.stdout or f"SSH command failed with exit code {process.returncode}").strip()
-            raise ClusterError(f"{host}: {detail}")
+            # ssh itself exits 255 when it cannot connect or authenticate.
+            failure = GatewayUnreachable if process.returncode == 255 else ClusterError
+            raise failure(f"{host}: {detail}")
         return process.stdout
+
+    def _unreachable(self, host: str) -> bool:
+        return time.monotonic() < self._unreachable_until.get(host, 0.0)
 
     def run_with_fallback(
         self,
@@ -218,11 +308,22 @@ class ClusterClient:
         *,
         stdin: str | None = None,
         timeout: float = 30,
+        attempt_timeout: float | None = None,
     ) -> tuple[str, str]:
+        """Run on the first gateway that answers.
+
+        ``timeout`` bounds the whole operation. ``attempt_timeout`` instead allows
+        every gateway that long, for work whose duration is its own.
+        """
+        route = self.gateway_for(gateway)
+        candidates = self.candidates(route)
+        if attempt_timeout is not None:
+            timeout = attempt_timeout * len(candidates)
         if timeout <= 0:
             raise ValueError("SSH operation timeout must be positive")
-
-        candidates = self.candidates(gateway)
+        # A gateway that just refused its connection goes last and reserves no time.
+        reachable = [host for host in candidates if not self._unreachable(host)]
+        candidates = (*reachable, *(host for host in candidates if host not in reachable))
         deadline = time.monotonic() + timeout
         errors: list[str] = []
         for index, host in enumerate(candidates):
@@ -231,14 +332,28 @@ class ClusterClient:
                 errors.append(f"{host}: SSH operation budget exhausted before attempt")
                 continue
 
-            # Divide the remaining operation budget between all gateways that
-            # still need an attempt. A slow gateway cannot starve the next one,
-            # while a fast failure leaves the later gateways more time.
-            attempt_timeout = remaining / (len(candidates) - index)
+            waiting = len(reachable) - index  # Reachable gateways still to be tried, this one included.
+            if attempt_timeout is not None:
+                allowed = min(attempt_timeout, remaining)
+            elif waiting <= 1 or (route != "auto" and host == route):
+                # A named gateway keeps the whole budget, as when it was the only
+                # candidate; the others take over when it fails early.
+                allowed = remaining
+            else:
+                # Divide the remaining operation budget between the reachable gateways
+                # that still need an attempt. A slow gateway cannot starve the next one,
+                # while a fast failure leaves the later gateways more time.
+                allowed = remaining / waiting
             try:
-                return host, self.ssh(host, command, stdin=stdin, timeout=attempt_timeout)
+                output = self.ssh(host, command, stdin=stdin, timeout=allowed)
+            except GatewayUnreachable as error:
+                self._unreachable_until[host] = time.monotonic() + GATEWAY_UNREACHABLE_SECONDS
+                errors.append(str(error))
             except ClusterError as error:
                 errors.append(str(error))
+            else:
+                self._unreachable_until.pop(host, None)
+                return host, output
         raise ClusterError("; ".join(errors) or "No SSH gateway is available")
 
     def resolve_gateway(self, gateway: str = "auto") -> str:
@@ -247,7 +362,7 @@ class ClusterClient:
             "command -v sbatch >/dev/null && command -v squeue >/dev/null && "
             "command -v sacct >/dev/null"
         )
-        host, _ = self.run_with_fallback(command, gateway, timeout=15)
+        host, _ = self.run_with_fallback(command, gateway, timeout=30)
         return host
 
     def initialize_workspace(self, gateway: str = "auto", *, work_root: str | None = None) -> str:
@@ -328,6 +443,8 @@ class ClusterClient:
         run_id: str,
         files: Mapping[str, str],
         gateway: str = "auto",
+        *,
+        immutable: bool = False,
     ) -> tuple[str, dict[str, str]]:
         """Upload a frozen capsule in one connection, verifying every file."""
         run_id = self._run_id(run_id)
@@ -370,7 +487,19 @@ for name, path, content in files:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        if request.get("immutable"):
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                if path.read_bytes() != content:
+                    raise ValueError("An immutable capsule file already exists with different content")
+        else:
+            os.replace(temporary, path)
+        descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -379,7 +508,7 @@ print(json.dumps(receipts))
 """
         host, output = self.run_with_fallback(
             shlex.join(["python3", "-c", script]), gateway,
-            stdin=json.dumps({"root": root, "files": contents}), timeout=30,
+            stdin=json.dumps({"root": root, "files": contents, "immutable": immutable}), timeout=120,
         )
         try:
             if json.loads(output) != expected:
@@ -403,6 +532,19 @@ print(json.dumps(receipts))
             timeout=15,
         )
         return host, destination
+
+    def node_names(self, gateway: str = "auto") -> list[str]:
+        cached = self._node_inventory_cache.get(gateway)
+        if cached and time.monotonic() - cached[0] < 60:
+            return list(cached[1])
+        _, output = self.run_with_fallback(
+            f"export PATH={SLURM_BIN}:$PATH; sinfo -N -h -o '%N'", gateway, timeout=15,
+        )
+        names = sorted(set(output.split()))
+        if not names or any(not re.fullmatch(r"[A-Za-z0-9_.-]+", name) for name in names):
+            raise ClusterError("Slurm returned an invalid node inventory")
+        self._node_inventory_cache[gateway] = (time.monotonic(), names)
+        return names
 
     def test_script(self, script: str, gateway: str = "auto") -> tuple[str, str]:
         command = (
@@ -465,13 +607,13 @@ print(json.dumps(receipts))
                 job_id = raw_job_id = None
 
         if job_id is None:
-            lookup = f'''export PATH={SLURM_BIN}:$PATH
+            lookup = f'''set -eu
+export PATH={SLURM_BIN}:$PATH
 token={shlex.quote(token)}
 since=$(date -d '7 days ago' +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
-{{
-  LC_ALL=C squeue -h -u "$USER" -o '%i|%k' 2>/dev/null || true
-  LC_ALL=C sacct -X -n -P -S "$since" -o JobIDRaw,Comment%128 2>/dev/null || true
-}}
+LC_ALL=C squeue -h -u "$USER" -o '%i|%k'
+LC_ALL=C timeout 8s sacct -X -n -P -S "$since" -o JobIDRaw,Comment%128 \
+  || printf '%s\n' {ACCOUNTING_UNAVAILABLE_MARKER}
 '''
             host, output = self.run_with_fallback(lookup, gateway, timeout=20)
             matches: dict[str, str] = {}
@@ -490,6 +632,12 @@ since=$(date -d '7 days ago' +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
                     + ", ".join(sorted(matches))
                 )
             if not matches:
+                if ACCOUNTING_UNAVAILABLE_MARKER in output:
+                    # Only accounting remembers a job that already left the queue.
+                    raise ClusterError(
+                        f"{host}: Slurm accounting is unavailable; an accepted "
+                        "submission cannot be ruled out"
+                    )
                 return None
             job_id = next(iter(matches))
             raw_job_id = job_id
@@ -534,7 +682,14 @@ since=$(date -d '7 days ago' +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
         )
         submission_key = submission_key or run_id
         token = self._submission_token(submission_key)
-        host = self.resolve_gateway() if gateway == "auto" else self.candidates(gateway)[0]
+        gateway = self.gateway_for(gateway)
+        # A named gateway is used as given, with no extra round trip, unless it
+        # has just refused a connection; then a reachable one is resolved.
+        host = (
+            self.resolve_gateway(gateway)
+            if gateway == "auto" or self._unreachable(gateway)
+            else gateway
+        )
         run_directory = self.run_directory(run_id)
         script_path = f"{run_directory}/job.sbatch"
         receipt_directory = f"{run_directory}/submissions"
@@ -673,34 +828,87 @@ done
     def job_statuses(
         self, job_ids: Iterable[str], gateway: str = "auto"
     ) -> tuple[str, dict[str, dict[str, str]]]:
+        snapshot = self.job_status_snapshot(job_ids, gateway)
+        return snapshot.gateway, snapshot.statuses
+
+    def job_status_snapshot(
+        self, job_ids: Iterable[str], gateway: str = "auto"
+    ) -> JobStatusSnapshot:
+        """Ask accounting and the live controller in one connection.
+
+        Accounting alone cannot be trusted with a job's fate: its daemon can be
+        down or can drop updates, while the controller forgets a finished job
+        after MinJobAge. A finished accounting record is used as is; otherwise
+        the controller's record of the job is; an unfinished accounting record
+        stands only when the controller could not be asked.
+        """
         unique = tuple(dict.fromkeys(str(job_id) for job_id in job_ids if str(job_id)))
         if not unique:
-            return self.resolve_gateway(gateway), {}
+            return JobStatusSnapshot(self.resolve_gateway(gateway), {})
         if any(not re.fullmatch(r"\d+(?:_[0-9]+)?", job_id) for job_id in unique):
             raise ValueError("Invalid Slurm job ID")
-        field_specs = (
-            ("JobIDRaw", "JobIDRaw"),
-            ("State", "State%64"),
-            ("ExitCode", "ExitCode"),
-            ("Reason", "Reason"),
-            ("NodeList", "NodeList"),
-            ("Elapsed", "Elapsed"),
-            ("Start", "Start"),
-            ("End", "End"),
-            ("AllocTRES", "AllocTRES"),
-            ("Partition", "Partition"),
-            ("Account", "Account"),
-            ("Restarts", "Restarts"),
-        )
-        fields = ",".join(spec for _, spec in field_specs)
-        command = (
-            f"export PATH={SLURM_BIN}:$PATH; "
-            "LC_ALL=C SLURM_TIME_FORMAT=%s sacct -X -n -P "
-            f"-j {shlex.quote(','.join(unique))} -o {fields}"
-        )
-        host, output = self.run_with_fallback(command, gateway, timeout=30)
+        jobs = shlex.quote(",".join(unique))
+        accounting_format = ",".join(spec for _, spec in _ACCOUNTING_FIELDS)
+        controller_format = ",".join(f"{spec}:|" for _, spec in _CONTROLLER_FIELDS)
+        command = f'''export PATH={SLURM_BIN}:$PATH
+accounting=$(LC_ALL=C SLURM_TIME_FORMAT=%s timeout 8s sacct -X -n -P -j {jobs} -o {accounting_format} 2>&1)
+accounting_rc=$?
+controller=$(LC_ALL=C SLURM_TIME_FORMAT=%s timeout 8s squeue -h --states=all -j {jobs} -O {shlex.quote(controller_format)} 2>&1)
+controller_rc=$?
+# Asked about a single job it has forgotten, squeue fails; that is an answer.
+if test "$controller_rc" -ne 0; then
+  case "$controller" in *'Invalid job id specified'*) controller_rc=0; controller= ;; esac
+fi
+if test "$accounting_rc" -ne 0 && test "$controller_rc" -ne 0; then
+  printf '%s\\n' "$accounting" "$controller" >&2
+  exit 1
+fi
+printf '%s %s\\n%s\\n' {_ACCOUNTING_MARKER} "$accounting_rc" "$accounting" {_CONTROLLER_MARKER} "$controller_rc" "$controller"
+'''
+        host, output = self.run_with_fallback(command, gateway, timeout=40)
+        accounting_text, separator, controller_text = output.partition(_CONTROLLER_MARKER)
+        accounting_header, _, accounting_body = accounting_text.partition("\n")
+        controller_header, _, controller_body = controller_text.partition("\n")
+        if (not separator or not accounting_header.startswith(_ACCOUNTING_MARKER)):
+            raise ClusterError(f"{host}: Slurm status response is invalid")
+        accounting_ok = accounting_header.split()[-1] == "0"
+        controller_ok = controller_header.strip() == "0"
+        accounting = self._accounting_records(accounting_body) if accounting_ok else {}
+        controller: dict[str, dict[str, str]] = {}
+        if controller_ok:
+            try:
+                controller = self._controller_records(controller_body)
+            except ValueError as error:
+                # An unreadable row must not read as "the controller no longer lists the job".
+                controller_ok, controller_body = False, str(error)
         statuses: dict[str, dict[str, str]] = {}
-        names = tuple(name for name, _ in field_specs)
+        for job_id in unique:
+            recorded, listed = accounting.get(job_id), controller.get(job_id)
+            if listed and listed["State"] in ACTIVE_STATES:
+                # A requeued job is live again whatever accounting last recorded.
+                statuses[job_id] = listed
+            elif recorded and recorded["State"] not in ACTIVE_STATES:
+                statuses[job_id] = recorded
+            elif listed:
+                statuses[job_id] = listed
+            elif recorded and not controller_ok:
+                statuses[job_id] = recorded
+        return JobStatusSnapshot(
+            host,
+            statuses,
+            accounting_error=None if accounting_ok else self._tool_error(accounting_body, "sacct"),
+            controller_error=None if controller_ok else self._tool_error(controller_body, "squeue"),
+        )
+
+    @staticmethod
+    def _tool_error(output: str, tool: str) -> str:
+        detail = next((line.strip() for line in output.splitlines() if line.strip()), "")
+        return (detail or f"{tool} did not answer")[:300]
+
+    @staticmethod
+    def _accounting_records(output: str) -> dict[str, dict[str, str]]:
+        records: dict[str, dict[str, str]] = {}
+        names = tuple(name for name, _ in _ACCOUNTING_FIELDS)
         for line in output.splitlines():
             values = line.rstrip("|").split("|")
             # Restart telemetry is optional: an absent accounting value must
@@ -719,30 +927,39 @@ done
             cancelled_by = re.match(r"CANCELLED\s+by\s+([^\s+]+)", raw_state, re.IGNORECASE)
             if cancelled_by:
                 record["CancelledBy"] = cancelled_by.group(1)
-            statuses[job_id] = record
-        pending = [job_id for job_id, record in statuses.items() if record["State"] == "PENDING"]
-        if pending:
-            # Accounting often reports Reason=None for queued jobs. Ask the
-            # live scheduler once for the whole batch, on the same gateway.
-            queue_command = (
-                f"export PATH={SLURM_BIN}:$PATH; "
-                "LC_ALL=C timeout 10s squeue -h "
-                f"-j {shlex.quote(','.join(pending))} -o '%i|%T|%R'"
-            )
-            try:
-                queue_output = self.ssh(host, queue_command, timeout=15)
-            except ClusterError as error:
-                for job_id in pending:
-                    statuses[job_id]["Reason"] = f"Live queue reason unavailable: {error}"
-            else:
-                for line in queue_output.splitlines():
-                    fields = line.split("|", 2)
-                    if len(fields) != 3:
-                        continue
-                    job_id, state, reason = (value.strip() for value in fields)
-                    if job_id in pending and state.upper() == "PENDING" and reason:
-                        statuses[job_id]["Reason"] = reason.strip("()")
-        return host, statuses
+            record["Source"] = "accounting"
+            records[job_id] = record
+        return records
+
+    @staticmethod
+    def _controller_records(output: str) -> dict[str, dict[str, str]]:
+        records: dict[str, dict[str, str]] = {}
+        names = tuple(name for name, _ in _CONTROLLER_FIELDS)
+        for line in output.splitlines():
+            if not line.strip():
+                continue
+            values = [value.strip() for value in line.rstrip().removesuffix("|").split("|")]
+            record = dict(zip(names, values)) if len(values) == len(names) else {}
+            job_id = record.pop("JobID", "")
+            state_match = re.match(r"[A-Za-z_]+", record.get("State", ""))
+            if not state_match or not re.fullmatch(r"\d+(?:_[0-9]+)?", job_id):
+                raise ValueError(f"squeue printed an unexpected row: {line.strip()[:200]}")
+            record["StateRaw"] = record["State"]
+            state = state_match.group(0).upper()
+            state = record["State"] = _CONTROLLER_STATES.get(state, state)
+            restarts = record.pop("Restarts")
+            if re.fullmatch(r"[0-9]+", restarts):
+                record["Restarts"] = str(int(restarts))
+            if record["NodeList"] in {"", "(null)", "N/A"}:
+                record["NodeList"] = "None assigned"  # As accounting words it.
+            # The controller forecasts a queued job's start and a running job's end.
+            if state in _UNSTARTED_STATES:
+                record.pop("Start")
+            if state in ACTIVE_STATES or state in _UNSTARTED_STATES:
+                record.pop("End")
+            record["Source"] = "controller"
+            records[job_id] = record
+        return records
 
     def cancel(self, job_id: str, gateway: str = "auto") -> str:
         if not re.fullmatch(r"\d+(?:_[0-9]+)?", job_id):
@@ -905,10 +1122,21 @@ done
         lines: int = 500,
         max_bytes: int = 1_000_000,
         contains: str | None = None,
+        execution_boundary: Mapping[str, object] | None = None,
     ) -> tuple[str, str]:
         path = self._remote_path(path)
         lines = max(1, min(lines, 5000))
         max_bytes = max(1024, min(max_bytes, 5_000_000))
+        if execution_boundary is not None:
+            # The same JSONL is reused on resume. Read only bytes written since
+            # this execution's launch, even after a server or scheduler restart.
+            boundary = dict(execution_boundary)
+            boundary["boundary_path"] = self._remote_path(str(boundary["boundary_path"]))
+            arguments = {**boundary, "path": path, "lines": lines,
+                         "max_bytes": max_bytes, "contains": contains}
+            script = Path(__file__).with_name("training_progress_log.py").read_text()
+            command = "python3 -c " + shlex.quote(script) + " " + shlex.quote(json.dumps(arguments))
+            return self.run_with_fallback(command, gateway, timeout=20)
         reader = f"tail -n {lines} {shlex.quote(path)}"
         if contains is not None:
             if any(char in contains for char in ("\x00", "\n", "\r")):
@@ -923,9 +1151,13 @@ done
 
 
 __all__ = [
+    "ACTIVE_STATES",
     "ClusterClient",
     "ClusterError",
+    "DEFAULT_GATEWAY",
+    "GatewayUnreachable",
     "HOME_ROOT",
+    "JobStatusSnapshot",
     "SLURM_BIN",
     "Submission",
     "SubmissionOutcomeUnknown",

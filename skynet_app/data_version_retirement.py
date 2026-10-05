@@ -40,6 +40,8 @@ def episode_hashes(metadata):
 
 
 class DataVersionRetirement:
+    pointcloud_upgrade = False
+
     def __init__(self, database, preparation_service):
         if database.workspace_id is not None:
             raise ValueError('Dataset migration requires the system database to inspect every workspace dependency')
@@ -52,7 +54,8 @@ class DataVersionRetirement:
             raise ValueError('Select distinct registered original and replacement dataset versions')
         before, after = versions[old], versions[new]
         old_meta, new_meta = _json(before['metadata_json']), _json(after['metadata_json'])
-        if before['format'] not in OLD_RECORDING_FORMATS or after['format']!=RECORDING_DATASET_FORMAT:
+        allowed_old = {RECORDING_DATASET_FORMAT} if self.pointcloud_upgrade else OLD_RECORDING_FORMATS
+        if before['format'] not in allowed_old or after['format']!=RECORDING_DATASET_FORMAT:
             raise ValueError('Only obsolete recording exports can migrate to the shared recording format')
         if before['resource_id']!=after['resource_id']:
             raise ValueError('Replacement must be an immutable new version of the same dataset resource')
@@ -108,13 +111,22 @@ class DataVersionRetirement:
             result.update([row['id'],row['manifest_sha256']])
         return result
 
-    def _plan(self, connection, old, new):
+    def _plan(self, connection, old, new, *, lock=False):
         before,after,jobs,locations,new_locations=self._record(connection,old,new)
         active=[row['id'] for row in connection.execute('SELECT id,status FROM job_attempts').fetchall() if row['status'] not in TERMINAL]
         if active:
             raise ValueError('Wait for all active or queued jobs to stop before retiring dataset payloads')
         old_refs=self._needles(connection,before,locations)
         new_refs=self._needles(connection,after,new_locations)
+        # Evaluation targets are independent of experiment training revisions.
+        # They cannot be rebound by creating a new training revision, and their
+        # frozen stages/attempts may be resumed after completion or failure.
+        for row in connection.execute("SELECT resolved_config_json FROM workflow_stages WHERE stage_type='EVALUATE'").fetchall():
+            if references(_json(row['resolved_config_json']), old_refs):
+                raise ValueError('An evaluation still references the old dataset; remove that evaluation before retiring its payload')
+        for row in connection.execute("SELECT a.execution_snapshot_json FROM job_attempts a JOIN workflow_stages s ON s.id=a.stage_id WHERE s.stage_type='EVALUATE'").fetchall():
+            if row['execution_snapshot_json'] and references(_json(row['execution_snapshot_json']), old_refs):
+                raise ValueError('A frozen evaluation attempt still references the old dataset; remove that evaluation before retiring its payload')
         revisions=connection.execute('SELECT id,experiment_id,revision_number,requested_spec_json FROM experiment_revisions ORDER BY experiment_id,revision_number DESC').fetchall()
         heads={};affected=set()
         for row in revisions:
@@ -147,6 +159,12 @@ class DataVersionRetirement:
         with self.db.operation_lock('pipeline'),self.preparation.lock,self.db.read_snapshot() as connection:
             return self._plan(connection,old_version_id,replacement_version_id)[0]
 
+    def _delete_payloads(self, plan, before, jobs, locations):
+        self.preparation._delete_dataset_copies(jobs, [before], locations)
+
+    def _finish_payloads(self, connection, plan):
+        pass
+
     def retire(self, old_version_id, replacement_version_id, plan_token):
         with self.db.operation_lock('pipeline'),self.preparation.lock:
             with self.db.transaction() as connection:
@@ -156,7 +174,7 @@ class DataVersionRetirement:
                         raise ValueError('Retirement is already bound to another replacement')
                     if existing['state']=='RETIRED':
                         return _json(existing['receipt_json'])
-                plan,before,jobs,locations=self._plan(connection,old_version_id,replacement_version_id)
+                plan,before,jobs,locations=self._plan(connection,old_version_id,replacement_version_id,lock=True)
                 if plan['token']!=plan_token:
                     raise ValueError('Migration dependencies changed; review the retirement plan again')
                 now=utc_now()
@@ -166,7 +184,7 @@ class DataVersionRetirement:
             try:
                 # Existing cleanup enforces exact prepared roots and job UUIDs.
                 # Neither source/raw versions nor replacement refs are passed.
-                self.preparation._delete_dataset_copies(jobs,[before],locations)
+                self._delete_payloads(plan,before,jobs,locations)
             except Exception as exc:
                 error=exc
             receipt=dict(schema=plan['schema'],version_id=old_version_id,replacement_version_id=replacement_version_id,
@@ -175,6 +193,8 @@ class DataVersionRetirement:
                          history_preserved=True,original_recordings_preserved=True,completed_at=utc_now())
             if error:receipt['error']=str(error)
             with self.db.transaction() as connection:
+                if not error:
+                    self._finish_payloads(connection,plan)
                 connection.execute('UPDATE data_version_retirements SET state=?,receipt_json=?,error=?,updated_at=? WHERE version_id=?',
                     (receipt['state'],canonical_json(receipt),str(error) if error else None,utc_now(),old_version_id))
                 connection.execute("UPDATE data_locations SET status='REMOVED' WHERE version_id=?",(old_version_id,))

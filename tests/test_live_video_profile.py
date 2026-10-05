@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from skynet_app.cluster_runtime import WORK_ROOT
+from skynet_app.cluster_runtime import DEFAULT_GATEWAY, WORK_ROOT
 from skynet_app.dexverse_versions import V1_REVISION, V1_REPOSITORY
 from skynet_app.live_xr_video import LiveVideoService, VideoGeneration
 
@@ -17,7 +17,7 @@ def video(tmp_path):
     configured = json.loads((Path(__file__).resolve().parents[1] / 'config/live_video.json').read_text())
     (tmp_path / 'config').mkdir()
     (tmp_path / 'config/live_video.json').write_text(json.dumps(configured))
-    cluster = SimpleNamespace(candidates=lambda host: (host,), _remote_path=lambda path: path)
+    cluster = SimpleNamespace(_remote_path=lambda path: path)
     live = SimpleNamespace(root=tmp_path, archive=SimpleNamespace(cluster=cluster))
     service = LiveVideoService(SimpleNamespace(live=live))
     service.sources = {}
@@ -39,6 +39,8 @@ def test_archived_video_profile_preserves_recording_identity_without_legacy_conf
     assert profile['repository'] == f'{WORK_ROOT}/{V1_REPOSITORY}'
     assert profile['source_revision'] == V1_REVISION
     assert profile['runtime'] == configured['runtime']
+    # The configured gateway key stays in the profile content but is never validated or routed on.
+    assert profile['gateway'] == configured['gateway']
     assert profile['robot'] == job['profile']['robot']
     assert profile['hand_bundle']['root'] == f"{WORK_ROOT}/hands/{profile['robot']}/{'b' * 64}"
     assert job == before
@@ -88,11 +90,11 @@ def test_archived_render_uses_standalone_video_profile(video, monkeypatch):
     generation = VideoGeneration()
     result = service.render(None, job, WORK_ROOT + '/raw/demo.pkl', dict(sha256='c' * 64), 0, generation)
     assert result['state'] == 'READY'
-    assert calls[0][0] == 'hand'
+    assert calls[0][0] == 'hand' and calls[0][1][2] == DEFAULT_GATEWAY
     _, transport, rendered, root, operation = calls[1]
     assert transport is service.live.archive.cluster
     assert rendered['profile']['source_revision'] == V1_REVISION
-    assert rendered['gateway'] == 'sky2' and operation == 'start'
+    assert rendered['gateway'] == DEFAULT_GATEWAY and operation == 'start'
     assert root == f'{WORK_ROOT}/jobs/runs/{generation.token}'
     assert generation.remote_stopped
 
@@ -116,5 +118,6 @@ def test_interrupted_archived_video_cancellation_recovers_without_conversion_ser
     transport, restored, job_id, remote, operation = cancelled[0]
     assert transport is service.live.archive.cluster
     assert restored['profile']['source_revision'] == V1_REVISION
+    assert restored['gateway'] == DEFAULT_GATEWAY
     assert (job_id, remote, operation) == ('123', root, 'cancel')
     assert not service.active

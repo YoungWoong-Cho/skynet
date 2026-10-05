@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
+import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -12,6 +15,7 @@ import pytest
 from skynet_app.adapters import PreparationStep, resolve_adapter_plan
 from skynet_app.experiments import ExperimentSpec
 from skynet_app.slurm import (
+    GITHUB_SSH_TO_HTTPS,
     RUNNER_SOURCE,
     SlurmCompileError,
     compile_sbatch,
@@ -69,7 +73,8 @@ def test_compiler_emits_canonical_directives_and_capsule():
     assert "runtime-manifest.json" in script
     assert "system-manifest.json" in script
     assert "capsule-manifest.json" in script
-    assert 'SKYNET_CAPSULE_DIR="$SKYNET_RUN_DIR/attempts/$SLURM_JOB_ID"' in script
+    assert 'export SKYNET_RUN_ROOT=/coc/flash7/ycho420/jobs/runs/run-001' in script
+    assert 'SKYNET_CAPSULE_DIR="$SKYNET_RUN_ROOT/attempts/$SLURM_JOB_ID"' in script
     assert '"$SKYNET_CAPSULE_DIR/job.sbatch"' in script
     assert "importlib.metadata.distributions()" in compiled.files["runtime-wrapper.py"]
     assert "--query-gpu=index,uuid,name,driver_version,memory.total" in script
@@ -80,6 +85,29 @@ def test_compiler_emits_canonical_directives_and_capsule():
     assert resolve_slurm_log_path(compiled.stdout_path_template, "8123") == (
         "/coc/flash7/ycho420/logs/canonical-train-8123.out"
     )
+
+
+def test_submission_script_size_is_independent_of_metadata_body_size():
+    spec = make_spec()
+    plan = resolve_adapter_plan(spec)
+    small = compile_sbatch(spec, plan, run_id="large-capsule", capsule_files={"audit.json": "{}"})
+    body = json.dumps({"metadata": "large-metadata-body" * 1_200_000})
+    large = compile_sbatch(spec, plan, run_id="large-capsule", capsule_files={"audit.json": body})
+    assert len(body) > 16 * 1024 * 1024
+    assert len(large.script.encode()) == len(small.script.encode())
+    assert len(large.script.encode()) < 64 * 1024
+    assert "large-metadata-body" not in large.script
+    assert "base64 --decode" not in large.script
+    assert large.files["audit.json"] == body
+    assert small.capsule_relative_directory != large.capsule_relative_directory
+    digest = hashlib.sha256(large.files["checksums.sha256"].encode()).hexdigest()
+    assert digest in large.script
+    assert hashlib.sha256(body.encode()).hexdigest() in large.files["checksums.sha256"]
+    assert large.upload_files[f"{large.capsule_relative_directory}/audit.json"] == body
+    # These formerly duplicated the resolved spec / immutable attempt snapshot.
+    assert "requested-spec.json" not in large.files
+    assert "adapter-plan.json" not in large.files
+    assert "adapter-manifest.json" not in large.files
 
 
 def test_sbatch_log_path_resolution_is_structural_and_rejects_unsupported_tokens():
@@ -106,6 +134,70 @@ def test_compiler_exports_and_creates_shared_xdg_cache_root():
     script = compile_sbatch(spec, resolve_adapter_plan(spec), run_id="cache-001").script
     assert "export XDG_CACHE_HOME=/coc/flash7/ycho420/.cache" in script
     assert 'mkdir -p "$XDG_CACHE_HOME" "$WORK_ROOT"/.cache/{uv,huggingface,torch}' in script
+
+
+def test_submodules_are_fetched_over_the_https_transport_of_the_main_clone():
+    spec = make_spec()
+    assert spec.source.include_submodules
+    script = compile_sbatch(spec, resolve_adapter_plan(spec), run_id="submodules-001").script
+    assert (
+        f'git -C "$SKYNET_SOURCE_DIR" {GITHUB_SSH_TO_HTTPS} submodule update --init --recursive'
+        in script
+    )
+    payload = spec.model_dump(mode="json", by_alias=True)
+    payload["source"]["include_submodules"] = False
+    without = ExperimentSpec.model_validate(payload)
+    script = compile_sbatch(without, resolve_adapter_plan(without), run_id="submodules-002").script
+    assert "submodule update" not in script
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is required")
+def test_github_ssh_submodule_remotes_resolve_to_https():
+    config = shlex.split(GITHUB_SSH_TO_HTTPS)
+    for remote, expected in (
+        ("git@github.com:AaronYang1223/opentv.git", "https://github.com/AaronYang1223/opentv.git"),
+        ("ssh://git@github.com/AaronYang1223/opentv.git", "https://github.com/AaronYang1223/opentv.git"),
+        ("https://github.com/RogerQi/human-policy", "https://github.com/RogerQi/human-policy"),
+    ):
+        resolved = subprocess.run(
+            ["git", *config, "ls-remote", "--get-url", remote],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        assert resolved == expected
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is required")
+def test_git_c_url_rewrites_reach_recursive_submodule_clones(tmp_path):
+    def git(*args, cwd):
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com",
+             "-c", "protocol.file.allow=always", *args],
+            cwd=cwd, check=True, capture_output=True, text=True,
+        )
+
+    module = tmp_path / "module"
+    module.mkdir()
+    git("init", "-q", cwd=module)
+    (module / "README").write_text("module\n")
+    git("add", "README", cwd=module)
+    git("commit", "-q", "-m", "module", cwd=module)
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=module, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    top = tmp_path / "top"
+    top.mkdir()
+    git("init", "-q", cwd=top)
+    (top / ".gitmodules").write_text(
+        '[submodule "sub"]\n\tpath = sub\n\turl = git@github.com:owner/module.git\n'
+    )
+    git("add", ".gitmodules", cwd=top)
+    git("update-index", "--add", "--cacheinfo", f"160000,{commit},sub", cwd=top)
+    git("commit", "-q", "-m", "top", cwd=top)
+    # Same command shape as the preflight; only the rewrite target is local.
+    git("-C", str(top), "submodule", "sync", "--recursive", cwd=tmp_path)
+    git("-C", str(top), "-c", f"url.{module.as_uri()}.insteadOf=git@github.com:owner/module.git",
+        "submodule", "update", "--init", "--recursive", cwd=tmp_path)
+    assert (top / "sub" / "README").read_text() == "module\n"
 
 
 def test_overcap_pair_and_manual_node():

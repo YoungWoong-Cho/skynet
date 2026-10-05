@@ -289,7 +289,7 @@ def test_evaluation_entrypoints_verify_reference_only_manifest_before_policy_loa
     context={'result_path':str(tmp_path/'evaluation/result.json'),
         'policy':{'adapter':'xpolicylab-act','native_config':{
             'dataset_path':str(tmp_path/'a'), 'dataset_manifest_sha256':digest(tmp_path/'a/manifest.json')}},
-        'compatibility':{'io_contract':recorded_contract(manifest)}}
+        'compatibility':{'io_contract':recorded_contract(manifest), 'policy_loader':'xpolicy_joints'}}
     path=tmp_path/'context.json';path.write_text(json.dumps(context))
     monkeypatch.setattr(sys,'argv',[entrypoint,'--context',str(path),'--source-dir',str(tmp_path/'native')])
     calls=[]
@@ -358,3 +358,39 @@ def test_unidex_manifest_preserves_human_task_instruction_and_verified_codec_ide
     assert recording_prompt(dict(src,prompt='Use explicit instruction'),capture)=='Use explicit instruction'
     assert recording_prompt({'session_profile':{'instructions':'  ','task_name':'Pick up cube'}},capture)=='Pick up cube'
     assert recording_prompt({},capture)=='Dexverse-PickCube-v0'
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_camera_frame_codec_reuses_only_explicitly_fixed_archived_rgb_pose(tmp_path, monkeypatch, dynamic):
+    src, _, _ = source(tmp_path, images=True)
+    # The archived receipt, not a simulator default, determines the frame.
+    with h5py.File(src['images'], 'r+') as file:
+        metadata = json.loads(file.attrs['metadata'])
+        metadata['cameras']['scene_front']['world_from_camera'][0][3] = 1.25
+        metadata['cameras']['scene_front']['dynamic'] = dynamic
+        file.attrs['metadata'] = json.dumps(metadata)
+    src['image_sha256'] = digest(src['images'])
+    payload = pickle.loads(Path(src['recording']).read_bytes())
+    payload['episodes'][0]['skynet_images']['sha256'] = src['image_sha256']
+    Path(src['recording']).write_bytes(pickle.dumps(payload))
+    src['sha256'] = digest(src['recording'])
+    codec = types.ModuleType('action_codecs.unidex')
+    seen = []
+    def encode(raw, capture, poses):
+        seen.append(poses.copy())
+        return {'faas_state_absolute': np.zeros((4,82), dtype='f4'),
+                'faas_action_absolute': np.zeros((4,82), dtype='f4')}, {
+                'id':'skynet.unidex-faas/v1','codec_sha256':'b'*64,'frame':'camera_opengl'}
+    codec.encode_recording = encode
+    monkeypatch.setitem(sys.modules,'action_codecs.unidex',codec)
+    spec = request(tmp_path,[src],rgb=True)
+    spec['action_representation'] = {'id':'skynet.unidex-faas/v1'}
+    if dynamic:
+        with pytest.raises(ValueError, match='per-frame'):
+            prepare(spec)
+        assert not seen
+    else:
+        result = prepare(spec)
+        assert seen[0].shape == (4,4,4)
+        np.testing.assert_array_equal(seen[0][:,0,3],1.25)
+        assert result['episodes'][0]['streams']['scene_front']['path'] == src['images']

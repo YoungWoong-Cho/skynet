@@ -83,7 +83,7 @@ def test_all_recording_declarations_bind_shared_format_and_freeze_their_loader()
             assert all(RECORDING_DATASET_FORMAT in binding.formats and preset.contract in binding.contracts for binding in bindings)
             assert "adapter-support/" + preset.loader_validation.script in manifest.train.capsule_files
         assert "adapter-support/recording_dataset.py" in manifest.train.capsule_files
-    assert set(convertible) == {"xpolicylab-act", "xpolicylab-act-native", "egoverse-act", "egoverse-hpt", "unidex"}
+    assert set(convertible) == {"xpolicylab-act", "xpolicylab-act-native", "egoverse-act", "egoverse-hpt", "unidex", "human-policy-hat"}
 
 
 def test_unidex_declares_geometry_temporal_semantics_and_verified_hands():
@@ -91,7 +91,7 @@ def test_unidex_declares_geometry_temporal_semantics_and_verified_hands():
     preset, = manifest.train.data_requirements.recording_conversion.presets
     stream, = preset.observation_requirements["streams"]
     assert stream["camera_ids"] == ["scene_front"]
-    assert stream["channels"] == "XYZRGB" and stream["num_points"] == 1024
+    assert stream["channels"] == "XYZRGB" and stream["num_points"] == 10000
     assert stream["color_range"] == "0_1" and stream["depth_range"] == [0.01, 5.0]
     assert stream["camera_convention"] == "ros_optical" and stream["crop"] is None
     assert preset.preprocessing == {"pointcloud_frame": "camera_ros_optical", "pointcloud_native_frame": "camera_opengl"}
@@ -107,6 +107,22 @@ def test_unidex_declares_geometry_temporal_semantics_and_verified_hands():
         "skynet_sharpa_right",
     }
     assert manifest.evaluations == []
+
+
+def test_unidex_exposes_atomic_multi_dataset_input_mixing_and_step_budget():
+    declaration = unidex_manifest().train
+    fields = {field.path: field for field in declaration.input_fields}
+    datasets = fields["native.config.datasets"]
+    assert datasets.kind == "json" and datasets.data_binding.cardinality == "many"
+    assert datasets.data_binding.value_path == "selection"
+    assert "native.config.dataset_path" not in fields and "native.config.dataset_manifest_sha256" not in fields
+    assert fields["native.config.mixing_policy"].default == "window_proportional"
+    assert fields["native.config.mixing_policy"].choices == ["window_proportional", "hand_balanced"]
+    assert declaration.parameter_flags["train.max_steps"].flag == "--max-steps"
+    assert "--data-spec" in declaration.argv and "--dataset" not in declaration.argv
+    assert "adapter-support/dataset_inputs.py" in declaration.capsule_files
+    assert declaration.progress.total_path == "native.config.epochs"
+    assert declaration.progress.step_source.completed_key == "global_step"
 
 
 def test_duplicate_and_undeclared_default_presets_are_rejected():
@@ -134,7 +150,7 @@ def test_convert_api_requires_exact_adapter_identity_and_rejects_old_format(monk
     payload = dict(session_id="recording-1", adapter_id="adapter-1", adapter_version_id="version-1", adapter_data_preset="state", name="Training data")
     with TestClient(app) as client:
         assert client.post("/api/data/exports", json=payload).status_code == 202
-        assert calls[0][0] == ("recording-1", "adapter-1", "Training data", None)
+        assert calls[0][0] == ("recording-1", "adapter-1", "Training data")
         assert calls[0][1]["adapter_version_id"] == "version-1"
         assert calls[0][1]["adapter_data_preset"] == "state"
         assert client.post("/api/data/exports", json={**payload, "format": "obsolete-recipe"}).status_code == 422

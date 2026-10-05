@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from skynet_app.cluster_runtime import WORK_ROOT, ClusterError, SubmissionOutcomeUnknown
+from skynet_app.cluster_runtime import DEFAULT_GATEWAY, WORK_ROOT, ClusterError, SubmissionOutcomeUnknown
 from skynet_app.live_xr_video import VideoGeneration
 from skynet_app.live_xr_video_cluster import control_cluster
 
@@ -16,15 +16,18 @@ def cluster_video():
     calls = []
     profile = {'account':'overcap','partition':'overcap','gpu_type':'any',
                'runtime':WORK_ROOT+'/runtime','repository':WORK_ROOT+'/repo'}
+    def read(command,gateway,**kw):
+        assert gateway==job['gateway']
+        return 'sky2',json.dumps(state['metadata'])
     transport = SimpleNamespace(
         write_capsule_file=lambda *a:calls.append(('write',*a)),
         submit_script=lambda *a,**kw:(calls.append(('submit',a,kw)) or SimpleNamespace(job_id='123')),
         recover_submission=lambda *a:SimpleNamespace(job_id='123'),
         job_statuses=lambda *a:('sky2',{'123':{'State':state['scheduler']}}),
         cancel=lambda *a:calls.append(('cancel',*a)),
-        ssh=lambda *a,**kw:json.dumps(state['metadata']),
+        run_with_fallback=read,
     )
-    job={'gateway':'sky2'}
+    job={'gateway':DEFAULT_GATEWAY}
     def control(operation):
         return control_cluster(transport,job,generation,root,operation,
             profile=profile,request={'recording':WORK_ROOT+'/raw/demo.pkl'},sources={'render_recording.py':'pass'})
@@ -53,7 +56,7 @@ def test_cancel_requires_scheduler_confirmation_and_exact_owned_job(cluster_vide
     control('start')
     with pytest.raises(ValueError,match='confirm video cancellation'):
         control('cancel')
-    assert ('cancel','123','sky2') in calls
+    assert ('cancel','123',DEFAULT_GATEWAY) in calls
     state['scheduler']='CANCELLED'
     assert control('cancel')['state']=='CANCELLED'
 

@@ -4,9 +4,10 @@ import base64
 import hashlib
 import json
 import psycopg
-from skynet_app.db_backend import DATABASE_ERRORS, INTEGRITY_ERRORS
+from skynet_app.db_backend import DATABASE_ERRORS
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,11 +17,12 @@ from fastapi.testclient import TestClient
 import pytest
 
 import skynet_app.pipeline_api as pipeline_api
-from skynet_app.cluster_runtime import ClusterError, Submission, SubmissionOutcomeUnknown
+from skynet_app.cluster_runtime import (
+    ClusterError, JobStatusSnapshot, Submission, SubmissionOutcomeUnknown,
+)
 from skynet_app.adapters import (
     AdapterManifest,
     NativeTrackingIntegration,
-    RepositoryArgumentValidation,
     builtin_adapter_manifests,
     resolve_adapter_plan,
 )
@@ -37,11 +39,10 @@ COMMIT = "e17cf98fe4bc234c564b37abc9e155f25e76d566"
 
 
 def submitted_execution(cluster):
-    """Read the execution file actually embedded in the submitted transport."""
-    lines = cluster.script.splitlines()
-    for index, line in enumerate(lines):
-        if "base64 --decode >" in line and "/execution.json" in line:
-            return json.loads(base64.b64decode(lines[index + 1].strip()))
+    """Read the frozen execution file referenced by the submitted script."""
+    for name, content in cluster.capsule_files.items():
+        if name.endswith("/execution.json") and name in cluster.script:
+            return json.loads(content)
     raise AssertionError("Submitted capsule has no execution.json")
 
 
@@ -156,6 +157,9 @@ def make_pipeline_service(database, cluster, **kwargs):
 class FakeCluster:
     hosts = ("sky1", "sky2")
 
+    def node_names(self, gateway="auto"):
+        return ["grom", "megazord", "unlisted-node"]
+
     def __init__(self) -> None:
         self.script = ""
         self.state = "RUNNING"
@@ -168,6 +172,20 @@ class FakeCluster:
         self.argument_validation_calls = 0
         self.run_commands: list[str] = []
         self.test_script_count = 0
+        self.capsule_files = {}
+        self.accounting_error = None
+        self.forgotten: set[str] = set()  # Jobs neither accounting nor the controller describes.
+        self.exit_records: dict[str, str] = {}  # Job id -> the final.json its script wrote.
+        self.launch_records: dict[str, str] = {}  # Job id -> the system-manifest.json of its launch.
+        self.unreadable = False  # Every gateway fails while reading shared storage.
+
+    def write_capsule_files(self, run_id, files, gateway="auto", *, immutable=False):
+        assert immutable
+        for name, content in files.items():
+            if name in self.capsule_files:
+                assert self.capsule_files[name] == content
+            self.capsule_files[name] = content
+        return "sky1", {name: f"/coc/flash7/ycho420/jobs/runs/{run_id}/{name}" for name in files}
 
     def test_script(self, script, gateway="auto"):
         self.test_script_count += 1
@@ -190,6 +208,8 @@ class FakeCluster:
 
     def run_with_fallback(self, command, gateway="auto", **kwargs):
         self.run_commands.append(command)
+        if "SKYNET_MANUAL_RESUME_CHECKPOINT" in command:
+            return "sky1", json.dumps({"present": False})
         if "SKYNET_CHECKPOINT_PRESENT" in command:
             return "sky1", "SKYNET_CHECKPOINT_PRESENT"
         if "egomimic/hydra_configs/train_zarr_cartesian.yaml" in command:
@@ -224,9 +244,27 @@ class FakeCluster:
             for job_id in job_ids
         }
 
+    def job_status_snapshot(self, job_ids, gateway="auto"):
+        host, statuses = self.job_statuses(job_ids, gateway)
+        return JobStatusSnapshot(
+            host, {job: record for job, record in statuses.items() if job not in self.forgotten},
+            accounting_error=self.accounting_error,
+        )
+
     def cancel(self, job_id, gateway="auto"):
         self.cancel_calls.append((job_id, gateway))
         return gateway
+
+    def read_optional_file(self, path, gateway="auto", **kwargs):
+        if self.unreadable:
+            raise ClusterError("sky1: SSH operation timed out")
+        if path.endswith("/final.json"):
+            return "sky1", self.exit_records.get(path.split("/")[-2])
+        if path.endswith("/system-manifest.json"):
+            return "sky1", self.launch_records.get(path.split("/")[-2])
+        if path.endswith(("/selected-for-inference.json", "/state/interruption.json")):
+            return "sky1", self.log_content
+        return "sky1", self.file_content
 
     def read_log(self, *args, **kwargs):
         if self.log_content is None:
@@ -259,6 +297,23 @@ class ToggleSubmissionFailureCluster(FakeCluster):
         if self.fail_script_test:
             raise ClusterError("sbatch validation unavailable")
         return super().test_script(script, gateway)
+
+
+def test_capsule_upload_failure_stops_before_slurm_validation_or_submission(tmp_path):
+    class FailedUpload(FakeCluster):
+        def write_capsule_files(self, *args, **kwargs):
+            raise ClusterError("Cluster capsule upload verification failed")
+    database = Database(tmp_path / "failed-upload")
+    cluster = FailedUpload()
+    service = make_pipeline_service(database, cluster)
+    experiment = service.create_experiment(canonical_spec())
+    service.submit_experiment(experiment["id"])
+    run = database.get_run(experiment["runs"][0]["id"])
+    assert cluster.test_script_count == 0
+    assert cluster.submit_count == 0
+    assert run["status"] == "FAILED"
+    assert run["attempts"][0]["status"] == "SUBMISSION_FAILED"
+    assert "capsule upload" in run["attempts"][0]["slurm_reason"]
 
 
 class ImmediateRecoveryCluster(FakeCluster):
@@ -815,6 +870,57 @@ def test_wandb_retry_recovers_missing_binding(monkeypatch, missing):
         assert binding["last_error"] is None
 
 
+@pytest.mark.parametrize("state", ["PENDING", "RUNNING"])
+def test_reconcile_unchanged_scheduler_state_does_not_rewrite_or_lock_each_job(tmp_path, monkeypatch, state):
+    database = Database(tmp_path / "unchanged.db")
+    cluster = FakeCluster()
+    service = make_pipeline_service(database, cluster)
+    monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", tmp_path / "capsules")
+    experiment = service.create_experiment(canonical_spec())
+    service.submit_experiment(experiment["id"])
+    cluster.state = state
+    service.reconcile()
+    run_id = experiment["runs"][0]["id"]
+    before = database.get_run(run_id)
+    lock_entries = []
+    original_lock = service._reconcile_lock
+    class CountLock:
+        def __enter__(self):
+            lock_entries.append(1)
+            return original_lock.__enter__()
+        def __exit__(self, *args):
+            return original_lock.__exit__(*args)
+    service._reconcile_lock = CountLock()
+    def unexpected_transition(**kwargs):
+        pytest.fail("an unchanged scheduler observation must not produce a lifecycle write")
+    monkeypatch.setattr(database, "transition_workflow_state", unexpected_transition)
+    report = service.reconcile()
+    assert report["checked"] == 1
+    assert report["updated"] == 0
+    assert len(lock_entries) == 1  # Only the invariant check, no per-job locks.
+    assert database.get_run(run_id) == before
+
+
+@pytest.mark.parametrize("changes", [
+    {"slurm_reason": "Resources"}, {"node_list": "different-node"},
+    {"exit_code": "1:0"}, {"status": "CANCELLING"},
+    {"stage_status": "CANCELLING"}, {"run_status": "CANCELLING"},
+    {"stage_type": "EVALUATE", "evaluation_status": "SUBMITTED"},
+    {"stage_type": "EVALUATE", "evaluation_status": None},
+])
+def test_accounting_changes_are_never_skipped(changes):
+    row = {"status": "PENDING", "stage_status": "PENDING_SLURM", "run_status": "PENDING",
+           "stage_type": "TRAIN", "slurm_state": "PENDING", "slurm_reason": None,
+           "exit_code": "0:0", "node_list": None, "restart_count": 0}
+    record = {"State": "PENDING", "Reason": "None", "ExitCode": "0:0"}
+    assert PipelineService._active_accounting_unchanged(row, record)
+    assert not PipelineService._active_accounting_unchanged({**row, **changes}, record)
+    assert not PipelineService._active_accounting_unchanged(row, {**record, "Restarts": "1"})
+    assert not PipelineService._active_accounting_unchanged(row, {**record, "State": "COMPLETED"})
+    assert PipelineService._active_accounting_unchanged(
+        {**row, "stage_type": "EVALUATE", "evaluation_status": "PENDING"}, record)
+
+
 def test_create_submit_auto_overcap_and_reconcile(monkeypatch):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
@@ -1182,7 +1288,7 @@ def test_reconcile_fails_run_when_declared_checkpoint_marker_is_missing(monkeypa
         event = next(item for item in run["events"] if item["event_type"] == "CHECKPOINT_FINALIZATION_FAILED")
         assert event["new_status"] == "FAILED"
         assert event["details_json"]["process_status"] == "SUCCEEDED"
-        assert "unavailable" in event["details_json"]["error"]
+        assert "missing" in event["details_json"]["error"]
 
 
 def test_reconcile_fails_run_when_required_checkpoint_registration_fails(monkeypatch):
@@ -2100,140 +2206,6 @@ def test_new_revision_is_latest_scoped_and_can_submit_existing_draft(monkeypatch
             raise AssertionError("duplicate experiment revision was accepted")
 
 
-def _legacy_clean_retry_upgrade_scenario(monkeypatch):
-    with tempfile.TemporaryDirectory() as directory:
-        database = Database(Path(directory) / "skynet.db")
-        cluster = FakeCluster()
-        service = make_pipeline_service(database, cluster)
-        capsule_root = Path(directory) / "capsules"
-        monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", capsule_root)
-
-        legacy_manifest = next(
-            item.model_dump(mode="json")
-            for item in builtin_adapter_manifests()
-            if item.slug == "generic"
-        )
-        legacy_manifest.update(
-            {
-                "slug": "retry_fixture",
-                "display_name": "Retry fixture",
-                "default_repository": "https://example.test/retry-fixture.git",
-            }
-        )
-        legacy_manifest["capabilities"]["name"] = "retry_fixture"
-        legacy_manifest["train"] = {
-            "argv": ["python", "train.py"],
-            "resume_argv": ["--resume", "{{tokens.resume_checkpoint}}"],
-            "parameter_flags": {
-                "native.overrides.precision": {
-                    "flag": "--precision",
-                    "style": "separate",
-                }
-            },
-        }
-        adapter = database.create_adapter(
-            name="Retry fixture", manifest=legacy_manifest
-        )
-
-        payload = canonical_spec()
-        payload["identity"]["experiment"] = "clean-retry-upgrade"
-        payload["source"] = {
-            "repository": "https://example.test/retry-fixture.git",
-            "revision": COMMIT,
-            "adapter": "retry_fixture",
-        }
-        payload["native"] = {"overrides": {"precision": "bf16"}}
-        payload["train"]["checkpoint"]["max_attempts"] = 4
-        experiment = service.create_experiment(payload)
-        run_id = experiment["runs"][0]["id"]
-        original_run = database.get_run(run_id)
-        original_stage = original_run["stages"][0]
-        historical_config = original_stage["resolved_config_json"]
-        assert "--precision" in historical_config["plan"]["argv"]
-        service.submit_experiment(experiment["id"])
-        _mark_training_run_failed(database, run_id)
-
-        current_manifest = json.loads(json.dumps(legacy_manifest))
-        current_manifest["train"]["parameter_flags"] = {
-            "train.precision": {
-                "flag": "--pytorch-training-precision",
-                "style": "separate",
-                "value_map": {"bf16": "bfloat16", "fp32": "float32"},
-            }
-        }
-        current_manifest["train"]["retry_clean_argv"] = ["--fresh-output"]
-        database.edit_adapter(
-            adapter["id"],
-            manifest=current_manifest,
-            expected_latest_version=1,
-        )
-        action = service.run_manual_actions(database.get_run(run_id))["retry_clean"]
-        assert action["enabled"]
-        assert "pinned adapter v1" in action["reason"]
-        assert "current adapter v2" in action["reason"]
-
-        result = service.retry_run(run_id, "retry", "auto")
-        assert result["status"] == "SUBMITTED"
-        retried = database.get_run(run_id)
-        assert retried["stages"][0]["resolved_config_json"] == historical_config
-        clean_attempt = retried["attempts"][-1]
-        clean_snapshot = clean_attempt["execution_snapshot_json"]
-        assert clean_attempt["execution_snapshot_sha256"] == content_sha256(clean_snapshot)
-        assert clean_snapshot["adapter"]["version"] == 2
-        assert clean_snapshot["resolved_spec"]["train"]["precision"] == "bf16"
-        assert "precision" not in clean_snapshot["resolved_spec"]["native"]["overrides"]
-        assert "--precision" not in clean_snapshot["argv"]
-        precision_index = clean_snapshot["argv"].index(
-            "--pytorch-training-precision"
-        )
-        assert clean_snapshot["argv"][precision_index + 1] == "bfloat16"
-        assert clean_snapshot["argv"][-1] == "--fresh-output"
-        assert clean_snapshot["plan"]["retry_clean_argv"] == ["--fresh-output"]
-        assert clean_snapshot["migration_provenance"]["transformations"] == [
-            {
-                "kind": "native_override_to_canonical_binding",
-                "from": "native.overrides.precision",
-                "to": "train.precision",
-                "input_value": "bf16",
-                "resolved_value": "bf16",
-            },
-            {
-                "kind": "adapter_retry_clean_argv",
-                "argv": ["--fresh-output"],
-            },
-        ]
-        capsule_snapshot = json.loads(
-            (capsule_root / run_id / "attempt-snapshot.json").read_text()
-        )
-        assert capsule_snapshot == clean_snapshot
-
-        database.update_job_attempt(clean_attempt["id"], status="FAILED")
-        database.update_stage(original_stage["id"], status="FAILED")
-        database.update_run(run_id, status="FAILED")
-        checkpoint = database.create_checkpoint(
-            run_id,
-            produced_by_attempt_id=clean_attempt["id"],
-            checkpoint_type="FULL_RESUME",
-            path="/tmp/retry-fixture.ckpt",
-            training_step=1,
-            is_resumable=True,
-        )
-        resumed = service.retry_run(run_id, "resume", "auto")
-        assert resumed["status"] == "SUBMITTED"
-        resume_attempt = database.get_run(run_id)["attempts"][-1]
-        resume_snapshot = resume_attempt["execution_snapshot_json"]
-        assert resume_attempt["resume_checkpoint_id"] == checkpoint["id"]
-        assert resume_snapshot["adapter"]["version"] == 1
-        assert "--precision" in resume_snapshot["argv"]
-        assert "--pytorch-training-precision" not in resume_snapshot["argv"]
-        assert "--fresh-output" not in resume_snapshot["argv"]
-        assert resume_snapshot["migration_provenance"]["policy"] == "strict_pinned_resume"
-        assert resume_snapshot["migration_provenance"]["checkpoint"] == {
-            "id": checkpoint["id"],
-            "path": checkpoint["path"],
-        }
-
-
 class AttemptLogCluster(FakeCluster):
     def __init__(self) -> None:
         super().__init__()
@@ -2947,7 +2919,8 @@ def test_attempt_log_endpoint_distinguishes_content_from_retrieval_failure(monke
             assert response.json()["detail"] == "not found"
 
 
-def test_evaluation_ingests_canonical_episode_ledger(monkeypatch):
+@pytest.mark.parametrize("task_success", [True, False])
+def test_evaluation_ingests_canonical_episode_ledger(monkeypatch, task_success):
     with tempfile.TemporaryDirectory() as directory:
         database = Database(Path(directory) / "skynet.db")
         cluster = FakeCluster()
@@ -2984,7 +2957,7 @@ def test_evaluation_ingests_canonical_episode_ledger(monkeypatch):
                             "task": task_id,
                         "seed": 7,
                         "episode_index": 0,
-                        "success": True,
+                        "success": task_success,
                         "reward": 1.0,
                         "episode_length": 3,
                         "status": "SUCCEEDED",
@@ -3004,14 +2977,283 @@ def test_evaluation_ingests_canonical_episode_ledger(monkeypatch):
             )
         )
 
+        database.upsert_tracking_binding("wandb", "run", run_id,
+            remote_id="remote-run", remote_url="https://example.invalid/run", status="FINISHED")
+        database.upsert_tracking_binding("mlflow", "run", run_id,
+            remote_id="blocked-run", remote_url=None, status="BLOCKED")
+        monkeypatch.setattr(service, "_active_tracking_providers",
+            lambda _: [{"provider": "wandb"}, {"provider": "mlflow"}])
+        def fail_inline_tracking(*args, **kwargs):
+            pytest.fail("Evaluation lifecycle must not enter GPU/provider synchronization")
+        monkeypatch.setattr(service, "_sync_tracking_outputs", fail_inline_tracking)
         service.reconcile()
         loaded = database.get_evaluation(evaluation["id"])
         assert loaded["status"] == "SUCCEEDED"
         assert loaded["progress_completed"] == 1
-        assert loaded["episodes"][0]["success"] is True
+        assert loaded["episodes"][0]["success"] is task_success
         assert loaded["episodes"][0]["reward"] == 1.0
         artifacts = database.get_run(run_id)["artifacts"]
         assert any(item["artifact_type"] == "EVALUATION_RESULT" for item in artifacts)
+
+        bindings = {row["provider"]: row for row in database.list_tracking_bindings("run", run_id)}
+        assert bindings["wandb"]["status"] == "QUEUED"
+        assert bindings["wandb"]["remote_id"] == "remote-run"
+        assert bindings["mlflow"]["status"] == "BLOCKED"
+
+
+def _completed_evaluation(tmp_path, monkeypatch):
+    """A submitted one-episode evaluation and the canonical result it will write."""
+    database = Database(tmp_path / "skynet.db")
+    cluster = FakeCluster()
+    service = make_pipeline_service(database, cluster)
+    monkeypatch.setattr(pipeline_api, "LOCAL_CAPSULE_ROOT", tmp_path / "capsules")
+    experiment = service.create_experiment(canonical_spec())
+    service.submit_experiment(experiment["id"])
+    run_id = experiment["runs"][0]["id"]
+    cluster.state = "COMPLETED"
+    service.reconcile()
+    suite = next(suite for suite in database.list_evaluation_suites() if suite["name"] == "libero_10")
+    task_id = suite["config_json"]["tasks"][0]
+    database.create_checkpoint(run_id, checkpoint_type="INFERENCE", path="/coc/flash7/ycho420/artifacts/fake.ckpt",
+                               sha256="a" * 64, size_bytes=1, is_selected_for_inference=True)
+    evaluation = service.create_evaluation(EvaluationRequest(
+        run_id=run_id, checkpoint_path="/coc/flash7/ycho420/artifacts/fake.ckpt", suite_id=suite["id"],
+        tasks=[task_id], episodes_per_task=1, seeds=[7], argv=["python3", "evaluate.py"]))
+    result = json.dumps({
+        "schema_version": 1, "run_id": run_id,
+        "checkpoint": {"path": "/coc/flash7/ycho420/artifacts/fake.ckpt", "sha256": "a" * 64},
+        "evaluator": {"adapter": suite["evaluator_adapter"], "version": suite["evaluator_version"]},
+        "environment": {"suite": suite["name"], "version": suite["suite_version"]},
+        "aggregate": [],
+        "episodes": [{"task": task_id, "seed": 7, "episode_index": 0, "success": True,
+                      "reward": 1.0, "episode_length": 3, "status": "SUCCEEDED"}],
+    })
+    monkeypatch.setattr(service, "_sync_tracking_outputs", lambda *args, **kwargs: None)
+    return database, cluster, service, evaluation, result
+
+
+def test_completed_evaluation_reads_a_late_result_within_the_grace_window(tmp_path, monkeypatch):
+    database, cluster, service, evaluation, result = _completed_evaluation(tmp_path, monkeypatch)
+    cluster.status_details = {"End": str(int(time.time()) - 30)}
+    cluster.file_content = None  # result.json not visible to the gateway yet
+    service.reconcile()
+    pending = database.get_evaluation(evaluation["id"])
+    assert pending["status"] not in {"FAILED", "SUCCEEDED"}
+    assert not [a for a in database.get_run(evaluation["run_id"])["attempts"]
+                if a["stage_id"] == evaluation["stage_id"] and a["status"] == "SUCCEEDED"]
+    cluster.file_content = result
+    service.reconcile()
+    loaded = database.get_evaluation(evaluation["id"])
+    assert loaded["status"] == "SUCCEEDED" and loaded["progress_completed"] == 1
+
+
+def test_unreadable_result_after_the_grace_window_fails_and_can_be_reread(tmp_path, monkeypatch):
+    database, cluster, service, evaluation, result = _completed_evaluation(tmp_path, monkeypatch)
+    cluster.status_details = {"End": str(int(time.time()) - 3600)}
+    cluster.file_content = "{"  # truncated file
+    service.reconcile()
+    failed = database.get_evaluation(evaluation["id"])
+    assert failed["status"] == "FAILED"
+    run = database.get_run(evaluation["run_id"])
+    actions = service.evaluation_manual_actions(failed, run)
+    assert actions["retry_submission"]["enabled"] is False
+    assert actions["reread_result"]["enabled"] is True
+    with pytest.raises(ValueError, match="still unreadable"):
+        service.reread_evaluation_result(evaluation["id"])
+    assert database.get_evaluation(evaluation["id"])["status"] == "FAILED"
+    submissions = cluster.submit_count
+    cluster.file_content = result
+    recovered = service.reread_evaluation_result(evaluation["id"])["evaluation"]
+    assert recovered["status"] == "SUCCEEDED" and recovered["progress_completed"] == 1
+    assert recovered["episodes"][0]["success"] is True
+    assert cluster.submit_count == submissions, "re-reading never reruns episodes"
+    events = database.list_events(entity_type="evaluation", entity_id=evaluation["id"])
+    assert [event["event_type"] for event in events][:2] == ["EVALUATION_RESULT_REREAD", "EVALUATION_RESULT_INVALID"]
+    with pytest.raises(ValueError, match="Slurm job succeeded"):
+        service.reread_evaluation_result(evaluation["id"])
+
+
+def _exit_record(job_id, *, exit_code=0, restart_count=0):
+    """What the batch script's EXIT trap leaves in {run}/attempts/{job}/final.json."""
+    from datetime import datetime, timezone
+
+    return json.dumps({
+        "schema_version": 1, "job_id": job_id, "restart_count": restart_count, "node_list": "grom",
+        "exit_code": exit_code,
+        "finished_at": datetime.fromtimestamp(time.time() - 3600, timezone.utc).isoformat(),
+    })
+
+
+def _evaluation_attempt(database, evaluation):
+    return next(a for a in database.get_run(evaluation["run_id"])["attempts"]
+                if a["stage_id"] == evaluation["stage_id"])
+
+
+def _forgotten_evaluation(tmp_path, monkeypatch):
+    """Accounting is down and the controller has already dropped the finished job."""
+    database, cluster, service, evaluation, result = _completed_evaluation(tmp_path, monkeypatch)
+    cluster.accounting_error = "sacct: error: Problem talking to the database: Connection refused"
+    cluster.forgotten = {"9001"}
+    return database, cluster, service, evaluation, result
+
+
+def test_forgotten_job_completes_from_its_exit_record_on_the_second_scan(tmp_path, monkeypatch):
+    database, cluster, service, evaluation, result = _forgotten_evaluation(tmp_path, monkeypatch)
+    cluster.exit_records["9001"] = _exit_record("9001", restart_count=1)
+    cluster.launch_records["9001"] = json.dumps({"captured_at": "2026-10-01T03:54:58.475268+00:00"})
+    cluster.file_content = result
+    submissions = cluster.submit_count
+
+    service.reconcile()
+    assert database.get_evaluation(evaluation["id"])["status"] == evaluation["status"], \
+        "one scan that misses a job is not yet proof that Slurm forgot it"
+    service.reconcile()
+
+    finished = database.get_evaluation(evaluation["id"])
+    assert finished["status"] == "SUCCEEDED" and finished["progress_completed"] == 1
+    attempt = _evaluation_attempt(database, evaluation)
+    assert (attempt["status"], attempt["slurm_state"], attempt["exit_code"]) == ("SUCCEEDED", "COMPLETED", "0:0")
+    assert attempt["slurm_reason"] == pipeline_api.EXIT_RECORD_REASON
+    assert (attempt["node_list"], attempt["restart_count"]) == ("grom", 1)
+    assert attempt["started_at"] == "2026-10-01T03:54:58.000Z", "its start is the launch it recorded, not a guess"
+    from datetime import datetime
+
+    ended = datetime.fromisoformat(attempt["finished_at"].replace("Z", "+00:00")).timestamp()
+    assert abs(ended - (time.time() - 3600)) < 60, "the job's own end time is kept"
+    assert cluster.submit_count == submissions
+
+
+def test_forgotten_job_with_a_failing_exit_record_fails_and_never_resubmits(tmp_path, monkeypatch):
+    database = Database(tmp_path / "skynet.db")
+    cluster = FakeCluster()
+    service = make_pipeline_service(database, cluster)
+    monkeypatch.setattr(pipeline_api, "LOCAL_CAPSULE_ROOT", tmp_path / "capsules")
+    run = _create_submitted_run(service, "forgotten-time-limit")
+    attempt = run["attempts"][0]
+    # The same receipt that lets a scheduler-confirmed time limit resume automatically.
+    cluster.log_content = json.dumps(dict(schema_version=1, job_id=attempt["slurm_job_id"], run_id=run["id"],
+                                          reason="time_limit_warning", exit_code=124))
+    cluster.accounting_error, cluster.forgotten = "sacct: error: Connection refused", {attempt["slurm_job_id"]}
+    cluster.exit_records[attempt["slurm_job_id"]] = _exit_record(attempt["slurm_job_id"], exit_code=124)
+
+    service.reconcile()
+    service.reconcile()
+
+    failed = database.get_run(run["id"])
+    assert failed["status"] == "FAILED" and len(failed["attempts"]) == 1
+    assert failed["attempts"][0]["exit_code"] == "124:0"
+    assert cluster.submit_count == 1, "an exit record alone never queues another attempt"
+    event = next(e for e in failed["events"] if e["event_type"] == "JOB_FAILED")
+    assert event["details_json"]["source"] == pipeline_api.EXIT_RECORD_SOURCE
+
+
+@pytest.mark.parametrize("record", ["absent", "another job", "earlier execution", "truncated"])
+def test_forgotten_job_without_a_trustworthy_exit_record_is_held_until_cancelled(tmp_path, monkeypatch, record):
+    database, cluster, service, evaluation, result = _forgotten_evaluation(tmp_path, monkeypatch)
+    cluster.file_content = result
+    attempt = _evaluation_attempt(database, evaluation)
+    if record == "another job":
+        cluster.exit_records["9001"] = _exit_record("9002")
+    elif record == "earlier execution":
+        database.update_job_attempt(attempt["id"], restart_count=1)
+        cluster.exit_records["9001"] = _exit_record("9001", exit_code=1, restart_count=0)
+    elif record == "truncated":
+        cluster.exit_records["9001"] = _exit_record("9001")[:40]
+    submissions = cluster.submit_count
+
+    for _ in range(3):
+        service.reconcile()
+
+    held = _evaluation_attempt(database, evaluation)
+    assert database.get_evaluation(evaluation["id"])["status"] == evaluation["status"]
+    assert held["status"] == attempt["status"] and held["slurm_reason"] == pipeline_api.FORGOTTEN_JOB_HELD
+    reads = []
+    read = cluster.read_optional_file
+    cluster.read_optional_file = lambda path, *a, **k: reads.append(path) or read(path, *a, **k)
+    service.reconcile()
+    assert _evaluation_attempt(database, evaluation)["updated_at"] == held["updated_at"], "held once, not every scan"
+    assert reads == [], "nothing new appears between scans, so the capsule is not read again each time"
+    assert cluster.submit_count == submissions
+
+    service.cancel_evaluation(evaluation["id"])
+    service.reconcile()
+    cancelled = database.get_evaluation(evaluation["id"])
+    assert cancelled["status"] == "CANCELLED"
+    assert _evaluation_attempt(database, evaluation)["slurm_reason"] == pipeline_api.FORGOTTEN_JOB_CANCELLED
+
+
+def test_gateway_failure_while_reading_evidence_changes_nothing(tmp_path, monkeypatch):
+    database, cluster, service, evaluation, result = _completed_evaluation(tmp_path, monkeypatch)
+    cluster.status_details = {"End": str(int(time.time()) - 3600)}  # long past the result grace window
+    cluster.file_content = result
+    cluster.unreadable = True
+    service.reconcile()
+    assert database.get_evaluation(evaluation["id"])["status"] == evaluation["status"], \
+        "a result that could not be read is not an invalid result"
+    cluster.unreadable = False
+    service.reconcile()
+    assert database.get_evaluation(evaluation["id"])["status"] == "SUCCEEDED"
+
+
+def test_completed_training_waits_for_a_readable_checkpoint_descriptor(tmp_path, monkeypatch):
+    database = Database(tmp_path / "skynet.db")
+    cluster = FakeCluster()
+    service = make_pipeline_service(database, cluster)
+    monkeypatch.setattr(pipeline_api, "LOCAL_CAPSULE_ROOT", tmp_path / "capsules")
+    run = _create_submitted_run(service, "unreadable-descriptor")
+    _declare_checkpoint_output(database, run["id"])
+    cluster.state, cluster.unreadable = "COMPLETED", True
+    service.reconcile()
+    waiting = database.get_run(run["id"])
+    assert waiting["status"] != "FAILED"
+    assert not any(event["event_type"] == "CHECKPOINT_FINALIZATION_FAILED" for event in waiting["events"])
+    cluster.unreadable = False  # The gateway answers: the descriptor really is absent.
+    service.reconcile()
+    assert database.get_run(run["id"])["status"] == "FAILED"
+
+
+def test_unreachable_scheduler_leaves_attempts_as_they_are(tmp_path, monkeypatch, caplog):
+    database, cluster, service, evaluation, result = _completed_evaluation(tmp_path, monkeypatch)
+
+    def unreachable(job_ids, gateway="auto"):
+        raise ClusterError("sky1: SSH operation timed out; sky2: Connection closed")
+
+    cluster.job_status_snapshot = unreachable
+    with caplog.at_level("WARNING", logger="skynet_app.pipeline_api"):
+        assert service.reconcile()["ok"] and service.reconcile()["ok"]
+    assert database.get_evaluation(evaluation["id"])["status"] == evaluation["status"]
+    assert [r.message for r in caplog.records].count(
+        "Job status is degraded: Slurm cannot be queried (sky1: SSH operation timed out; sky2: Connection closed)"
+    ) == 1, "a lasting condition is reported when it starts, not on every scan"
+
+
+def test_database_failure_while_storing_a_valid_result_is_not_an_invalid_result(tmp_path, monkeypatch):
+    database, cluster, service, evaluation, result = _completed_evaluation(tmp_path, monkeypatch)
+    cluster.status_details = {"End": str(int(time.time()) - 3600)}  # long past the result grace window
+    cluster.file_content = result
+    store = database.upsert_evaluation_episode
+
+    def connection_lost(*args, **kwargs):
+        raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(database, "upsert_evaluation_episode", connection_lost)
+    with pytest.raises(psycopg.OperationalError):
+        service.reconcile()
+    assert database.get_evaluation(evaluation["id"])["status"] == evaluation["status"]
+    monkeypatch.setattr(database, "upsert_evaluation_episode", store)
+    service.reconcile()
+    assert database.get_evaluation(evaluation["id"])["status"] == "SUCCEEDED"
+
+
+def test_job_in_its_epilog_stays_running(tmp_path, monkeypatch):
+    database, cluster, service, evaluation, result = _completed_evaluation(tmp_path, monkeypatch)
+    cluster.state = "RUNNING"
+    service.reconcile()
+    assert database.get_evaluation(evaluation["id"])["status"] == "RUNNING"
+    cluster.state = "COMPLETING"  # What the live controller reports while a job releases its nodes.
+    service.reconcile()
+    assert database.get_evaluation(evaluation["id"])["status"] == "RUNNING"
+    assert _evaluation_attempt(database, evaluation)["status"] == "RUNNING"
 
 
 class GatewayRecoveryCluster(DelayedRecoveryCluster):
@@ -3102,6 +3344,7 @@ def test_evaluation_running_progress_does_not_count_as_completed(tmp_path, monke
     cluster = FakeCluster()
     service = make_pipeline_service(database, cluster)
     run, evaluation = _create_active_evaluation(service, "evaluation-running-progress")
+    evaluation = database.update_evaluation(evaluation["id"], status="RUNNING")
     task = evaluation["task_selection_json"][0]
     episode = dict(task=task, seed=0, episode_index=0, status="RUNNING", metrics={"worker_index": 0})
     record = dict(kind="episode_observed", total=1, episode=episode, recorded_at="2026-09-09T12:00:00Z")
@@ -3161,3 +3404,127 @@ def test_cluster_transport_is_pinned_into_new_runtime_without_mutating_request(t
         runtime_input, manifest, "sky2")
     assert runtime["environment"]["NCCL_P2P_DISABLE"] == expected
     assert runtime_input["environment"] == requested
+
+
+def test_evaluation_submission_retry_preserves_identity_and_pinned_protocol(tmp_path, monkeypatch):
+    db = Database(tmp_path / 'retry-evaluation.db')
+    cluster = FakeCluster()
+    service = make_pipeline_service(db, cluster)
+    monkeypatch.setattr(pipeline_api, 'LOCAL_CAPSULE_ROOT', tmp_path / 'capsules')
+    run, evaluation = _create_active_evaluation(service, 'retry-evaluation')
+    stage = next(x for x in run['stages'] if x['id'] == evaluation['stage_id'])
+    initial_config = stage['resolved_config_json']
+    previous = next(a for a in run['attempts'] if a['stage_id'] == stage['id'])
+    db.update_job_attempt(previous['id'], status='SUBMISSION_FAILED', slurm_job_id=None)
+    db.update_stage(stage['id'], status='FAILED')
+    db.update_evaluation(evaluation['id'], status='FAILED')
+    calls = []
+    monkeypatch.setattr(cluster, 'recover_submission', lambda *args: calls.append(args) or None, raising=False)
+    result = service.retry_evaluation_submission(evaluation['id'], 'sky2')['evaluation']
+    after = db.get_run(run['id'])
+    assert result['id'] == evaluation['id'] and result['stage_id'] == stage['id']
+    assert after['status'] == 'SUCCEEDED'
+    assert len([a for a in after['attempts'] if a['stage_id'] == stage['id']]) == 2
+    assert next(x for x in after['stages'] if x['id'] == stage['id'])['resolved_config_json'] == initial_config
+    assert calls == [(run['id'], previous['id'], previous['gateway'] or 'sky2')]
+    with pytest.raises(ValueError, match='no active attempt'):
+        service.retry_evaluation_submission(evaluation['id'], 'sky2')
+
+
+def test_evaluation_retry_requires_successful_receipt_lookup(tmp_path, monkeypatch):
+    db = Database(tmp_path / 'retry-lookup.db')
+    cluster = FakeCluster()
+    service = make_pipeline_service(db, cluster)
+    monkeypatch.setattr(pipeline_api, 'LOCAL_CAPSULE_ROOT', tmp_path / 'capsules')
+    run, evaluation = _create_active_evaluation(service, 'retry-lookup')
+    stage_id = evaluation['stage_id']
+    attempt = next(a for a in run['attempts'] if a['stage_id'] == stage_id)
+    db.update_job_attempt(attempt['id'], status='SUBMISSION_FAILED', slurm_job_id=None)
+    db.update_stage(stage_id, status='FAILED')
+    db.update_evaluation(evaluation['id'], status='FAILED')
+    def unavailable(*args):
+        raise ClusterError('scheduler lookup unavailable')
+    monkeypatch.setattr(cluster, 'recover_submission', unavailable, raising=False)
+    with pytest.raises(ClusterError):
+        service.retry_evaluation_submission(evaluation['id'], 'sky2')
+    assert len([a for a in db.get_run(run['id'])['attempts'] if a['stage_id'] == stage_id]) == 1
+    assert db.get_evaluation(evaluation['id'])['status'] == 'FAILED'
+
+
+def test_evaluation_retry_reuses_existing_slurm_receipt(tmp_path, monkeypatch):
+    db = Database(tmp_path / 'retry-receipt.db')
+    cluster = FakeCluster()
+    service = make_pipeline_service(db, cluster)
+    monkeypatch.setattr(pipeline_api, 'LOCAL_CAPSULE_ROOT', tmp_path / 'capsules')
+    run, evaluation = _create_active_evaluation(service, 'retry-receipt')
+    stage_id = evaluation['stage_id']
+    attempt = next(a for a in run['attempts'] if a['stage_id'] == stage_id)
+    db.update_job_attempt(attempt['id'], status='SUBMISSION_FAILED', slurm_job_id=None)
+    db.update_stage(stage_id, status='FAILED')
+    db.update_evaluation(evaluation['id'], status='FAILED')
+    receipt = Submission('99123', '99123', 'sky2', '/tmp/job.sbatch', '/tmp/run', recovered=True)
+    monkeypatch.setattr(cluster, 'recover_submission', lambda *args: receipt, raising=False)
+    service.retry_evaluation_submission(evaluation['id'], 'sky2')
+    after = db.get_run(run['id'])
+    attempts = [a for a in after['attempts'] if a['stage_id'] == stage_id]
+    assert len(attempts) == 1 and attempts[0]['slurm_job_id'] == '99123'
+    assert after['status'] == 'SUCCEEDED'
+    assert db.get_evaluation(evaluation['id'])['status'] == 'SUBMITTED'
+
+
+@pytest.mark.parametrize("scheduler_state", ["FAILED", "OUT_OF_MEMORY", "TIMEOUT"])
+def test_failed_evaluation_runtime_retry_keeps_frozen_stage(tmp_path, monkeypatch, scheduler_state):
+    db = Database(tmp_path / 'runtime-retry.db')
+    cluster = FakeCluster()
+    service = make_pipeline_service(db, cluster)
+    monkeypatch.setattr(pipeline_api, 'LOCAL_CAPSULE_ROOT', tmp_path / 'capsules')
+    run, evaluation = _create_active_evaluation(service, 'runtime-retry')
+    stage = next(s for s in run['stages'] if s['id'] == evaluation['stage_id'])
+    previous = next(a for a in run['attempts'] if a['stage_id'] == stage['id'])
+    db.update_job_attempt(previous['id'], status='FAILED', slurm_state=scheduler_state)
+    db.update_stage(stage['id'], status='FAILED')
+    db.update_evaluation(evaluation['id'], status='FAILED')
+    cluster.state = scheduler_state
+    monkeypatch.setattr(cluster, 'recover_submission', lambda *args: pytest.fail('Accepted jobs use accounting, not receipt recovery'), raising=False)
+    before = cluster.submit_count
+    result = service.retry_evaluation_submission(evaluation['id'], 'sky2')['evaluation']
+    after = db.get_run(run['id'])
+    assert cluster.submit_count == before + 1
+    assert result['id'] == evaluation['id'] and result['stage_id'] == stage['id']
+    assert after['status'] == 'SUCCEEDED'
+    assert next(s for s in after['stages'] if s['id'] == stage['id'])['resolved_config_json'] == stage['resolved_config_json']
+    assert len([a for a in after['attempts'] if a['stage_id'] == stage['id']]) == 2
+    with pytest.raises(ValueError):
+        service.retry_evaluation_submission(evaluation['id'], 'sky2')
+    assert cluster.submit_count == before + 1
+
+
+@pytest.mark.parametrize('scheduler_state', ['RUNNING', 'PENDING', 'COMPLETED', 'CANCELLED', 'UNKNOWN', None])
+def test_failed_evaluation_retry_rejects_unconfirmed_or_nonfailure_accounting(tmp_path, monkeypatch, scheduler_state):
+    db = Database(tmp_path / 'blocked-runtime-retry.db')
+    cluster = FakeCluster()
+    service = make_pipeline_service(db, cluster)
+    monkeypatch.setattr(pipeline_api, 'LOCAL_CAPSULE_ROOT', tmp_path / 'capsules')
+    run, evaluation = _create_active_evaluation(service, 'blocked-runtime-retry')
+    attempt = next(a for a in run['attempts'] if a['stage_id'] == evaluation['stage_id'])
+    db.update_job_attempt(attempt['id'], status='FAILED', slurm_state='FAILED')
+    db.update_stage(evaluation['stage_id'], status='FAILED')
+    db.update_evaluation(evaluation['id'], status='FAILED')
+    cluster.state = scheduler_state
+    if scheduler_state is None:
+        monkeypatch.setattr(cluster, 'job_statuses', lambda *args: ('sky2', {}))
+    before = cluster.submit_count
+    with pytest.raises(ValueError, match='confirmed failed Slurm job'):
+        service.retry_evaluation_submission(evaluation['id'], 'sky2')
+    assert cluster.submit_count == before
+    assert db.get_evaluation(evaluation['id'])['status'] == 'FAILED'
+
+
+@pytest.mark.parametrize('previous_status,enabled', [('PREEMPTED', True), ('SUBMISSION_UNCONFIRMED', False), ('RUNNING', False)])
+def test_evaluation_retry_distinguishes_past_preemption_from_live_attempt(tmp_path, previous_status, enabled):
+    service = make_pipeline_service(Database(tmp_path / 'retry-action.db'), FakeCluster())
+    evaluation = {'run_id': 'r', 'stage_id': 's', 'status': 'FAILED'}
+    run = {'stages': [{'id': 's', 'stage_type': 'EVALUATE', 'status': 'FAILED'}],
+           'attempts': [{'id': 'old', 'stage_id': 's', 'attempt_number': 1, 'status': previous_status},
+                        {'id': 'new', 'stage_id': 's', 'attempt_number': 2, 'status': 'FAILED', 'slurm_job_id': '999'}]}
+    assert service.evaluation_manual_actions(evaluation, run)['retry_submission']['enabled'] is enabled

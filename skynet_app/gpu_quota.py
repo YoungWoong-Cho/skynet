@@ -66,3 +66,46 @@ def idle_partition_quota(account, partition):
         raise ValueError("Slurm returned no explicit GPU limits for the idle normal account")
     return {"account": account, "partition": partition, "qos": qos, "limits": limits,
             "active_allocations": 0}
+
+
+def missing_idle_account_quotas(output, queues):
+    """Supplement gpu_usage's active-only table, isolating each probe failure."""
+    present = {
+        line.strip().strip("|").split("|", 1)[0].strip()
+        for line in output.splitlines() if line.lstrip().startswith("|")
+    }
+    receipts = []
+    for account, partition in queues:
+        if account in present:
+            continue
+        try:
+            receipts.append(idle_partition_quota(account, partition))
+        except Exception as error:
+            receipts.append({"account": account, "partition": partition, "error": str(error)})
+    return receipts
+
+
+def idle_quota_usage(receipt, columns):
+    """Translate a verified idle receipt without assuming unknown quotas are zero."""
+    if receipt.get("error"):
+        raise ValueError(str(receipt["error"]))
+    if type(receipt.get("active_allocations")) is not int or receipt["active_allocations"] != 0:
+        raise ValueError("Slurm did not confirm an idle account")
+    limits = receipt.get("limits")
+    if not isinstance(limits, dict) or not limits or any(
+        not (key == "gpu" or key.startswith("gpu:"))
+        or type(value) is not int or value < 0
+        for key, value in limits.items()
+    ):
+        raise ValueError("Slurm returned invalid idle GPU limits")
+    metrics = {}
+    for column in columns:
+        candidates = [limits[key] for key in ("gpu", "gpu:" + column) if key in limits]
+        metrics[column] = {"usage": 0, "limit": min(candidates) if candidates else None}
+    total_limits = [limits["gpu"]] if "gpu" in limits else []
+    typed_limits = [value for key, value in limits.items() if key.startswith("gpu:")]
+    if typed_limits:
+        total_limits.append(sum(typed_limits))
+    metrics["total_gpus"] = {"usage": 0, "limit": min(total_limits)}
+    metrics["cpu"] = {"usage": 0, "limit": None}
+    return metrics

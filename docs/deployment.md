@@ -63,7 +63,7 @@ systemctl --user status skynet.service
 journalctl --user -u skynet.service -n 100 --no-pager
 systemctl --user restart skynet.service
 systemctl --user stop skynet.service
-curl --fail http://127.0.0.1:8080/api/health
+curl --fail http://127.0.0.1:8080/api/workspace/session
 ```
 
 Use a single worker and no development reload watcher. Do not restart the old Mac app against its stale database after cutover.

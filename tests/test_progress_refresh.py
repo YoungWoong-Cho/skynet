@@ -208,3 +208,16 @@ def test_stop_discards_queued_progress_reads(service, monkeypatch):
     finally:
         release.set()
         wait_until_idle(service)
+
+
+@pytest.mark.parametrize("status", ["PENDING", "SUBMITTED", "CANCELLED", "SUCCEEDED"])
+def test_non_running_evaluations_never_queue_or_read_remote_progress(service, monkeypatch, status):
+    def unexpected(*args, **kwargs):
+        pytest.fail("A non-running evaluation must not download execution bodies or remote progress")
+    monkeypatch.setattr(service.database, "get_run", unexpected)
+    monkeypatch.setattr(service.database, "get_evaluation", unexpected)
+    service.cluster = SimpleNamespace(read_file=unexpected)
+    evaluation = {"id": "queued", "status": status, "run_id": "run"}
+    assert service._queue_list_progress_refresh("evaluation", [evaluation]) is False
+    assert service._progress_refresh_workers == 0
+    service._ingest_evaluation_progress(evaluation)

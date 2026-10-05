@@ -121,6 +121,10 @@ def plan_artifacts(source_sha, source_info, contract, render_identity):
                 "modality": modality, "camera_id": camera_id, "recipe": recipe,
                 "timing": contract["timing"], "render_identity": scene,
                 "dependencies": list(dependencies)}
+        if modality == 'point_cloud':
+            # Capture provenance may be reused from an older renderer. The
+            # derived bytes must still pin the current geometry implementation.
+            spec['derivation_revision'] = scene.get('renderer_revision', content_digest(scene))
         key = content_digest(spec)
         nodes.setdefault(key, {"artifact_key": key, "episode_key": source_info.get("episode_key", source_sha),
                                "camera_id": camera_id, "modality": modality, "recipe": recipe,
@@ -154,3 +158,97 @@ def plan_artifacts(source_sha, source_info, contract, render_identity):
             key = add(camera_id, "point_cloud", recipe, dependencies)
         nodes[key].setdefault("streams", []).append(stream["name"])
     return list(nodes.values())
+
+
+def reuse_recorded_captures(nodes, artifacts):
+    """Prefer verified saved captures without changing their producer identity.
+
+    A conversion consumes observations of the recording, not a fresh rendering
+    by the latest worker. The complete source, timing, camera recipe and pinned
+    scene/assets must match. Only the worker revision may differ; this is an
+    explicit saved-capture policy, NOT a claim that renderer code is equivalent.
+    A material change to capture semantics must change the camera/scene policy
+    in render_identity, and therefore cannot reuse captures under this policy.
+
+    Connected streams require one complete capture family. Never mix RGB/depth
+    from different renderers or generate a missing capture under an old identity.
+    The worker still checks manifests, bytes, frame alignment and calibration.
+    """
+    nodes = deepcopy(nodes)
+    by_key = {node['artifact_key']: node for node in nodes}
+
+    def signature(spec):
+        scene = spec.get('render_identity') or {}
+        if (not re.fullmatch('[0-9a-f]{64}', str(scene.get('renderer_revision', '')))
+                or any(not scene.get(key) for key in
+                       ('source_revision', 'task', 'robot', 'runtime', 'camera_policy'))):
+            return None
+        value = deepcopy(spec)
+        value['render_identity'].pop('renderer_revision')
+        return content_digest(value)
+
+    # Families retain the full old renderer identity. Reject unverified and
+    # malformed candidates even if this helper is called without the store.
+    families = {}
+    for artifact in artifacts:
+        spec = artifact.get('spec') or {}
+        if (artifact.get('state') != 'READY' or spec.get('schema') != ARTIFACT_SCHEMA
+                or spec.get('modality') not in {'rgb', 'depth'} or spec.get('dependencies') != []
+                or content_digest(spec) != artifact.get('artifact_key')
+                or not re.fullmatch('[0-9a-f]{64}', str(artifact.get('manifest_sha256', '')))
+                or not str(artifact.get('path', '')).startswith('/')):
+            continue
+        logical = signature(spec)
+        if logical:
+            family = content_digest(spec['render_identity'])
+            families.setdefault(family, {})[logical] = artifact
+
+    # A shared camera joins all its dependent streams into one component, so a
+    # merged cloud cannot accidentally combine two incompatible capture runs.
+    edges = {key: set() for key in by_key}
+    for key, node in by_key.items():
+        for dependency in node['dependencies']:
+            edges[key].add(dependency)
+            edges[dependency].add(key)
+    replacements, visited = {}, set()
+    for key in by_key:
+        if key in visited:
+            continue
+        component, pending = set(), [key]
+        while pending:
+            current = pending.pop()
+            if current in component:
+                continue
+            component.add(current)
+            pending.extend(edges[current] - component)
+        visited.update(component)
+        captures = [by_key[item] for item in component if by_key[item]['modality'] in {'rgb', 'depth'}]
+        wanted = {item['artifact_key']: signature(item['spec']) for item in captures}
+        if not wanted or None in wanted.values():
+            continue
+        current_family = content_digest(captures[0]['spec']['render_identity'])
+        # Prefer an exact current revision when it is already complete; else use
+        # a deterministic saved family. Artifact keys do not depend on labels.
+        for family in sorted(families, key=lambda item: (item != current_family, item)):
+            available = families[family]
+            if all(logical in available for logical in wanted.values()):
+                for old_key, logical in wanted.items():
+                    replacements[old_key] = available[logical]['spec']
+                break
+
+    result, keys = [], {}
+    for node in nodes:
+        original_key = node['artifact_key']
+        spec = deepcopy(replacements.get(original_key, node['spec']))
+        if node['dependencies']:
+            dependencies = [keys[key] for key in node['dependencies']]
+            identities = {content_digest(item['spec']['render_identity']): item['spec']['render_identity']
+                          for item in result if item['artifact_key'] in dependencies}
+            if len(identities) != 1:
+                raise ValueError('Derived observations require one complete capture identity')
+            spec['dependencies'] = dependencies
+            spec['render_identity'] = deepcopy(next(iter(identities.values())))
+        node.update(spec=spec, artifact_key=content_digest(spec), dependencies=list(spec['dependencies']))
+        keys[original_key] = node['artifact_key']
+        result.append(node)
+    return result

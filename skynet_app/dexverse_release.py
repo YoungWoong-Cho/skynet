@@ -1,5 +1,6 @@
 """Historical DexVerse release identities; not additional live collection choices."""
 
+from .cluster_runtime import DEFAULT_GATEWAY
 from .dexverse_versions import V1_TASKS, environment_profile
 
 V0_NAMES = {
@@ -52,7 +53,7 @@ def release_profile(target, task, cluster_root):
         task_name="DexVerse · " + info["name"],
         provider="huggingface",
         execution="slurm",
-        gateway="sky2",
+        gateway=DEFAULT_GATEWAY,
         image_capture=False,
     )
 

@@ -16,7 +16,7 @@ from .workspaces import COOKIE
 
 log = logging.getLogger(__name__)
 CHANNEL = "skynet_changes"
-TOPICS = frozenset({"data", "exports", "recordings", "adapters", "settings", "session"})
+TOPICS = frozenset({"data", "exports", "recordings", "adapters", "settings", "notes", "session"})
 
 
 class Subscription:

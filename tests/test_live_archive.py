@@ -14,14 +14,36 @@ from types import SimpleNamespace
 import pytest
 
 from skynet_app import live_xr_archive as module
+from skynet_app.cluster_runtime import DEFAULT_GATEWAY, ClusterClient, ClusterError
 from skynet_app.database import canonical_json
 from skynet_app.live_xr_archive_remote import archive_control
 
 
 class Transport:
     def candidates(self, host):
-        assert host in {"sky2", "bonjour-test"}
+        assert host in {"cluster-test", "bonjour-test"}
         return (host,)
+
+    def resolve_gateway(self, gateway):
+        assert gateway == DEFAULT_GATEWAY
+        return "cluster-test"
+
+    def _remote_path(self, path):
+        return path
+
+
+class Gateways(ClusterClient):
+    """Two configured gateways; the first refuses every connection."""
+
+    def __init__(self):
+        super().__init__(["down-test", "up-test"])
+        self.attempts = []
+
+    def ssh(self, host, command, **kwargs):
+        self.attempts.append(host)
+        if host == "down-test":
+            raise ClusterError(f"{host}: Connection refused")
+        return ""
 
     def _remote_path(self, path):
         return path
@@ -106,7 +128,7 @@ def test_large_control_request_survives_slow_reader_and_full_output_pipes(archiv
     deadline = threading.Timer(5, a.service.stopping.set)
     deadline.start()
     try:
-        result = a.service._call(a.live.cluster, "sky2", "verify", manifest="x" * 200000)
+        result = a.service._call(a.live.cluster, "cluster-test", "verify", manifest="x" * 200000)
         assert result == {"length": 200000, "operation": "verify"}
     finally:
         deadline.cancel()
@@ -121,7 +143,7 @@ def test_control_request_can_stop_while_large_input_is_blocked(archives, monkeyp
     stopping.start()
     try:
         with pytest.raises(RuntimeError, match="app shutdown"):
-            a.service._call(a.live.cluster, "sky2", "verify", manifest="x" * 200000)
+            a.service._call(a.live.cluster, "cluster-test", "verify", manifest="x" * 200000)
     finally:
         stopping.cancel()
         stopping.join()
@@ -133,7 +155,7 @@ def test_control_request_reports_remote_failure_before_large_input_is_read(archi
     a = archives
     monkeypatch.setattr(a.service, "_program", lambda: "import sys;sys.stderr.write('verification refused');sys.exit(9)")
     with pytest.raises(module.ClusterError, match="verification refused"):
-        a.service._call(a.live.cluster, "sky2", "verify", manifest="x" * 200000)
+        a.service._call(a.live.cluster, "cluster-test", "verify", manifest="x" * 200000)
     assert a.root.exists()
 
 
@@ -141,12 +163,14 @@ def test_complete_tree_streamed_verified_before_exact_source_removal(archives):
     a = archives
     result = a.service.archive(a.identifier)
     assert result["state"] == "VERIFIED" and not result["source_removed"] and a.root.exists()
+    assert result["gateway"] == "cluster-test"
     copied = Path(result["root"]).parent
     assert {item["path"] for item in result["manifest"]["files"]} == a.files.keys()
     assert (copied / "output/empty").is_dir()
     for name, content in a.files.items():
         assert (copied / name).read_bytes() == content
-    assert len(a.launches) == 3  # inventory + source stream + destination receive
+    # inventory + source stream + destination receive
+    assert [args[-2] for args in a.launches] == ["bonjour-test", "bonjour-test", "cluster-test"]
     sibling = a.root.parent / "another-session"
     sibling.mkdir()
     (sibling / "keep").write_text("untouched")
@@ -166,7 +190,8 @@ def test_busy_consumer_defers_cleanup_but_can_resolve_verified_source(archives):
     result = a.service.archive(a.identifier, cleanup=True)
     assert result["state"] == "CLEANUP_PENDING" and a.root.exists()
     transport, gateway, path = a.service.resolve(a.live.get(a.identifier), "recordings/live/20.pkl")
-    assert gateway == "sky2" and Path(path).read_bytes() == a.files["output/recordings/live/20.pkl"]
+    assert transport is a.service.cluster and gateway == DEFAULT_GATEWAY
+    assert Path(path).read_bytes() == a.files["output/recordings/live/20.pkl"]
     assert "/derived/" in a.service.derived_root(a.live.get(a.identifier))
     with pytest.raises(ValueError, match="not part"):
         a.service.resolve(a.live.get(a.identifier), "unknown.pkl")
@@ -407,3 +432,46 @@ def test_failed_unit_with_live_cgroup_descendants_blocks_archive(archives, monke
     with pytest.raises(ValueError, match="descendants are still running"):
         archive_control(dict(operation="manifest", **a.service._source(a.jobs[a.identifier])))
     assert a.root.exists()
+
+
+def test_stored_receipt_is_identified_by_its_root_not_by_the_host_that_received_it():
+    """A receipt written through a gateway that has since left the configuration."""
+
+    class Offline(ClusterClient):
+        def ssh(self, *args, **kwargs):
+            pytest.fail("Reading a saved receipt must not open a connection")
+
+    cluster = Offline(["sky1"])
+    identifier = "c94e16e6-6db0-4e66-b351-184aec09e0d2"
+    manifest = dict(schema="skynet.live-archive/v1", session_id=identifier,
+                    files=[dict(path="output/recordings/live/20.pkl", size_bytes=1, sha256="0" * 64)])
+    checksum = hashlib.sha256(canonical_json(manifest).encode()).hexdigest()
+    root = f"{module.CLUSTER.paths.datasets}/raw/dexverse-live/{identifier}/{checksum}/output"
+    job = dict(id=identifier, archive=dict(state="READY", gateway="sky2", root=root,
+                                           manifest=manifest, manifest_sha256=checksum))
+    assert module.archive_descriptor(job, cluster)["root"] == root
+    service = module.LiveArchiveService(SimpleNamespace(cluster=cluster))
+    try:
+        assert service.resolve(job, "recordings/live/20.pkl") == (
+            cluster, DEFAULT_GATEWAY, root + "/recordings/live/20.pkl")
+    finally:
+        service.stop()
+    other = "6a257afb-642c-41dd-b77e-e7cc92ee1b28"
+    for changed in (dict(root=root.replace(identifier, other)), dict(root=root + "/nested"), dict(gateway=None)):
+        with pytest.raises(ValueError, match="storage location is invalid"):
+            module.archive_descriptor(dict(job, archive=dict(job["archive"], **changed)), cluster)
+
+
+def test_copy_and_verification_use_the_gateway_that_answers_and_record_it(archives):
+    a = archives
+    cluster = a.service.cluster = Gateways()
+    result = a.service.archive(a.identifier)
+    assert result["state"] == "VERIFIED" and result["gateway"] == "up-test"
+    assert cluster.attempts == ["down-test", "up-test"]
+    # inventory + source stream on the workstation, then the receiving gateway
+    assert [args[-2] for args in a.launches] == ["bonjour-test", "bonjour-test", "up-test"]
+    assert a.service.cleanup_source(a.identifier)["state"] == "READY"
+    # verification on the cluster, then removal on the workstation
+    assert [args[-2] for args in a.launches[3:]] == ["up-test", "bonjour-test"]
+    assert cluster.attempts == ["down-test", "up-test"] * 2
+    assert a.live.get(a.identifier)["archive"]["gateway"] == "up-test"

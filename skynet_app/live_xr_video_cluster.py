@@ -83,7 +83,7 @@ def control_cluster(transport, job, generation, root, operation, **value):
                 raise ValueError("Waiting for Slurm to confirm video cancellation")
             return {"state": "CANCELLED"}
         program = "import json,sys; from pathlib import Path; p=Path(sys.argv[1]); print(p.read_text() if p.is_file() and p.stat().st_size < 100000 else '{}')"
-        metadata = json.loads(transport.ssh(gateway, "python3 -c " + shlex.quote(program) + " " + shlex.quote(root + "/video.json"), timeout=20))
+        metadata = json.loads(transport.run_with_fallback("python3 -c " + shlex.quote(program) + " " + shlex.quote(root + "/video.json"), gateway, attempt_timeout=20)[1])
         if state in TERMINAL:
             if state == "COMPLETED" and metadata.get("state") == "READY":
                 if metadata.get("path") != root + "/video.mp4":

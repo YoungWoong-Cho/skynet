@@ -9,8 +9,8 @@
     />
     <title>Skynet / Experiment Console</title>
     <meta name="hand-viewer-module" content="/static/hands-viewer.js" />
-    <meta name="episode-scene-module" content="/static/episode-scene.js" />
-    <link rel="stylesheet" href="/static/styles.css?v=recording-loading-20260919" />
+    <meta name="episode-scene-module" content="/static/episode-scene.js?v=dark-scene-20260920" />
+    <link rel="stylesheet" href="/static/styles.css?v=dark-scene-20260920" />
     <script
       type="application/skynet-script"
       data-workspace-src="/static/dialogs.js?v=consistent-20260912"
@@ -38,12 +38,17 @@
     ></script>
     <script
       type="application/skynet-script"
-      data-workspace-src="/static/episode-viewer.js?v=recording-loading-20260919"
+      data-workspace-src="/static/episode-viewer.js?v=dataset-preview-20260920"
       defer=""
     ></script>
     <script
       type="application/skynet-script"
       data-workspace-src="/static/app.js?v=consistent-20260912"
+      defer=""
+    ></script>
+    <script
+      type="application/skynet-script"
+      data-workspace-src="/static/notes.js"
       defer=""
     ></script>
     <script
@@ -58,7 +63,7 @@
     ></script>
     <script
       type="application/skynet-script"
-      data-workspace-src="/static/live-review.js?v=recording-loading-20260919"
+      data-workspace-src="/static/live-review.js?v=dataset-preview-20260920"
       defer=""
     ></script>
     <script
@@ -68,7 +73,7 @@
     ></script>
     <script
       type="application/skynet-script"
-      data-workspace-src="/static/policy-exports.js?v=consistent-20260912"
+      data-workspace-src="/static/policy-exports.js?v=dataset-preview-20260920"
       defer=""
     ></script>
     <script
@@ -101,6 +106,9 @@
             Open workspace
           </button>
           <p id="workspace-message" role="status" aria-live="polite"></p>
+          <button id="workspace-retry" class="button" type="button" hidden="">
+            Retry connection
+          </button>
         </form>
       </div>
     </section>
@@ -183,9 +191,7 @@
           <div class="connection-control">
             <label for="gateway">Cluster gateway</label>
             <select id="gateway" name="gateway">
-              <option value="auto">Auto: sky1 then sky2</option>
-              <option value="sky1">Only sky1</option>
-              <option value="sky2">Only sky2</option>
+              <!-- gateway-options -->
             </select>
             <span
               id="connection-dot"
@@ -726,7 +732,25 @@
               >
                 Adapters
               </button>
+              <button id="experiment-tab-notes" type="button" role="tab" aria-selected="false"
+                tabindex="-1" aria-controls="experiment-notes" data-experiment-tab="notes">Notes</button>
             </nav>
+            <section id="experiment-notes" data-tab-panel="notes" role="tabpanel" aria-labelledby="experiment-tab-notes" hidden>
+              <section class="panel table-panel">
+                <div class="panel-heading">
+                  <h2>Notes</h2>
+                  <div class="panel-heading-actions"><div class="toolbar">
+                    <input id="notes-search" type="search" aria-label="Filter notes" placeholder="Filter notes" />
+                    <button id="new-note" class="button button-accent" type="button" aria-haspopup="dialog" aria-controls="note-editor-dialog">New note</button>
+                  </div></div>
+                </div>
+                <div id="notes-error" class="inline-alert" role="alert" hidden></div>
+                <div id="notes-location" class="panel-heading" hidden>
+                  <nav id="notes-path" class="page-actions" aria-label="Note path"></nav>
+                </div>
+                <div id="notes-table" class="table-scroll identity-table"></div>
+              </section>
+            </section>
             <section
               id="presets"
               data-tab-panel="presets"
@@ -859,48 +883,24 @@
                     <div>
                       <h2>Configure a training run</h2>
                       <p>
-                        Choose training data, an algorithm, a runtime, and
-                        cluster resources.
+                        Choose an algorithm and code, then complete each step
+                        to configure the training run.
                       </p>
-                      <p id="experiment-revision-intent" class="secondary">
-                        Submitted specifications are immutable. Changes create a
-                        new experiment revision.
-                      </p>
+                      <p id="experiment-step-status" class="secondary" aria-live="polite"></p>
+                      <p id="experiment-revision-intent" class="secondary" hidden></p>
                     </div>
-                    <span id="adapter-status" class="quiet-label"
+                    <span id="adapter-status" class="quiet-label" hidden
                       >Loading adapters...</span
                     >
                   </div>
 
-                  <fieldset class="form-section" id="training-data-section">
-                    <legend>1. Training data</legend>
-                    <div class="form-grid">
-                      <div class="field span-4">
-                        <label for="experiment-data-bundle"
-                          >Training dataset</label
-                        >
-                        <select id="experiment-data-bundle" disabled="">
-                          <option value="">Loading prepared datasets…</option>
-                        </select>
-                        <small id="experiment-data-bundle-status"
-                          >Choose the prepared result to use for
-                          training.</small
-                        >
-                        <div
-                          id="experiment-extra-data-inputs"
-                          class="form-grid"
-                        ></div>
-                      </div>
-                    </div>
-                  </fieldset>
-                  <fieldset class="form-section">
-                    <legend>2. Algorithm and code</legend>
+                  <fieldset class="form-section" id="training-code-section" data-experiment-step="code">
+                    <legend>1. Algorithm and code</legend>
                     <div class="form-grid">
                       <div class="field span-2">
                         <label for="experiment-name">Experiment name</label>
                         <input
                           id="experiment-name"
-                          value="encoder-baseline"
                           maxlength="96"
                           pattern="[A-Za-z0-9][A-Za-z0-9_.-]*"
                           required=""
@@ -911,7 +911,7 @@
                           >Algorithm / adapter</label
                         >
                         <select id="experiment-adapter" required="" disabled="">
-                          <option value="">Loading active adapters...</option>
+                          <option value="">Loading adapters...</option>
                         </select>
                         <small id="adapter-capabilities"
                           >Repository defaults and capabilities come from the
@@ -986,7 +986,29 @@
                       </div>
                     </div>
                   </fieldset>
-                  <fieldset class="form-section" id="training-runtime-section">
+                  <fieldset class="form-section" id="training-data-section" data-experiment-step="data" disabled hidden>
+                    <legend>2. Training datasets</legend>
+                    <p id="experiment-data-empty" class="secondary" hidden></p>
+                    <div class="form-grid">
+                      <div class="field span-4">
+                        <label for="experiment-data-bundle"
+                          >Training dataset</label
+                        >
+                        <select id="experiment-data-bundle" disabled="">
+                          <option value="">Loading prepared datasets…</option>
+                        </select>
+                        <small id="experiment-data-bundle-status"
+                          >Choose the prepared result to use for
+                          training.</small
+                        >
+                        <div
+                          id="experiment-extra-data-inputs"
+                          class="form-grid"
+                        ></div>
+                      </div>
+                    </div>
+                  </fieldset>
+                  <fieldset class="form-section" id="training-runtime-section" data-experiment-step="runtime" disabled hidden>
                     <legend>3. Runtime</legend>
                     <div class="form-grid">
                       <div class="field">
@@ -1035,7 +1057,7 @@
                     </div>
                   </fieldset>
 
-                  <fieldset class="form-section">
+                  <fieldset class="form-section" id="training-settings-section" data-experiment-step="settings" disabled hidden>
                     <legend>4. Training settings</legend>
                     <div class="form-grid">
                       <div class="field">
@@ -1215,8 +1237,8 @@ trainer.deterministic=true"
                     </div>
                   </fieldset>
 
-                  <fieldset class="form-section">
-                    <legend>5. GPU and time</legend>
+                  <fieldset class="form-section" id="training-resources-section" data-experiment-step="resources" disabled hidden>
+                    <legend>5. Resources</legend>
                     <div class="form-grid">
                       <div class="field">
                         <label for="resource-policy">Queue policy</label>
@@ -1269,7 +1291,8 @@ trainer.deterministic=true"
                         <input
                           id="resource-cpus"
                           type="number"
-                          value="12"
+                          value="8"
+                          readonly
                           min="1"
                           max="128"
                         />
@@ -1295,8 +1318,8 @@ trainer.deterministic=true"
                     </div>
                   </fieldset>
 
-                  <fieldset class="form-section">
-                    <legend>Checkpoint and variants</legend>
+                  <fieldset class="form-section" id="training-checkpoint-section" data-experiment-step="checkpoint" disabled hidden>
+                    <legend>6. Checkpoint and variants</legend>
                     <div class="form-grid">
                       <div class="field">
                         <label for="checkpoint-mode">Checkpoint</label>
@@ -1390,8 +1413,8 @@ trainer.deterministic=true"
                     </div>
                   </fieldset>
 
-                  <fieldset class="form-section">
-                    <legend>Tracking and evaluation</legend>
+                  <fieldset class="form-section" id="training-tracking-section" data-experiment-step="tracking" disabled hidden>
+                    <legend>7. Tracking and evaluation</legend>
                     <div class="form-grid">
                       <div class="tracking-provider-grid span-4">
                         <label
@@ -1939,7 +1962,7 @@ trainer.deterministic=true"
                     </thead>
                     <tbody id="runs-body">
                       <tr class="empty-row">
-                        <td colspan="11">Open this tab to load runs.</td>
+                        <td colspan="12">Open this tab to load runs.</td>
                       </tr>
                     </tbody>
                   </table>
@@ -2071,6 +2094,17 @@ trainer.deterministic=true"
                         >
                       </div>
                     </details>
+                    <div id="evaluation-target-fields" class="field span-2" hidden>
+                      <label for="evaluation-target-dataset">Evaluation dataset</label>
+                      <select id="evaluation-target-dataset" disabled>
+                        <option value="">Choose a target hand dataset...</option>
+                      </select>
+                      <label class="checkbox-label">
+                        <input id="evaluation-unseen-hand" type="checkbox" checked disabled />
+                        Unseen hand
+                      </label>
+                      <small>Fixes the target hand and scene. Unseen hand excludes hands in this run’s training inputs.</small>
+                    </div>
                     <div class="field span-2">
                       <label for="evaluation-suite">Suite</label>
                       <select id="evaluation-suite" required="">
@@ -3356,11 +3390,7 @@ trainer.deterministic=true"
                                     <label for="collection-gateway"
                                       >Gateway</label
                                     ><select id="collection-gateway">
-                                      <option value="auto">
-                                        Auto: sky1 then sky2
-                                      </option>
-                                      <option value="sky1">sky1</option>
-                                      <option value="sky2">sky2</option>
+                                      <!-- gateway-options -->
                                     </select>
                                   </div>
                                   <div class="field">
@@ -4254,9 +4284,7 @@ Select a session.</pre
                       <div class="field">
                         <label for="data-import-gateway">SSH gateway</label
                         ><select id="data-import-gateway">
-                          <option value="auto">Auto: sky1, then sky2</option>
-                          <option value="sky1">sky1</option>
-                          <option value="sky2">sky2</option>
+                          <!-- gateway-options -->
                         </select>
                       </div>
                       <div class="field">
@@ -4606,6 +4634,12 @@ Select a session.</pre
                   >
                     Inspect files
                   </button>
+                  <label for="storage-inspection-scope">Inspect</label>
+                  <select id="storage-inspection-scope">
+                    <option value="all">All managed outputs</option>
+                    <option value="pretrained">Pretrained model assets</option>
+                    <option value="dependencies">Unused environments, repositories and model caches</option>
+                  </select>
                 </div>
               </form>
               <div class="settings-grid settings-grid-single">
@@ -4979,6 +5013,7 @@ Select a session.</pre
             role="alert"
             hidden=""
           ></p>
+          <section id="prepared-dataset-preview" hidden=""></section>
           <div id="prepared-dataset-content"></div>
         </section>
       </dialog>
@@ -5355,6 +5390,42 @@ Select a session.</pre
       </section>
     </dialog>
 
+    <dialog id="workspace-note-dialog" class="app-dialog" data-dialog-title="Note">
+      <section data-dialog-panel>
+        <template data-dialog-actions><a id="workspace-note-download" class="button button-outline" hidden>Download</a><button id="workspace-note-edit" class="button button-outline" type="button" aria-haspopup="dialog" aria-controls="note-editor-dialog" hidden>Edit</button><button id="workspace-note-delete" class="button button-danger" type="button" hidden>Delete</button></template>
+        <p id="workspace-note-date" class="hint"></p>
+        <div id="workspace-note-error" class="inline-alert" role="alert" hidden></div>
+        <article id="workspace-note-content" class="document-content"></article>
+      </section>
+    </dialog>
+    <dialog id="note-editor-dialog" class="app-dialog" data-dialog-title="New note">
+      <form id="note-editor-form" class="dialog-form" data-dialog-panel>
+        <div class="form-grid">
+          <div class="field span-2">
+            <label for="note-editor-title">Title</label>
+            <input id="note-editor-title" required />
+          </div>
+          <div class="field span-2">
+            <label for="note-editor-folder">Folder</label>
+            <select id="note-editor-folder"></select>
+          </div>
+          <div class="field span-4">
+            <label for="note-editor-markdown">Markdown</label>
+            <textarea id="note-editor-markdown" rows="20" spellcheck="false"></textarea>
+          </div>
+          <div class="field span-4">
+            <label for="note-editor-files">Attachments</label>
+            <div id="note-editor-attachments" class="table-scroll identity-table"></div>
+            <input id="note-editor-files" type="file" accept=".svg,.png,.jpg,.jpeg,.webp,.gif,.json,.html,.csv,.txt,.md" multiple />
+            <small>Reference an attachment by its file name, for example ![Plot](plot.svg).</small>
+          </div>
+        </div>
+        <div id="note-editor-error" class="inline-alert" role="alert" hidden></div>
+        <div class="form-actions">
+          <button id="note-editor-save" class="button button-accent" type="submit">Save</button>
+        </div>
+      </form>
+    </dialog>
     <template id="app-dialog-layout">
       <div class="panel-heading dialog-heading">
         <div class="dialog-heading-text">

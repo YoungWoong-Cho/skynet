@@ -95,7 +95,8 @@ class EpisodePreviews:
         transport, gateway, _ = archive.resolve(job, job["recordings"][index])
         candidates = [(transport, gateway, f"{WORK_ROOT}/hands/{profile['robot']}/{digest}")]
         if bundle.get("root") and job.get("gateway"):
-            candidates.append((self.reviews.live.transport(job), job["gateway"], bundle["root"]))
+            origin = self.reviews.live.transport(job)
+            candidates.append((origin, origin.gateway_for(job["gateway"]), bundle["root"]))
         error = None
         seen = set()
         for transport, gateway, root in candidates:
@@ -104,7 +105,7 @@ class EpisodePreviews:
             seen.add((gateway, root))
             code = inspect.getsource(verified_hand_file) + "\nimport json\nprint(json.dumps(verified_hand_file(" + repr(dict(request, root=root)) + ")))\n"
             try:
-                result = json.loads(transport.ssh(gateway, "python3 -", stdin=code, timeout=20).strip().splitlines()[-1])
+                result = json.loads(transport.run_with_fallback("python3 -", gateway, stdin=code, attempt_timeout=20)[1].strip().splitlines()[-1])
                 return transport, gateway, result
             except (OSError, ValueError, RuntimeError) as exc:
                 error = exc
@@ -132,7 +133,7 @@ class EpisodePreviews:
                         if "isaac_lab" in p.versions and p.environment_path), None)
         if not runtime:
             raise ValueError("No configured Python environment can read recorded arrays")
-        if gateway in CLUSTER.gateways:
+        if transport is archive.cluster:
             base = json.loads((self.reviews.live.root / "config/live_video.json").read_text())
             pinned = environment_profile(base, profile["task"], cluster_root=WORK_ROOT)
             if pinned["source_revision"] != profile["source_revision"]:
@@ -176,7 +177,7 @@ class EpisodePreviews:
             except (OSError, ValueError, RuntimeError) as exc:
                 request["hand_visual_warning"] = str(exc)
             code = self.program + "\nprint(json.dumps(prepare_preview(" + repr(request) + ")))\n"
-            reply = transport.ssh(gateway, shlex.quote(python) + " -", stdin=code, timeout=240)
+            _, reply = transport.run_with_fallback(shlex.quote(python) + " -", gateway, stdin=code, attempt_timeout=240)
             result = json.loads(reply.strip().splitlines()[-1])
             if result != {"state": "READY"}:
                 raise ValueError("Recorded scene preparation did not complete")

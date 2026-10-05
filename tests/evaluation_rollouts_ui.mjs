@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {JSDOM} from 'jsdom';
-const w = new JSDOM(await readFile(new URL('../static/index.html', import.meta.url),'utf8'), {runScripts:'outside-only', pretendToBeVisual:true, url:'http://localhost:8080/#evaluations'}).window;
+import {indexHtml} from './index_page.cjs';
+const w = new JSDOM(indexHtml(), {runScripts:'outside-only', pretendToBeVisual:true, url:'http://localhost:8080/#evaluations'}).window;
 const observers=[]; const Observer=w.MutationObserver;
 w.MutationObserver=class extends Observer { constructor(callback){super(callback);observers.push(this);} };
 const el=id=>w.document.getElementById(id);
@@ -38,6 +39,14 @@ try {
    assert.equal(evaluationRow().querySelector('[data-cancel-action]').textContent,'Cancel');
    assert.equal(evaluationRow().querySelector('[data-delete-kind]'),null);
  }
+ // History refresh must not reload submission catalogs or training suggestions.
+ const oldSuites=w.loadEvaluationSuites, oldHistoryApi=w.api;
+ const historyCalls=[];
+ w.loadEvaluationSuites=()=>{throw new Error('History loaded submission catalogs');};
+ w.api=async url=>{historyCalls.push(url);assert.equal(url,'/api/evaluations');return {evaluations:[base]};};
+ await w.loadEvaluations(true);
+ assert.deepEqual(historyCalls,['/api/evaluations']);
+ w.loadEvaluationSuites=oldSuites;w.api=oldHistoryApi;
  const originalApi=w.api, originalConfirm=w.askUserDialog;
  const cancelCalls=[];
  w.api=(url,options)=>{cancelCalls.push({url,options});return Promise.reject(new Error('offline'));};
@@ -128,7 +137,7 @@ try {
    el('evaluation-search').value='unrelated run';
    el('evaluation-state-filter').value='FAILED';
    w.prepareEvaluationSubmission();
-   w.loadEvaluations=async()=>w.setupEvaluationTest([submitted,base,other]);
+   w.loadEvaluations=async()=>{throw new Error('A successful submission must not depend on history loading');};
    w.api=(url,options)=>options?.method==='POST'
      ? Promise.resolve({evaluation:submitted})
      : new Promise(resolve=>{resolveDetail=resolve;});
@@ -144,8 +153,45 @@ try {
    await flush();
    w.setupEvaluationTest([submitted,base,other]);
    assert.equal(el('evaluation-detail').closest('dialog'),el('evaluation-detail-dialog'),'refresh preserves the modal placement');
-   row.querySelector('button').click();
+   row.querySelector('[data-evaluation-action]').click();
    assert.equal(el('evaluation-detail').hidden,true,'the submitted row closes with one click');
  }
+ // Runtime failures reuse the existing canonical retry action and evaluation ID.
+ const failed={...base,status:'FAILED',manual_actions:{retry_submission:{enabled:true,label:'Retry evaluation'}},episodes:[]};
+ w.setupEvaluationTest([failed]);
+ w.api=async()=>({evaluation:failed});
+ el('evaluations-body').querySelector('[data-evaluation-action]').click();
+ await flush();
+ const retry=el('evaluation-detail-actions').querySelector('[data-evaluation-retry-submission]');
+ assert.equal(retry.textContent,'Retry evaluation');
+ let acceptRetry; const retryCalls=[];
+ w.api=(url,options)=>{retryCalls.push({url,options});return options?.method==='POST'
+   ? new Promise(resolve=>{acceptRetry=resolve;})
+   : Promise.resolve({evaluation:{...failed,status:'PENDING',manual_actions:{retry_submission:{enabled:false}},episodes:[]}});};
+ retry.click();retry.click();
+ assert.equal(retryCalls.length,1,'disabled action prevents duplicate submission');
+ assert.equal(retryCalls[0].url,'/api/evaluations/eval/retry-submission');
+ assert.equal(retryCalls[0].options.method,'POST');
+ acceptRetry({evaluation:{...failed,status:'PENDING'}});await flush();
+ assert.equal(el('evaluation-detail-actions').querySelector('[data-evaluation-retry-submission]'),null,'active retry cannot be submitted again');
+ // A succeeded job whose result read failed re-reads result.json instead of rerunning episodes.
+ const unread={...base,id:'unread',status:'FAILED',manual_actions:{retry_submission:{enabled:false},reread_result:{enabled:true,label:'Re-read result'}},episodes:[]};
+ w.setupEvaluationTest([unread]);
+ w.api=async()=>({evaluation:unread});
+ el('evaluations-body').querySelector('[data-evaluation-action]').click();
+ await flush();
+ assert.equal(el('evaluation-detail-actions').querySelector('[data-evaluation-retry-submission]'),null,'no rerun is offered for a succeeded job');
+ const reread=el('evaluation-detail-actions').querySelector('[data-evaluation-reread-result]');
+ assert.equal(reread.textContent,'Re-read result');
+ let acceptReread; const rereadCalls=[];
+ w.api=(url,options)=>{rereadCalls.push({url,options});return options?.method==='POST'
+   ? new Promise(resolve=>{acceptReread=resolve;})
+   : Promise.resolve({evaluation:{...unread,status:'SUCCEEDED',manual_actions:{reread_result:{enabled:false}},episodes:[]}});};
+ reread.click();reread.click();
+ assert.equal(rereadCalls.length,1,'disabled action prevents a duplicate read');
+ assert.equal(rereadCalls[0].url,'/api/evaluations/unread/reread-result');
+ assert.equal(rereadCalls[0].options.method,'POST');
+ acceptReread({evaluation:{...unread,status:'SUCCEEDED'}});await flush();
+ assert.equal(el('evaluation-detail-actions').querySelector('[data-evaluation-reread-result]'),null,'a recovered result cannot be read again');
  console.log('Evaluation UI: immediate panel, rollout rows, modal, playback, row switching, submission placement and field order passed.');
 } finally {for(const observer of observers)observer.disconnect();await flush();w.close();}

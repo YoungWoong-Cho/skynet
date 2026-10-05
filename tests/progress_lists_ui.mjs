@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {JSDOM} from 'jsdom';
+import {indexHtml} from './index_page.cjs';
 
-const w = new JSDOM(await readFile(new URL('../static/index.html', import.meta.url), 'utf8'), {
+const w = new JSDOM(indexHtml(), {
   runScripts:'outside-only', pretendToBeVisual:true, url:'http://localhost:8080/#runs',
 }).window;
 const observers=[];const Observer=w.MutationObserver;

@@ -146,11 +146,11 @@ class LocalTransport:
         assert Path(path).resolve().is_relative_to(self.root)
         return path
 
-    def ssh(self, gateway, command, *, stdin=None, **kwargs):
+    def run_with_fallback(self, command, gateway, *, stdin=None, **kwargs):
         if stdin is None:
             words = shlex.split(command)
             marker = Path(words[words.index("-f") + 1].rstrip(";"))
-            return marker.read_text() if marker.exists() else ""
+            return gateway, marker.read_text() if marker.exists() else ""
         self.uploads += 1
         completed = subprocess.run(
             shlex.split(command),
@@ -159,7 +159,7 @@ class LocalTransport:
             text=True,
             check=True,
         )
-        return completed.stdout
+        return gateway, completed.stdout
 
 
 def test_remote_upload_checks_all_files_and_reuses_ready_bundle(source, tmp_path):
@@ -182,6 +182,47 @@ def test_remote_upload_rejects_corrupt_bundle_without_ready_marker(source, tmp_p
     assert "checksum mismatch" in error.value.stderr
     assert not list(remote_root.rglob("READY"))
     assert not list(remote_root.rglob(".hand-*"))
+
+
+@pytest.mark.parametrize("reply_lost", [False, True])
+def test_remote_upload_falls_back_to_another_gateway_without_replacing_a_bundle(
+    source, tmp_path, reply_lost
+):
+    from skynet_app.cluster_runtime import ClusterClient, ClusterError
+
+    path, manifest = build(source)
+    remote_root = tmp_path / "remote"
+    local = LocalTransport(remote_root)
+    bundle = remote_root / "hands" / manifest["robot"] / manifest["digest"]
+    attempts, published = [], []
+
+    def files():
+        return {p: p.stat().st_mtime_ns for p in sorted(bundle.rglob("*"))}
+
+    class Client(ClusterClient):
+        def _remote_path(self, path):
+            return local._remote_path(path)
+
+        def ssh(self, host, command, *, stdin=None, timeout=30):
+            attempts.append(host)
+            if host == "first" and not reply_lost:
+                raise ClusterError("first: connection refused")
+            output = local.run_with_fallback(command, host, stdin=stdin)[1]
+            if host == "first":
+                # The transfer finished on shared storage, but its reply never arrived.
+                published.append(files())
+                raise ClusterError("first: SSH operation timed out")
+            return output
+
+    remote = hands.upload(path, str(remote_root), Client(["first", "second"]), "first")
+    assert attempts == ["first", "second", "first", "second"]
+    assert local.uploads == (2 if reply_lost else 1)
+    assert remote == str(bundle) and RUNTIME["read_bundle"](remote)[1] == manifest
+    assert (bundle / "READY").read_text() == manifest["digest"]
+    assert not list(remote_root.rglob(".hand-*"))
+    if reply_lost:
+        # The second gateway verified the same digest and kept the published files.
+        assert published[-1] and files() == published[-1]
 
 
 def test_catalog_exposes_thirteen_imported_variants_and_missing_mesh_reason():

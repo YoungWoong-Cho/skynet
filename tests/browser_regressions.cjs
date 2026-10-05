@@ -18,7 +18,7 @@ function load(names, globals = {}) {
 
 test('Completed includes SUCCEEDED without including failed runs; Slurm search works', () => {
   const elements = { runSearch: { value: '' }, runStatusFilter: { value: 'completed' } };
-  const c = load(['filteredRuns'], { elements, runRows: [
+  const c = load(['jobStatusLabel', 'trainingAdapterLabel', 'filteredRuns'], { elements, runRows: [
     { id: 'a', status: 'SUCCEEDED', latest_attempt: { slurm_job_id: '123' } },
     { id: 'b', status: 'COMPLETED' }, { id: 'c', status: 'FAILED' },
   ] });
@@ -55,7 +55,7 @@ test('seed validation rejects malformed, empty and unsafe values', () => {
   }
 });
 test('submitted variant uses persisted latest attempt rather than NOT SUBMITTED', () => {
-  const c = load(['normalizedRunState', 'runAttemptCount', 'runAttemptRecords', 'attemptHasSlurmSubmission', 'runHasExplicitPreflightFailure', 'variantRunDisplayState'], {
+  const c = load(['jobStatusLabel', 'normalizedRunState', 'runAttemptCount', 'runAttemptRecords', 'attemptHasSlurmSubmission', 'runHasExplicitPreflightFailure', 'variantRunDisplayState'], {
     explicitBoolean: () => null, firstValue: (...v) => v.find(x => x != null),
   });
   assert.equal(c.variantRunDisplayState({ status: 'FAILED', attempt_count: 1, latest_attempt: { slurm_job_id: '1', status: 'FAILED' } }), 'FAILED');
@@ -63,8 +63,9 @@ test('submitted variant uses persisted latest attempt rather than NOT SUBMITTED'
 });
 test('adapter view uses the versions returned by the API', async () => {
   const field = () => ({ value: '', textContent: '' });
-  const elements = Object.fromEntries(['adapterEditor','adapterEditorTitle','adapterEditorStatus','adapterEditorSlug','adapterEditorName','adapterManifest','adapterDescription','adapterChangeNote','adapterValidationRepository','adapterValidationRevision','experimentSource','experimentRevision'].map(name => [name, field()]));
+  const elements = Object.fromEntries(['adapterEditor','adapterEditorMode','adapterEditorTitle','adapterEditorStatus','adapterEditorSlug','adapterEditorName','adapterManifest','adapterDescription','adapterChangeNote','adapterValidationRepository','adapterValidationRevision','experimentSource','experimentRevision'].map(name => [name, field()]));
   const versions = [{ version_number: 2 }];
+  elements.adapterEditor.querySelector = () => ({});
   let rendered;
   let error;
   const c = load(['openAdapter'], { elements, currentRevealLauncher: () => null, disclosureToken: () => 1, disclosureTokenIsCurrent: () => true,
@@ -89,10 +90,6 @@ test('submission handoff accepts the actual backend submitted array', () => {
   const c = load(['submittedTrainingRunRecords', 'explicitlySubmittedTrainingRunRecords']);
   assert.equal(c.explicitlySubmittedTrainingRunRecords({ revision_number: 1, submitted: [{ run_id: 'new-run', status: 'FAILED' }] })[0].id, 'new-run');
 });
-test('bundle selection is unsupported without a declared binding', () => {
-  const c = load(['datasetBindingValue', 'experimentBundleCompatibility'], { selectedAdapter: () => ({}), declaredAdapterInputFields: () => [] });
-  assert.equal(c.experimentBundleCompatibility({}).compatible, false);
-});
 
 test('zero quota and missing quota never invent a free GPU', () => {
   const c = load(['gpuAllocationCell'], { escapeHtml: String, userColor: () => '#000' });
@@ -115,14 +112,19 @@ test('structured API errors retain their explanation and field location', () => 
   assert.ok(!c.apiErrorMessage({ code: 'MISSING_RUNTIME', errors: ['Install runtime'] }).includes('[object Object]'));
 });
 
+test('an adapter that declares no dataset binding has no data requirement', () => {
+  const c = load(['datasetAssignmentVersionId', 'adapterDataContracts', 'datasetBindingValue', 'experimentBundleCompatibility'], { selectedAdapter: () => ({}), declaredAdapterInputFields: () => [] });
+  assert.equal(c.experimentBundleCompatibility({}).compatible, true);
+});
+
 test('bundle compatibility rejects local files and extra unconsumed data', () => {
-  const c = load(['datasetBindingValue', 'experimentBundleCompatibility'], { selectedAdapter: () => ({}), declaredAdapterInputFields: () => [{data_binding: {role:'training_data', position:0, formats:['lerobot-v2.0']}}] });
+  const c = load(['datasetAssignmentVersionId', 'adapterDataContracts', 'datasetBindingValue', 'experimentBundleCompatibility'], { selectedAdapter: () => ({}), declaredAdapterInputFields: () => [{data_binding: {role:'training_data', position:0, formats:['lerobot-v2.0']}}] });
   const assignment = {role:'training_data', position:0, version:{format:'lerobot-v2.0',path:'/cluster/data',status:'READY'}};
   assert.equal(c.experimentBundleCompatibility({assignments:[assignment]}).compatible, true);
   assert.match(c.experimentBundleCompatibility({assignments:[{...assignment,version:{...assignment.version,metadata:{storage_location:'workstation'}}}]}).message, /collection workstation/);
   assert.equal(c.experimentBundleCompatibility({assignments:[{...assignment,version:{...assignment.version,status:'LOCAL'}}]}).compatible, false);
   assert.match(c.experimentBundleCompatibility({assignments:[assignment,{...assignment,position:1}]}).message, /cannot consume/);
-  assert.match(c.experimentBundleCompatibility({assignments:[assignment,assignment]}).message, /duplicate/);
+  assert.match(c.experimentBundleCompatibility({assignments:[assignment,assignment]}).message, /Duplicate/);
 });
 
 test('collection defaults preserve zero and false, respect gateway choice and require fresh evidence', () => {

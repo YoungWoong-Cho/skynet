@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from skynet_app.cluster_runtime import DEFAULT_GATEWAY, ClusterClient, ClusterError
 from skynet_app.database import canonical_json
 from skynet_app.live_xr_archive_remote import archive_control
 from skynet_app.live_xr_review import LiveReviewService
@@ -15,6 +16,7 @@ from skynet_app.recording_file_deletion import (
     RecordingFileMaintenance,
     recording_identity,
 )
+from tests.test_maintenance import LocalCluster
 from tests.test_recording_deletion import recording  # noqa: F401
 
 
@@ -90,13 +92,13 @@ def files(recording, monkeypatch):  # noqa: F811 - imported pytest fixture
         type(
             "Cluster",
             (),
-            {"paths": type("Paths", (), {"datasets": str(root / "datasets")})()},
+            {"paths": type("Paths", (), {"datasets": str(root / "datasets")})(), "runtime_profiles": {}},
         )(),
     )
     calls = []
 
     def call(transport, host, operation, **request):
-        assert host == "sky2"
+        assert host == transport.resolve_gateway(DEFAULT_GATEWAY)
         calls.append(operation)
         return archive_control(dict(request, operation=operation))
 
@@ -251,3 +253,43 @@ def test_deleting_one_recording_keeps_shared_observation_and_other_episode(files
     assert path.exists() and (original/job["recordings"][1]).exists()
     with service.db.connection() as c:
         assert [row[0] for row in c.execute("SELECT recording_path FROM observation_sources WHERE artifact_key=?",(key,))] == [job["recordings"][1]]
+
+
+def test_inventory_revision_and_file_removal_use_the_gateway_that_answers(files, monkeypatch):
+    service, live, session, names, final, _ = files
+
+    class Gateways(ClusterClient):
+        """Two configured gateways; the first refuses every connection."""
+
+        def __init__(self):
+            super().__init__(["down-test", "up-test"])
+            self.attempts = []
+
+        def ssh(self, host, command, *, stdin=None, timeout=None):
+            self.attempts.append(host)
+            if host == "down-test":
+                raise ClusterError(f"{host}: Connection refused")
+            if not command.startswith("python3 "):
+                return ""  # the scheduler probe that selects a gateway
+            return LocalCluster.ssh(self, host, command, stdin=stdin, timeout=timeout)
+
+        def _remote_path(self, path):
+            return path
+
+    cluster = Gateways()
+    monkeypatch.setattr(service, "cluster", cluster)
+    revisions = []
+
+    def call(transport, host, operation, **request):
+        revisions.append((operation, host))
+        return archive_control(dict(request, operation=operation))
+
+    monkeypatch.setattr(live.archive, "_call", call)
+    selector = identity(session, names[1])
+    plan = service.preview("recording-file", selector)
+    assert not plan["blockers"]
+    assert service.delete("recording-file", selector, plan["token"])["deleted"]
+    assert revisions == [("revise", "up-test")]
+    assert cluster.attempts[:2] == ["down-test", "up-test"] and cluster.attempts.count("down-test") > 1
+    assert live.get(session)["recordings"] == [names[0], names[2]]
+    assert not (final / "output" / names[1]).exists()

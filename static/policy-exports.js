@@ -143,9 +143,9 @@
   }
   const stageLabels = {
     QUEUED: "Queued",
-    STAGING: "Preparing submission to sky2",
-    SUBMITTING: "Submitting CPU job to sky2",
-    ARCHIVING: "Waiting for the recording archive on sky2",
+    STAGING: "Preparing submission",
+    SUBMITTING: "Submitting CPU job",
+    ARCHIVING: "Waiting for the recording archive",
     FETCHING: "Checking originals",
     OBSERVATIONS: "Preparing required observations",
     CONVERTING: "Converting",
@@ -168,7 +168,7 @@
       : "";
     if (!terminal(job) && job.execution === "cluster") {
       const location = [
-        job.gateway || "sky2",
+        job.gateway,
         job.cluster_partition,
         job.cluster_job_id
           ? `Slurm job ${job.cluster_job_id}`
@@ -427,6 +427,8 @@
             ${job ? `<a class="button button-outline" href="/api/data/exports/${encodeURIComponent(job.id)}/manifest.json" download>Download manifest</a>` : ""}
             ${jobs.length ? `<button type="button" class="button button-outline" data-version-history="${esc(dataset.id)}">Conversion history</button>` : ""}
           </div>`;
+        el("prepared-dataset-preview").hidden = false;
+        window.SkynetEpisodeViewer?.openDataset?.("prepared-dataset-preview", dataset.id);
       }
       if (current()) error("prepared-dataset-error", null);
     } catch (e) {
@@ -441,6 +443,8 @@
     SkynetDialog.close(dialog);
     error("prepared-dataset-error", null);
     if (!same) {
+      window.SkynetEpisodeViewer?.closeDataset?.("prepared-dataset-preview");
+      el("prepared-dataset-preview").hidden = true;
       el("prepared-dataset-title").textContent = target.kind === "history" ? "Conversion history" : "Dataset";
       el("prepared-dataset-context").textContent = "";
       el("prepared-dataset-actions").replaceChildren();
@@ -511,7 +515,7 @@
       }
     } catch (e) {
       if (detail.open) error("prepared-dataset-error", e.message);
-      else showToast(e.message);
+      else showToast(e.message, true);
     } finally {
       button.disabled = false;
     }
@@ -527,7 +531,10 @@
     }
   };
   dialog.addEventListener("close", () => generation++);
-  detail.addEventListener("close", () => detailGeneration++);
+  detail.addEventListener("close", () => {
+    detailGeneration++;
+    window.SkynetEpisodeViewer?.closeDataset?.("prepared-dataset-preview");
+  });
   function updateDefaultName() {
     const control = el("policy-export-name");
     if (!control.value || control.value === defaultName) {

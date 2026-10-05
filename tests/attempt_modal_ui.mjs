@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {JSDOM} from 'jsdom';
-const w = new JSDOM(await readFile(new URL('../static/index.html', import.meta.url),'utf8'), {runScripts:'outside-only', pretendToBeVisual:true, url:'http://localhost:8080/#runs'}).window;
+import {indexHtml} from './index_page.cjs';
+const w = new JSDOM(indexHtml(), {runScripts:'outside-only', pretendToBeVisual:true, url:'http://localhost:8080/#runs'}).window;
 const observers=[];const NativeObserver=w.MutationObserver;
 w.MutationObserver=class extends NativeObserver{constructor(callback){super(callback);observers.push(this);}};
 const el=id=>w.document.getElementById(id);
@@ -33,6 +34,17 @@ try{
    },
    {id:'evaluation-attempt',stage_id:'evaluation-stage',attempt_number:1,status:'SUCCEEDED',slurm_job_id:'456'},
  ]}};
+ assert.equal(w.queueReasonLabel({status:'SUCCEEDED',slurm_reason:'QOSGrpGRES'}),'-');
+ assert.equal(w.queueReasonLabel({status:'RUNNING',slurm_reason:'Priority'}),'-');
+ assert.match(w.queueReasonLabel({status:'PENDING',slurm_reason:'QOSGrpGRES'}),/Waiting/);
+ assert.equal(w.queueReasonLabel({status:'FAILED',slurm_reason:'OutOfMemory'}),'OutOfMemory');
+ const completed=structuredClone(payload);
+ completed.run.status='SUCCEEDED';
+ completed.run.attempts[0].status='SUCCEEDED';
+ completed.run.attempts[0].slurm_reason='QOSGrpGRES';
+ w.renderRunDetailContent(completed,'test-run');
+ assert.doesNotMatch(el('run-detail-meta').textContent,/QOSGrpGRES/);
+ assert.doesNotMatch(el('attempts-body').textContent,/QOSGrpGRES/);
  w.renderRunDetailContent(payload,'test-run');
  assert.match(el('run-detail-meta').textContent,/egoverse-act · v7/);
  assert.match(w.runRowDescriptor(payload.run).cells[1].html,/egoverse-act · v7/);
@@ -89,7 +101,7 @@ try{
  w.closeRunAttemptDisclosure({restoreFocus:false});
  w.setupRunHistoryTest([payload.run]);
  let releaseDetail;
- w.api=path=>path==='/api/runs/test-run'
+ w.api=path=>path==='/api/runs/test-run?include_payloads=false'
    ? new Promise(resolve=>{releaseDetail=resolve;})
    : Promise.resolve({content:'sample log'});
  const historyLaunch=el('runs-body').querySelector('[data-run-action="view"]');

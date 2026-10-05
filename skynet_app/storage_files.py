@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+from bisect import bisect_left
+from functools import lru_cache
 import json
 import re
 import shutil
@@ -18,6 +20,7 @@ CANONICAL = frozenset(
         "eval",
         "datasets",
         "artifacts",
+        "assets",
         "logs",
         "workspace",
         "repos",
@@ -30,12 +33,57 @@ CANONICAL = frozenset(
 PROTECTED = frozenset({"services", "envs", "repos", "workspace", ".cache"})
 
 
+@lru_cache(maxsize=32768)
+def normalized_path(value):
+    return str(PurePosixPath(value)).rstrip('/')
+
+
 def overlaps(a, b):
-    a, b = PurePosixPath(a), PurePosixPath(b)
-    return a == b or a in b.parents or b in a.parents
+    a, b = normalized_path(a), normalized_path(b)
+    return a == b or a.startswith(b + '/') or b.startswith(a + '/')
 
 
-def checked_path(root, value):
+class PathReferences:
+    """Prefix lookup without scanning every retained reference for every file."""
+
+    def __init__(self, values):
+        self.paths = {normalized_path(value) for value in values}
+        self.sorted = sorted(self.paths)
+
+    def overlaps(self, value):
+        path = normalized_path(value)
+        current = path
+        while current:
+            if current in self.paths:
+                return True
+            current = current.rpartition('/')[0]
+        prefix = path + '/'
+        index = bisect_left(self.sorted, prefix)
+        return index < len(self.sorted) and self.sorted[index].startswith(prefix)
+
+
+SOURCE_CACHE = re.compile(r".+-([0-9a-f]{8})")
+
+
+def source_cache_origin(container):
+    """Origin URL of a Skynet checkout cache, whose name ends with the first
+    8 hex digits of sha256(origin URL); None for any other directory."""
+    match = SOURCE_CACHE.fullmatch(container.name)
+    if match is None or container.is_symlink() or not container.is_dir():
+        return None
+    for revision in sorted(container.iterdir()):
+        config = revision / ".git" / "config"
+        if revision.is_symlink() or not config.is_file():
+            continue
+        section = re.search(r'^\[remote "origin"\]\s*$(.*?)(?=^\[|\Z)',
+                            config.read_text(errors="replace"), re.M | re.S)
+        url = section and re.search(r"^\s*url\s*=\s*(\S+)\s*$", section.group(1), re.M)
+        if url and hashlib.sha256(url.group(1).encode("utf-8")).hexdigest()[:8] == match.group(1):
+            return url.group(1)
+    return None
+
+
+def checked_path(root, value, *, scope="all"):
     root, path = Path(root), Path(value)
     if (
         not root.is_absolute()
@@ -44,11 +92,25 @@ def checked_path(root, value):
         or root not in path.parents
     ):
         raise ValueError("Cleanup path must be below the workspace base path")
-    if path.relative_to(root).parts[0] in PROTECTED:
+    relative = path.relative_to(root).parts
+    dependency = (
+        len(relative) == 2 and relative[0] in {"envs", "repos"}
+        or len(relative) == 4 and relative[:3] == (".cache", "huggingface", "hub")
+        and relative[3].startswith("models--")
+    )
+    if relative[0] in PROTECTED and not (scope == "dependencies" and dependency):
         raise ValueError("Service, runtime and source directories are protected")
     for ancestor in (path, *path.parents):
         if ancestor.is_symlink():
             raise ValueError("Symbolic links cannot be cleaned")
+    if scope == "dependencies" and dependency:
+        # Skynet only removes what it provably created: checkout caches and
+        # download caches. Environments under envs/ are installed by operators.
+        if relative[0] == "envs":
+            raise ValueError("Operator-installed environments are protected; Skynet never creates them")
+        # A missing cache keeps interrupted deletions idempotent.
+        if relative[0] == "repos" and path.exists() and source_cache_origin(path) is None:
+            raise ValueError("Only Skynet source checkouts can be cleaned; this repository is protected")
     return path
 
 
@@ -112,15 +174,19 @@ def describe(path):
 def execute(request):
     root = request["root"]
     operation = request["operation"]
+    scope = request.get("scope", "all")
+    if scope not in {"all", "pretrained", "dependencies"}:
+        raise ValueError("Unknown storage inspection scope")
     if operation in {"scan", "scan_objects"}:
-        protected = request.get("protected", [])
+        protected = PathReferences(request.get("protected", []))
         candidates = []
         base = Path(root)
         # Enumerate only output boundaries, never recursively crawl live data.
         for relative in (
             ()
             if operation == "scan_objects"
-            else ("jobs/runs", "eval/runs", "datasets/prepared", "logs", "artifacts")
+            else (() if scope == "dependencies" else ("assets/pretrained",) if scope == "pretrained" else
+                  ("jobs/runs", "eval/runs", "datasets/prepared", "logs", "artifacts", "assets/pretrained"))
         ):
             folder = base / relative
             checked_path(root, str(folder))
@@ -128,6 +194,19 @@ def execute(request):
                 candidates.extend(
                     (p, "Unreferenced output") for p in sorted(folder.iterdir())
                 )
+        if operation == "scan" and scope == "dependencies":
+            for relative in ("envs", "repos", ".cache/huggingface/hub"):
+                folder = base / relative
+                # Never traverse a symlinked dependency container.
+                if any(p.is_symlink() for p in (folder, *folder.parents)):
+                    continue
+                if folder.is_dir():
+                    reason = {"envs": "Runtime environment",
+                              "repos": "Unreferenced source checkout",
+                              ".cache/huggingface/hub": "Unreferenced download cache"}[relative]
+                    candidates.extend((p, reason)
+                                      for p in sorted(folder.iterdir())
+                                      if relative != ".cache/huggingface/hub" or p.name.startswith("models--"))
         if operation == "scan_objects" and base.is_dir():
             for prefix in sorted(base.iterdir()):
                 if not re.fullmatch(r"[a-f0-9]{2}", prefix.name) or prefix.is_symlink():
@@ -142,18 +221,22 @@ def execute(request):
                         (path, "Unreferenced metadata body")
                         for path in sorted(directory.iterdir())
                     )
-        elif base.is_dir():
+        elif base.is_dir() and scope == "all":
             candidates.extend(
                 (p, "Outside the storage layout")
                 for p in sorted(base.iterdir())
                 if p.name not in CANONICAL
             )
         result = []
+        truncated = False
         for path, reason in candidates:
-            if any(overlaps(str(path), ref) for ref in protected):
+            if protected.overlaps(str(path)):
                 continue
+            if len(result) >= 2000:
+                truncated = True
+                break
             try:
-                checked_path(root, str(path))
+                checked_path(root, str(path), scope=scope)
                 item = describe(path)
                 item.update(
                     reason=reason,
@@ -170,12 +253,8 @@ def execute(request):
                     "size_bytes": None,
                 }
             result.append(item)
-            if len(result) >= 2000:
-                raise ValueError(
-                    "Too many unreferenced paths; narrow the storage tree before scanning"
-                )
-        return {"items": result, "root": root}
-    paths = [checked_path(root, item["path"]) for item in request["items"]]
+        return {"items": result, "root": root, "truncated": truncated}
+    paths = [checked_path(root, item["path"], scope=scope) for item in request["items"]]
     if len(paths) > 500 or any(
         a != b and overlaps(str(a), str(b)) for a in paths for b in paths
     ):
@@ -193,7 +272,7 @@ def execute(request):
                 + current["path"]
             )
     for path in paths:
-        checked_path(root, str(path))
+        checked_path(root, str(path), scope=scope)
         if path.is_dir():
             shutil.rmtree(path)
         elif path.exists():

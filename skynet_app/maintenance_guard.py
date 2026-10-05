@@ -4,6 +4,13 @@ import json
 
 HISTORY_TABLES = frozenset(
     {
+        "data_bundle_assignments",
+        "data_derivation_inputs",
+        "data_derivations",
+        "metadata_payload_refs",
+        "data_locations",
+        "policy_exports",
+        "live_xr_sessions",
         "data_resources",
         "data_resource_versions",
         "data_bundles",
@@ -31,6 +38,10 @@ HISTORY_TABLES = frozenset(
 ID_FIELDS = frozenset(
     {
         "id",
+        "version_id",
+        "input_version_id",
+        "output_version_id",
+        "bundle_id",
         "adapter_key",
         "adapter_version_id",
         "source_adapter_key",
@@ -67,6 +78,23 @@ def guard_write(connection, table, values):
             identifier for ids in plan["records"].values() for identifier in ids
         }
         deleting.add(plan["id"])
+        from .maintenance import paths_in
+        from .storage_files import overlaps
+        paths = []
+        def contains_identity(value):
+            if isinstance(value, str):
+                return value in deleting
+            if isinstance(value, dict):
+                return any(contains_identity(item) for item in value.values())
+            return isinstance(value, (list, tuple)) and any(contains_identity(item) for item in value)
+        for key, value in values.items():
+            if key.endswith('_json') and isinstance(value, str):
+                value = json.loads(value)
+            if contains_identity(value):
+                raise ValueError('This item is being deleted. Finish its pending deletion before using it')
+            paths.extend(paths_in(value))
+        if any(overlaps(path, item['path']) for path in paths for item in plan.get('files', [])):
+            raise ValueError('This file is being deleted. Finish its pending deletion before using it')
         registry_dependency = False
         if plan["kind"] in {"adapter", "suite"}:
             from .registry_dependencies import consumer_matcher

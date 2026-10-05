@@ -35,6 +35,21 @@ def test_competing_converts_claim_one_producer_and_share_artifacts(context):
     assert store.for_job('second')[key]['state'] == 'READY'
 
 
+def test_capture_lookup_requires_ready_and_exact_authorized_source(context):
+    _, store, source, nodes = context
+    assert store.ready_captures([source]) == {}
+    producer = store.acquire(store.claim(nodes, {'mode': 'render'})['id'])
+    key = nodes[0]['artifact_key']
+    assert store.ready_captures([source]) == {}
+    store.finish(producer, artifacts=[dict(artifact_key=key, path='/observations/' + key, manifest_sha256='b' * 64)])
+    captures = store.ready_captures([source])
+    assert [item['artifact_key'] for item in captures[source['sha256']]] == [key]
+    assert store.ready_captures([dict(source, path='recordings/other.pkl')]) == {}
+    assert store.ready_captures([dict(source, session_id='other')]) == {}
+    assert store.ready_captures([dict(source, sha256='c' * 64)]) == {}
+    assert store.ready_captures([]) == {}
+
+
 def test_delete_initiating_convert_does_not_delete_producer(context):
     db, store, _, nodes = context
     producer = store.claim(nodes, {'mode': 'render'})

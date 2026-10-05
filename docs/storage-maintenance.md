@@ -1,6 +1,6 @@
 # Storage and history maintenance
 
-The PostgreSQL database on sky2 is the canonical index. Large adapter manifests,
+The central PostgreSQL database is the canonical index. Large adapter manifests,
 execution snapshots, resolved stage configurations and tracking journal bodies
 live in checksum-addressed cluster objects. SQL retains searchable identity,
 state, relationships and object references. Reads verify content hashes. Journal

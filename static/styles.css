@@ -1029,21 +1029,6 @@ tbody tr:last-child td {
   background: var(--orange);
 }
 
-.legacy-composer {
-  margin-top: 28px;
-  margin-bottom: 32px;
-}
-
-.legacy-composer > summary {
-  display: flex;
-  justify-content: space-between;
-  padding: 10px 12px;
-  background: var(--surface-soft);
-  border: 1px solid var(--line);
-  font: 10px var(--mono);
-  cursor: pointer;
-}
-
 .submission-section {
   display: grid;
   grid-template-columns: minmax(230px, 0.55fr) minmax(520px, 1.45fr);
@@ -2277,6 +2262,23 @@ details.evaluation-task-select.is-disabled > summary::after {
   width: 130px;
 }
 
+.adapter-index-panel .checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  font: 10px var(--mono);
+}
+.adapter-index-panel .checkbox-label input[type="checkbox"] {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
+  min-height: 14px;
+  margin: 0;
+  padding: 0;
+}
+
 .detail-panel {
   margin-bottom: 14px;
 }
@@ -2786,9 +2788,6 @@ footer {
   }
   #datasets .registry-section-help {
     max-width: none;
-  }
-  .legacy-composer > summary span:last-child {
-    display: none;
   }
   footer {
     gap: 6px;
@@ -3729,7 +3728,7 @@ table:has(> tbody#data-bundles-body) :is(th, td):nth-child(5) {
 }
 
 /* One episode viewer layout for collection reviews and evaluation rollouts. */
-.app-dialog:has(.episode-viewer) {
+.app-dialog:has(.episode-viewer:not([hidden])) {
   width: min(1200px, calc(100vw - 32px));
   max-width: 1200px;
 }
@@ -3764,8 +3763,37 @@ table:has(> tbody#data-bundles-body) :is(th, td):nth-child(5) {
 .episode-viewer-layers label:has(input:disabled) {
   opacity: 0.5;
 }
-#live-episode-viewer .episode-viewer-layers {
+.episode-viewer-layers {
   align-items: center;
+}
+.episode-viewer-loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(241, 243, 244, 0.92);
+  z-index: 4;
+  color: var(--muted);
+}
+.episode-viewer-state-overlay {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  max-height: 35%;
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: rgba(0, 0, 0, 0.68);
+  color: white;
+  font: 11px/1.5 var(--mono);
+}
+#prepared-dataset-preview {
+  border-top: 1px solid var(--line);
+  margin-top: 20px;
+  padding-top: 16px;
 }
 .live-review-recording-actions {
   display: inline-flex;
@@ -3837,7 +3865,7 @@ table:has(> tbody#data-bundles-body) :is(th, td):nth-child(5) {
 }
 .episode-viewer-scene {
   position: relative;
-  background: #f1f3f4;
+  background: #18232b;
   height: 420px;
   min-height: 240px;
 }
@@ -3883,7 +3911,6 @@ table:has(> tbody#data-bundles-body) :is(th, td):nth-child(5) {
   }
   .episode-viewer-scene {
     position: relative;
-    background: #f1f3f4;
     height: 300px;
   }
 }
@@ -4104,3 +4131,32 @@ table:has(> tbody#data-bundles-body) :is(th, td):nth-child(5) {
     gap: 4px;
   }
 }
+
+/* Submit and the preset modal share the same ordered form steps. */
+#experiment-form select[data-input-slot][multiple] {
+  min-height: 8rem;
+}
+
+/* Reading content inside the shared dialog shell. */
+.document-content { line-height: 1.65; overflow-wrap: anywhere; }
+.document-content > :first-child { margin-top: 0; }
+.document-content :is(h2, h3, h4) { margin: 24px 0 10px !important; }
+.document-content pre { padding: 14px; overflow: auto; background: var(--ink); color: #e4efe6; }
+.document-content :not(pre) > code { overflow-wrap: anywhere; }
+.document-content .table-scroll { margin: 16px 0; }
+.document-content blockquote { margin: 16px 0; padding-left: 14px; border-left: 3px solid var(--muted); }
+.document-content .note-figure { display: block; margin: 20px 0; }
+.document-content .note-figure img { display: block; max-width: 100%; height: auto; margin-inline: auto; background: white; }
+.document-content .math-display { display: block; margin: 16px 0; overflow-x: auto; overflow-y: hidden; overflow-wrap: normal; }
+.document-content .math-display .katex-display { margin: 0; }
+
+/* Keep long experiment and dataset descriptions within their columns. */
+#runs-body > tr:not(.row-disclosure-companion) > td:nth-child(2),
+#runs-body > tr:not(.row-disclosure-companion) > td:nth-child(3) {
+  min-width: 170px;
+  max-width: 300px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.training-data-list > summary { cursor: pointer; }
+.training-data-list[open] > summary { margin-bottom: 0.5rem; }

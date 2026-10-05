@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {JSDOM} from 'jsdom';
-const w = new JSDOM(await readFile(new URL('../static/index.html', import.meta.url),'utf8'), {runScripts:'outside-only', pretendToBeVisual:true, url:'http://localhost:8080/#experiments'}).window;
+import {indexHtml} from './index_page.cjs';
+const w = new JSDOM(indexHtml(), {runScripts:'outside-only', pretendToBeVisual:true, url:'http://localhost:8080/#experiments'}).window;
 const observers=[]; const Observer=w.MutationObserver;
 w.MutationObserver=class extends Observer {constructor(callback){super(callback);observers.push(this);}};
 w.fetch=()=>new Promise(()=>{});
@@ -73,7 +74,8 @@ try {
 
  input('steps').value='101';
  assert.equal(w.validateAdapterDeclaredFields({focus:false,notify:false}),false);
- assert.match(input('steps').validationMessage,/maximum is 100/);
+ assert.equal(input('steps').validity.customError,true);
+ assert.match(el('adapter-declared-fields-error').textContent,/maximum is 100/);
  // Starting from prepared data pins its original adapter version even after a registry edit.
  const selectedVersion={id:'version-prepared',version_number:1,manifest,manifest_sha256:'a'.repeat(64)};
  const pinnedAdapter={id:'adapter-test',name:'Test policy',selected_version:selectedVersion,latest_version:{id:'version-latest',version_number:2,manifest,manifest_sha256:'b'.repeat(64)}};
@@ -90,7 +92,7 @@ try {
  assert.equal(requests.at(-1),'/api/adapters/adapter-test?version_number=1');
  assert.equal(el('experiment-adapter').value,'adapter-version:version-prepared');
  assert.equal(input('observation_mode').value,JSON.stringify('state'));
- assert.equal(el('experiment-name').value,'recorded-data-policy-test');
+ assert.equal(el('experiment-name').value,'');
  assert.equal(el('experiment-data-bundle').value,'bundle-test');
  await assert.rejects(()=>w.usePreparedDataset({...prepared,adapter:{...prepared.adapter,adapter_version_id:'different-version'}}),/pinned version/);
  await assert.rejects(()=>w.usePreparedDataset({...prepared,adapter:null}),/exact adapter version/);

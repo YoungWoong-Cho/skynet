@@ -10,6 +10,9 @@ from __future__ import annotations
 import hashlib
 import json
 import shlex
+from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict
+from threading import RLock
 from pathlib import Path, PurePosixPath
 
 from . import history_journals, storage_files
@@ -19,7 +22,7 @@ from .workspace_storage import WorkspaceStorage
 from .registry_dependencies import extend_graph, suite_removal_notices
 from .registry_policy import suppress_defaults
 
-KINDS = {"experiment": "experiments", "run": "runs", "evaluation": "evaluations",
+KINDS = {"experiment": "experiments", "draft-revision": "experiment_revisions", "run": "runs", "evaluation": "evaluations",
          "adapter": "adapters", "suite": "evaluation_suites", "recording": "live_xr_sessions", "recording-file": "live_xr_sessions"}
 TERMINAL = frozenset(
     {
@@ -55,6 +58,12 @@ JSON_PATH_COLUMNS = {
 }
 
 
+_REFERENCE_CACHE = OrderedDict()
+_REFERENCE_CACHE_LOCK = RLock()
+_REFERENCE_DIGESTS = {"experiment_revisions": "requested_spec_sha256",
+                      "variants": "resolved_spec_sha256", "data_bundles": "manifest_sha256"}
+
+
 def paths_in(value):
     if isinstance(value, str):
         if value.startswith("/"):
@@ -71,7 +80,13 @@ def fingerprint(value):
     return hashlib.sha256(canonical_json(value).encode()).hexdigest()
 
 
-def rows(connection, table, condition="1=1", params=()):
+def rows(connection, table, condition="1=1", params=(), *, raw_payloads=False):
+    if raw_payloads:
+        # Immutable payload references already carry the body's SHA-256. Retain
+        # them in the deletion fingerprint without fetching the remote body.
+        return [row["record"] for row in connection.execute(
+            f"SELECT to_jsonb(t) AS record FROM {table} t WHERE {condition}", params
+        ).fetchall()]
     return [
         dict(row)
         for row in connection.execute(
@@ -94,7 +109,7 @@ class Maintenance:
         self.storage = WorkspaceStorage(database)
         self.local_capsules = Path(local_capsules) if local_capsules else None
 
-    def remote(self, operation, root, items=None, protected=None, gateway="auto"):
+    def remote(self, operation, root, items=None, protected=None, gateway="auto", scope="all"):
         host = self.cluster.resolve_gateway(gateway)
         script = Path(storage_files.__file__).read_text()
         result = self.cluster.ssh(
@@ -106,6 +121,7 @@ class Maintenance:
                     "root": root,
                     "items": items or [],
                     "protected": protected or [],
+                    "scope": scope,
                 }
             ),
             timeout=120,
@@ -140,7 +156,8 @@ class Maintenance:
 
         def add(table, column, values):
             query, params = in_ids(column, values)
-            graph[table] = rows(c, table, query, params)
+            graph[table] = rows(c, table, query, params,
+                                raw_payloads=table in {"workflow_stages", "job_attempts"})
             return [row["id"] for row in graph[table]]
 
         def block(kind, record, reason):
@@ -164,6 +181,13 @@ class Maintenance:
 
         if kind in {"adapter", "suite"}:
             extend_graph(c, kind, target, graph, block, rows)
+        elif kind == "draft-revision":
+            if target.get("submitted_at") is not None:
+                block(kind, target, "Submitted revisions cannot be discarded")
+            variants = add("variants", "experiment_revision_id", [identifier])
+            query, params = in_ids("variant_id", variants)
+            for record in rows(c, "runs", query, params):
+                block("run", record, "Delete this training run first")
         elif kind == "experiment":
             revisions = add("experiment_revisions", "experiment_id", [identifier])
             variants = add("variants", "experiment_revision_id", revisions)
@@ -270,41 +294,128 @@ class Maintenance:
         excluded = {table: {r["id"] for r in data} for table, data in graph.items()}
         refs = []
         for table, columns in PATH_COLUMNS.items():
-            for record in rows(c, table):
+            # SELECT * materializes remote execution snapshots and manifests.
+            # Only identity and paths participate in retained-file protection.
+            for record in c.execute(f"SELECT id, {', '.join(columns)} FROM {table}").fetchall():
                 if record["id"] not in excluded.get(table, set()):
                     refs.extend(
                         (str(record[key]), table, record["id"])
                         for key in columns
-                        if record.get(key)
+                        if record[key]
                     )
         for table, column in JSON_PATH_COLUMNS.items():
-            for record in rows(c, table):
-                if record["id"] not in excluded.get(table, set()):
-                    refs.extend(
-                        (path, table, record["id"])
-                        for path in paths_in(json.loads(record[column]))
-                    )
-        return refs
+            digest = _REFERENCE_DIGESTS.get(table, f"md5({column})")
+            headers = c.execute(f"SELECT id, {digest} AS digest FROM {table}").fetchall()
+            keys = {row["id"]: (str(self.db.url), table, row["id"], row["digest"])
+                    for row in headers if row["id"] not in excluded.get(table, set())}
+            with _REFERENCE_CACHE_LOCK:
+                paths = {identifier: _REFERENCE_CACHE[key] for identifier, key in keys.items()
+                         if key in _REFERENCE_CACHE}
+            missing = [identifier for identifier in keys if identifier not in paths]
+            if missing:
+                for record in c.execute(
+                    "SELECT record_id AS id, projection_json -> 'paths' AS paths "
+                    "FROM document_projections WHERE table_name=? AND record_id=ANY(?)", (table, missing)
+                ).fetchall():
+                    paths[record["id"]] = tuple(record["paths"])
+                if any(identifier not in paths for identifier in missing):
+                    raise ValueError("Stored file references are incomplete; deletion is unavailable")
+                with _REFERENCE_CACHE_LOCK:
+                    for identifier in missing:
+                        _REFERENCE_CACHE[keys[identifier]] = paths[identifier]
+                    while len(_REFERENCE_CACHE) > 4096:
+                        _REFERENCE_CACHE.popitem(last=False)
+            for identifier, values in paths.items():
+                refs.extend((path, table, identifier) for path in values)
+        # Configured runtimes are retained dependencies even before a first run.
+        from .cluster_config import CLUSTER
+        for name, profile in CLUSTER.runtime_profiles.items():
+            refs.extend((path, "runtime_profile", name)
+                        for path in paths_in(profile.model_dump(mode="json")))
+        for record in c.execute("SELECT id, config_json FROM runtime_profiles WHERE enabled=1").fetchall():
+            config = record["config_json"]
+            if isinstance(config, str):
+                config = json.loads(config)
+            refs.extend((path, "runtime_profile", record["id"]) for path in paths_in(config))
+        refs.extend(self._source_cache_references(c))
+        return list(dict.fromkeys(refs))
+
+    def _source_cache_references(self, c):
+        """Checkout containers are derived from repository URLs at compile time,
+        so they never appear as stored paths. Retained experiments (their runs
+        and evaluations reuse the checkout) and active adapters keep them."""
+        root = self.storage.work_root
+        if root is None:
+            return []
+        from .slurm import source_cache_directory
+        repositories = {
+            row[0] for row in c.execute(
+                "SELECT DISTINCT projection_json #>> '{source,repository}' FROM document_projections "
+                "WHERE table_name='experiment_revisions'"
+            ).fetchall()
+        }
+        repositories.update(
+            row[0] for row in c.execute(
+                "SELECT DISTINCT repository_url FROM adapters WHERE archived_at IS NULL"
+            ).fetchall()
+        )
+        return [(source_cache_directory(root, repository), "source_repository", repository)
+                for repository in sorted(filter(None, repositories))]
 
     @staticmethod
     def _referenced(path, references, graph):
         evaluation_runs = {row["run_id"] for row in graph.get("evaluations", [])}
+        candidate = storage_files.normalized_path(path)
         for reference, table, identifier in references:
             # The retained run owns the container, while evaluation attempts own
             # their children. An exact reference or another consumer still blocks.
             if (
                 table == "runs"
                 and identifier in evaluation_runs
-                and PurePosixPath(reference) in PurePosixPath(path).parents
+                and candidate.startswith(storage_files.normalized_path(reference) + '/')
             ):
                 continue
             if storage_files.overlaps(path, reference):
                 return True
         return False
 
+    def _reference_blockers(self, c, path, references):
+        """Expose removable draft dependencies without weakening file protection."""
+        blockers = []
+        for reference, table, identifier in references:
+            if not storage_files.overlaps(path, reference):
+                continue
+            revision = None
+            if table == "experiment_revisions":
+                revision = c.execute(
+                    "SELECT id, owner_id, revision_number, submitted_at FROM experiment_revisions WHERE id=?",
+                    (identifier,),
+                ).fetchone()
+            elif table == "variants":
+                revision = c.execute(
+                    "SELECT r.id, r.owner_id, r.revision_number, r.submitted_at "
+                    "FROM experiment_revisions r JOIN variants v ON v.experiment_revision_id=r.id WHERE v.id=?",
+                    (identifier,),
+                ).fetchone()
+            if (revision is not None and revision["submitted_at"] is None
+                    and (self.db.workspace_id is None or revision["owner_id"] == self.db.workspace_id)
+                    and not c.execute(
+                        "SELECT 1 FROM runs r JOIN variants v ON v.id=r.variant_id "
+                        "WHERE v.experiment_revision_id=? LIMIT 1", (revision["id"],),
+                    ).fetchone()):
+                entry = {"kind": "draft-revision", "id": revision["id"],
+                         "label": f"Draft revision {revision['revision_number']}",
+                         "reason": "This unsubmitted draft references the files; review and discard the draft first"}
+            else:
+                entry = {"kind": "storage", "id": None, "label": path,
+                         "reason": "Referenced by another retained item; delete that dependency first"}
+            if entry not in blockers:
+                blockers.append(entry)
+        return blockers
+
     def _file_groups(self, c, kind, target, graph, blockers):
         groups = {}
-        if kind in {"experiment", "adapter", "suite"}:
+        if kind in {"experiment", "draft-revision", "adapter", "suite"}:
             return groups
         run = (
             target
@@ -370,14 +481,9 @@ class Maintenance:
                 continue
             if self._referenced(path, references, graph):
                 # Reusing a file is a dependency, never permission to unlink it.
-                blockers.append(
-                    {
-                        "kind": "storage",
-                        "id": None,
-                        "label": path,
-                        "reason": "Referenced by another retained item; delete that dependency first",
-                    }
-                )
+                for blocker in self._reference_blockers(c, path, references):
+                    if blocker not in blockers:
+                        blockers.append(blocker)
                 continue
             if object_root and path.startswith(object_root + "/"):
                 group = object_root
@@ -410,16 +516,21 @@ class Maintenance:
         owned = {(table, row["id"]) for table, data in graph.items() for row in data}
         if kind == "run":
             owned.add(("tracking_journals", identifier))
-        by_digest = {}
-        for ref in rows(c, "metadata_payload_refs"):
-            by_digest.setdefault(ref["sha256"], set()).add(
-                (ref["table_name"], ref["record_id"])
+        return [dict(row) for row in c.execute("""
+            WITH owned AS (
+              SELECT * FROM jsonb_to_recordset(?::jsonb) AS o(table_name text, record_id text)
+            ), candidates AS (
+              SELECT DISTINCT r.sha256 FROM metadata_payload_refs r
+              JOIN owned o USING (table_name, record_id)
             )
-        return [
-            dict(row)
-            for row in c.execute("SELECT * FROM metadata_payloads").fetchall()
-            if by_digest.get(row["sha256"]) and by_digest[row["sha256"]] <= owned
-        ]
+            SELECT p.* FROM metadata_payloads p JOIN candidates USING (sha256)
+            WHERE NOT EXISTS (
+              SELECT 1 FROM metadata_payload_refs r
+              LEFT JOIN owned o USING (table_name, record_id)
+              WHERE r.sha256=p.sha256 AND o.record_id IS NULL
+            )
+        """, (json.dumps([{"table_name": table, "record_id": identifier}
+                           for table, identifier in sorted(owned)]),)).fetchall()]
 
     def preview(self, kind, identifier, gateway="auto"):
         with self.db.connection() as c:
@@ -462,7 +573,8 @@ class Maintenance:
                 )
         files = []
         if not blockers:
-            for root, paths in groups.items():
+            def inspect_group(group):
+                root, paths = group
                 request = [{"path": path} for path in sorted(set(paths))]
                 result = (
                     storage_files.execute(
@@ -471,7 +583,12 @@ class Maintenance:
                     if root.startswith("local:")
                     else self.remote("inspect", root, request, gateway=gateway)
                 )
-                files.extend({**item, "root": root} for item in result["items"])
+                return [{**item, "root": root} for item in result["items"]]
+
+            # Independent read-only inspections; deletion remains serialized.
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                for group_files in pool.map(inspect_group, groups.items()):
+                    files.extend(group_files)
         plan = {
             "kind": kind,
             "id": identifier,
@@ -496,7 +613,7 @@ class Maintenance:
     def delete(self, kind, identifier, token, gateway="auto"):
         # Same lock as submission/reconciliation; SQL serialization also covers
         # concurrent API writes and other app hosts.
-        with self.db.operation_lock("pipeline"):
+        with self.db.operation_lock("pipeline"), self.db.metadata_lock:
             with self.db.connection() as c:
                 try:
                     self._target(c, kind, identifier)
@@ -514,7 +631,8 @@ class Maintenance:
                 raise ValueError(
                     "The item or its files changed. Review the new deletion preview"
                 )
-            with self.db.transaction() as c:
+            prepared_journals, journal_bodies = history_journals.prepare(self.db, plan['journals'], plan['needles'])
+            with self.db.transaction(payloads=journal_bodies) as c:
                 _, graph, blockers = self._graph(c, kind, identifier)
                 if blockers or fingerprint(graph) != plan["graph_hash"]:
                     raise ValueError("History changed. Review deletion again")
@@ -528,7 +646,7 @@ class Maintenance:
                         utc_now(),
                     ),
                 )
-                history_journals.apply(c, self.db, plan["journals"], plan["needles"])
+                history_journals.apply(c, self.db, plan["journals"], plan["needles"], prepared_journals)
             # Intent is committed before the first irreversible filesystem change.
             with self.db.transaction() as c:
                 _, graph, blockers = self._graph(c, kind, identifier)
@@ -554,14 +672,18 @@ class Maintenance:
                         raise ValueError(
                             "A metadata body is now shared. Review dependencies again"
                         )
-                for root in sorted({item["root"] for item in plan["files"]}):
-                    items = [item for item in plan["files"] if item["root"] == root]
-                    if root.startswith("local:"):
-                        storage_files.execute(
-                            {"operation": "delete", "root": root[6:], "items": items}
-                        )
-                    else:
-                        self.remote("delete", root, items, gateway=gateway)
+            for root in sorted({item["root"] for item in plan["files"]}):
+                items = [item for item in plan["files"] if item["root"] == root]
+                if root.startswith("local:"):
+                    storage_files.execute(
+                        {"operation": "delete", "root": root[6:], "items": items}
+                    )
+                else:
+                    self.remote("delete", root, items, gateway=gateway)
+            with self.db.transaction() as c:
+                _, current_graph, blockers = self._graph(c, kind, identifier)
+                if blockers or fingerprint(current_graph) != plan["graph_hash"]:
+                    raise ValueError("History changed during deletion; retry required")
                 self._delete_rows(c, kind, identifier, graph)
                 for digest in plan["payloads"]:
                     c.execute(
@@ -613,7 +735,9 @@ class Maintenance:
         else:
             c.execute(f"DELETE FROM {KINDS[kind]} WHERE id=?", (identifier,))
 
-    def inspect_storage(self, gateway="auto"):
+    def inspect_storage(self, gateway="auto", scope="all"):
+        if scope not in {"all", "pretrained", "dependencies"}:
+            raise ValueError("Unknown storage inspection scope")
         root = self.storage.require_root()
         with self.db.connection() as c:
             protected = [path for path, _, _ in self._references(c)]
@@ -637,10 +761,11 @@ class Maintenance:
                         "SELECT path FROM metadata_payloads p WHERE NOT EXISTS (SELECT 1 FROM metadata_payload_refs r WHERE r.sha256=p.sha256)"
                     ).fetchall()
                 ]
-        result = self.remote("scan", root, protected=protected, gateway=gateway)
+        result = self.remote("scan", root, protected=protected, gateway=gateway, scope=scope)
+        result["scope"] = scope
         for item in result["items"]:
             item["root"] = root
-        if self.db.payload_store:
+        if self.db.payload_store and scope == "all":
             object_root = str(self.db.payload_store.objects.root)
             extra = self.remote(
                 "scan_objects", object_root, protected=protected, gateway=gateway
@@ -648,6 +773,7 @@ class Maintenance:
             for item in extra["items"]:
                 item["root"] = object_root
             result["items"].extend(extra["items"])
+            result["truncated"] = result.get("truncated", False) or extra.get("truncated", False)
             known = {item["path"] for item in result["items"]}
             # Catalog rows from an interrupted cleanup must also be removable.
             missing = [
@@ -656,7 +782,8 @@ class Maintenance:
                 if path not in known
                 and not any(storage_files.overlaps(path, ref) for ref in protected)
             ]
-            if missing:
+            # Omitted entries from a bounded scan are not missing files.
+            if missing and not extra.get("truncated", False):
                 checked = self.remote(
                     "inspect",
                     object_root,
@@ -679,9 +806,9 @@ class Maintenance:
         result["token"] = fingerprint(result)
         return result
 
-    def clean_storage(self, selected, token, gateway="auto"):
-        with self.db.operation_lock("pipeline"), self.db.transaction() as c:
-            report = self.inspect_storage(gateway)
+    def clean_storage(self, selected, token, gateway="auto", scope="all"):
+        with self.db.operation_lock("pipeline"), self.db.metadata_lock:
+            report = self.inspect_storage(gateway, scope=scope)
             if token != report["token"]:
                 raise ValueError("Storage changed. Scan again before cleaning")
             items = [
@@ -691,19 +818,35 @@ class Maintenance:
             ]
             if set(selected) != {item["path"] for item in items} or not items:
                 raise ValueError("Select unreferenced files from the current scan")
+            operation_id = fingerprint(sorted(selected))
+            with self.db.transaction() as c:
+                retained = self._references(c)
+                retained.extend((row[0], 'metadata', '') for row in c.execute(
+                    "SELECT path FROM metadata_payloads p WHERE EXISTS (SELECT 1 FROM metadata_payload_refs r WHERE r.sha256=p.sha256)"
+                ).fetchall())
+                if any(self._referenced(item['path'], retained, {}) for item in items):
+                    raise ValueError('Storage changed. Scan again before cleaning')
+                plan = {'kind': 'storage', 'id': operation_id, 'records': {}, 'files': items}
+                c.execute(
+                    "INSERT INTO maintenance_operations(target_kind,target_id,owner_id,plan_json,created_at) VALUES ('storage',?,?,?,?) "
+                    "ON CONFLICT(target_kind,target_id) DO UPDATE SET plan_json=excluded.plan_json",
+                    (operation_id, self.db.workspace_id or 'legacy', canonical_json(plan), utc_now()),
+                )
             deleted = []
             for root in sorted({item["root"] for item in items}):
                 result = self.remote(
                     "delete",
                     root,
                     [item for item in items if item["root"] == root],
-                    gateway=gateway,
+                    gateway=gateway, scope=scope,
                 )
                 deleted.extend(result["deleted"])
-            if self.db.payload_store:
-                for path in deleted:
-                    c.execute(
-                        "DELETE FROM metadata_payloads WHERE path=? AND NOT EXISTS (SELECT 1 FROM metadata_payload_refs WHERE sha256=metadata_payloads.sha256)",
-                        (path,),
-                    )
+            with self.db.transaction() as c:
+                if self.db.payload_store:
+                    for path in deleted:
+                        c.execute(
+                            "DELETE FROM metadata_payloads WHERE path=? AND NOT EXISTS (SELECT 1 FROM metadata_payload_refs WHERE sha256=metadata_payloads.sha256)",
+                            (path,),
+                        )
+                c.execute("DELETE FROM maintenance_operations WHERE target_kind='storage' AND target_id=?", (operation_id,))
             return {"deleted": deleted}

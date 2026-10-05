@@ -9,7 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from skynet_app.cluster_runtime import ClusterClient, ClusterError, SubmissionOutcomeUnknown, WORK_ROOT
+from skynet_app.cluster_config import CLUSTER
+from skynet_app.cluster_runtime import DEFAULT_GATEWAY, ClusterClient, ClusterError, SubmissionOutcomeUnknown, WORK_ROOT
 from skynet_app.training_contracts import RECORDING_DATASET_FORMAT
 from skynet_app.policy_exports import PolicyExportService
 from skynet_app import policy_exports_api as api
@@ -17,6 +18,9 @@ from test_policy_exports import setup as offline_setup, create
 
 
 class Cluster:
+    # The cluster, not its caller, chooses the login host that serves a request.
+    host = "serving-host"
+
     def __init__(self):
         self.files, self.submissions = {}, []
         self.uploads = []
@@ -25,23 +29,26 @@ class Cluster:
         self.fail_status = False
 
     def candidates(self, gateway):
-        return ["sky2"]
+        return [self.host]
+
+    def served(self, gateway):
+        assert gateway == DEFAULT_GATEWAY, "Preparation routes with the configured default"
+        return self.host
 
     def write_capsule_file(self, identifier, path, content, gateway):
-        assert gateway == "sky2"
         remote = f"{WORK_ROOT}/jobs/runs/{identifier}/{path}"
         self.files[remote] = content
-        return gateway, remote
+        return self.served(gateway), remote
 
     def write_capsule_files(self, identifier, files, gateway):
         self.uploads.append(dict(files))
-        return gateway, {
+        return self.served(gateway), {
             path: self.write_capsule_file(identifier, path, content, gateway)[1]
             for path, content in files.items()
         }
 
     def submit_script(self, script, identifier, gateway, *, submission_key):
-        assert gateway == "sky2"
+        host = self.served(gateway)
         # Keep the production identifier contract at this fake transport boundary.
         ClusterClient._run_id(identifier)
         ClusterClient._submission_token(submission_key)
@@ -49,27 +56,28 @@ class Cluster:
         if self.fail_submit:
             self.fail_submit = False
             raise SubmissionOutcomeUnknown("reply was lost after acceptance")
-        return SimpleNamespace(job_id="42")
+        return SimpleNamespace(job_id="42", gateway=host)
 
     def job_statuses(self, identifiers, gateway):
-        assert identifiers == ["42"] and gateway == "sky2"
+        assert identifiers == ["42"]
+        host = self.served(gateway)
         if self.fail_status:
             raise ClusterError("temporary connection loss")
-        return gateway, {"42": {"State": self.state}}
+        return host, {"42": {"State": self.state}}
 
     def read_file(self, path, gateway, *, max_bytes):
-        assert gateway == "sky2"
+        host = self.served(gateway)
         if path not in self.files:
             raise ClusterError("missing receipt")
         value = self.files[path]
         assert len(value) <= max_bytes
-        return gateway, value
+        return host, value
 
     def file_size(self, path, gateway):
-        return gateway, len(self.files[path].encode())
+        return self.served(gateway), len(self.files[path].encode())
 
     def stream_file_range(self, path, gateway, *, start, end):
-        assert gateway == "sky2"
+        assert gateway == self.host, "A stream continues on the host that answered its size"
         yield self.files[path].encode()[start:end + 1]
 
 @pytest.fixture
@@ -82,12 +90,12 @@ def setup(offline_setup, monkeypatch):
     monkeypatch.setattr(service.observations, "ensure", lambda job, sources: sources)
     session["archive"] = dict(state="READY", root=f"{WORK_ROOT}/datasets/raw/test/output")
     resolved, ensured = [], []
+    service.cluster = Cluster()
     def resolve(current, relative):
         assert current["id"] == session["id"]
         resolved.append(relative)
-        return service.cluster, "sky2", session["archive"]["root"] + "/" + relative
-    service.live.archive = SimpleNamespace(resolve=resolve, ensure=ensured.append)
-    service.cluster = Cluster()
+        return service.cluster, DEFAULT_GATEWAY, session["archive"]["root"] + "/" + relative
+    service.live.archive = SimpleNamespace(cluster=service.cluster, resolve=resolve, ensure=ensured.append)
     return service, session, source, resolved, ensured
 
 def receipt(service, job, *, manifest=None):
@@ -109,9 +117,11 @@ def test_all_formats_use_resumable_cpu_job_and_only_remote_payloads(setup, forma
     service, session, _, resolved, _ = setup
     job = create(service, session["id"], format, "Archived demonstration")
     assert job["target"] == "cluster"
+    assert "gateway" not in job, "No login host has served this job yet"
     service.prepare(job["id"])
     pending = service.get(job["id"])
     assert pending["state"] == "PENDING"
+    assert pending["gateway"] == service.cluster.host
     assert pending["cluster_partition"] == "rl2-lab"
     assert pending["cluster_account"] == "rl2-lab"
     assert pending["cluster_cpus"] == 4
@@ -139,7 +149,12 @@ def test_all_formats_use_resumable_cpu_job_and_only_remote_payloads(setup, forma
     version = service.database.get_data_resource_version(ready["version_id"])
     assert version["status"] == "ON_CLUSTER"
     assert version["metadata"]["storage_location"] == "cluster"
-    assert [v["kind"] for v in version["locations"]] == ["cluster"]
+    assert [(v["kind"], v["host"]) for v in version["locations"]] == [("cluster", CLUSTER.id)]
+    manifest = service.remote_artifact(job["id"], "manifest.json")
+    host, size = manifest.location()
+    assert host == service.cluster.host
+    assert b"".join(service.cluster.stream_file_range(manifest.path, host, start=0, end=size - 1)).decode() \
+        == service.cluster.files[manifest.path]
     assert version["derivation_id"]
     assert create(service, session["id"], format, "Repeated")["id"] == job["id"]
     assert service.retry(job["id"])["state"] == "READY"
@@ -215,6 +230,7 @@ def test_failed_cpu_job_retry_creates_one_new_attempt(setup):
     assert service.get(job["id"])["state"] == "FAILED"
     retried = service.retry(job["id"])
     assert retried["state"] == retried["stage"] == "QUEUED"
+    assert retried["gateway"] is None, "a new attempt has not been accepted by any gateway yet"
     service.cluster.state = "PENDING"
     service.prepare(job["id"])
     second = service.get(job["id"])
@@ -313,6 +329,43 @@ def test_archive_source_lookup_reads_each_selected_session_once(setup, monkeypat
     assert set(resolved) == {source["path"] for source in sources} | {source["image_path"] for source in sources}
     assert all(source["session_profile"]["instructions"] == "Pick up the cube." for source in sources)
     assert sources[0]["session_profile"] is not session["profile"]
+
+@pytest.mark.parametrize("field", ["path", "image_path"])
+def test_sources_outside_cluster_storage_are_rejected_whatever_host_is_recorded(setup, monkeypatch, field):
+    service, session, _, _, _ = setup
+    job = create(service, session["id"], "fixture-rgb", "Archived demonstration")
+    resolve = service.live.archive.resolve
+    # The transport places a source in cluster storage; a host name beside it does not.
+    def recorded(current, relative):
+        transport, _, path = resolve(current, relative)
+        return transport, "retired-host", path
+    monkeypatch.setattr(service.live.archive, "resolve", recorded)
+    assert len(service._archived_sources(job)) == len(session["recordings"])
+    workstation = object()
+    paths = {item[field] for item in job["sources"]}
+    def elsewhere(current, relative):
+        transport, gateway, path = resolve(current, relative)
+        return (workstation if relative in paths else transport), gateway, path
+    monkeypatch.setattr(service.live.archive, "resolve", elsewhere)
+    with pytest.raises(ValueError, match="must be stored on the training cluster"):
+        service._archived_sources(job)
+    service.prepare(job["id"])
+    assert service.get(job["id"])["state"] == "FAILED" and not service.cluster.submissions
+
+
+def test_job_saved_with_a_login_host_is_prepared_through_the_default_route(setup):
+    service, session, _, _, _ = setup
+    job = create(service, session["id"], "fixture-rgb", "Saved with a login host")
+    # Jobs created by earlier versions stored a login host before any submission.
+    service.update(job["id"], gateway="sky2")
+    service.prepare(job["id"])
+    pending = service.get(job["id"])
+    assert pending["state"] == "PENDING" and pending["gateway"] == service.cluster.host
+    receipt(service, pending)
+    service.cluster.state = "COMPLETED"
+    service.prepare(job["id"])
+    assert service.get(job["id"])["state"] == "READY"
+
 
 def test_failed_capsule_upload_never_submits_job(setup, monkeypatch):
     service, session, *_ = setup

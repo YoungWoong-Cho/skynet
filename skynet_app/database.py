@@ -95,7 +95,12 @@ class Database:
         if object_config.get("object_store_root"):
             from .payload_store import PayloadStore
             self.payload_store = PayloadStore(self)
+        self.metadata_lock = self.operation_lock("metadata-objects")
         self._write_lock = threading.RLock()
+        self._progress_cache_lock = threading.RLock()
+        self._progress_spec_cache: dict[str, dict[str, Any]] = {}
+        self._experiment_source_cache = {}
+        self._dataset_assignment_cache = {}
         if workspace_id is None:
             self.initialize()
         else:
@@ -133,7 +138,20 @@ class Database:
             yield connection
 
     @contextmanager
-    def transaction(self, *, immediate: bool = True) -> Iterator[PostgresConnection]:
+    def transaction(self, *, immediate: bool = True, payloads=()) -> Iterator[PostgresConnection]:
+        if self.payload_store and any(body is not None for body in payloads):
+            # Cleanup takes the same object lock, outside the SQL write lock.
+            with self.metadata_lock:
+                prepared = self.payload_store.prepare(payloads)
+                with self._transaction(immediate=immediate) as connection:
+                    self.payload_store.register_prepared(connection, prepared)
+                    yield connection
+        else:
+            with self._transaction(immediate=immediate) as connection:
+                yield connection
+
+    @contextmanager
+    def _transaction(self, *, immediate: bool = True) -> Iterator[PostgresConnection]:
         with self._write_lock:
             connection = self._connect()
             try:
@@ -156,10 +174,13 @@ class Database:
                 connection.close()
 
     @staticmethod
-    def _decode(row: Record | None) -> dict[str, Any] | None:
+    def _decode(row: Record | None, *, include_payloads: bool = True) -> dict[str, Any] | None:
         if row is None:
             return None
-        result = dict(row)
+        result = {
+            key: row[key] for key in row.keys()
+            if include_payloads or key not in {"resolved_config_json", "execution_snapshot_json"}
+        }
         for key in JSON_COLUMNS.intersection(result):
             raw = result[key]
             if raw is not None:
@@ -215,6 +236,7 @@ class Database:
         table: str,
         entity_id: str,
         fields: Mapping[str, Any],
+        *, materialize: bool = True,
     ) -> dict[str, Any]:
         from .maintenance_guard import guard_write
         guard_write(connection, table, {"id": entity_id, **fields})
@@ -223,20 +245,18 @@ class Database:
             if current is None:
                 raise KeyError(f"{table} entity not found: {entity_id}")
             return current
-        if cls._row_by_id(connection, table, entity_id) is None:
-            raise KeyError(f"{table} entity not found: {entity_id}")
         if getattr(connection, "payload_store", None):
             fields = connection.payload_store.encode_fields(connection, table, entity_id, fields)
         assignments = ", ".join(f"{key} = ?" for key in fields)
         cursor = connection.execute(
-            f"UPDATE {table} SET {assignments} WHERE id = ?",
+            f"UPDATE {table} SET {assignments} WHERE id = ? AND {visible_sql(table)} RETURNING *",
             (*fields.values(), entity_id),
         )
         if cursor.rowcount != 1:
             raise KeyError(f"{table} entity not found: {entity_id}")
-        updated = cls._row_by_id(connection, table, entity_id)
+        updated = cursor.fetchone()
         assert updated is not None
-        return updated
+        return cls._decode(updated) if materialize else updated
 
     def owns(self, table: str, identifier: str, *, writable: bool = False) -> bool:
         if table not in PRIVATE_TABLES:
@@ -633,20 +653,46 @@ class Database:
                    r.revision_number AS latest_revision_number,
                    r.requested_spec_sha256 AS latest_spec_sha256,
                    r.submitted_at AS latest_revision_submitted_at,
-                   json_extract(r.requested_spec_json, '$.source.revision') AS git_revision,
-                   json_extract(r.requested_spec_json, '$.source.repository') AS repository,
-                   json_extract(r.requested_spec_json, '$.source.project_subdirectory') AS project_subdirectory
+                   stats.run_count, stats.variant_count, stats.adapter
             FROM experiments e
             LEFT JOIN projects p ON p.id = e.project_id
             LEFT JOIN experiment_revisions r ON r.id = (
                 SELECT id FROM experiment_revisions WHERE experiment_id = e.id
                 ORDER BY revision_number DESC LIMIT 1
             )
+            LEFT JOIN LATERAL (
+                SELECT count(*) AS run_count, count(DISTINCT run.variant_id) AS variant_count,
+                       (array_agg(run.adapter_name ORDER BY run.created_at DESC))[1] AS adapter
+                FROM runs run JOIN variants v ON v.id = run.variant_id
+                WHERE v.experiment_revision_id = r.id AND {visible_sql('runs', 'run')}
+            ) stats ON true
             {where} ORDER BY e.created_at DESC LIMIT ? OFFSET ?
         """
         parameters.extend((limit, offset))
         with self.connection() as connection:
             results = self._decode_many(connection.execute(query, parameters).fetchall())
+            keys = {row["latest_revision_id"]: (row["latest_revision_id"], row["latest_spec_sha256"])
+                    for row in results if row["latest_revision_id"]}
+            with self._progress_cache_lock:
+                sources = {identifier: self._experiment_source_cache[key]
+                           for identifier, key in keys.items() if key in self._experiment_source_cache}
+            missing = list(keys.keys() - sources.keys())
+            if missing:
+                for row in connection.execute("""
+                    SELECT record_id AS id, projection_json #>> '{source,git_revision}' AS git_revision,
+                           projection_json #>> '{source,repository}' AS repository,
+                           projection_json #>> '{source,project_subdirectory}' AS project_subdirectory
+                    FROM document_projections WHERE table_name='experiment_revisions' AND record_id=ANY(?)
+                """, (missing,)).fetchall():
+                    sources[row["id"]] = {key: row[key] for key in
+                        ("git_revision", "repository", "project_subdirectory")}
+                with self._progress_cache_lock:
+                    self._experiment_source_cache.update({keys[i]: sources[i] for i in missing if i in sources})
+                    while len(self._experiment_source_cache) > 4096:
+                        self._experiment_source_cache.pop(next(iter(self._experiment_source_cache)))
+            for row in results:
+                row.update(sources.get(row["latest_revision_id"], {
+                    "git_revision": None, "repository": None, "project_subdirectory": None}))
             self._attach_tracking_links(connection, results, "experiment")
             return results
 
@@ -894,12 +940,14 @@ class Database:
             self._attach_tracking_links(connection, results, "run")
             return results
 
-    def get_run(self, run_id: str) -> dict[str, Any] | None:
+    def get_run(self, run_id: str, *, include_details: bool = True, include_payloads: bool = True,
+                execution_stage_ids: Sequence[str] | None = None) -> dict[str, Any] | None:
         if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
             return None
         with self.connection() as connection:
             run = self._decode(connection.execute(f"""
-                SELECT r.*, v.name AS variant_name, v.parameters_json, v.resolved_spec_json,
+                SELECT r.*, v.name AS variant_name, v.parameters_json,
+                       {"v.resolved_spec_json" if include_payloads else "NULL AS resolved_spec_json"},
                        er.experiment_id, er.id AS experiment_revision_id,
                        er.revision_number AS experiment_revision_number,
                        e.name AS experiment_name
@@ -911,13 +959,61 @@ class Database:
             """, (run_id,)).fetchone())
             if run is None:
                 return None
-            run["stages"] = self._decode_many(connection.execute(
-                "SELECT * FROM workflow_stages WHERE run_id = ? ORDER BY created_at", (run_id,)
-            ).fetchall())
-            run["attempts"] = self._decode_many(connection.execute("""
-                SELECT a.* FROM job_attempts a JOIN workflow_stages s ON s.id = a.stage_id
-                WHERE s.run_id = ? ORDER BY a.created_at
-            """, (run_id,)).fetchall())
+            if not include_details:
+                return run
+            if include_payloads and execution_stage_ids is not None:
+                # Planning needs the training specification and lifecycle state,
+                # not every previous evaluation's code/data capsule. Selected
+                # stages retain their complete, checksum-verified execution body.
+                selected = set(execution_stage_ids)
+                documents = [row['document'] for row in connection.execute(
+                    "SELECT to_jsonb(s) AS document FROM workflow_stages s WHERE run_id=? ORDER BY created_at",
+                    (run_id,),
+                ).fetchall()]
+                raw_configs = [json.loads(row['resolved_config_json']) for row in documents]
+                if self.payload_store:
+                    contexts = self.payload_store.project(raw_configs, ['context.execution_key'])
+                else:
+                    contexts = [{'context.execution_key': (value.get('context') or {}).get('execution_key')}
+                                for value in raw_configs]
+                run['stages'] = []
+                for document, context in zip(documents, contexts):
+                    if document['id'] in selected:
+                        if self.payload_store:
+                            document['resolved_config_json'] = self.payload_store.read(document['resolved_config_json'])
+                        stage = self._decode(document)
+                    else:
+                        stage = self._decode(document, include_payloads=False)
+                        stage['resolved_config_json'] = {'context': {'execution_key': context['context.execution_key']}}
+                    run['stages'].append(stage)
+                run['attempts'] = []
+                for row in connection.execute(
+                    "SELECT to_jsonb(a) AS document FROM job_attempts a "
+                    "JOIN workflow_stages s ON s.id=a.stage_id "
+                    "WHERE s.run_id=? ORDER BY a.created_at", (run_id,),
+                ).fetchall():
+                    document = row['document']
+                    include_attempt = document['stage_id'] in selected
+                    if include_attempt and self.payload_store:
+                        document['execution_snapshot_json'] = self.payload_store.read(document['execution_snapshot_json'])
+                    run['attempts'].append(self._decode(document, include_payloads=include_attempt))
+            elif include_payloads:
+                run["stages"] = self._decode_many(connection.execute(
+                    "SELECT * FROM workflow_stages WHERE run_id = ? ORDER BY created_at", (run_id,)
+                ).fetchall())
+                run["attempts"] = self._decode_many(connection.execute("""
+                    SELECT a.* FROM job_attempts a JOIN workflow_stages s ON s.id = a.stage_id
+                    WHERE s.run_id = ? ORDER BY a.created_at
+                """, (run_id,)).fetchall())
+            else:
+                run["stages"] = [self._decode(row['summary']) for row in connection.execute(
+                    "SELECT to_jsonb(s) - 'resolved_config_json' AS summary FROM workflow_stages s "
+                    "WHERE run_id=? ORDER BY created_at", (run_id,)
+                ).fetchall()]
+                run["attempts"] = [self._decode(row['summary']) for row in connection.execute(
+                    "SELECT to_jsonb(a) - 'execution_snapshot_json' AS summary FROM job_attempts a "
+                    "JOIN workflow_stages s ON s.id=a.stage_id WHERE s.run_id=? ORDER BY a.created_at", (run_id,)
+                ).fetchall()]
             run["checkpoints"] = self._decode_many(connection.execute(
                 "SELECT * FROM checkpoints WHERE run_id = ? ORDER BY training_step, created_at", (run_id,)
             ).fetchall())
@@ -958,23 +1054,78 @@ class Database:
             for start in range(0, len(identifiers), 400):
                 batch = identifiers[start:start + 400]
                 placeholders = ",".join("?" for _ in batch)
-                variants = self._decode_many(connection.execute(f"""
-                    SELECT r.id AS run_id, v.resolved_spec_json
-                    FROM runs r JOIN variants v ON v.id = r.variant_id
-                    WHERE r.id IN ({placeholders})
-                """, batch).fetchall())
-                for row in variants:
-                    evidence[row["run_id"]]["resolved_spec_json"] = row.get("resolved_spec_json")
+                # Variants are immutable: reuse their compact display settings,
+                # while attempts, status and observed progress remain live reads.
+                variant_ids = {row["id"]: row["variant_id"] for row in connection.execute(
+                    f"SELECT id, variant_id FROM runs WHERE id IN ({placeholders})", batch
+                ).fetchall()}
+                with self._progress_cache_lock:
+                    missing_ids = list({variant_id: run_id for run_id, variant_id in variant_ids.items()
+                                        if variant_id not in self._progress_spec_cache}.values())
+                    if missing_ids:
+                        missing_placeholders = ",".join("?" for _ in missing_ids)
+                        variants = self._decode_many(connection.execute(f"""
+                            WITH selected_specs AS MATERIALIZED (
+                                SELECT r.id AS run_id, v.resolved_spec_json::jsonb AS spec
+                                FROM runs r JOIN variants v ON v.id = r.variant_id
+                                WHERE r.id IN ({missing_placeholders})
+                            )
+                            SELECT run_id,
+                              jsonb_set(
+                                spec #- '{{source,adapter_manifest,train,capsule_files}}',
+                                '{{data,bundle,assignments}}',
+                                COALESCE((SELECT jsonb_agg(jsonb_set(item, '{{version,metadata}}',
+                                  (COALESCE(item #> '{{version,metadata}}', '{{}}'::jsonb)
+                                    - 'episodes' - 'shared_artifacts') || jsonb_build_object('episodes',
+                                    CASE WHEN jsonb_typeof(item #> '{{version,metadata,episodes}}') = 'array'
+                                      THEN to_jsonb(jsonb_array_length(item #> '{{version,metadata,episodes}}'))
+                                      ELSE item #> '{{version,metadata,episodes}}' END)))
+                                  FROM jsonb_array_elements(COALESCE(
+                                    spec #> '{{data,bundle,assignments}}', '[]'::jsonb)) item),
+                                  '[]'::jsonb)
+                              )::text AS resolved_spec_json
+                            FROM selected_specs
+                        """, missing_ids).fetchall())
+                        for row in variants:
+                            self._progress_spec_cache[variant_ids[row["run_id"]]] = row.get("resolved_spec_json")
+                    for run_id, variant_id in variant_ids.items():
+                        evidence[run_id]["resolved_spec_json"] = self._progress_spec_cache[variant_id]
+                    while len(self._progress_spec_cache) > 512:
+                        self._progress_spec_cache.pop(next(iter(self._progress_spec_cache)))
 
                 attempts = self._decode_many(connection.execute(f"""
-                    SELECT s.run_id, a.*
+                    SELECT s.run_id, to_jsonb(a) - 'execution_snapshot_json' AS summary,
+                      CASE WHEN jsonb_exists(a.execution_snapshot_json::jsonb, '$skynet_object_v1')
+                        THEN a.execution_snapshot_json::jsonb
+                        ELSE jsonb_build_object(
+                          'plan', jsonb_build_object('native_config', jsonb_build_object('initial_checkpoint',
+                            a.execution_snapshot_json::jsonb #> '{{plan,native_config,initial_checkpoint}}')),
+                          'migration_provenance', jsonb_build_object('checkpoint',
+                            a.execution_snapshot_json::jsonb #> '{{migration_provenance,checkpoint}}'),
+                          'resolved_spec', jsonb_build_object('native', jsonb_build_object('config',
+                            jsonb_build_object('initial_checkpoint',
+                              a.execution_snapshot_json::jsonb #> '{{resolved_spec,native,config,initial_checkpoint}}'))))
+                      END AS resume_evidence
                     FROM job_attempts a
                     JOIN workflow_stages s ON s.id = a.stage_id
                     WHERE s.stage_type = 'TRAIN' AND s.run_id IN ({placeholders})
                     ORDER BY s.run_id, a.attempt_number, a.created_at
                 """, batch).fetchall())
-                for row in attempts:
-                    evidence[row["run_id"]]["attempts"].append(row)
+                resume_paths = (
+                    'plan.native_config.initial_checkpoint', 'migration_provenance.checkpoint',
+                    'resolved_spec.native.config.initial_checkpoint',
+                )
+                documents = [row['resume_evidence'] for row in attempts]
+                if self.payload_store:
+                    resume_flags = self.payload_store.truthy_paths(documents, resume_paths)
+                else:
+                    from .payload_store import _path_value
+                    resume_flags = [any(_path_value(document, path) for path in resume_paths)
+                                    for document in documents]
+                for row, pinned_resume in zip(attempts, resume_flags):
+                    attempt = {**row['summary'], 'run_id': row['run_id'],
+                               'has_initial_checkpoint': pinned_resume}
+                    evidence[row["run_id"]]["attempts"].append(attempt)
 
                 checkpoints = self._decode_many(connection.execute(f"""
                     SELECT * FROM checkpoints
@@ -992,7 +1143,8 @@ class Database:
                 for row in metrics:
                     evidence[row["run_id"]]["metrics"].append(row)
                 progress_samples = self._decode_many(connection.execute(f"""
-                    SELECT * FROM training_progress_samples
+                    SELECT run_id, attempt_id, restart_count, completed, total, unit, recorded_at
+                    FROM training_progress_samples
                     WHERE run_id IN ({placeholders})
                     ORDER BY run_id, recorded_at, completed
                 """, batch).fetchall())
@@ -1021,17 +1173,39 @@ class Database:
         auto_resume: bool = False,
         max_attempts: int = 1,
         status: str = "PENDING",
+        stage_id: str | None = None,
     ) -> dict[str, Any]:
         if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
             raise KeyError("Record not found in this workspace")
         now = utc_now()
         values = {
-            "id": new_id(), "run_id": run_id, "stage_type": stage_type, "name": name,
+            "id": stage_id if stage_id is not None else new_id(), "run_id": run_id, "stage_type": stage_type, "name": name,
             "status": status, "resolved_config_json": canonical_json(resolved_config or {}),
             "auto_resume": int(auto_resume), "max_attempts": max_attempts, "created_at": now,
             "started_at": None, "completed_at": None, "updated_at": now,
         }
-        with self.transaction() as connection:
+        with self.transaction(payloads=(values['resolved_config_json'],)) as connection:
+            target = ((resolved_config or {}).get("context") or {}).get("target_dataset")
+            if stage_type == "EVALUATE" and target is not None:
+                if not isinstance(target, Mapping):
+                    raise ValueError("Evaluation target must be a frozen dataset selection")
+                # This shares the repository-write lock with dataset cleanup, so
+                # target validation and its first durable reference are atomic.
+                available = connection.execute("""
+                    SELECT 1 FROM data_resource_versions v
+                    JOIN data_resources r ON r.id=v.resource_id
+                    LEFT JOIN data_dataset_presentations p ON p.version_id=v.id
+                    WHERE v.id=? AND v.manifest_sha256=? AND r.category='dataset'
+                      AND p.archived_at IS NULL
+                      AND NOT EXISTS(SELECT 1 FROM data_version_retirements retirement WHERE retirement.version_id=v.id)
+                      AND NOT EXISTS(SELECT 1 FROM maintenance_operations m
+                        WHERE jsonb_exists(m.plan_json::jsonb #> '{records,data_resource_versions}', v.id))
+                      AND EXISTS(SELECT 1 FROM data_locations location WHERE location.version_id=v.id
+                          AND location.kind='cluster' AND location.status='AVAILABLE'
+                          AND location.manifest_sha256=v.manifest_sha256 AND location.path=?)
+                """, (target.get("version_id"), target.get("manifest_sha256"), target.get("path"))).fetchone()
+                if available is None:
+                    raise ValueError("Evaluation target dataset changed or is missing, archived, retired, or unavailable on the training cluster")
             self._insert(connection, "workflow_stages", values)
             result = self._row_by_id(connection, "workflow_stages", values["id"])
         assert result is not None
@@ -1056,8 +1230,10 @@ class Database:
             json_fields=frozenset({"resolved_config_json"}),
         )
         encoded["updated_at"] = utc_now()
-        with self.transaction() as connection:
-            return self._update(connection, "workflow_stages", stage_id, encoded)
+        with self.transaction(payloads=(encoded.get('resolved_config_json'),)) as connection:
+            row = self._update(connection, "workflow_stages", stage_id, encoded, materialize=False)
+        # A write receipt contains lifecycle fields, not unchanged execution bodies.
+        return self._decode(row, include_payloads=False)
 
     def claim_stage_for_submission(self, stage_id: str) -> dict[str, Any] | None:
         """Atomically claim one pending stage so concurrent dispatchers cannot submit it twice."""
@@ -1117,7 +1293,7 @@ class Database:
             json_fields=frozenset({"execution_snapshot_json"}),
         )
         now = utc_now()
-        with self.transaction() as connection:
+        with self.transaction(payloads=(values_extra.get('execution_snapshot_json'),)) as connection:
             if attempt_number is None:
                 attempt_number = connection.execute(
                     "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM job_attempts WHERE stage_id = ?", (stage_id,)
@@ -1165,7 +1341,9 @@ class Database:
         }))
         encoded["updated_at"] = utc_now()
         with self.transaction() as connection:
-            return self._update(connection, "job_attempts", attempt_id, encoded)
+            row = self._update(connection, "job_attempts", attempt_id, encoded, materialize=False)
+        # A write receipt contains lifecycle fields, not unchanged execution bodies.
+        return self._decode(row, include_payloads=False)
 
     def claim_stage_and_create_job_attempt(
         self,
@@ -1191,7 +1369,7 @@ class Database:
             json_fields=frozenset({"execution_snapshot_json"}),
         )
         now = utc_now()
-        with self.transaction() as connection:
+        with self.transaction(payloads=(values_extra.get('execution_snapshot_json'),)) as connection:
             claimed = connection.execute(
                 """
                 UPDATE workflow_stages
@@ -1429,7 +1607,12 @@ class Database:
         event: Mapping[str, Any] | None = None,
         expected_stage_statuses: Sequence[str] | None = None,
     ) -> dict[str, Any]:
-        """Commit one attempt/stage/run/evaluation transition and its event together."""
+        """Commit one lifecycle transition; return its small state receipt.
+
+        Full execution documents are available from the explicit read methods.
+        Materializing them here makes every scheduler poll transfer immutable
+        multi-megabyte bodies even though callers only need status and identity.
+        """
         if self.workspace_id is not None and stage_id is not None and not self.owns("workflow_stages", stage_id):
             raise KeyError("Record not found in this workspace")
         if self.workspace_id is not None and attempt_id is not None and not self.owns("job_attempts", attempt_id):
@@ -1485,43 +1668,52 @@ class Database:
             )
             encoded_evaluation["updated_at"] = now
 
-        with self.transaction() as connection:
+        with self.transaction(payloads=(encoded_stage.get('resolved_config_json'), (encoded_attempt or {}).get('execution_snapshot_json'))) as connection:
+            applied = True
             if expected_stage_statuses is not None:
-                current_stage = self._row_by_id(connection, "workflow_stages", stage_id)
+                current_stage = connection.execute(
+                    "SELECT * FROM workflow_stages WHERE id=?", (stage_id,)
+                ).fetchone()
                 if current_stage is None:
                     raise KeyError("Workflow stage not found")
                 expected = {str(value).upper() for value in expected_stage_statuses}
-                if str(current_stage.get("status") or "").upper() not in expected:
-                    return {"applied": False, "stage": current_stage}
-            result: dict[str, Any] = {
-                "stage": self._update(connection, "workflow_stages", stage_id, encoded_stage)
-            }
-            if attempt_id is not None and encoded_attempt is not None:
-                result["attempt"] = self._update(
-                    connection, "job_attempts", attempt_id, encoded_attempt
-                )
-            if run_id is not None and encoded_run is not None:
-                result["run"] = self._update(connection, "runs", run_id, encoded_run)
-            if evaluation_id is not None and encoded_evaluation is not None:
-                result["evaluation"] = self._update(
-                    connection, "evaluations", evaluation_id, encoded_evaluation
-                )
-            if event is not None:
-                event_values = {
-                    "id": new_id(),
-                    "entity_type": str(event["entity_type"]),
-                    "entity_id": str(event["entity_id"]),
-                    "event_type": str(event["event_type"]),
-                    "old_status": event.get("old_status"),
-                    "new_status": event.get("new_status"),
-                    "details_json": canonical_json(event.get("details") or {}),
-                    "created_at": now,
+                if str(current_stage["status"] or "").upper() not in expected:
+                    applied = False
+            if not applied:
+                result = {"applied": False, "stage": current_stage}
+            else:
+                result: dict[str, Any] = {
+                    "stage": self._update(connection, "workflow_stages", stage_id, encoded_stage, materialize=False)
                 }
-                self._insert(connection, "events", event_values)
-                result["event"] = self._row_by_id(connection, "events", event_values["id"])
-            if expected_stage_statuses is not None:
-                result["applied"] = True
-            return result
+                if attempt_id is not None and encoded_attempt is not None:
+                    result["attempt"] = self._update(
+                        connection, "job_attempts", attempt_id, encoded_attempt, materialize=False
+                    )
+                if run_id is not None and encoded_run is not None:
+                    result["run"] = self._update(connection, "runs", run_id, encoded_run)
+                if evaluation_id is not None and encoded_evaluation is not None:
+                    result["evaluation"] = self._update(
+                        connection, "evaluations", evaluation_id, encoded_evaluation
+                    )
+                if event is not None:
+                    event_values = {
+                        "id": new_id(),
+                        "entity_type": str(event["entity_type"]),
+                        "entity_id": str(event["entity_id"]),
+                        "event_type": str(event["event_type"]),
+                        "old_status": event.get("old_status"),
+                        "new_status": event.get("new_status"),
+                        "details_json": canonical_json(event.get("details") or {}),
+                        "created_at": now,
+                    }
+                    self._insert(connection, "events", event_values)
+                    result["event"] = self._row_by_id(connection, "events", event_values["id"])
+                if expected_stage_statuses is not None:
+                    result["applied"] = True
+        for key in ("stage", "attempt"):
+            if key in result:
+                result[key] = self._decode(result[key], include_payloads=False)
+        return result
 
     def repair_pre_submission_orphans(
         self, experiment_id: str | None = None
@@ -1659,6 +1851,7 @@ class Database:
         """Repair interrupted terminal transitions using their latest attempt as evidence."""
 
         draft_repairs = self.repair_pre_submission_orphans()
+        ledger_repairs = self.repair_incomplete_evaluation_ledgers()
         active_stage_states = (
             "SUBMITTING", "SUBMITTED", "PENDING_SLURM", "RUNNING", "CANCELLING",
         )
@@ -1770,6 +1963,7 @@ class Database:
         return {
             "repaired": repaired,
             "draft_graphs_repaired": draft_repairs["repaired"],
+            "evaluation_ledgers_repaired": ledger_repairs,
             "revision_ids": draft_repairs["revision_ids"],
             "run_ids": sorted(run_ids),
             "experiment_ids": sorted(experiment_ids),
@@ -2034,7 +2228,9 @@ class Database:
                 batch = identifiers[start:start + 400]
                 placeholders = ",".join("?" for _ in batch)
                 artifacts = self._decode_many(connection.execute(f"""
-                    SELECT evaluation_id, metadata_json FROM artifacts
+                    SELECT evaluation_id,
+                           json_build_object('aggregate', metadata_json::jsonb -> 'aggregate')::text AS metadata_json
+                    FROM artifacts
                     WHERE artifact_type = 'EVALUATION_RESULT'
                       AND evaluation_id IN ({placeholders})
                     ORDER BY created_at
@@ -2056,7 +2252,11 @@ class Database:
                 SELECT ev.id, r.run_number AS training_run_number,
                        ex.name AS experiment_name, ex.id AS experiment_id,
                        cp.path AS checkpoint_path, cp.training_step AS checkpoint_step,
-                       es.description AS suite_label, ws.resolved_config_json
+                       es.description AS suite_label,
+                       CASE WHEN jsonb_exists(ws.resolved_config_json::jsonb, '$skynet_object_v1')
+                            THEN ws.resolved_config_json::jsonb
+                            ELSE jsonb_build_object('resources', ws.resolved_config_json::jsonb -> 'resources')
+                       END AS config_projection
                 FROM evaluations ev
                 JOIN runs r ON r.id = ev.run_id
                 JOIN variants v ON v.id = r.variant_id
@@ -2067,8 +2267,10 @@ class Database:
                 LEFT JOIN evaluation_suites es ON es.id = ev.evaluation_suite_id
                 WHERE ev.id IN ({placeholders})
             """, batch).fetchall())
-            for row in rows:
-                config = row.pop("resolved_config_json", None) or {}
+            documents = [row.pop("config_projection", None) or {} for row in rows]
+            configs = (self.payload_store.project(documents, ("resources",)) if self.payload_store
+                       else documents)
+            for row, config in zip(rows, configs):
                 row["resources"] = config.get("resources") or {}
                 by_id[row["id"]].update(row)
 
@@ -2123,14 +2325,14 @@ class Database:
                 batch = identifiers[start:start + 400]
                 placeholders = ",".join("?" for _ in batch)
                 attempts = self._decode_many(connection.execute(f"""
-                    SELECT e.id AS evaluation_id, a.*
+                    SELECT e.id AS evaluation_id, to_jsonb(a) - 'execution_snapshot_json' AS summary
                     FROM evaluations e
                     JOIN job_attempts a ON a.stage_id = e.stage_id
                     WHERE e.id IN ({placeholders})
                     ORDER BY e.id, a.attempt_number, a.created_at
                 """, batch).fetchall())
                 for row in attempts:
-                    evidence[row["evaluation_id"]]["attempts"].append(row)
+                    evidence[row["evaluation_id"]]["attempts"].append(row["summary"])
                 episodes = self._decode_many(connection.execute(f"""
                     SELECT * FROM evaluation_episodes
                     WHERE evaluation_id IN ({placeholders})
@@ -2169,6 +2371,62 @@ class Database:
                     (encoded["updated_at"], evaluation_id),
                 )
             return result
+
+    def repair_incomplete_evaluation_ledgers(self) -> int:
+        """Recover interrupted legacy ledger creation for already accepted work."""
+        with self.connection() as connection:
+            rows = connection.execute(f"""
+                SELECT e.id FROM evaluations e
+                WHERE {visible_sql("evaluations", "e")}
+                  AND e.status IN ('SUBMITTING','SUBMITTED','PENDING','PENDING_SLURM',
+                                   'RUNNING','REQUEUED','RETRY_PENDING')
+                  AND (SELECT COUNT(*) FROM evaluation_episodes p WHERE p.evaluation_id=e.id)
+                      < jsonb_array_length(e.task_selection_json::jsonb)
+                        * jsonb_array_length(e.seeds_json::jsonb) * e.episodes_per_task
+            """).fetchall()
+        repaired = 0
+        for row in rows:
+            # ON CONFLICT in the atomic initializer preserves every existing
+            # result/ID and tolerates collection completing another row first.
+            if self.initialize_evaluation_episodes(
+                row["id"], expected_parent_states=("SUBMITTING", "SUBMITTED", "PENDING",
+                    "PENDING_SLURM", "RUNNING", "REQUEUED", "RETRY_PENDING"),
+            ):
+                repaired += 1
+        return repaired
+
+    def initialize_evaluation_episodes(
+        self, evaluation_id: str, *, expected_parent_states: Sequence[str] | None = None,
+    ) -> int:
+        """Fill the pinned evaluation ledger atomically, preserving existing outcomes."""
+        if self.workspace_id is not None and not self.owns("evaluations", evaluation_id):
+            raise KeyError("Record not found in this workspace")
+        with self.transaction() as connection:
+            parent = connection.execute(
+                "SELECT task_selection_json, seeds_json, episodes_per_task, status FROM evaluations WHERE id = ?",
+                (evaluation_id,),
+            ).fetchone()
+            if parent is None:
+                raise KeyError("Evaluation not found")
+            if expected_parent_states is not None and parent["status"] not in expected_parent_states:
+                return 0
+            from .maintenance_guard import guard_write
+            guard_write(connection, "evaluation_episodes", {"evaluation_id": evaluation_id})
+            now = utc_now()
+            rows = [
+                (new_id(), evaluation_id, task, seed, index, "{}", now)
+                for task in json.loads(parent["task_selection_json"])
+                for seed in json.loads(parent["seeds_json"])
+                for index in range(parent["episodes_per_task"])
+            ]
+            cursor = connection.executemany(
+                """INSERT INTO evaluation_episodes
+                   (id, evaluation_id, task, seed, episode_index, metrics_json, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT (evaluation_id, task, seed, episode_index) DO NOTHING""",
+                rows,
+            )
+            return cursor.rowcount
 
     def upsert_evaluation_episode(
         self,
@@ -2314,6 +2572,42 @@ class Database:
             ).fetchone())
         assert result is not None
         return result
+
+    def record_training_progress_samples(
+        self, run_id: str, attempt_id: str, samples: Sequence[Mapping[str, Any]]
+    ) -> None:
+        """Persist one observed log tail atomically, with one ownership check.
+
+        Conflicts preserve the original observation, exactly as single-sample
+        ingestion does. A failed batch cannot leave a misleading partial tail.
+        """
+        if not samples:
+            return
+        now = utc_now()
+        rows = []
+        for sample in samples:
+            restart, completed, total = sample["restart_count"], sample["completed"], sample.get("total")
+            if restart < 0 or completed < 0 or (total is not None and total < 1):
+                raise ValueError("invalid training progress sample")
+            rows.append((new_id(), run_id, attempt_id, restart, completed, total,
+                         sample.get("unit", "step"), sample["source_kind"],
+                         canonical_json(sample.get("evidence") or {}),
+                         sample.get("recorded_at") or now, now))
+        with self.transaction() as connection:
+            owner = connection.execute(f"""
+                SELECT s.run_id FROM job_attempts a
+                JOIN workflow_stages s ON s.id=a.stage_id
+                WHERE a.id=? AND s.run_id=? AND {visible_sql('job_attempts', 'a')}
+            """, (attempt_id, run_id)).fetchone()
+            if owner is None:
+                raise KeyError("Attempt not found for this run in this workspace")
+            connection.executemany("""
+                INSERT INTO training_progress_samples (
+                    id, run_id, attempt_id, restart_count, completed, total, unit,
+                    source_kind, evidence_json, recorded_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(attempt_id, restart_count, completed) DO NOTHING
+            """, rows)
 
     def enrich_training_progress_metrics(
         self, sample_id: str, metrics: Mapping[str, float | int]
@@ -2619,7 +2913,12 @@ class Database:
     ) -> dict[str, Any] | None:
         if not rows:
             return None
-        decoded = [cls._decode(row) for row in rows]
+        if include_versions:
+            decoded = [cls._decode(row) for row in rows]
+        else:
+            latest_number = max(int(row['version_number']) for row in rows)
+            decoded = [cls._decode(row) if int(row['version_number']) in {latest_number, selected_version}
+                       else {key: row[key] for key in row.keys() if key != 'manifest_json'} for row in rows]
         versions = sorted(
             (row for row in decoded if row is not None),
             key=lambda row: int(row["version_number"]),
@@ -2655,20 +2954,18 @@ class Database:
         return result
 
     @staticmethod
-    def _adapter_rows(
-        connection: PostgresConnection, adapter_id: str
-    ) -> list[Record]:
-        return connection.execute(
-            f"""
-            SELECT * FROM adapters
-            WHERE {visible_sql("adapters")} AND adapter_key = COALESCE(
-                (SELECT adapter_key FROM adapters WHERE adapter_key = ? LIMIT 1),
-                (SELECT adapter_key FROM adapters WHERE id = ? LIMIT 1)
-            )
-            ORDER BY version_number DESC
-            """,
-            (adapter_id, adapter_id),
+    def _adapter_rows(connection: PostgresConnection, adapter_id: str, *, headers_only=False) -> list[Record]:
+        # Keep external references opaque while selecting rows. The caller
+        # decides when full manifests are needed (after write transactions).
+        projection = "to_jsonb(a) - 'manifest_json' || jsonb_build_object('manifest_json', '{}')" if headers_only else "to_jsonb(a)"
+        rows = connection.execute(
+            f"""SELECT {projection} AS document FROM adapters a
+                WHERE {visible_sql('adapters', 'a')} AND adapter_key=COALESCE(
+                    (SELECT adapter_key FROM adapters WHERE adapter_key=? LIMIT 1),
+                    (SELECT adapter_key FROM adapters WHERE id=? LIMIT 1))
+                ORDER BY version_number DESC""", (adapter_id, adapter_id),
         ).fetchall()
+        return [Record(tuple(row['document']), tuple(row['document'].values()), connection.payload_store) for row in rows]
 
     @classmethod
     def _insert_adapter_version(
@@ -2790,6 +3087,36 @@ class Database:
                 include_versions=include_versions,
             )
 
+    def get_adapter_version(
+        self, adapter_id: str, *, version_id: str | None = None,
+        version_number: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Read one visible immutable manifest without hydrating its history."""
+        if self.workspace_id is not None and not self.owns("adapters", adapter_id):
+            return None
+        with self.connection() as connection:
+            filters, parameters = [], [adapter_id, adapter_id]
+            if version_id is not None:
+                filters.append("a.id=?")
+                parameters.append(version_id)
+            if version_number is not None:
+                filters.append("a.version_number=?")
+                parameters.append(version_number)
+            extra = " AND " + " AND ".join(filters) if filters else ""
+            row = connection.execute(
+                f"SELECT to_jsonb(a) AS document FROM adapters a "
+                f"WHERE {visible_sql('adapters', 'a')} AND adapter_key=COALESCE("
+                "(SELECT adapter_key FROM adapters WHERE adapter_key=? LIMIT 1),"
+                "(SELECT adapter_key FROM adapters WHERE id=? LIMIT 1))"
+                f"{extra} ORDER BY version_number DESC LIMIT 1", parameters,
+            ).fetchone()
+            if row is None:
+                return None
+            document = row["document"]
+            return self._adapter_version_payload(Record(
+                tuple(document), tuple(document.values()), connection.payload_store,
+            ))
+
     def create_adapter(
         self,
         *,
@@ -2807,7 +3134,7 @@ class Database:
             raise ValueError("Adapter manifest must be an object")
         adapter_key = new_id()
         resolved_url = repository_url or self._repository_url_from_manifest(manifest)
-        with self.transaction() as connection:
+        with self.transaction(payloads=(canonical_json(manifest),)) as connection:
             self._insert_adapter_version(
                 connection,
                 adapter_key=adapter_key,
@@ -2819,9 +3146,8 @@ class Database:
                 created_by=created_by,
                 change_note=change_note,
             )
-            result = self._adapter_bundle(
-                self._adapter_rows(connection, adapter_key), include_versions=True
-            )
+            result_rows = self._adapter_rows(connection, adapter_key)
+        result = self._adapter_bundle(result_rows, include_versions=True)
         assert result is not None
         return result
 
@@ -2841,8 +3167,8 @@ class Database:
             raise KeyError("Record not found in this workspace")
         if not isinstance(manifest, Mapping):
             raise ValueError("Adapter manifest must be an object")
-        with self.transaction() as connection:
-            rows = self._adapter_rows(connection, adapter_id)
+        with self.transaction(payloads=(canonical_json(manifest),)) as connection:
+            rows = self._adapter_rows(connection, adapter_id, headers_only=True)
             current = self._adapter_bundle(rows)
             if current is None:
                 raise KeyError(f"Adapter not found: {adapter_id}")
@@ -2872,9 +3198,8 @@ class Database:
                 source_adapter_key=latest.get("source_adapter_id"),
                 source_version_number=latest.get("source_version_number"),
             )
-            result = self._adapter_bundle(
-                self._adapter_rows(connection, current["id"]), include_versions=True
-            )
+            result_rows = self._adapter_rows(connection, current["id"])
+        result = self._adapter_bundle(result_rows, include_versions=True)
         assert result is not None
         return result
 
@@ -2893,13 +3218,13 @@ class Database:
         normalized_name = name.strip()
         if not normalized_name:
             raise ValueError("Adapter name must not be empty")
-        with self.transaction() as connection:
-            source = self._adapter_bundle(
-                self._adapter_rows(connection, adapter_id), selected_version=version_number
-            )
-            if source is None:
-                raise KeyError(f"Adapter or version not found: {adapter_id}")
-            selected = source["selected_version"]
+        source = self.get_adapter(adapter_id, version_number=version_number, include_versions=False)
+        if source is None:
+            raise KeyError(f"Adapter or version not found: {adapter_id}")
+        selected = source["selected_version"]
+        with self.transaction(payloads=(canonical_json(selected['manifest']),)) as connection:
+            if connection.execute("SELECT 1 FROM adapters WHERE id=?", (selected['id'],)).fetchone() is None:
+                raise KeyError("Source adapter was deleted")
             clone_key = new_id()
             self._insert_adapter_version(
                 connection,
@@ -2914,9 +3239,8 @@ class Database:
                 source_adapter_key=source["id"],
                 source_version_number=int(selected["version_number"]),
             )
-            result = self._adapter_bundle(
-                self._adapter_rows(connection, clone_key), include_versions=True
-            )
+            result_rows = self._adapter_rows(connection, clone_key)
+        result = self._adapter_bundle(result_rows, include_versions=True)
         assert result is not None
         return result
 
@@ -2924,7 +3248,7 @@ class Database:
         if self.workspace_id is not None and adapter_id is not None and not self.owns("adapters", adapter_id, writable=True):
             raise KeyError("Record not found in this workspace")
         with self.transaction() as connection:
-            rows = self._adapter_rows(connection, adapter_id)
+            rows = self._adapter_rows(connection, adapter_id, headers_only=True)
             current = self._adapter_bundle(rows)
             if current is None:
                 raise KeyError(f"Adapter not found: {adapter_id}")
@@ -2933,9 +3257,8 @@ class Database:
                 "UPDATE adapters SET enabled = 0, archived_at = ?, updated_at = ? WHERE adapter_key = ?",
                 (archived_at, utc_now(), current["id"]),
             )
-            result = self._adapter_bundle(
-                self._adapter_rows(connection, current["id"]), include_versions=True
-            )
+            result_rows = self._adapter_rows(connection, current["id"])
+        result = self._adapter_bundle(result_rows, include_versions=True)
         assert result is not None
         return result
 
@@ -2943,7 +3266,7 @@ class Database:
         if self.workspace_id is not None and adapter_id is not None and not self.owns("adapters", adapter_id, writable=True):
             raise KeyError("Record not found in this workspace")
         with self.transaction() as connection:
-            rows = self._adapter_rows(connection, adapter_id)
+            rows = self._adapter_rows(connection, adapter_id, headers_only=True)
             current = self._adapter_bundle(rows)
             if current is None:
                 raise KeyError(f"Adapter not found: {adapter_id}")
@@ -2951,9 +3274,8 @@ class Database:
                 "UPDATE adapters SET enabled = 1, archived_at = NULL, updated_at = ? WHERE adapter_key = ?",
                 (utc_now(), current["id"]),
             )
-            result = self._adapter_bundle(
-                self._adapter_rows(connection, current["id"]), include_versions=True
-            )
+            result_rows = self._adapter_rows(connection, current["id"])
+        result = self._adapter_bundle(result_rows, include_versions=True)
         assert result is not None
         return result
 
@@ -2977,7 +3299,7 @@ class Database:
         manifest_json = canonical_json(manifest)
         manifest_sha256 = content_sha256(manifest_json)
         resolved_url = repository_url or self._repository_url_from_manifest(manifest)
-        with self.transaction() as connection:
+        with self.transaction(payloads=(manifest_json,)) as connection:
             seeded = connection.execute(
                 "SELECT adapter_key FROM adapters WHERE seed_key = ? LIMIT 1",
                 (normalized_seed,),
@@ -3039,9 +3361,8 @@ class Database:
                 )
             if not materialize_result:
                 return None
-            result = self._adapter_bundle(
-                self._adapter_rows(connection, adapter_key), include_versions=True
-            )
+            result_rows = self._adapter_rows(connection, adapter_key)
+        result = self._adapter_bundle(result_rows, include_versions=True)
         assert result is not None
         return result
 
@@ -3478,6 +3799,8 @@ class Database:
         if version is None or version["manifest_sha256"] != manifest_sha256:
             raise ValueError("Location must reference the exact registered dataset")
         with self.transaction() as connection:
+            from .maintenance_guard import guard_write
+            guard_write(connection, 'data_locations', {'version_id': version_id, 'path': path})
             connection.execute("""INSERT INTO data_locations VALUES (?,?,?,?,?,?,?,?)
                 ON CONFLICT(version_id, host, path) DO UPDATE SET
                 status=excluded.status, verified_at=excluded.verified_at""",
@@ -3618,9 +3941,11 @@ class Database:
             for table, column in [
                 ("experiment_revisions", "requested_spec_json"),
                 ("variants", "resolved_spec_json"),
+                ("workflow_stages", "resolved_config_json"),
+                ("job_attempts", "execution_snapshot_json"),
             ]:
                 for row in c.execute(f"SELECT {column} FROM {table}"):
-                    if references_dataset(json.loads(row[0])):
+                    if row[0] and references_dataset(json.loads(row[0])):
                         raise ValueError(
                             "This dataset is used by an experiment and cannot be deleted"
                         )
@@ -3640,17 +3965,36 @@ class Database:
                 imports.append(dict(row))
             if preview:
                 return {"jobs": jobs, "versions": versions, "locations": locations, "imports": imports}
-            try:
-                cleanup(jobs, versions, locations)
-            except Exception as exc:
+            operation_id = selected_version_id or identifier
+            intent = {
+                'kind': 'dataset', 'id': operation_id,
+                'records': {'data_resource_versions': sorted(version_ids),
+                            'data_bundles': [bundle['id'] for bundle in bundles],
+                            'policy_exports': [job['id'] for job in jobs]},
+                'files': [{'path': path} for path in sorted({version['path'] for version in versions} |
+                         {location['path'] for location in locations}) if path],
+            }
+            c.execute(
+                "INSERT INTO maintenance_operations(target_kind,target_id,owner_id,plan_json,created_at) VALUES ('dataset',?,?,?,?) "
+                "ON CONFLICT(target_kind,target_id) DO UPDATE SET plan_json=excluded.plan_json",
+                (operation_id, self.workspace_id or LEGACY_WORKSPACE, canonical_json(intent), utc_now()),
+            )
+        # File removal can take seconds/minutes. The durable intent rejects new
+        # consumers while unrelated writes continue; failed cleanup is retryable.
+        try:
+            cleanup(jobs, versions, locations)
+        except Exception as exc:
+            failure = exc
+        with self.transaction() as c:
+            c.execute("SET LOCAL skynet.delete_history='on'")
+            if failure:
                 # Filesystem deletions cannot roll back. Keep records for retry,
                 # but make every affected copy and bundle unavailable to training.
-                failure = exc
                 for job in jobs:
                     job.update(
                         state="DELETE_FAILED",
                         training_ready=False,
-                        error=str(exc),
+                        error=str(failure),
                         updated_at=utc_now(),
                     )
                     c.execute(
@@ -3697,6 +4041,7 @@ class Database:
                     )
                 for job in jobs:
                     c.execute("DELETE FROM policy_exports WHERE id=?", (job["id"],))
+                c.execute("DELETE FROM maintenance_operations WHERE target_kind='dataset' AND target_id=?", (operation_id,))
         if failure:
             raise ValueError(
                 f"Dataset deletion is incomplete. Retry Delete dataset. {failure}"
@@ -3704,25 +4049,57 @@ class Database:
         return {"deleted": True, "resource_id": resource_id, "version_id": selected_version_id}
 
     def dataset_preset_links(self):
-        """Exact dataset results referenced by any saved preset revision in this workspace."""
+        """Resolve fresh revision identities, reusing only their immutable input projections."""
         with self.connection() as connection:
-            return [dict(row) for row in connection.execute(f"""
-                SELECT DISTINCT e.id AS experiment_id, e.name AS experiment_name,
-                       er.revision_number, r.id AS resource_id, v.id AS version_id
+            headers = connection.execute(f"""
+                SELECT e.id AS experiment_id, e.name AS experiment_name, er.id,
+                       er.revision_number, er.requested_spec_sha256
                 FROM experiments e JOIN experiment_revisions er ON er.experiment_id=e.id
-                CROSS JOIN json_each(er.requested_spec_json, '$.data.bundle.assignments') a
-                JOIN data_resource_versions v ON (
-                    v.id=json_extract(a.value, '$.version.metadata.registered_version_id')
-                    OR (json_extract(a.value, '$.version.metadata.registered_version_id') IS NULL
-                        AND v.manifest_sha256=json_extract(a.value, '$.version.manifest_sha256')))
-                JOIN data_resources r ON r.id=v.resource_id
-                WHERE {visible_sql("experiments", "e")} AND r.category='dataset'
-                  AND (json_extract(a.value, '$.version.metadata.registered_version_id') IS NOT NULL
-                       OR (r.provider=json_extract(a.value, '$.resource.provider')
-                           AND r.namespace=json_extract(a.value, '$.resource.namespace')
-                           AND r.source_key=json_extract(a.value, '$.resource.name')))
-                ORDER BY e.name, er.revision_number, r.id, v.id
+                WHERE {visible_sql('experiments', 'e')}
+                ORDER BY e.name, er.revision_number
+            """).fetchall()
+            keys = {row['id']: (row['id'], row['requested_spec_sha256']) for row in headers}
+            with self._progress_cache_lock:
+                assignments = {identifier: self._dataset_assignment_cache[key]
+                               for identifier, key in keys.items() if key in self._dataset_assignment_cache}
+            missing = list(keys.keys() - assignments.keys())
+            if missing:
+                assignments.update({identifier: [] for identifier in missing})
+                for row in connection.execute("""
+                    SELECT p.record_id AS id, a.value ->> 'version_id' AS version_id,
+                           a.value ->> 'digest' AS digest, a.value ->> 'provider' AS provider,
+                           a.value ->> 'namespace' AS namespace, a.value ->> 'source_key' AS source_key
+                    FROM document_projections p CROSS JOIN LATERAL
+                         jsonb_array_elements(p.projection_json -> 'assignments') a(value)
+                    WHERE p.table_name='experiment_revisions' AND p.record_id=ANY(?)
+                """, (missing,)).fetchall():
+                    assignments[row['id']].append(dict(row))
+                with self._progress_cache_lock:
+                    self._dataset_assignment_cache.update({keys[i]: assignments[i] for i in missing})
+                    while len(self._dataset_assignment_cache) > 4096:
+                        self._dataset_assignment_cache.pop(next(iter(self._dataset_assignment_cache)))
+            versions = [dict(row) for row in connection.execute("""
+                SELECT v.id, v.resource_id, v.manifest_sha256, r.provider, r.namespace, r.source_key
+                FROM data_resource_versions v JOIN data_resources r ON r.id=v.resource_id
+                WHERE r.category='dataset'
             """).fetchall()]
+            by_id = {row['id']: row for row in versions}
+            by_identity = {}
+            for row in versions:
+                by_identity.setdefault((row['manifest_sha256'], row['provider'], row['namespace'], row['source_key']), []).append(row)
+            result, seen = [], set()
+            for header in headers:
+                for assignment in assignments[header['id']]:
+                    candidates = ([by_id[assignment['version_id']]] if assignment['version_id'] in by_id else []) if assignment['version_id'] else by_identity.get(
+                        (assignment['digest'], assignment['provider'], assignment['namespace'], assignment['source_key']), [])
+                    for version in candidates:
+                        key = (header['id'], version['id'])
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        result.append({key: header[key] for key in ('experiment_id', 'experiment_name', 'revision_number')} |
+                                      {'resource_id': version['resource_id'], 'version_id': version['id']})
+            return sorted(result, key=lambda row: (row['experiment_name'], row['revision_number'], row['resource_id'], row['version_id']))
 
     def data_version_usage_many(
         self, manifest_sha256s: Sequence[str], *, workspace_id: str | None = None
@@ -3735,15 +4112,44 @@ class Database:
         hidden = set()
         with self.connection() as connection:
             rows = connection.execute("""
-                SELECT DISTINCT json_extract(assignment.value, '$.version.manifest_sha256') AS digest,
-                       e.owner_id AS usage_owner_id, e.id AS experiment_id, e.name,
-                       er.revision_number, r.id AS run_id, r.status AS run_status
-                FROM experiment_revisions er JOIN experiments e ON e.id=er.experiment_id
-                LEFT JOIN variants v ON v.experiment_revision_id=er.id
-                LEFT JOIN runs r ON r.variant_id=v.id
-                CROSS JOIN json_each(er.requested_spec_json, '$.data.bundle.assignments') assignment
-                WHERE json_extract(assignment.value, '$.version.manifest_sha256') = ANY(?)
-                ORDER BY e.name, er.revision_number
+                WITH usages AS (
+                    SELECT json_extract(assignment.value, '$.version.manifest_sha256') AS digest,
+                           e.owner_id AS usage_owner_id, e.id AS experiment_id, e.name,
+                           er.revision_number, r.id AS run_id, r.status AS run_status
+                    FROM experiment_revisions er JOIN experiments e ON e.id=er.experiment_id
+                    LEFT JOIN variants v ON v.experiment_revision_id=er.id
+                    LEFT JOIN runs r ON r.variant_id=v.id
+                    CROSS JOIN json_each(er.requested_spec_json, '$.data.bundle.assignments') assignment
+                    UNION ALL
+                    SELECT target.digest, e.owner_id, e.id, e.name,
+                           er.revision_number, r.id, r.status
+                    FROM workflow_stages stage
+                    JOIN runs r ON r.id=stage.run_id
+                    JOIN variants v ON v.id=r.variant_id
+                    JOIN experiment_revisions er ON er.id=v.experiment_revision_id
+                    JOIN experiments e ON e.id=er.experiment_id
+                    CROSS JOIN LATERAL (VALUES
+                        (json_extract(stage.resolved_config_json, '$.context.target_dataset.manifest_sha256')),
+                        (json_extract(stage.resolved_config_json, '$.plan.native_config.canonical_evaluation.target_dataset.manifest_sha256'))
+                    ) target(digest)
+                    UNION ALL
+                    SELECT target.digest, e.owner_id, e.id, e.name,
+                           er.revision_number, r.id, r.status
+                    FROM job_attempts attempt
+                    JOIN workflow_stages stage ON stage.id=attempt.stage_id
+                    JOIN runs r ON r.id=stage.run_id
+                    JOIN variants v ON v.id=r.variant_id
+                    JOIN experiment_revisions er ON er.id=v.experiment_revision_id
+                    JOIN experiments e ON e.id=er.experiment_id
+                    CROSS JOIN LATERAL (VALUES
+                        (json_extract(attempt.execution_snapshot_json, '$.plan.native_config.canonical_evaluation.target_dataset.manifest_sha256')),
+                        (json_extract(attempt.execution_snapshot_json, '$.context.target_dataset.manifest_sha256'))
+                    ) target(digest)
+                )
+                SELECT DISTINCT digest, usage_owner_id, experiment_id, name,
+                       revision_number, run_id, run_status
+                FROM usages WHERE digest = ANY(?)
+                ORDER BY name, revision_number, run_id
             """, (digests,)).fetchall()
         for row in rows:
             item = dict(row)
@@ -4050,7 +4456,31 @@ class Database:
             rows = connection.execute(
                 "SELECT * FROM data_derivations ORDER BY created_at DESC LIMIT ?", (limit,)
             ).fetchall()
-            return [self._data_derivation_payload(connection, row) for row in rows]
+            results = self._decode_many(rows)
+            if not results:
+                return []
+            inputs = connection.execute(
+                "SELECT * FROM data_derivation_inputs WHERE derivation_id=ANY(?) ORDER BY role, position",
+                ([row["id"] for row in results],),
+            ).fetchall()
+            version_ids = {row["output_version_id"] for row in results}
+            version_ids.update(row["input_version_id"] for row in inputs)
+            version_rows = connection.execute(
+                "SELECT * FROM data_resource_versions WHERE id=ANY(?)", (list(version_ids),)
+            ).fetchall()
+            versions = {row["id"]: row for row in self._data_version_payloads(
+                connection, version_rows, include_resource=True)}
+            by_id = {row["id"]: row for row in results}
+            for row in results:
+                row["converter_config"] = row.pop("converter_config_json", {})
+                row["output_version"] = versions[row["output_version_id"]]
+                row["inputs"] = []
+            for row in inputs:
+                by_id[row["derivation_id"]]["inputs"].append({
+                    "version_id": row["input_version_id"], "role": row["role"],
+                    "position": row["position"], "version": versions[row["input_version_id"]],
+                })
+            return results
 
     def get_data_derivation(self, derivation_id: str) -> dict[str, Any] | None:
         with self.connection() as connection:

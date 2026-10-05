@@ -14,7 +14,7 @@ from psycopg.conninfo import make_conninfo
 
 from skynet_app.background_owner import BackgroundOwner
 from skynet_app.database import Database
-from skynet_app.db_backend import INTEGRITY_ERRORS
+from skynet_app.db_backend import INTEGRITY_ERRORS, lock_key
 
 
 @pytest.fixture
@@ -209,11 +209,21 @@ def test_tracking_queue_and_cursor_are_shared_between_hosts(pg, tmp_path):
     assert not (tmp_path / "host-a" / "wandb-state.json").exists()
 
 
-def test_background_workers_stop_when_ownership_connection_is_lost(pg):
+def test_background_workers_stop_and_reacquire_after_ownership_connection_is_lost(pg):
     db, url = pg
     started = threading.Event()
     stopped = threading.Event()
-    owner = BackgroundOwner(db, started.set, stopped.set, interval=0.03)
+    transitions = []
+
+    def start():
+        transitions.append("start")
+        started.set()
+
+    def stop():
+        transitions.append("stop")
+        stopped.set()
+
+    owner = BackgroundOwner(db, start, stop, interval=0.03)
     from skynet_app.db_backend import lock_key
 
     key = lock_key("background-owner") & ((1 << 64) - 1)
@@ -227,9 +237,43 @@ def test_background_workers_stop_when_ownership_connection_is_lost(pg):
             ).fetchone()[0]
             connection.execute("SELECT pg_terminate_backend(%s)", (pid,))
         assert stopped.wait(5)
-        eventually(lambda: owner.state == "lost")
+        eventually(lambda: transitions == ["start", "stop", "start"] and owner.state == "active")
+        assert owner.thread.is_alive()
     finally:
         owner.stop()
+    assert transitions == ["start", "stop", "start", "stop"]
+
+
+def test_partial_background_start_retains_lease_until_cleanup_finishes(pg):
+    db, url = pg
+    transitions = []
+    cleanup_attempted = threading.Event()
+    allow_cleanup = threading.Event()
+
+    def start():
+        transitions.append("start")
+        if transitions.count("start") == 1:
+            raise ConnectionError("DB disconnected during partial service startup")
+
+    def stop():
+        cleanup_attempted.set()
+        if not allow_cleanup.is_set():
+            raise RuntimeError("Worker is still draining")
+        transitions.append("stop")
+
+    owner = BackgroundOwner(db, start, stop, interval=0.03)
+    contender = Database(url=url).operation_lock("background-owner")
+    try:
+        owner.start()
+        assert cleanup_attempted.wait(5)
+        assert not contender.acquire(False)
+        assert transitions == ["start"]
+        allow_cleanup.set()
+        eventually(lambda: transitions == ["start", "stop", "start"] and owner.state == "active")
+    finally:
+        allow_cleanup.set()
+        owner.stop()
+    assert transitions == ["start", "stop", "start", "stop"]
 
 
 def test_tracking_journal_cannot_attach_another_workspace_run(pg):
@@ -356,3 +400,43 @@ def test_lock_cleanup_failure_without_prior_error_still_raises(pg):
                 )
     assert lock.acquire(blocking=False)
     lock.release()
+
+
+def test_abandoned_transaction_expires_releases_writer_and_rolls_back(pg):
+    db, _ = pg
+    abandoned = db.backend.connect()
+    observer = db.backend.connect()
+    try:
+        timeout = int(abandoned.execute(
+            "SELECT setting FROM pg_settings WHERE name='idle_in_transaction_session_timeout'"
+        ).fetchone()[0])
+        assert 0 < timeout <= 120000
+        abandoned.execute("SET idle_in_transaction_session_timeout='250ms'")
+        abandoned.execute("BEGIN")
+        abandoned.execute("SELECT pg_advisory_xact_lock(?)", (lock_key("repository-write"),))
+        abandoned.execute(
+            "INSERT INTO projects(id,name,created_at) VALUES ('abandoned','abandoned','now')"
+        )
+        pid = abandoned.raw.info.backend_pid
+        assert observer.execute(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid=? AND locktype='advisory' AND granted)",
+            (pid,),
+        ).fetchone()[0]
+        # Do not touch the abandoned socket: the server must recover on its own.
+        eventually(lambda: not observer.execute(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid=?)", (pid,)
+        ).fetchone()[0])
+        project = db.create_project("New writer can proceed")
+        assert [p["id"] for p in db.list_projects()] == [project["id"]]
+    finally:
+        abandoned.close()
+        observer.close()
+
+
+def test_idle_transaction_timeout_does_not_cancel_active_sql(pg):
+    db, _ = pg
+    with db.transaction() as c:
+        c.execute("SET LOCAL idle_in_transaction_session_timeout='100ms'")
+        c.execute("SELECT pg_sleep(0.3)")
+        c.execute("INSERT INTO projects(id,name,created_at) VALUES ('active','active','now')")
+    assert [p["id"] for p in db.list_projects()] == ["active"]

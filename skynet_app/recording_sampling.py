@@ -1,5 +1,6 @@
 """Submission-time view of the same sampling plan used by recording loaders."""
-from .adapters.recording_time import resolve_sampling
+from .adapters.recording_time import resolve_sampling, resolve_collection_sampling
+from .adapters.dataset_inputs import resolve_data_selections
 from .training_contracts import RECORDING_DATASET_FORMAT
 
 
@@ -13,10 +14,16 @@ def experiment_sampling(document, manifest=None):
     selected = [item for item in assignments if item.get("role") == "training_data"]
     if not selected:
         return None
-    if len(selected) != 1:
-        raise ValueError("Recording sampling requires one training dataset manifest")
+    many = any((field.get("data_binding") or {}).get("role") == "training_data"
+               and (field.get("data_binding") or {}).get("cardinality") == "many"
+               for field in declaration.get("train", {}).get("input_fields", []))
+    if len(selected) != 1 and not many:
+        raise ValueError("Recording sampling requires one training dataset manifest for this adapter")
     metadata = (selected[0].get("version") or {}).get("metadata") or {}
     config = (document.get("native") or {}).get("config") or {}
+    formats = [(item.get("version", {}).get("metadata") or {}).get("format") for item in selected]
+    if many and any(value != RECORDING_DATASET_FORMAT for value in formats):
+        raise ValueError("Multiple recording datasets must all use the shared recording format")
     if metadata.get("format") != RECORDING_DATASET_FORMAT:
         if config.get("control_hz") not in (None, ""):
             raise ValueError("Frequency overrides require a shared recording dataset")
@@ -28,7 +35,17 @@ def experiment_sampling(document, manifest=None):
         reject_sampling_overrides(config.get("model_overrides") or {}, config.get("model_preset"))
     hz = config.get("control_hz")
     chunk = config.get("action_steps")
-    return resolve_sampling(metadata, control_hz=None if hz == "" else hz,
-                            action_steps=requirement.get("default_action_steps", 1) if chunk in (None, "") else chunk,
-                            window_policy=requirement["window_policy"],
-                            require_validation=requirement.get("require_validation", False))
+    resolver = resolve_collection_sampling if many else resolve_sampling
+    value = resolve_data_selections(document) if many else metadata
+    sampling = resolver(value, control_hz=None if hz == "" else hz,
+                        action_steps=requirement.get("default_action_steps", 1) if chunk in (None, "") else chunk,
+                        window_policy=config.get("window_policy", requirement["window_policy"]) if declaration.get("slug") == "human-policy-hat" else requirement["window_policy"],
+                        require_validation=requirement.get("require_validation", False))
+    if many and declaration.get("slug") in {"unidex", "human-policy-hat"}:
+        from .adapters.unidex_subset import apply_frame_budget
+        if declaration.get("slug") == "unidex":
+            from .adapters.unidex_input import collection_pointcloud_recipe
+            collection_pointcloud_recipe(value)
+        sampling = apply_frame_budget(value, sampling, config.get("unique_source_frames"),
+                                      selection_seed=config.get("data_selection_seed", 20260920))
+    return sampling

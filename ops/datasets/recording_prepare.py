@@ -432,9 +432,21 @@ def prepare(request):
             from action_codecs.unidex import encode_recording
             calibration = streams.get("scene_front_world_from_camera")
             if calibration is None:
-                raise ValueError("UniDex requires per-frame recorded scene_front calibration")
-            with h5py.File(calibration["path"], "r") as file:
-                poses = file[calibration["dataset"]][:]
+                # Archived fixed RGB captures already pin the measured camera
+                # pose. Reuse it instead of requiring another render for FAAS.
+                camera = streams.get("scene_front", {}).get("calibration", {})
+                if camera.get("mount") != "fixed_scene" or camera.get("dynamic"):
+                    raise ValueError("UniDex requires per-frame recorded scene_front calibration")
+                try:
+                    from observation_geometry import pose_from_ros, rigid_transform
+                except ImportError:
+                    from ops.datasets.observation_geometry import pose_from_ros, rigid_transform
+                pose = (rigid_transform(camera["world_from_camera"]) if "world_from_camera" in camera
+                        else pose_from_ros(camera.get("position_world"), camera.get("quaternion_world_ros")))
+                poses = np.repeat(pose[None], len(arrays["action"]), axis=0)
+            else:
+                with h5py.File(calibration["path"], "r") as file:
+                    poses = file[calibration["dataset"]][:]
             encoded, codec_spec = encode_recording(raw, capture, poses)
             # The action representation depends on poses, not on unrelated RGB
             # payload bytes in the same file or a render's camera resolution.

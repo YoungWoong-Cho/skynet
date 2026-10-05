@@ -131,6 +131,25 @@ def resolve_model_io(manifest, spec=None, *, legacy=False):
     for field in train.get("input_fields") or []:
         if field.get("default") is not None and lookup(spec, field["path"]) is None:
             _set_path(spec, field["path"], field["default"])
+    assignments = lookup(spec, "data.bundle.assignments") or []
+    selected = [item for item in assignments if item.get("role") == "training_data"]
+    if len(selected) > 1:
+        results = []
+        for assignment in sorted(selected, key=lambda item: item.get("position", 0)):
+            single = deepcopy(spec)
+            single["data"]["bundle"]["assignments"] = [assignment]
+            results.append(resolve_model_io(manifest, single, legacy=legacy))
+        labels = list(dict.fromkeys(label for result in results for label, _ in result["entries"]))
+        entries, compatible = [], True
+        for label in labels:
+            values = [dict(result["entries"]).get(label) for result in results]
+            same = len(set(values)) == 1
+            compatible &= same
+            entries.append([label, values[0] if same else "Varies across selected datasets"])
+        return {**results[0], "entries": entries, "dataset_count": len(selected),
+                "compatible": compatible,
+                "resolved": compatible and all(result["resolved"] for result in results),
+                "note": results[0]["note"] if compatible else "Selected datasets have incompatible model input or output dimensions."}
     contract = train.get("model_io")
     if not contract and legacy:
         # Older receipts predate I/O declarations. Only infer our recorded-joint

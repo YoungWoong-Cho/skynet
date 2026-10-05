@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {JSDOM} from 'jsdom';
-const w=new JSDOM(await readFile(new URL('../static/index.html',import.meta.url),'utf8'),{url:'http://localhost:8080/?data_view=recording#data',runScripts:'outside-only'}).window;
+import {indexHtml} from './index_page.cjs';
+const w=new JSDOM(indexHtml(),{url:'http://localhost:8080/?data_view=recording#data',runScripts:'outside-only'}).window;
 const el=id=>w.document.getElementById(id);
 let reviewed,converted,linked,navigation,changes=0,registryState='ready';
 w.openLiveReview=s=>reviewed=s.id;
@@ -22,7 +23,11 @@ try {
  assert.equal(rows[0].cells[3].textContent,'2 datasets');
  assert.equal(rows[1].cells[3].textContent,'0 datasets');
  assert.equal(rows[0].cells[3].querySelector('.state-pill'),null);
- assert.doesNotMatch(el('simulation-recordings-body').textContent,/Stored on sky2/);
+ assert.doesNotMatch(el('simulation-recordings-body').textContent,/sky\d/);
+ w.renderSimulationRecordings([{...one,archive:{state:'COPYING'}},{...two,archive:{state:'CLEANUP_PENDING'}}]);
+ assert.match(rows[0].cells[0].textContent,/Moving to the cluster…/);assert.match(rows[1].cells[0].textContent,/On the cluster · cleanup pending/);
+ assert.doesNotMatch(el('simulation-recordings-body').textContent,/sky\d/,'transfer status names no login host');
+ w.renderSimulationRecordings([one,two]);
  rows[0].cells[3].querySelector('button').click();assert.equal(linked,'one');
  const buttons=rows[0].querySelectorAll('.row-actions button');buttons[0].click();buttons[1].click();
  assert.equal(reviewed,'one');assert.equal(converted,'one');

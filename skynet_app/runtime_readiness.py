@@ -282,9 +282,8 @@ def render_readiness_sbatch(
     minimum = smoke.resources
     queue_policy = queue_policy or minimum.queue_policy
     gpu_type = gpu_type or minimum.gpu_type
-    cpus_per_task = (
-        minimum.cpus_per_task if cpus_per_task is None else cpus_per_task
-    )
+    from .cluster_config import cpus_for_gpus
+    cpus_per_task = cpus_for_gpus(minimum.gpu_count)
     memory_gb = minimum.memory_gb if memory_gb is None else memory_gb
     time_limit = time_limit or minimum.time_limit
     if cpus_per_task < minimum.cpus_per_task:

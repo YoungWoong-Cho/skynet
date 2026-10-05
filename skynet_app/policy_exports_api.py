@@ -69,11 +69,6 @@ def create(request: ExportRequest):
     )
 
 
-@router.delete("/{identifier}")
-def delete_format(identifier: str):
-    return checked(lambda: service.delete_dataset(service.get(identifier)["resource_id"], identifier))
-
-
 @router.get("/{identifier}")
 def status(identifier: str):
     return checked(service.status, identifier)

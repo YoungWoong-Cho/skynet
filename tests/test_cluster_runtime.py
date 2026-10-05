@@ -7,6 +7,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
+
 import skynet_app.cluster_runtime as cluster_runtime
 from skynet_app.cluster_runtime import (
     ClusterClient,
@@ -127,7 +129,7 @@ def test_pinned_explicit_gateway_is_prompt_and_ambiguous_retry_submits_once(
             self.ssh_hosts: list[str] = []
 
         def resolve_gateway(self, gateway="auto"):
-            return "sky1"
+            return "sky1" if gateway == "auto" else gateway
 
         def ssh(self, host, command, *, stdin=None, timeout=30):
             self.ssh_hosts.append(host)
@@ -285,9 +287,15 @@ def test_fallback_reserves_operation_budget_for_each_gateway(monkeypatch) -> Non
 
 
 class AccountingClusterClient(ClusterClient):
-    def __init__(self, output: str) -> None:
+    """Answers the combined status query: accounting rows, then controller rows."""
+
+    def __init__(self, accounting: str = "", controller: str = "", *,
+                 accounting_rc: int = 0, controller_rc: int = 0) -> None:
         super().__init__(("sky2",))
-        self.output = output
+        self.output = (
+            f"__SKYNET_ACCOUNTING__ {accounting_rc}\n{accounting}\n"
+            f"__SKYNET_CONTROLLER__ {controller_rc}\n{controller}\n"
+        )
         self.command = ""
 
     def run_with_fallback(self, command, gateway="auto", *, stdin=None, timeout=30):
@@ -320,6 +328,7 @@ def test_job_statuses_normalizes_cancelled_accounting_record() -> None:
         "Account": "overcap",
         "StateRaw": "CANCELLED by 3712043",
         "CancelledBy": "3712043",
+        "Source": "accounting",
     }
 
 
@@ -375,36 +384,239 @@ def test_validation_timeout_is_an_error_and_never_runs_the_job(tmp_path, monkeyp
     assert not marker.exists()
 
 
-def test_pending_reasons_use_one_live_query_on_the_accounting_gateway(monkeypatch):
+def test_pending_reasons_come_from_the_controller_in_the_same_query(monkeypatch):
     client = AccountingClusterClient(
         "11|PENDING|0:0|None|None assigned|00:00:00|Unknown|Unknown||overcap|overcap\n"
-        "12|PENDING|0:0|None|None assigned|00:00:00|Unknown|Unknown||overcap|overcap\n"
+        "12|PENDING|0:0|None|None assigned|00:00:00|Unknown|Unknown||overcap|overcap\n",
+        "11|PENDING|0:0|QOSGrpGRES||N/A|N/A|0|\n"
+        "12|PENDING|0:0|Priority||1791079999|N/A|0|\n"
+        "99|PENDING|0:0|Resources||N/A|N/A|0|\n",
     )
-    calls = []
-    def live_queue(host, command, **kwargs):
-        calls.append((host, command, kwargs))
-        return "11|PENDING|QOSGrpGRES\n12|PENDING|(Priority)\n99|PENDING|Resources\n"
-    monkeypatch.setattr(client, "ssh", live_queue)
+    monkeypatch.setattr(client, "ssh", lambda *args, **kwargs: pytest.fail("One connection answers both"))
     _, records = client.job_statuses(["11", "12"])
-    assert len(calls) == 1
-    assert calls[0][0] == "sky2"
-    assert "-j 11,12" in calls[0][1]
+    assert "--states=all" in client.command and "-j 11,12" in client.command
     assert records["11"]["Reason"] == "QOSGrpGRES"
     assert records["12"]["Reason"] == "Priority"
+    assert "Start" not in records["12"], "A queued job's start time is only a forecast"
     assert "99" not in records
 
 
-def test_queue_reason_failure_is_visible_without_discarding_accounting(monkeypatch):
+def test_unfinished_accounting_record_stands_only_when_the_controller_cannot_answer():
+    pending = "11|PENDING|0:0|None|None assigned|00:00:00|Unknown|Unknown||overcap|overcap\n"
+    unreachable = AccountingClusterClient(pending, "slurm_load_jobs error: Unable to contact slurm controller", controller_rc=1)
+    snapshot = unreachable.job_status_snapshot(["11"])
+    assert snapshot.statuses["11"]["State"] == "PENDING"
+    assert snapshot.statuses["11"]["Source"] == "accounting"
+    assert "Unable to contact" in snapshot.controller_error and snapshot.accounting_error is None
+
+    # The controller answered and no longer lists the job: accounting missed its end.
+    forgotten = AccountingClusterClient(pending, "")
+    snapshot = forgotten.job_status_snapshot(["11"])
+    assert snapshot.statuses == {} and snapshot.controller_error is None
+
+
+def test_controller_answers_when_accounting_is_down():
     client = AccountingClusterClient(
-        "11|PENDING|0:0|None|None assigned|00:00:00|Unknown|Unknown||overcap|overcap\n"
+        "sacct: error: _open_persist_conn: failed to open persistent connection to host:db:6819: Connection refused\n",
+        "11|RUNNING|0:0|None|grom|1791078068|1791079414|2|\n"
+        "12|FAILED|2:0|NonZeroExitCode|asimo|1791078068|1791078072|0|\n",
+        accounting_rc=1,
     )
-    def unavailable(*args, **kwargs):
-        raise ClusterError("sky2: SSH operation timed out")
-    monkeypatch.setattr(client, "ssh", unavailable)
-    _, records = client.job_statuses(["11"])
-    assert records["11"]["State"] == "PENDING"
-    assert "Live queue reason unavailable" in records["11"]["Reason"]
-    assert "timed out" in records["11"]["Reason"]
+    snapshot = client.job_status_snapshot(["11", "12", "13"])
+    assert "Connection refused" in snapshot.accounting_error
+    assert snapshot.controller_error is None
+    assert snapshot.statuses["11"] == {
+        "State": "RUNNING", "StateRaw": "RUNNING", "ExitCode": "0:0", "Reason": "None",
+        "NodeList": "grom", "Start": "1791078068", "Restarts": "2", "Source": "controller",
+    }, "A running job's end time is its time limit, not an observation"
+    assert snapshot.statuses["12"]["End"] == "1791078072"
+    assert snapshot.statuses["12"]["ExitCode"] == "2:0"
+    assert "13" not in snapshot.statuses
+
+
+def test_finished_accounting_record_takes_precedence_over_the_controller():
+    client = AccountingClusterClient(
+        "11|CANCELLED by 3712043|0:15|None|grom|00:01:00|1791078068|1791078128||overcap|overcap|0\n"
+        "12|RUNNING|0:0|None|grom|00:01:00|1791078068|Unknown||overcap|overcap|0\n",
+        "11|CANCELLED|0:15|None|grom|1791078068|1791078128|0|\n"
+        "12|COMPLETED|0:0|None|grom|1791078068|1791078130|1|\n",
+    )
+    _, records = client.job_statuses(["11", "12"])
+    assert records["11"]["CancelledBy"] == "3712043"
+    assert (records["12"]["State"], records["12"]["Source"]) == ("COMPLETED", "controller")
+    assert records["12"]["Restarts"] == "1"
+
+
+def _fake_scheduler(tmp_path, monkeypatch, *, sacct: str, squeue: str):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for name, body in {"sacct": sacct, "squeue": squeue, "timeout": 'shift\nexec "$@"'}.items():
+        tool = fake_bin / name
+        tool.write_text("#!/bin/bash\n" + body + "\n")
+        tool.chmod(0o755)
+    monkeypatch.setattr(cluster_runtime, "SLURM_BIN", str(fake_bin))
+
+    class LocalClient(ClusterClient):
+        def ssh(self, host, command, *, stdin=None, timeout=30):
+            completed = subprocess.run(["/bin/bash", "-c", command], input=stdin, capture_output=True, text=True)
+            if completed.returncode != 0:
+                raise ClusterError(f"{host}: {(completed.stderr or completed.stdout).strip()}")
+            return completed.stdout
+
+    return LocalClient(("sky1", "sky2"))
+
+
+def test_status_query_survives_an_accounting_outage_end_to_end(tmp_path, monkeypatch):
+    client = _fake_scheduler(
+        tmp_path, monkeypatch,
+        sacct="echo 'sacct: error: Problem talking to the database: Connection refused' >&2; exit 1",
+        squeue="printf '%s\\n' '11|COMPLETING|0:0|None|grom|1791078068|1791078072|0|'",
+    )
+    snapshot = client.job_status_snapshot(["11", "12"])
+    assert snapshot.gateway == "sky1"
+    assert "Connection refused" in snapshot.accounting_error
+    assert set(snapshot.statuses) == {"11"}
+    assert snapshot.statuses["11"]["State"] == "COMPLETING"
+
+
+def test_a_single_forgotten_job_is_an_answer_not_a_controller_failure(tmp_path, monkeypatch):
+    client = _fake_scheduler(
+        tmp_path, monkeypatch,
+        sacct="exit 1",
+        squeue="echo 'slurm_load_jobs error: Invalid job id specified' >&2; exit 1",
+    )
+    snapshot = client.job_status_snapshot(["3991566"])
+    assert snapshot.statuses == {}
+    assert snapshot.controller_error is None
+    assert snapshot.accounting_error
+
+
+def test_status_query_fails_only_when_neither_source_answers(tmp_path, monkeypatch):
+    client = _fake_scheduler(
+        tmp_path, monkeypatch,
+        sacct="echo 'sacct: error: Connection refused' >&2; exit 1",
+        squeue="echo 'slurm_load_jobs error: Unable to contact slurm controller' >&2; exit 1",
+    )
+    with pytest.raises(ClusterError, match="Unable to contact slurm controller"):
+        client.job_status_snapshot(["11"])
+
+
+def test_submission_avoids_a_gateway_that_just_refused_its_connection():
+    class NamedGatewayDown(ClusterClient):
+        def __init__(self):
+            super().__init__(("sky1", "sky2"))
+            self.submissions = []
+
+        def ssh(self, host, command, *, stdin=None, timeout=30):
+            if host == "sky2":
+                raise cluster_runtime.GatewayUnreachable("sky2: Connection closed by remote host")
+            if "sbatch --parsable" in command:
+                self.submissions.append(host)
+                return "4815\n"
+            return ""
+
+    client = NamedGatewayDown()
+    assert client.run_with_fallback("true", "sky2")[0] == "sky1"
+    submission = client.submit_script("#!/bin/bash\ntrue\n", "run-1", "sky2")
+    assert (submission.job_id, submission.gateway) == ("4815", "sky1")
+    assert client.submissions == ["sky1"]
+
+
+def test_gateway_that_refused_its_connection_goes_last_and_reserves_no_time(monkeypatch):
+    clock = [100.0]
+    attempts: list[tuple[str, float]] = []
+
+    class SecondGatewayRefuses(ClusterClient):
+        def ssh(self, host, command, *, stdin=None, timeout=30):
+            attempts.append((host, timeout))
+            if host == "sky2":
+                raise cluster_runtime.GatewayUnreachable("sky2: Connection closed")
+            if timeout < 15:
+                clock[0] += timeout
+                raise ClusterError("sky1: SSH operation timed out")
+            return "ready"
+
+    monkeypatch.setattr(cluster_runtime.time, "monotonic", lambda: clock[0])
+    client = SecondGatewayRefuses(("sky1", "sky2"))
+    with pytest.raises(ClusterError):  # A slow login given half the budget, then the refusal.
+        client.run_with_fallback("true", timeout=20)
+    attempts.clear()
+    assert client.run_with_fallback("true", timeout=20) == ("sky1", "ready")
+    assert attempts == [("sky1", 20)], "the only reachable gateway takes the whole budget"
+    assert client.run_with_fallback("true", "sky2", timeout=20) == ("sky1", "ready")
+    clock[0] += cluster_runtime.GATEWAY_UNREACHABLE_SECONDS
+    attempts.clear()
+    client.with_storage(None).run_with_fallback("true", timeout=40)
+    assert attempts[0] == ("sky1", 20), "the gateway is trusted again after a while"
+
+
+def test_named_gateway_and_per_attempt_budgets():
+    attempts: list[tuple[str, float]] = []
+
+    class Recording(ClusterClient):
+        def ssh(self, host, command, *, stdin=None, timeout=30):
+            attempts.append((host, round(timeout)))
+            raise ClusterError(f"{host}: failed")
+
+    client = Recording(("sky1", "sky2"))
+    with pytest.raises(ClusterError):
+        client.run_with_fallback("true", "sky2", timeout=30)
+    assert attempts == [("sky2", 30), ("sky1", 30)], "a named gateway keeps the budget it had alone"
+    attempts.clear()
+    with pytest.raises(ClusterError):
+        client.run_with_fallback("true", attempt_timeout=40)
+    assert attempts == [("sky1", 40), ("sky2", 40)]
+
+
+def test_controller_only_states_and_requeues_are_read_as_accounting_would_word_them():
+    client = AccountingClusterClient(
+        "11|PREEMPTED|0:0|None|grom|00:01:00|1791078068|1791078128||overcap|overcap|0\n",
+        "11|RUNNING|0:0|None|grom|1791078200|1791081800|1|\n"
+        "12|REQUEUE_HOLD|0:0|launch failure limit exceeded requeued held||N/A|N/A|5|\n",
+    )
+    _, records = client.job_statuses(["11", "12"])
+    assert (records["11"]["State"], records["11"]["Restarts"]) == ("RUNNING", "1"), \
+        "a job the controller runs again is live whatever accounting last recorded"
+    assert (records["12"]["State"], records["12"]["StateRaw"]) == ("PENDING", "REQUEUE_HOLD")
+    assert "Start" not in records["12"]
+
+
+def test_unreadable_controller_row_is_an_error_not_an_absent_job():
+    client = AccountingClusterClient("", "11|RUNNING|a row squeue never prints\n", accounting_rc=1)
+    snapshot = client.job_status_snapshot(["11"])
+    assert snapshot.statuses == {}
+    assert "unexpected row" in snapshot.controller_error
+
+
+def test_recorded_gateway_that_is_no_longer_configured_routes_by_the_default():
+    client = FallbackClusterClient(("sky1", "sky2"))
+    assert client.gateway_for("sky2") == "sky2"
+    assert client.gateway_for("retired-host") == client.gateway_for(None) == cluster_runtime.DEFAULT_GATEWAY
+    assert client.run_with_fallback("true", "retired-host") == ("sky2", "ready")
+
+
+def test_named_gateway_is_a_preference_with_the_others_as_fallback():
+    client = FallbackClusterClient(("sky1", "sky2"))
+    assert client.candidates("sky2") == ("sky2", "sky1")
+    assert client.run_with_fallback("true", "sky1") == ("sky2", "ready")
+    with pytest.raises(ValueError, match="Unknown SSH gateway"):
+        client.candidates("-oProxyCommand=bad")
+
+
+def test_recovery_never_reports_no_job_while_accounting_is_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(cluster_runtime, "WORK_ROOT", str(tmp_path / "work"))
+    token = ClusterClient._submission_token("attempt-1")
+    client = _fake_scheduler(tmp_path, monkeypatch, sacct="exit 1", squeue="true")
+    with pytest.raises(ClusterError, match="accounting is unavailable"):
+        client.recover_submission("run-1", "attempt-1")
+
+    (tmp_path / "bin" / "squeue").write_text(f"#!/bin/bash\nprintf '%s\\n' '4242|{token}'\n")
+    recovered = client.recover_submission("run-1", "attempt-1")
+    assert recovered.job_id == "4242" and recovered.recovered
+
+    (tmp_path / "bin" / "squeue").write_text("#!/bin/bash\ntrue\n")
+    (tmp_path / "bin" / "sacct").write_text("#!/bin/bash\ntrue\n")
+    assert client.recover_submission("run-1", "attempt-1") is None
 
 
 def test_unavailable_gpu_forecast_does_not_reject_a_valid_submission(tmp_path, monkeypatch):
@@ -525,3 +737,43 @@ def test_capsule_batch_preserves_symlink_targets(tmp_path, monkeypatch):
     with pytest.raises(ClusterError, match="symbolic links"):
         client.write_capsule_files("batch-1", {"worker/frozen.py": "replace"}, "sky2")
     assert protected.read_text() == "keep"
+
+
+def test_immutable_capsule_upload_reuses_identical_content_and_rejects_replacement(tmp_path, monkeypatch):
+    import pytest
+    root = tmp_path.resolve() / "work"
+    monkeypatch.setattr(cluster_runtime, "WORK_ROOT", str(root))
+    client = ClusterClient(("sky2",))
+    def local(host, command, *, stdin=None, timeout=30):
+        result = subprocess.run(command, shell=True, input=stdin, text=True, capture_output=True)
+        if result.returncode:
+            raise ClusterError(result.stderr)
+        return result.stdout
+    monkeypatch.setattr(client, "ssh", local)
+    files = {"submissions/capsules/frozen/execution.json": '{"argv":["original"]}'}
+    _, paths = client.write_capsule_files("immutable-1", files, "sky2", immutable=True)
+    original = Path(next(iter(paths.values())))
+    inode = original.stat().st_ino
+    client.write_capsule_files("immutable-1", files, "sky2", immutable=True)
+    assert original.stat().st_ino == inode
+    with pytest.raises(ClusterError, match="different content"):
+        client.write_capsule_files("immutable-1", {next(iter(files)): "changed"}, "sky2", immutable=True)
+    assert original.read_text() == next(iter(files.values()))
+    assert not list(root.rglob(".upload-*"))
+
+
+def test_node_inventory_is_validated_deduplicated_and_cached(monkeypatch):
+    import pytest
+    client = ClusterClient()
+    calls = []
+    def read(command, gateway, **kwargs):
+        calls.append(command)
+        return "sky2", "grom\ndynamics\ngrom\n"
+    monkeypatch.setattr(client, "run_with_fallback", read)
+    assert client.node_names("sky2") == ["dynamics", "grom"]
+    assert client.node_names("sky2") == ["dynamics", "grom"]
+    assert len(calls) == 1
+    client._node_inventory_cache.clear()
+    monkeypatch.setattr(client, "run_with_fallback", lambda *a, **kw: ("sky2", "bad;node"))
+    with pytest.raises(ClusterError, match="invalid node inventory"):
+        client.node_names("sky2")

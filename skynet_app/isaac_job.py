@@ -33,7 +33,7 @@ def compile_isaac_job(profile, root, name, argv, checks=(), after=()):
             f"#SBATCH --account={profile['account']}",
             f"#SBATCH --partition={profile['partition']}",
             f"#SBATCH --gres={gres}",
-            "#SBATCH --cpus-per-task=4",
+            f"#SBATCH --cpus-per-task={CLUSTER.defaults.cpus_per_gpu}",
             "#SBATCH --mem=48G",
             "#SBATCH --time=00:30:00",
             f"#SBATCH --output={root}/stdout.log",

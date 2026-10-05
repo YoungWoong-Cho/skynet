@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { JSDOM } from "jsdom";
+import { indexHtml } from "./index_page.cjs";
 const dom = new JSDOM(
-  await readFile(new URL("../static/index.html", import.meta.url), "utf8"),
+  indexHtml(),
   {
     runScripts: "outside-only",
     pretendToBeVisual: true,
@@ -43,6 +44,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 let viewerOptions, viewerVideoId, viewerPlaying = false;
 const viewerPauses = [];
 window.SkynetEpisodeViewer = {
+  sequenceNavigation: window.eval("(" + (await readFile(new URL("../static/episode-viewer.js", import.meta.url), "utf8")).match(/function sequenceNavigation\([\s\S]*?\n  }/)[0] + ")"),
   open: (...args) => {
     viewerOptions = args[3];
     viewerVideoId = args[1];

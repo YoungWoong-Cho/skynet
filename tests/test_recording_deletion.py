@@ -26,7 +26,6 @@ def recording(tmp_path, monkeypatch):
         )
     monkeypatch.setattr("skynet_app.recording_deletion.WORK_ROOT", str(root))
     cluster = LocalCluster()
-    cluster.candidates = lambda host: (host,)
     cluster._remote_path = lambda path: path
     db = Database(tmp_path / "test.db")
     live = LiveXRService(db, cluster=cluster, root=tmp_path)

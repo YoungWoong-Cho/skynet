@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import pytest
 from skynet_app.cluster_runtime import (
+    DEFAULT_GATEWAY,
     ClusterClient,
     SubmissionOutcomeUnknown,
     ClusterError,
@@ -489,3 +490,22 @@ def test_status_reschedules_after_failed_check_and_skips_finished_sessions(
     service.update(job["id"], state="FAILED", scheduler_final=True)
     assert service.status(job["id"])["state"] == "FAILED"
     assert not service.status_pending
+
+
+def test_archived_session_logs_ignore_the_host_recorded_in_the_receipt(service):
+    job = service.create(True)
+    service.update(job["id"], archive=dict(state="READY", gateway="retired-host"))
+    reads = []
+
+    def read(command, gateway, **kwargs):
+        reads.append((gateway, command))
+        return "answering-host", "worker output"
+
+    service.archive = SimpleNamespace(
+        cluster=SimpleNamespace(run_with_fallback=read),
+        is_archived=lambda job: True,
+        session_root=lambda job: "/archive/session",
+    )
+    assert service.logs(job["id"]) == "worker output"
+    assert [gateway for gateway, _ in reads] == [DEFAULT_GATEWAY]
+    assert "/archive/session/stdout.log" in reads[0][1]

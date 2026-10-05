@@ -10,11 +10,14 @@ from ops.datasets.recording_probe import probe, validate_source_split
 from skynet_app.adapters.recording_time import resolve_sampling, source_frequency
 from skynet_app.recording_sampling import experiment_sampling
 from skynet_app.adapters.unidex_manifest import manifest as unidex_manifest
+from skynet_app.adapters.unidex_input import default_pointcloud_recipe
 
 
 def manifest(lengths=(90, 121), rates=(60, 60), split=None):
     return dict(format='skynet.recording-dataset/v1',
-                episodes=[dict(index=i, id=f'episode-{i}', steps=n, capture={'step_dt':1/rates[i]})
+                contract='skynet.unidex-pointcloud-faas/v1', validation={'status': 'PASSED'},
+                episodes=[dict(index=i, id=f'episode-{i}', steps=n, capture={'step_dt':1/rates[i]},
+                               streams={'scene_front_pointcloud': {'recipe': default_pointcloud_recipe()}})
                           for i, n in enumerate(lengths)],
                 split=split or dict(train=[0], validation=[1]))
 
@@ -80,7 +83,9 @@ def test_tiny_source_period_is_validation_error():
 def test_backend_reuses_worker_eligibility_and_manifest_default():
     declaration=unidex_manifest()
     doc=dict(native={'config':{'control_hz':30}},
-             data={'bundle':{'assignments':[dict(role='training_data',version={'metadata':manifest()})]}})
+             data={'bundle':{'assignments':[dict(role='training_data', position=0,
+                 config={'location':dict(kind='cluster',status='AVAILABLE',path='/data',manifest_sha256='b'*64)},
+                 version={'format':'skynet.recording-dataset/v1','manifest_sha256':'b'*64,'metadata':manifest()})]}})
     plan=experiment_sampling(doc,declaration)
     assert plan['action_steps']==30 and plan['control_hz']==30
     doc['native']['config']['control_hz']=15
@@ -122,12 +127,13 @@ def test_sweep_validation_checks_each_frequency_before_launch(monkeypatch):
     spec=make_spec(native={'config':{'control_hz':30,'action_steps':30}},
         data={'bundle':dict(id='bundle',name='data',version='1',manifest_sha256='a'*64,
             assignments=[dict(role='training_data',position=0,
+                config={'location':dict(kind='cluster',status='AVAILABLE',path='/data',manifest_sha256='b'*64)},
                 resource=dict(provider='collection',namespace='datasets',name='test',kind='dataset'),
                 version=dict(revision='1',format='skynet.recording-dataset/v1',path='/data',
                              manifest_sha256='b'*64,status='READY',metadata=manifest()))])},
         sweep={'strategy':'grid','axes':{'native.config.control_hz':[30,15]},'seeds':[1]})
     monkeypatch.setattr(PipelineService,'_validate_manifest_input_fields',lambda *a:None)
-    with pytest.raises(ValueError,match='No usable train windows at 15 Hz'):
+    with pytest.raises(ValueError,match='No usable train windows.*15 Hz'):
         PipelineService._validate_sweep_inputs(spec,declaration)
 
 

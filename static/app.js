@@ -187,6 +187,9 @@ const elements = {
   refreshEvaluations: document.querySelector("#refresh-evaluations"),
   evaluationForm: document.querySelector("#evaluation-form"),
   evaluationRunId: document.querySelector("#evaluation-run-id"),
+  evaluationTargetFields: document.querySelector("#evaluation-target-fields"),
+  evaluationTargetDataset: document.querySelector("#evaluation-target-dataset"),
+  evaluationUnseenHand: document.querySelector("#evaluation-unseen-hand"),
   evaluationRunValidation: document.querySelector("#evaluation-run-validation"),
   evaluationCheckpoint: document.querySelector("#evaluation-checkpoint"),
   evaluationCheckpointValidation: document.querySelector(
@@ -1071,6 +1074,7 @@ function apiReadTopics(path) {
   if (path.startsWith("/api/data/")) return ["data"];
   if (path.startsWith("/api/collection/")) return ["recordings"];
   if (path.startsWith("/api/adapters")) return ["adapters"];
+  if (path.startsWith("/api/notes")) return ["notes"];
   if (/^\/api\/(settings|tracking|workspace|notifications)/.test(path)) return ["settings"];
   if (/^\/api\/(runs|experiments|evaluations)/.test(path)) return ["runs", "data", "adapters", "settings"];
   return ["other"];
@@ -1101,7 +1105,7 @@ function installLatestApiReadGuard() {
       const preview = ["/api/model-io/preview", "/api/experiments/preview", "/api/evaluations/validate-target"].includes(url.pathname);
       if (response.ok && !["HEAD", "OPTIONS"].includes(method) && !preview) {
         // A successful write is a read barrier even for callers outside api().
-        const topics = ["data", "exports", "recordings", "adapters", "settings", "runs", "other"];
+        const topics = ["data", "exports", "recordings", "adapters", "settings", "runs", "notes", "other"];
         window.invalidateApiReads(topics);
         window.SkynetRefresh?.invalidate(apiReadTopics(url.pathname), { reads: false });
       }
@@ -1202,6 +1206,66 @@ function createRefreshCoordinator() {
   };
 }
 
+function connectWorkspaceChanges(workspaceId, handlers) {
+  // One SSE connection per workspace across tabs. Six HTTP/1 tabs must not
+  // consume all six browser connections and starve ordinary API requests.
+  const key = `skynet-changes:${workspaceId}`;
+  const shared = window.BroadcastChannel && window.navigator?.locks;
+  const channel = shared ? new window.BroadcastChannel(key) : null;
+  const abort = new AbortController();
+  let stream = null, retry = null, delay = 1000, stopped = false, release = null, connected = false;
+  const deliver = value => {
+    if (stopped || !value || typeof value !== "object") return;
+    if (value.type === "resync") { connected = true; handlers.connection(true); handlers.resync(); }
+    else if (value.type === "change" && Array.isArray(value.topics)) handlers.change(value.topics);
+    else if (value.type === "connection" && typeof value.connected === "boolean") {
+      connected = value.connected; handlers.connection(connected);
+    }
+  };
+  const broadcast = value => { deliver(value); channel?.postMessage(value); };
+  if (channel) {
+    channel.onmessage = event => {
+      if (event.data?.type === "hello" && release && !stopped) channel.postMessage({ type: "connection", connected });
+      else deliver(event.data);
+    };
+    channel.postMessage({ type: "hello" });
+  }
+  const reconnect = () => {
+    stream?.close(); stream = null;
+    broadcast({ type: "connection", connected: false });
+    if (stopped || retry !== null) return;
+    retry = setTimeout(() => { retry = null; connect(); }, delay);
+    delay = Math.min(delay * 2, 30000);
+  };
+  const connect = () => {
+    if (stopped) return;
+    stream = new window.EventSource(`/api/changes?expected_workspace=${encodeURIComponent(workspaceId)}`);
+    stream.addEventListener("resync", () => { delay = 1000; broadcast({ type: "resync" }); });
+    stream.addEventListener("change", event => {
+      try {
+        const value = JSON.parse(event.data);
+        if (value.v !== 1 || !Array.isArray(value.topics)) throw new Error("Invalid change event");
+        broadcast({ type: "change", topics: value.topics });
+      } catch { broadcast({ type: "resync" }); }
+    });
+    stream.addEventListener("unavailable", reconnect);
+    stream.addEventListener("error", reconnect);
+  };
+  if (shared) {
+    void window.navigator.locks.request(key, { signal: abort.signal }, async () => {
+      if (stopped) return;
+      await new Promise(resolve => { release = resolve; connect(); });
+    }).catch(error => {
+      if (!stopped && error.name !== "AbortError") reconnect();
+    });
+  } else connect();
+  return () => {
+    if (stopped) return;
+    stopped = true; clearTimeout(retry); stream?.close();
+    abort.abort(); release?.(); channel?.close();
+  };
+}
+
 function initializeLiveRefresh() {
   const refresh = window.SkynetRefresh = createRefreshCoordinator();
   window.stopSkynetLiveRefresh = () => refresh.stop();
@@ -1217,49 +1281,29 @@ function initializeLiveRefresh() {
     () => loadTrackingConnections(true), () => { trackingConnectionsLoaded = false; });
   refresh.register("recordings", ["recordings"], () => activeTab === "collection",
     () => window.loadLiveXR?.(), () => loadedTabs.delete("collection"));
-  const topics = ["data", "exports", "recordings", "adapters", "settings"];
+  const topics = ["data", "exports", "recordings", "adapters", "settings", "notes"];
   if (window.EventSource && window.SkynetWorkspace?.id) {
-    let stream = null, retry = null, delay = 1000, stopped = false;
-    const reconnect = () => {
-      stream?.close();
-      stream = null;
-      refresh.connected = false;
-      document.dispatchEvent(new CustomEvent("skynet-live-updates", { detail: { connected: false } }));
-      if (stopped || retry !== null) return;
-      retry = setTimeout(() => { retry = null; connect(); }, delay);
-      delay = Math.min(delay * 2, 30000);
-    };
-    const connect = () => {
-      if (stopped) return;
-      stream = new EventSource(`/api/changes?expected_workspace=${encodeURIComponent(window.SkynetWorkspace.id)}`);
-      stream.addEventListener("resync", () => {
-        delay = 1000;
-        refresh.connected = true;
-        refresh.invalidate(topics);
-      });
-      stream.addEventListener("change", event => {
-        try {
-          const value = JSON.parse(event.data);
-          if (value.v !== 1 || !Array.isArray(value.topics)) {
-            refresh.invalidate(topics);
-            return;
-          }
-          refresh.invalidate(value.topics.filter(topic => topics.includes(topic)));
-        } catch { refresh.invalidate(topics); }
-      });
-      stream.addEventListener("unavailable", reconnect);
-      stream.addEventListener("error", reconnect);
-    };
-    connect();
-    window.stopSkynetLiveRefresh = () => {
-      refresh.stop();
-      stopped = true; clearTimeout(retry); stream?.close();
-    };
+    const stopStream = connectWorkspaceChanges(window.SkynetWorkspace.id, {
+      resync: () => refresh.invalidate(topics),
+      change: changed => refresh.invalidate(changed.filter(topic => topics.includes(topic))),
+      connection: connected => {
+        refresh.connected = connected;
+        document.dispatchEvent(new CustomEvent("skynet-live-updates", { detail: { connected } }));
+      },
+    });
+    window.stopSkynetLiveRefresh = () => { refresh.stop(); stopStream(); };
     window.addEventListener("pagehide", window.stopSkynetLiveRefresh, { once: true });
   }
-  window.addEventListener("focus", () => refresh.invalidate(topics));
+  const resumeVisibleReads = () => {
+    // A live stream already invalidates committed changes, including while
+    // hidden. Focusing a field/window is not a data change: replay only dirty
+    // subscriptions instead of downloading every catalog again.
+    if (refresh.connected) void refresh.flush();
+    else refresh.invalidate(topics);
+  };
+  window.addEventListener("focus", resumeVisibleReads);
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") refresh.invalidate(topics);
+    if (document.visibilityState === "visible") resumeVisibleReads();
   });
 }
 let latestSnapshot;
@@ -2107,6 +2151,7 @@ function renderSnapshot(snapshot, { background = false } = {}) {
     {
       gateway: snapshot.gateway,
       account_usage: snapshot.account_usage || [],
+      quota_errors: snapshot.quota_errors || [],
       jobs: pendingJobs,
     },
     () => {
@@ -2115,7 +2160,13 @@ function renderSnapshot(snapshot, { background = false } = {}) {
       syncFilterOptions("partition", pendingJobs, "partition");
       syncFilterOptions("account", pendingJobs, "account");
       applyPartitionFilters();
-      clearNotice(elements.errorBanner);
+      if (snapshot.quota_errors?.length) {
+        showNotice(elements.errorBanner, snapshot.quota_errors.map(
+          (item) => `${item.account ? `${item.account}: ` : ""}${item.message}`,
+        ).join(" · "), { title: "Account quota unavailable" });
+      } else {
+        clearNotice(elements.errorBanner);
+      }
       setConnection("online", `Connected through ${snapshot.gateway}`);
       setTextIfChanged(
         elements.lastUpdated,
@@ -2506,6 +2557,22 @@ function resolvedExperimentGpuCount() {
     matchingGpuRecommendation(manifest) || manifest.capabilities || {};
   const count = Number(capabilities[capabilityField]);
   return Number.isInteger(count) && count > 0 ? count : null;
+}
+
+// Skynet workspace scheduling policy; model defaults do not override it.
+const CPUS_PER_GPU = 8;
+
+function updateCpuResources() {
+  for (const [control, count] of [
+    [elements.resourceCpus, resolvedExperimentGpuCount() || 1],
+    [elements.collectionCpuCount, Number(elements.collectionGpuCount?.value) || 1],
+    [document.getElementById("evaluation-resource-cpus"), 1],
+  ]) {
+    if (!control) continue;
+    control.value = String(CPUS_PER_GPU * count);
+    control.readOnly = true;
+    control.title = `${CPUS_PER_GPU} CPUs per GPU (Skynet resource policy)`;
+  }
 }
 
 function setBatchControlValidity(control, message) {
@@ -3265,18 +3332,85 @@ function adapterInputFields(adapter = selectedAdapter()) {
 }
 
 let trainingDatasetRows = [];
+let dataBundlesLoadPromise = null;
+let trainingDatasetsLoadError = "";
+const experimentEditedValues = new Map();
+let experimentDatasetUseRequest = 0;
+let preservedExperimentRuntime = null;
+
+function rememberExperimentInput(control) {
+  if (
+    !control?.id ||
+    !control.matches("input, select, textarea") ||
+    control.dataset.adapterInputPath ||
+    control.dataset.inputSlot ||
+    control.id === "experiment-adapter"
+  )
+    return;
+  experimentEditedValues.set(control.id, {
+    value: control.value,
+    checked: control.checked,
+    selected: control.multiple ? selectedValues(control) : null,
+  });
+}
+
+function restoreExperimentEditedValues() {
+  for (const [id, saved] of experimentEditedValues) {
+    const control = document.getElementById(id);
+    if (
+      !control ||
+      [
+        "experiment-branch",
+        "experiment-revision",
+        "experiment-runtime",
+        "experiment-runtime-profile-select",
+      ].includes(id)
+    )
+      continue;
+    if (saved.selected) {
+      for (const option of control.options)
+        option.selected = saved.selected.includes(option.value);
+    } else if (
+      control instanceof HTMLSelectElement &&
+      saved.value &&
+      ![...control.options].some((option) => option.value === saved.value)
+    ) {
+      const option = document.createElement("option");
+      option.value = saved.value;
+      option.textContent = saved.value + " — review for this adapter";
+      control.append(option);
+      control.value = saved.value;
+    } else control.value = saved.value;
+    if (control.type === "checkbox") control.checked = saved.checked;
+  }
+}
+
+function rememberExperimentRuntime() {
+  if (elements.experimentRuntime.value)
+    preservedExperimentRuntime = {
+      backend: elements.experimentRuntime.value,
+      profileId: elements.experimentRuntimeProfileSelect.value,
+      value: elements.experimentRuntimeProfile.value,
+    };
+}
+
 
 function experimentInputSlots(adapter = selectedAdapter()) {
   const slots = new Map();
   for (const field of declaredAdapterInputFields(adapter)) {
     const binding = field.data_binding;
     if (!binding) continue;
-    const key = JSON.stringify([binding.role, Number(binding.position || 0)]);
+    const many = binding.cardinality === "many";
+    const key = JSON.stringify([
+      binding.role,
+      many ? "many" : Number(binding.position || 0),
+    ]);
     if (!slots.has(key))
       slots.set(key, {
         key,
         role: binding.role,
         position: Number(binding.position || 0),
+        cardinality: many ? "many" : "one",
         bindings: [],
       });
     slots.get(key).bindings.push(binding);
@@ -3288,36 +3422,83 @@ function experimentInputSlots(adapter = selectedAdapter()) {
   );
 }
 
+function experimentDatasetControl(index) {
+  return index
+    ? document.getElementById("experiment-data-input-" + index)
+    : elements.experimentDataBundle;
+}
+
+function experimentDatasetSelectionIds(control) {
+  if (!control) return [];
+  const selected = selectedValues(control);
+  let previous = [];
+  try {
+    previous = JSON.parse(control.dataset.selectionOrder || "[]");
+  } catch {}
+  const ordered = [
+    ...previous.filter((id) => selected.includes(id)),
+    ...selected.filter((id) => !previous.includes(id)),
+  ];
+  control.dataset.selectionOrder = JSON.stringify(ordered);
+  return ordered;
+}
+
+function setExperimentDatasetSelection(control, ids) {
+  const wanted = [...new Set(ids.filter(Boolean))];
+  for (const option of control.options)
+    option.selected = wanted.includes(option.value);
+  if (!wanted.length && !control.multiple) control.value = "";
+  control.dataset.selectionOrder = JSON.stringify(wanted);
+}
+
 function selectedExperimentDataBundle() {
   const selected = [];
   experimentInputSlots().forEach((slot, index) => {
-    const control = index
-      ? document.getElementById("experiment-data-input-" + index)
-      : elements.experimentDataBundle;
-    const dataset = trainingDatasetRows.find(
-      (row) => row.id === control?.value,
+    experimentDatasetSelectionIds(experimentDatasetControl(index)).forEach(
+      (id, position) => {
+        const dataset = trainingDatasetRows.find((row) => row.id === id);
+        if (dataset)
+          selected.push({
+            dataset,
+            slot,
+            position: slot.cardinality === "many" ? position : slot.position,
+          });
+      },
     );
-    if (dataset) selected.push({ dataset, slot });
   });
   if (!selected.length) return null;
   return {
     ...selected[0].dataset,
-    selections: selected.map(({ dataset, slot }) => ({
+    datasets: selected.map((item) => item.dataset),
+    selections: selected.map(({ dataset, slot, position }) => ({
       ...dataset.selection,
       role: slot.role,
-      position: slot.position,
+      position,
     })),
-    assignments: selected.flatMap(({ dataset, slot }) =>
-      dataset.assignments.map((a) => ({
-        ...a,
-        role: slot.role,
-        position: slot.position,
-      })),
+    assignments: selected.flatMap(({ dataset, slot, position }) =>
+      dataset.assignments.map((a) => ({ ...a, role: slot.role, position })),
     ),
   };
 }
 
+function datasetAssignmentVersionId(assignment) {
+  return (
+    assignment?.version?.metadata?.registered_version_id ||
+    assignment?.version?.id ||
+    assignment?.version_id ||
+    null
+  );
+}
+
 function datasetBindingValue(assignment, binding) {
+  if (binding.value_path === "selection")
+    return {
+      position: Number(assignment.position || 0),
+      version_id: datasetAssignmentVersionId(assignment),
+      path: assignment.config?.location?.path || assignment.version?.path,
+      manifest_sha256: assignment.version?.manifest_sha256,
+      metadata: assignment.version?.metadata || {},
+    };
   return {
     "version.path": assignment.version?.path,
     mount_path: assignment.mount_path,
@@ -3352,73 +3533,41 @@ function resolveAdapterDataBinding(field) {
   const binding = field?.data_binding;
   if (!binding) return null;
   const bundle = selectedExperimentDataBundle();
-  if (!bundle) {
+  if (!bundle)
     return {
       value: null,
       state: "empty",
-      message: "Choose a prepared dataset.",
+      message: "Choose training datasets.",
     };
-  }
-  const matches = (Array.isArray(bundle.assignments) ? bundle.assignments : [])
+  const relevant = {
+    ...bundle,
+    assignments: bundle.assignments.filter(
+      (a) =>
+        a.role === binding.role &&
+        (binding.cardinality === "many" ||
+          Number(a.position || 0) === Number(binding.position || 0)),
+    ),
+  };
+  const result = experimentBundleCompatibility(relevant, selectedAdapter(), [
+    binding,
+  ]);
+  if (!result.compatible)
+    return { value: null, state: "error", message: result.message };
+  const matches = bundle.assignments
     .filter(
-      (assignment) =>
-        String(assignment?.role || "") === String(binding.role || ""),
+      (a) =>
+        a.role === binding.role &&
+        (binding.cardinality === "many" ||
+          Number(a.position || 0) === Number(binding.position || 0)),
     )
-    .sort(
-      (left, right) => Number(left.position || 0) - Number(right.position || 0),
-    );
-  const assignment = matches.find(
-    (item) => Number(item.position || 0) === Number(binding.position || 0),
+    .sort((a, b) => Number(a.position || 0) - Number(b.position || 0));
+  const values = matches.map((assignment) =>
+    datasetBindingValue(assignment, binding),
   );
-  if (!assignment) {
-    return {
-      value: null,
-      state: "error",
-      message: `Selected dataset has no ${binding.role} role at position ${Number(binding.position || 0)}.`,
-    };
-  }
-  const format = String(assignment.version?.format || "");
-  const formats = Array.isArray(binding.formats)
-    ? binding.formats.map(String)
-    : [];
-  if (
-    formats.length &&
-    !formats.some(
-      (candidate) => candidate.toLowerCase() === format.toLowerCase(),
-    )
-  ) {
-    return {
-      value: null,
-      state: "error",
-      message: `Selected ${binding.role} format “${format || "undeclared"}” is incompatible; this adapter accepts ${formats.join(", ")}.`,
-    };
-  }
-  const contracts = adapterDataContracts(binding);
-  const metadata = assignment.version?.metadata || {};
-  if (
-    contracts.length &&
-    (!contracts.includes(metadata.contract) ||
-      metadata.validation?.status !== "PASSED")
-  ) {
-    return {
-      value: null,
-      state: "error",
-      message:
-        "Dataset does not satisfy the selected observation requirements.",
-    };
-  }
-  const value = datasetBindingValue(assignment, binding);
-  if (!value) {
-    return {
-      value: null,
-      state: "error",
-      message: `Selected dataset does not declare ${binding.value_path || "version.path"}.`,
-    };
-  }
   return {
-    value: String(value),
+    value: binding.cardinality === "many" ? values : values[0],
     state: "complete",
-    message: "From the selected dataset.",
+    message: "From the selected datasets.",
   };
 }
 
@@ -3496,6 +3645,10 @@ function adapterFieldRawValue(control) {
 }
 
 function setAdapterFieldControlValue(control, field, value) {
+  if (control.dataset.adapterInputDerived === "true") {
+    control.value = "";
+    return;
+  }
   if (control.type === "checkbox") {
     control.checked = Boolean(value);
   } else if (
@@ -3522,7 +3675,7 @@ function captureAdapterDeclaredValues() {
     .querySelectorAll("[data-adapter-input-path]")
     .forEach((control) => {
       const path = control.dataset.adapterInputPath;
-      if (control.dataset.adapterInputSensitive === "true") {
+      if (control.dataset.adapterInputSensitive === "true" || control.dataset.adapterInputDerived === "true") {
         values.delete(path);
         return;
       }
@@ -3661,7 +3814,10 @@ function renderAdapterDeclaredFields(adapter = selectedAdapter()) {
     return;
   }
 
-  elements.adapterDeclaredFieldsStatus.textContent = `${fields.length} declared field${fields.length === 1 ? "" : "s"}`;
+  const visibleFieldCount = fields.filter(field => field.data_binding?.value_path !== "selection").length;
+  elements.adapterDeclaredFieldsStatus.textContent = visibleFieldCount
+    ? `${visibleFieldCount} declared field${visibleFieldCount === 1 ? "" : "s"}`
+    : "No additional policy inputs.";
   const groups = new Map();
   const fieldGroup = (name, label) => {
     if (!groups.has(name)) {
@@ -3679,6 +3835,18 @@ function renderAdapterDeclaredFields(adapter = selectedAdapter()) {
     return groups.get(name);
   };
   fields.forEach((field) => {
+    if (field.data_binding?.value_path === "selection") {
+      // Dataset choices are already shown in step 2. Keep a value-free control
+      // for the shared binding validator; metadata belongs to server snapshots.
+      const control = document.createElement("input");
+      control.type = "hidden";
+      control.id = adapterFieldControlId(field.path);
+      control.dataset.adapterInputPath = field.path;
+      control.dataset.adapterInputKind = field.kind;
+      control.dataset.adapterInputDerived = "true";
+      elements.adapterDeclaredFieldsGrid.append(control);
+      return;
+    }
     const wrapper = document.createElement("div");
     wrapper.className = "field";
     const label = document.createElement("label");
@@ -3783,11 +3951,16 @@ function renderAdapterDeclaredFields(adapter = selectedAdapter()) {
       if (control.type === "checkbox") control.checked = Boolean(saved.raw);
       else if (control instanceof HTMLSelectElement) {
         const savedValue = String(saved.raw ?? "");
-        control.value = [...control.options].some(
-          (option) => option.value === savedValue,
-        )
-          ? savedValue
-          : "";
+        if (savedValue && ![...control.options].some(option => option.value === savedValue)) {
+          const retained = document.createElement("option");
+          retained.value = savedValue;
+          let label = savedValue;
+          try { label = String(JSON.parse(savedValue)); } catch {}
+          retained.textContent = label + " — unavailable for this code";
+          retained.disabled = true;
+          control.append(retained);
+        }
+        control.value = savedValue;
       } else control.value = String(saved.raw ?? "");
     } else if (!field.sensitive && field._dataBindingResolution?.value) {
       setAdapterFieldControlValue(
@@ -3802,6 +3975,7 @@ function renderAdapterDeclaredFields(adapter = selectedAdapter()) {
     ) {
       setAdapterFieldControlValue(control, field, field.default);
     }
+    if (field.data_binding) control.readOnly = true;
     wrapper.append(control);
     if (choiceList) wrapper.append(choiceList);
 
@@ -3869,10 +4043,18 @@ function renderAdapterDeclaredFields(adapter = selectedAdapter()) {
 }
 
 function parseAdapterDeclaredValue(control, field) {
+  if (field._dataBindingResolution) {
+    const resolution = field._dataBindingResolution;
+    return resolution.state === "complete"
+      ? { present: true, value: resolution.value }
+      : { present: false, value: null, error: resolution.message };
+  }
   if (field.kind === "boolean" && control.type === "checkbox")
     return { present: true, value: Boolean(control.checked) };
   const raw = control.value.trim();
   if (!raw) return { present: false, value: null };
+  if (control instanceof HTMLSelectElement && control.selectedOptions[0]?.disabled)
+    return { present: true, error: "The selected value is unavailable for this code. Choose an available value after inspection." };
   try {
     let value;
     if (
@@ -4026,7 +4208,8 @@ function collectAdapterDeclaredOverrides() {
       return;
     }
     declaredDescriptors.push(descriptor);
-    declaredLines.push(`${descriptor.key}=${JSON.stringify(parsed.value)}`);
+    if (!field.data_binding)
+      declaredLines.push(`${descriptor.key}=${JSON.stringify(parsed.value)}`);
   });
 
   const advancedLines = elements.nativeOverrides.value
@@ -4213,7 +4396,10 @@ function applyEvaluationSuiteDefaults(suiteIds) {
   });
 }
 
-function applySelectedAdapter({ loadSource = true } = {}) {
+function applySelectedAdapter({
+  loadSource = true,
+  preserveEdits = false,
+} = {}) {
   const previousSource = elements.experimentSource.value.trim();
   const previousWorkdir = elements.experimentWorkdir.value.trim();
   adapterDefaultErrors = [];
@@ -4228,7 +4414,7 @@ function applySelectedAdapter({ loadSource = true } = {}) {
     renderAdapterDeclaredFields(null);
     resetCommonHyperparameterOverrides();
     renderCommonHyperparameterDefaults(null);
-    elements.adapterCapabilities.textContent = "Select an active adapter.";
+    elements.adapterCapabilities.textContent = "Select an adapter.";
     elements.experimentSource.value = "";
     elements.experimentWorkdir.value = "";
     scheduleSourceBranchLoad();
@@ -4358,6 +4544,7 @@ function applySelectedAdapter({ loadSource = true } = {}) {
   }
   if (capabilities.supports_resume === false)
     elements.checkpointAutoResume.checked = false;
+  if (preserveEdits) restoreExperimentEditedValues();
   updateExperimentFields();
   if (adapterDefaultErrors.length) {
     showNotice(
@@ -4368,12 +4555,9 @@ function applySelectedAdapter({ loadSource = true } = {}) {
     clearNotice(elements.experimentsError);
   }
   const keepSource =
-    previousSource === defaults.url &&
-    previousWorkdir === defaults.workdir &&
-    /^[a-f0-9]{40}$/i.test(elements.experimentRevision.value) &&
-    (manifest.runtime?.allowed_backends || []).includes(
-      elements.experimentRuntime.value,
-    );
+    previousSource === elements.experimentSource.value.trim() &&
+    previousWorkdir === elements.experimentWorkdir.value.trim() &&
+    /^[a-f0-9]{40}$/i.test(elements.experimentRevision.value);
   if (loadSource) {
     if (keepSource) inspectRepositoryRuntime();
     else loadSourceBranches();
@@ -4458,9 +4642,9 @@ function populateExperimentAdapters(preserveId = "") {
   const available = [...versions.values()];
   if (!available.length) {
     elements.experimentAdapter.innerHTML =
-      '<option value="">No active adapters</option>';
+      '<option value="">No adapters available</option>';
     elements.experimentAdapter.disabled = true;
-    elements.adapterStatus.textContent = "No active adapters registered";
+    elements.adapterStatus.textContent = "No adapters registered";
     elements.adapterCapabilities.textContent =
       "Create or restore an adapter in the Adapter Registry.";
     return;
@@ -4479,7 +4663,7 @@ function populateExperimentAdapters(preserveId = "") {
   ) {
     elements.experimentAdapter.value = preserveId;
   } else if (preserveId) {
-    const message = `Previously selected adapter "${preserveId}" is unavailable. Choose an active adapter.`;
+    const message = `Previously selected adapter "${preserveId}" is unavailable. Choose an available adapter.`;
     elements.experimentAdapter.insertAdjacentHTML(
       "afterbegin",
       `<option value="${escapeHtml(preserveId)}" disabled>${escapeHtml(message)}</option>`,
@@ -4502,7 +4686,7 @@ function populateExperimentAdapters(preserveId = "") {
     elements.experimentAdapter.value === adapterOptionId(pinned);
   elements.adapterStatus.textContent = pinnedIsSelected
     ? `Pinned adapter v${adapterVersion(pinned)} loaded from the experiment revision.`
-    : `${active.length} active adapter${active.length === 1 ? "" : "s"}`;
+    : "";
 }
 
 async function loadAdapters(force = false) {
@@ -5599,10 +5783,55 @@ function selectedEvaluationSuite() {
 
 function evaluationSuiteScope(runId = "") {
   const normalizedRunId = String(runId || "").trim();
-  return normalizedRunId ? `run:${normalizedRunId}` : "global";
+  if (!normalizedRunId) return "global";
+  const target = normalizedRunId === elements.evaluationRunId.value.trim()
+    ? elements.evaluationTargetDataset?.value : "";
+  return `run:${normalizedRunId}${target ? `:target:${target}:unseen:${elements.evaluationUnseenHand.checked}` : ""}`;
+}
+
+function evaluationDatasetInput() {
+  if (!elements.evaluationTargetFields || elements.evaluationTargetFields.hidden) return {};
+  return {
+    target_dataset_id: elements.evaluationTargetDataset.value || null,
+    unseen_embodiment: elements.evaluationUnseenHand.checked,
+  };
+}
+
+function populateEvaluationTargetDatasets() {
+  const select = elements.evaluationTargetDataset;
+  if (!select) return;
+  const previous = select.value;
+  const contracts = new Set(evaluationSuites.map(suite => suite.target_dataset_contract).filter(Boolean));
+  const datasets = trainingDatasetRows.filter((row) => {
+    const assignments = row.assignments || [];
+    return assignments.length === 1 && contracts.has(assignments[0]?.version?.metadata?.contract);
+  });
+  setSelectOptions(select, datasets, previous);
+  select.insertAdjacentHTML("afterbegin", '<option value="">Choose a target hand dataset...</option>');
+  select.value = datasets.some(row => row.id === previous) ? previous : "";
+  if (previous && select.value !== previous && !elements.evaluationTargetFields.hidden) {
+    scheduleEvaluationTargetValidation();
+    void loadEvaluationSuites(true);
+  }
+}
+
+function updateEvaluationTargetFields(suites) {
+  if (!elements.evaluationTargetFields) return;
+  const required = suites.some(suite => suite.requires_target_dataset);
+  elements.evaluationTargetFields.hidden = !required;
+  elements.evaluationTargetDataset.disabled = !required;
+  elements.evaluationTargetDataset.required = required;
+  elements.evaluationUnseenHand.disabled = !required;
+  if (required) {
+    populateEvaluationTargetDatasets();
+    if (!dataBundlesLoaded) void loadDataBundles();
+  } else {
+    elements.evaluationTargetDataset.value = "";
+  }
 }
 
 function populateEvaluationSuites(preferredSuiteId = "", { runId = "" } = {}) {
+  updateEvaluationTargetFields(evaluationSuites);
   if (!evaluationSuites.length) {
     elements.evaluationSuite.innerHTML =
       '<option value="">No suites available</option>';
@@ -5714,7 +5943,9 @@ async function loadEvaluationSuites(
     const generation = (evaluationSuiteRequestGenerations.get(scope) || 0) + 1;
     evaluationSuiteRequestGenerations.set(scope, generation);
     const endpoint = runId
-      ? `/api/evaluation-suites?run_id=${encodeURIComponent(runId)}`
+      ? `/api/evaluation-suites?${new URLSearchParams({run_id: runId,
+          ...(runId === elements.evaluationRunId.value.trim() && elements.evaluationTargetDataset?.value
+            ? {target_dataset_id: elements.evaluationTargetDataset.value, unseen_embodiment: String(elements.evaluationUnseenHand.checked)} : {})})}`
       : "/api/evaluation-suites";
     requestPromise = (async () => {
       try {
@@ -5942,17 +6173,20 @@ function resetSourceSelect(select, message) {
 function setSourceRefStatus(message, state = "") {
   elements.sourceRefStatus.textContent = message;
   elements.sourceRefStatus.className = `source-ref-status${state ? ` is-${state}` : ""}`;
+  updateExperimentSubmitState();
 }
 
 function setRuntimeStatus(message, state = "") {
   elements.runtimeInspectionStatus.textContent = message;
   elements.runtimeInspectionStatus.className = `runtime-inspection-status${state ? ` is-${state}` : ""}`;
+  updateExperimentSubmitState();
 }
 
 function resetRuntimeInspection(
   message = "Select a commit to inspect its runtime.",
   state = "empty",
 ) {
+  rememberExperimentRuntime();
   ++runtimeInspectionRequest;
   runtimeInspectionKey = "";
   runtimeCandidates = [];
@@ -5965,7 +6199,6 @@ function resetRuntimeInspection(
     '<option value="">Choose a runtime backend first</option>';
   elements.experimentRuntimeProfileSelect.value = "";
   elements.experimentRuntimeProfileSelect.disabled = true;
-  elements.experimentRuntimeProfile.value = "";
   elements.experimentRuntimeProfile.disabled = false;
   elements.experimentRuntimeProfile.required = false;
   elements.runtimeProfileHelp.textContent =
@@ -6261,7 +6494,6 @@ function applyRuntimeProfileSelection(explicit = true) {
     elements.experimentRuntimeProfile.required = Boolean(
       candidate.requiresProfile,
     );
-    elements.experimentRuntimeProfile.value = "";
     if (candidate.value === "conda") {
       elements.experimentRuntimeProfile.placeholder =
         "/path/to/conda/environment";
@@ -6376,6 +6608,7 @@ async function inspectRepositoryRuntime(forceRefresh = false) {
     updateExperimentSubmitState();
     return;
   }
+  rememberExperimentRuntime();
   runtimeInspectionKey = "";
   runtimeCandidates = [];
   clearRepositoryInputOptions({ render: true });
@@ -6403,7 +6636,17 @@ async function inspectRepositoryRuntime(forceRefresh = false) {
       `/api/source/inspect?${query.toString()}`,
       { forceRefresh },
     );
-    if (request !== runtimeInspectionRequest) return;
+    if (
+      request !== runtimeInspectionRequest ||
+      key !==
+        repositoryInspectionKey(
+          elements.experimentSource.value.trim(),
+          elements.experimentRevision.value.trim(),
+          elements.experimentWorkdir.value.trim() || ".",
+          selectedAdapter(),
+        )
+    )
+      return;
     const currentAdapterScope = adapterDeclaredScope(selectedAdapter());
     if (currentAdapterScope?.key !== adapterScope?.key) return;
     const resolvedRevision = firstValue(
@@ -6451,7 +6694,51 @@ async function inspectRepositoryRuntime(forceRefresh = false) {
     elements.experimentRuntime.disabled = !runnable.length;
     runtimeInspectionKey = key;
     const strong = runnable.filter(isStrongRuntimeCandidate);
-    if (strong.length === 1) {
+    const retainedRuntime =
+      preservedExperimentRuntime &&
+      runnable.find(
+        (candidate) => candidate.value === preservedExperimentRuntime.backend,
+      );
+    if (retainedRuntime) {
+      elements.experimentRuntime.value = retainedRuntime.value;
+      applyRuntimeSelection(false);
+      const saved = preservedExperimentRuntime;
+      const retainedProfile = runtimeProfiles.find(
+        (profile) =>
+          profile.id === saved.profileId &&
+          profile.backend === retainedRuntime.value,
+      );
+      if (retainedProfile) {
+        elements.experimentRuntimeProfileSelect.value = retainedProfile.id;
+        applyRuntimeProfileSelection(false);
+      } else {
+        elements.experimentRuntimeProfile.value = saved.value;
+        if (saved.profileId) {
+          const missing = document.createElement("option");
+          missing.value = saved.profileId;
+          missing.textContent =
+            saved.profileId + " — unavailable for this code";
+          missing.disabled = true;
+          elements.experimentRuntimeProfileSelect.append(missing);
+          elements.experimentRuntimeProfileSelect.value = saved.profileId;
+          elements.experimentRuntimeProfileSelect.disabled = false;
+          elements.runtimeProfileHelp.textContent =
+            "The previous named profile is unavailable. Select a profile or choose custom configuration.";
+        }
+      }
+    } else if (preservedExperimentRuntime?.backend) {
+      const missing = document.createElement("option");
+      missing.value = preservedExperimentRuntime.backend;
+      missing.textContent =
+        preservedExperimentRuntime.backend + " — unavailable for this code";
+      missing.disabled = true;
+      elements.experimentRuntime.append(missing);
+      elements.experimentRuntime.value = missing.value;
+      setRuntimeStatus(
+        "The previous runtime is unavailable. Choose a runnable runtime.",
+        "warning",
+      );
+    } else if (strong.length === 1) {
       elements.experimentRuntime.value = strong[0].value;
       applyRuntimeSelection(false);
     } else if (!runnable.length) {
@@ -6482,12 +6769,23 @@ async function inspectRepositoryRuntime(forceRefresh = false) {
         " Database inspection reused; Refresh refs to query the repository again.";
     }
   } catch (error) {
-    if (request !== runtimeInspectionRequest) return;
+    if (
+      request !== runtimeInspectionRequest ||
+      key !==
+        repositoryInspectionKey(
+          elements.experimentSource.value.trim(),
+          elements.experimentRevision.value.trim(),
+          elements.experimentWorkdir.value.trim() || ".",
+          selectedAdapter(),
+        )
+    )
+      return;
     resetRuntimeInspection(
       `Runtime inspection failed: ${error.message}`,
       "error",
     );
   }
+  updateExperimentSubmitState();
 }
 
 function updateSourceCommitMeta() {
@@ -6544,6 +6842,7 @@ async function loadSourceCommits(
     return;
   }
   const request = ++sourceCommitRequest;
+  resetRuntimeInspection("Commit changed; inspect the selected revision.");
   sourceCommits = [];
   resetSourceSelect(
     elements.experimentRevision,
@@ -6569,7 +6868,9 @@ async function loadSourceCommits(
     });
     if (
       request !== sourceCommitRequest ||
-      owningBranchRequest !== sourceBranchRequest
+      owningBranchRequest !== sourceBranchRequest ||
+      repository !== elements.experimentSource.value.trim() ||
+      branch !== elements.experimentBranch.value
     )
       return;
     if (!Array.isArray(payload.commits)) {
@@ -6638,7 +6939,9 @@ async function loadSourceCommits(
   } catch (error) {
     if (
       request !== sourceCommitRequest ||
-      owningBranchRequest !== sourceBranchRequest
+      owningBranchRequest !== sourceBranchRequest ||
+      repository !== elements.experimentSource.value.trim() ||
+      branch !== elements.experimentBranch.value
     )
       return;
     resetSourceSelect(elements.experimentRevision, "Commits unavailable");
@@ -6728,7 +7031,11 @@ async function loadSourceBranches(
   try {
     const path = `/api/source/branches?repo_url=${encodeURIComponent(repository)}`;
     const { payload } = await sourceMetadataRequest(path, { forceRefresh });
-    if (request !== sourceBranchRequest) return;
+    if (
+      request !== sourceBranchRequest ||
+      repository !== elements.experimentSource.value.trim()
+    )
+      return;
     if (!Array.isArray(payload.branches)) {
       throw new Error("Branch response did not contain a branches array.");
     }
@@ -6796,7 +7103,11 @@ async function loadSourceBranches(
     saveSourceSelection(repository, selectedBranch, selectedCommit);
     await loadSourceCommits(selectedCommit, request, forceRefresh);
   } catch (error) {
-    if (request !== sourceBranchRequest) return;
+    if (
+      request !== sourceBranchRequest ||
+      repository !== elements.experimentSource.value.trim()
+    )
+      return;
     resetSourceSelect(elements.experimentBranch, "Branches unavailable");
     resetSourceSelect(elements.experimentRevision, "Choose a branch first");
     updateSourceCommitMeta();
@@ -6836,6 +7147,7 @@ function scheduleSourceBranchLoad() {
 }
 
 function experimentPayload() {
+  updateCpuResources();
   const declaredOverrides = collectAdapterDeclaredOverrides();
   const overrides = [
     ...declaredOverrides.declaredLines,
@@ -7024,11 +7336,197 @@ function experimentPayload() {
   };
 }
 
+function experimentSectionError(section, skip = []) {
+  if (!section) return "";
+  const ignored = new Set(skip);
+  const invalid = [...section.querySelectorAll("input, select, textarea")].find(
+    (control) =>
+      !ignored.has(control) && control.willValidate && !control.validity.valid,
+  );
+  if (!invalid) return "";
+  const label =
+    invalid.labels?.[0]?.textContent?.trim() || invalid.id || "Field";
+  return `${label}: ${invalid.validationMessage || "Enter a valid value."}`;
+}
+
+function experimentStepValidation(batchValidation = null) {
+  const sections = [
+    ...elements.experimentForm.querySelectorAll("[data-experiment-step]"),
+  ];
+  // Temporarily unlock only the fieldsets, preserving each control's own disabled state.
+  // Native validation must not ignore values solely because an earlier step is incomplete.
+  sections.forEach((section) => {
+    section.disabled = false;
+  });
+  const section = (step) =>
+    sections.find((item) => item.dataset.experimentStep === step);
+  const errors = {};
+  const adapter = selectedAdapter();
+  const revision = elements.experimentRevision.value.trim();
+  errors.code = !adapter
+    ? "Choose an adapter."
+    : adapterManifest(adapter).__parse_error ||
+      experimentSectionError(section("code"));
+  if (
+    !errors.code &&
+    (!revision || !sourceCommits.some((commit) => commit.sha === revision))
+  )
+    errors.code = "Select a commit loaded from the repository.";
+
+  const slots = experimentInputSlots(adapter);
+  const bundle = selectedExperimentDataBundle();
+  errors.data = slots.length ? trainingDatasetsLoadError : "";
+  for (let index = 0; index < slots.length; index += 1) {
+    const ids = experimentDatasetSelectionIds(experimentDatasetControl(index));
+    if (
+      !ids.length ||
+      ids.some((id) => !trainingDatasetRows.some((row) => row.id === id))
+    ) {
+      errors.data = "Choose available training datasets.";
+      break;
+    }
+    if (slots[index].cardinality !== "many" && ids.length !== 1) {
+      errors.data =
+        "This adapter accepts one dataset per input. Keep one selection.";
+      break;
+    }
+  }
+  if (!errors.data && slots.length) {
+    const compatible = experimentBundleCompatibility(bundle, adapter, null, {
+      allowAnyContract: true,
+    });
+    if (!compatible.compatible) errors.data = compatible.message;
+  }
+  const currentKey = repositoryInspectionKey(
+    elements.experimentSource.value.trim(),
+    revision,
+    elements.experimentWorkdir.value.trim() || ".",
+    adapter,
+  );
+  const runtime = runtimeCandidates.find(
+    (candidate) => candidate.value === elements.experimentRuntime.value,
+  );
+  errors.runtime =
+    runtimeInspectionKey !== currentKey || !runtime?.runnable
+      ? "Inspect the selected commit and choose a runnable runtime."
+      : experimentSectionError(section("runtime"));
+  const profile = selectedRuntimeProfile();
+  if (
+    !errors.runtime &&
+    elements.experimentRuntimeProfileSelect.value &&
+    !profile
+  )
+    errors.runtime = "Choose an available runtime profile.";
+  if (!errors.runtime && profile && profile.backend !== runtime.value)
+    errors.runtime = "Choose a profile for the selected runtime.";
+  if (
+    !errors.runtime &&
+    !profile &&
+    runtime?.manual &&
+    runtime.requiresProfile &&
+    !elements.experimentRuntimeProfile.value.trim()
+  )
+    errors.runtime = "Complete the selected runtime's required configuration.";
+
+  enforceSupportedPrecision();
+  elements.hpLearningRate.setCustomValidity(
+    !elements.hpLearningRate.disabled &&
+      elements.hpLearningRate.value !== "" &&
+      Number(elements.hpLearningRate.value) <= 0
+      ? "Learning rate must be greater than zero."
+      : "",
+  );
+  const declared = collectAdapterDeclaredOverrides();
+  // Cross-GPU batch rules belong to Resources, which must stay reachable to fix them.
+  errors.settings =
+    declared.errors[0] ||
+    experimentSectionError(section("settings"), [
+      elements.hpBatchSize,
+      elements.hpBatchSemantics,
+    ]);
+  const batchRaw = elements.hpBatchSize.value.trim();
+  if (
+    !errors.settings &&
+    !elements.hpBatchSize.disabled &&
+    batchRaw &&
+    (!Number.isInteger(Number(batchRaw)) || Number(batchRaw) < 1)
+  )
+    errors.settings = "Batch size must be a positive whole number.";
+  if (!errors.settings && slots.length) {
+    const compatible = experimentBundleCompatibility(bundle, adapter);
+    if (!compatible.compatible) errors.settings = compatible.message;
+  }
+  const batch = batchValidation || updateBatchCompatibility();
+  errors.resources =
+    experimentSectionError(section("resources")) || batch.errors[0] || "";
+  let sweepError = "";
+  if (elements.sweepDefinition.value.trim()) {
+    try {
+      const sweep = JSON.parse(elements.sweepDefinition.value);
+      if (!sweep || Array.isArray(sweep) || typeof sweep !== "object")
+        sweepError = "Sweep must be a JSON object.";
+    } catch {
+      sweepError = "Sweep must be valid JSON.";
+    }
+  }
+  elements.sweepDefinition.setCustomValidity(sweepError);
+  errors.checkpoint =
+    sweepError || experimentSectionError(section("checkpoint"));
+  if (
+    !errors.checkpoint &&
+    elements.checkpointMode.value !== "none" &&
+    !elements.checkpointPath.value.trim()
+  )
+    errors.checkpoint = "A checkpoint path or run ID is required.";
+  errors.tracking = experimentSectionError(section("tracking"));
+  for (const provider of selectedTrackingProviders()) {
+    const connection = trackingConnections.get(provider);
+    if (
+      !errors.tracking &&
+      (connection?.connected !== true ||
+        (provider === "wandb" && !connection.entity))
+    )
+      errors.tracking = `Connect and verify ${trackingProviderLabel(provider)} in Settings.`;
+  }
+  if (
+    !errors.tracking &&
+    elements.evaluationEnabled.checked &&
+    !selectedValues(elements.experimentEvaluationSuites).length
+  )
+    errors.tracking = "Select at least one evaluation suite.";
+
+  let first = null;
+  for (const fieldset of sections) {
+    const step = fieldset.dataset.experimentStep;
+    fieldset.disabled = Boolean(first);
+    fieldset.hidden = Boolean(first);
+    fieldset.dataset.stepState = first
+      ? "locked"
+      : errors[step]
+        ? "incomplete"
+        : "complete";
+    if (!first && errors[step])
+      first = {
+        step,
+        message: errors[step],
+        label: fieldset.querySelector("legend").textContent.trim(),
+      };
+  }
+  const status = document.getElementById("experiment-step-status");
+  if (status)
+    status.textContent = first
+      ? `${first.label}: ${first.message}`
+      : "All steps are ready. Preview the configuration before submitting.";
+  return { valid: !first, errors, first };
+}
+
 function validateExperiment({ notify = true, batchValidation = null } = {}) {
   const reject = (message) => {
     if (notify) showToast(message, true);
     return false;
   };
+  const steps = experimentStepValidation(batchValidation);
+  if (!steps.valid) return reject(steps.first.message);
   let sweepError = "";
   const rawSweep = elements.sweepDefinition.value.trim();
   if (rawSweep) {
@@ -7135,9 +7633,11 @@ function validateExperiment({ notify = true, batchValidation = null } = {}) {
 
 let loadedExperimentOrigin = null;
 let experimentPreviewSignature = null;
+let experimentPreviewRequest = 0;
 let experimentPreviewScripts = [];
 
 function invalidateExperimentPreview() {
+  ++experimentPreviewRequest;
   experimentPreviewSignature = null;
   experimentPreviewScripts = [];
   beginLogViewUpdate(elements.experimentScriptPreview);
@@ -7173,10 +7673,8 @@ function renderSelectedExperimentScript() {
 function updateExperimentSubmitState() {
   const presetMode = elements.experimentPresetDialog.open;
   const batchValidation = updateBatchCompatibility();
-  const ready =
-    !experimentBusy &&
-    validateExperiment({ notify: false, batchValidation }) &&
-    experimentPreviewIsCurrent();
+  const formValid = validateExperiment({ notify: false, batchValidation });
+  const ready = !experimentBusy && formValid && experimentPreviewIsCurrent();
   const existingExperiment = matchingExperimentForPayload(experimentPayload());
   const latestRevision = Number(existingExperiment?.latest_revision_number);
   const nextRevision = Number.isFinite(latestRevision)
@@ -7196,9 +7694,9 @@ function updateExperimentSubmitState() {
   } else {
     elements.saveExperimentButton.textContent = "Create draft";
     elements.submitExperimentButton.textContent = "Create and submit";
-    elements.experimentRevisionIntent.textContent =
-      "Submitted specifications are immutable. Changes create a new experiment revision.";
+    elements.experimentRevisionIntent.textContent = "";
   }
+  elements.experimentRevisionIntent.hidden = !existingExperiment || presetMode;
   if (presetMode)
     elements.saveExperimentButton.textContent = experimentBusy
       ? "Creating…"
@@ -7208,10 +7706,8 @@ function updateExperimentSubmitState() {
   elements.saveExperimentButton.classList.toggle("button-quiet", !presetMode);
   elements.submitExperimentButton.hidden = presetMode;
   elements.experimentPreviewButton.hidden = presetMode;
-  elements.experimentPreviewButton.disabled =
-    experimentBusy || !batchValidation.valid;
-  elements.saveExperimentButton.disabled =
-    experimentBusy || !batchValidation.valid;
+  elements.experimentPreviewButton.disabled = experimentBusy || !formValid;
+  elements.saveExperimentButton.disabled = experimentBusy || !formValid;
   elements.submitExperimentButton.disabled = presetMode || !ready;
   elements.newExperimentPreset.disabled = experimentBusy;
   const batchBlockedTitle = batchValidation.errors[0] || "";
@@ -7219,7 +7715,7 @@ function updateExperimentSubmitState() {
   elements.saveExperimentButton.title = batchBlockedTitle;
   elements.submitExperimentButton.title = ready
     ? existingExperiment
-      ? "Create a new immutable experiment revision and submit its Training Runs to Slurm"
+      ? "Create a new experiment revision and submit its Training Runs to Slurm"
       : "Create this experiment and submit its Training Runs to Slurm"
     : "Complete the required fields and preview the current configuration before submitting";
 }
@@ -7249,6 +7745,7 @@ function openExperimentPreset() {
     return { node, home };
   });
   elements.experimentName.value = "";
+  rememberExperimentInput(elements.experimentName);
   invalidateExperimentPreview();
   clearNotice(elements.experimentsError);
   SkynetDialog.open(elements.experimentPresetDialog, {
@@ -7274,13 +7771,18 @@ async function previewExperiment() {
     return;
   }
   const signature = JSON.stringify(experimentPayload());
+  const request = experimentPreviewRequest;
   setExperimentBusy(true);
   try {
     const result = await api("/api/experiments/preview", {
       method: "POST",
       body: JSON.stringify(experimentPayload()),
     });
-    if (signature !== JSON.stringify(experimentPayload())) return;
+    if (
+      request !== experimentPreviewRequest ||
+      signature !== JSON.stringify(experimentPayload())
+    )
+      return;
     clearNotificationScope(scope);
     const responseScripts = Array.isArray(result.scripts)
       ? result.scripts.filter((script) => typeof script === "string")
@@ -7316,7 +7818,9 @@ async function previewExperiment() {
       warningList.append(item);
     });
     warningList.hidden = !warnings.length;
-    const samplingSummary = document.querySelector("#experiment-preview-sampling");
+    const samplingSummary = document.querySelector(
+      "#experiment-preview-sampling",
+    );
     const sampling = result.recording_sampling || [];
     samplingSummary.hidden = !sampling.length;
     samplingSummary.replaceChildren();
@@ -7324,6 +7828,17 @@ async function previewExperiment() {
       const row = document.createElement("div");
       row.textContent = `${sampling.length > 1 ? `${plan.variant} · ` : ""}${Number(plan.control_hz.toFixed(4))} Hz · Chunk ${plan.action_steps} · Train ${plan.splits.train.windows.toLocaleString()} · Validation ${plan.splits.validation.windows.toLocaleString()} windows`;
       samplingSummary.append(row);
+      if (Array.isArray(plan.datasets) && plan.datasets.length > 1) {
+        for (const dataset of plan.datasets) {
+          const detail = document.createElement("div");
+          const name =
+            trainingDatasetRows.find((item) => item.id === dataset.version_id)
+              ?.name || dataset.version_id;
+          const splits = dataset.sampling?.splits;
+          detail.textContent = `${name}${splits ? ` · Train ${splits.train.windows.toLocaleString()} · Validation ${splits.validation.windows.toLocaleString()} windows` : ""}`;
+          samplingSummary.append(detail);
+        }
+      }
     });
     elements.experimentPreviewMeta.textContent = `${variantCount} variant${variantCount === 1 ? "" : "s"} / ${runnableScripts.length} runnable / ${blockers.length} blocked${warnings.length ? ` / ${warnings.length} warning(s)` : ""}`;
     elements.experimentPreviewBlockerList.replaceChildren();
@@ -7345,7 +7860,10 @@ async function previewExperiment() {
     elements.experimentPreviewEmpty.hidden = true;
     elements.experimentPreviewPanel.hidden = false;
   } catch (error) {
-    if (signature === JSON.stringify(experimentPayload()))
+    if (
+      request === experimentPreviewRequest &&
+      signature === JSON.stringify(experimentPayload())
+    )
       showToast(`Preview failed: ${error.message}`, true, { scope });
   } finally {
     setExperimentBusy(false);
@@ -8305,6 +8823,7 @@ function hydrateLoadedNativeSpec(nativeSpec = {}) {
     const descriptor = adapterOverrideDescriptor(field.path);
     if (descriptor.error) throw new Error(descriptor.error);
     claimedKeys.add(descriptor.key);
+    if (field.data_binding) continue;
     const loaded = loadedNativeFieldValue(nativeSpec, field.path);
     if (!loaded.present) continue;
     if (field.sensitive)
@@ -8436,6 +8955,8 @@ function clearExperimentPreviewAfterLoad() {
 }
 
 async function hydrateExperimentConfiguration(spec, request) {
+  experimentEditedValues.clear();
+  preservedExperimentRuntime = null;
   const source = loadedCanonicalObject(spec.source, "Experiment source");
   const runtime = loadedCanonicalObject(spec.runtime, "Experiment runtime");
   const train = loadedCanonicalObject(
@@ -8473,31 +8994,38 @@ async function hydrateExperimentConfiguration(spec, request) {
   populateExperimentDataBundles();
   const pinnedInputs = spec.data?.bundle?.assignments || [];
   experimentInputSlots().forEach((slot, index) => {
-    const pinned = pinnedInputs.find(
-      (item) =>
-        item.role === slot.role && Number(item.position || 0) === slot.position,
-    );
-    const control = index
-      ? document.getElementById("experiment-data-input-" + index)
-      : elements.experimentDataBundle;
-    const match =
-      pinned &&
-      trainingDatasetRows.find((dataset) => {
+    const pinned = pinnedInputs
+      .filter(
+        (item) =>
+          item.role === slot.role &&
+          (slot.cardinality === "many" ||
+            Number(item.position || 0) === slot.position),
+      )
+      .sort((a, b) => Number(a.position || 0) - Number(b.position || 0));
+    const ids = pinned.map((item) => {
+      const match = trainingDatasetRows.find((dataset) => {
         const candidate = dataset.assignments[0];
         return (
+          (datasetAssignmentVersionId(item)
+            ? datasetAssignmentVersionId(candidate) === datasetAssignmentVersionId(item)
+            : candidate?.version?.manifest_sha256 ===
+                item.version?.manifest_sha256 &&
+              candidate.resource?.name === item.resource?.name) &&
           candidate?.version?.manifest_sha256 ===
-            pinned.version?.manifest_sha256 &&
-          candidate.resource?.name === pinned.resource?.name &&
-          candidate.config?.location?.path === pinned.config?.location?.path
+            item.version?.manifest_sha256 &&
+          candidate.config?.location?.path === item.config?.location?.path
         );
       });
-    if (pinned && !match)
-      throw new Error(
-        "Saved " +
-          slot.role.replaceAll("_", " ") +
-          " files are no longer available at their registered location. Choose replacement data explicitly.",
-      );
-    control.value = match?.id || "";
+      if (!match)
+        throw new Error(
+          "Saved " +
+            slot.role.replaceAll("_", " ") +
+            " files are no longer available at their registered location. Choose replacement data explicitly.",
+        );
+      return match.id;
+    });
+    const control = experimentDatasetControl(index);
+    setExperimentDatasetSelection(control, ids);
     control.setCustomValidity("");
     control.removeAttribute("aria-invalid");
   });
@@ -8526,7 +9054,13 @@ async function hydrateExperimentConfiguration(spec, request) {
     float16: "fp16",
   });
 
-  if (!restoreSshGatewayPreference()) {
+  if (
+    !restoreSshGatewayPreference() &&
+    // A recorded gateway that is no longer configured keeps the current choice.
+    [...elements.gateway.options].some(
+      (option) => option.value === String(resources.gateway ?? ""),
+    )
+  ) {
     setLoadedSelectValue(elements.gateway, resources.gateway, "SSH gateway");
   }
   setLoadedSelectValue(
@@ -8688,6 +9222,11 @@ async function hydrateExperimentConfiguration(spec, request) {
     resources: { ...resources },
     evaluation: { specs: evaluations, suiteIds },
   };
+  for (const control of elements.experimentForm.querySelectorAll(
+    "input, select, textarea",
+  ))
+    rememberExperimentInput(control);
+  rememberExperimentRuntime();
   updateExperimentFields();
   updateBatchCompatibility();
   renderTrackingNamePreview();
@@ -9163,6 +9702,9 @@ function requestModelIO(section, manifest, values = {}, bundleId = null) {
   const previous = modelIORequests.get(section);
   if (previous) clearTimeout(previous.timer);
   const request = {};
+  const dataSelections = bundleId
+    ? selectedExperimentDataBundle()?.selections || []
+    : null;
   renderModelIO(section, null, "Reading input and output sizes…");
   modelIORequests.set(section, request);
   request.timer = setTimeout(async () => {
@@ -9178,15 +9720,14 @@ function requestModelIO(section, manifest, values = {}, bundleId = null) {
               model_io: train.model_io,
               data_requirements: train.data_requirements,
               input_fields: (train.input_fields || [])
-                .filter((field) => !field.sensitive)
+                .filter((field) => !field.sensitive && !field.data_binding)
                 .map(({ path, default: value }) => ({ path, default: value })),
             },
           },
           values,
           ...(bundleId
             ? {
-                data_selections:
-                  selectedExperimentDataBundle()?.selections || [],
+                data_selections: dataSelections,
               }
             : {}),
         }),
@@ -9218,7 +9759,7 @@ function refreshExperimentModelIO() {
   }
   const values = {};
   for (const field of declaredAdapterInputFields(adapter)) {
-    if (field.sensitive) continue;
+    if (field.sensitive || field.data_binding) continue;
     const control = document.getElementById(adapterFieldControlId(field.path));
     if (!control) continue;
     const parsed = parseAdapterDeclaredValue(control, field);
@@ -9291,6 +9832,13 @@ function filteredRuns() {
   });
 }
 
+function trainingDataCell(run) {
+  const values = trainingDataValue(run);
+  if (!values.length) return escapeHtml(savedTrainingDataLabel(run));
+  if (values.length === 1) return valueHtml(values[0]);
+  return `<details class="training-data-list"><summary>${values.length} datasets</summary>${values.map(valueHtml).join("<br>")}</details>`;
+}
+
 function runRowDescriptor(run) {
   const id = String(run.id || run.run_id || "");
   const state = jobStatusLabel(run);
@@ -9336,8 +9884,7 @@ function runRowDescriptor(run) {
       },
       {
         html:
-          trainingDataValue(run).map(valueHtml).join("<br>") ||
-          escapeHtml(savedTrainingDataLabel(run)),
+          trainingDataCell(run),
       },
       { html: statusPill(state) },
       {
@@ -9492,6 +10039,10 @@ async function loadRuns(
   }
   if (!background) {
     elements.refreshRuns.disabled = true;
+    if (!loadedTabs.has("runs")) {
+      elements.runCount.textContent = "Loading…";
+      elements.runsBody.innerHTML = emptyRow(12, "Loading training runs…");
+    }
   }
   try {
     const payload = await api(
@@ -9745,6 +10296,9 @@ document.addEventListener("click", async (event) => {
 });
 
 function queueReasonLabel(attempt) {
+  const state = String(attempt?.status || attempt?.state || "").toUpperCase();
+  // Accounting can retain the last queue reason after a successful exit.
+  if (["SUCCEEDED", "COMPLETED"].includes(state)) return "-";
   const reason = String(attempt?.slurm_reason || "").trim();
   const descriptions = {
     QOSGrpGRES: "Waiting for the group's GPU quota",
@@ -9752,7 +10306,10 @@ function queueReasonLabel(attempt) {
     Priority: "Waiting behind higher-priority jobs",
     Dependency: "Waiting for a prerequisite job",
   };
-  if (descriptions[reason]) return `${descriptions[reason]} (${reason})`;
+  if (descriptions[reason]) {
+    if (state && state !== "PENDING") return "-";
+    return `${descriptions[reason]} (${reason})`;
+  }
   if (reason) return reason;
   return String(attempt?.status || attempt?.state).toUpperCase() === "PENDING"
     ? "The scheduler has not reported a reason yet."
@@ -10119,7 +10676,7 @@ async function resolveRunAttemptCommonHyperparameters(record, action) {
       body: JSON.stringify(body),
     });
     if (!activeRunAttemptMatches(runId, attemptId)) return;
-    const detailPayload = await api(`/api/runs/${encodeURIComponent(runId)}`);
+    const detailPayload = await api(`/api/runs/${encodeURIComponent(runId)}?include_payloads=false`);
     if (!activeRunAttemptMatches(runId, attemptId)) return;
     pendingCommonHyperparameterResolutions.delete(key);
     const detail = renderRunDetail(detailPayload, runId, {
@@ -10940,7 +11497,7 @@ function renderRunDetailContent(payload, id, { preserveAttempt = false } = {}) {
         html: escapeHtml(
           attempt.error ||
             attempt.failure_reason ||
-            attempt.slurm_reason ||
+            (queueReasonLabel(attempt) !== "-" ? attempt.slurm_reason : null) ||
             "-",
         ),
       },
@@ -11077,6 +11634,8 @@ async function viewRun(id, launcher = null) {
   );
   elements.runDetailActions.innerHTML = "";
   elements.runDetailTracking.replaceChildren();
+  document.getElementById("run-checkpoint-list").replaceChildren();
+  document.getElementById("run-checkpoints").hidden = true;
   elements.runDetailMeta.innerHTML = keyValueHtml([
     ["Status", "Loading run..."],
   ]);
@@ -11087,7 +11646,7 @@ async function viewRun(id, launcher = null) {
     scroll: false,
   });
   const detailResult = await Promise.resolve(
-    api(`/api/runs/${encodeURIComponent(id)}`),
+    api(`/api/runs/${encodeURIComponent(id)}?include_payloads=false`),
   )
     .then((value) => ({ status: "fulfilled", value }))
     .catch((reason) => ({ status: "rejected", reason }));
@@ -11242,7 +11801,7 @@ async function pollRunDetail(
   runDetailPollInFlight = pollOwner;
   try {
     const detailResult = await Promise.resolve(
-      api(`/api/runs/${encodeURIComponent(runId)}`),
+      api(`/api/runs/${encodeURIComponent(runId)}?include_payloads=false`),
     )
       .then((value) => ({ status: "fulfilled", value }))
       .catch((reason) => ({ status: "rejected", reason }));
@@ -11693,6 +12252,10 @@ function initializeEvaluationResources() {
       input.querySelector('option[value="auto"]')?.remove();
       input.value = "a40";
     }
+    if (name === "cpus") {
+      input.value = String(CPUS_PER_GPU);
+      input.readOnly = true;
+    }
     input.addEventListener("input", () => scheduleEvaluationTargetValidation());
     input.addEventListener("change", () =>
       scheduleEvaluationTargetValidation(),
@@ -11730,6 +12293,7 @@ function validateEvaluationResources() {
 }
 
 function evaluationResources() {
+  updateCpuResources();
   const value = (name) =>
     document.getElementById(`evaluation-resource-${name}`).value;
   return {
@@ -11746,6 +12310,7 @@ function evaluationResources() {
 function evaluationTargetSignature() {
   return JSON.stringify([
     elements.evaluationRunId.value.trim(),
+    evaluationDatasetInput(),
     elements.evaluationCheckpoint.value.trim(),
     elements.evaluationSuite.value,
     elements.evaluationEnvironment.value,
@@ -11848,6 +12413,7 @@ async function validateEvaluationTarget(request, signature) {
       body: JSON.stringify({
         run_id: runId,
         checkpoint_path: checkpointPath || null,
+        ...evaluationDatasetInput(),
         suite_id: suiteId || null,
         environment: elements.evaluationEnvironment.value || null,
         tasks: checkedEvaluationTaskIds(),
@@ -11910,7 +12476,7 @@ async function validateEvaluationTarget(request, signature) {
     const resources = result.resolved_resources;
     const budget = document.querySelector("#evaluation-resource-summary");
     budget.textContent = resources
-      ? `Total: ${resources.gpu?.count || 1} ${String(resources.gpu?.type || "any").toUpperCase()} GPU${resources.gpu?.count === 1 ? "" : "s"} · ${resources.cpus_per_task} CPUs · ${resources.memory_gb} GB RAM · ${resources.time_limit}${resources.node?.name ? ` · Node: ${resources.node.name}` : ""}`
+      ? `Total: ${resources.gpu?.count || 1} ${String(resources.gpu?.type || "any").toUpperCase()} GPU${resources.gpu?.count === 1 ? "" : "s"} · ${resources.cpus_per_task} CPUs · ${resources.memory_gb} GB RAM · ${resources.time_limit}${resources.node?.name ? ` · Node: ${resources.node.name}` : resources.node?.eligible_names?.length ? ` · Available nodes: ${resources.node.eligible_names.join(", ")}` : ""}`
       : "Allocation has not been resolved. Validate a compatible checkpoint and evaluation suite.";
     const evaluator =
       result.evaluator && typeof result.evaluator === "object"
@@ -12103,6 +12669,7 @@ async function startEvaluationForRun(id) {
   clearNotice(elements.evaluationsError);
   elements.evaluationRunId.value = "";
   elements.evaluationCheckpoint.value = "";
+  if (elements.evaluationTargetDataset) elements.evaluationTargetDataset.value = "";
   elements.evaluationSuite.value = "";
   pendingEvaluationSuiteId = "";
   updateEvaluationEnvironmentFromSuite();
@@ -12211,7 +12778,7 @@ async function resumeRun(id, reason = "") {
     await loadRuns(true);
     if (activeRunDetailId === id && !elements.runDetail.hidden) {
       stopRunDetailPolling({ clearStatus: false });
-      const payload = await api(`/api/runs/${encodeURIComponent(id)}`);
+      const payload = await api(`/api/runs/${encodeURIComponent(id)}?include_payloads=false`);
       if (activeRunDetailId === id && !elements.runDetail.hidden) {
         runDetailFollowLatest = true;
         const detail = renderRunDetail(payload, id, { preserveAttempt: true });
@@ -12781,21 +13348,25 @@ async function loadEvaluations(force = false) {
   }
   elements.refreshEvaluations.disabled = true;
   clearNotice(elements.evaluationsError);
-  await loadEvaluationSuites(force);
-  try {
-    const runPayload = await api("/api/runs");
-    const choices = listFrom(runPayload, ["runs"]);
-    document.querySelector("#evaluation-run-options").innerHTML = choices
-      .map(
-        (run) =>
-          `<option value="${escapeHtml(run.id)}">${escapeHtml(run.experiment_name || run.id)} / ${escapeHtml(run.status)}</option>`,
-      )
-      .join("");
-  } catch (error) {
-    showNotice(
-      elements.evaluationsError,
-      `Training run suggestions could not be loaded: ${error.message}. You can enter a known run ID manually.`,
-    );
+  // The history view only needs evaluations. Loading submission suggestions
+  // here also revalidates the form and downloads source metadata after every submit.
+  if (activeTab === "evaluations") {
+    await loadEvaluationSuites(force);
+    try {
+      const runPayload = await api("/api/runs");
+      const choices = listFrom(runPayload, ["runs"]);
+      document.querySelector("#evaluation-run-options").innerHTML = choices
+        .map(
+          (run) =>
+            `<option value="${escapeHtml(run.id)}">${escapeHtml(run.experiment_name || run.id)} / ${escapeHtml(run.status)}</option>`,
+        )
+        .join("");
+    } catch (error) {
+      showNotice(
+        elements.evaluationsError,
+        `Training run suggestions could not be loaded: ${error.message}. You can enter a known run ID manually.`,
+      );
+    }
   }
   try {
     const payload = await api("/api/evaluations");
@@ -12834,6 +13405,7 @@ function evaluationPayload() {
   return {
     run_id: elements.evaluationRunId.value.trim() || null,
     checkpoint_path: elements.evaluationCheckpoint.value.trim() || null,
+    ...evaluationDatasetInput(),
     suite_id: elements.evaluationSuite.value,
     environment: elements.evaluationEnvironment.value,
     tasks,
@@ -12925,8 +13497,17 @@ async function createEvaluation(event) {
     showToast(`Evaluation ${evaluationId} created.`);
     document.querySelector("#evaluation-search").value = "";
     document.querySelector("#evaluation-state-filter").value = "all";
+    // The successful POST is the receipt. A slow/unavailable history refresh
+    // must not hide it or make a successfully submitted job look unsubmitted.
+    evaluationRows = [
+      evaluation,
+      ...evaluationRows.filter(
+        (row) => String(row.id || row.evaluation_id) !== String(evaluationId),
+      ),
+    ];
+    loadedTabs.add("evaluations");
     await activateTab("evaluations", true, "runs");
-    await loadEvaluations(true);
+    renderEvaluations();
     const launcher = [
       ...elements.evaluationsBody.querySelectorAll(
         "[data-evaluation-action='view']",
@@ -13288,7 +13869,13 @@ function renderEvaluationDetail(evaluation) {
   setTextIfChanged(elements.evaluationDetailTitle, evaluationName(evaluation));
   setHtmlIfChanged(
     elements.evaluationDetailActions,
-    cancellationActionButton("evaluation", id, evaluation.manual_actions || {}),
+    cancellationActionButton("evaluation", id, evaluation.manual_actions || {}) +
+      (evaluation.manual_actions?.retry_submission?.enabled
+        ? `<button type="button" class="button" data-evaluation-retry-submission="${escapeHtml(id)}">${escapeHtml(evaluation.manual_actions.retry_submission.label || "Retry submission")}</button>`
+        : "") +
+      (evaluation.manual_actions?.reread_result?.enabled
+        ? `<button type="button" class="button" data-evaluation-reread-result="${escapeHtml(id)}">${escapeHtml(evaluation.manual_actions.reread_result.label || "Re-read result")}</button>`
+        : ""),
   );
   setHtmlIfChanged(
     elements.evaluationDetailMeta,
@@ -13463,7 +14050,11 @@ function trainingDatasetLabel(dataset) {
     .join(" · ");
 }
 
-function datasetAlgorithmCompatibility(dataset, adapter) {
+function datasetAlgorithmCompatibility(
+  dataset,
+  adapter,
+  { allowAnyContract = false } = {},
+) {
   const slot = experimentInputSlots(adapter).find(
     (item) => item.role === "training_data",
   );
@@ -13483,31 +14074,27 @@ function datasetAlgorithmCompatibility(dataset, adapter) {
     },
     adapter,
     slot.bindings,
+    { allowAnyContract },
   );
 }
+
 function updateAlgorithmCompatibility() {
-  const dataset = trainingDatasetRows.find(
-    (row) => row.id === elements.experimentDataBundle.value,
-  );
+  // Algorithm comes first. Changing it must remain possible with old datasets selected.
   for (const option of elements.experimentAdapter.options) {
     const adapter = [...adapterRows, loadedExperimentAdapterSnapshot]
       .filter(Boolean)
       .find((item) => adapterOptionId(item) === option.value);
     if (!adapter) continue;
-    const result = dataset
-      ? datasetAlgorithmCompatibility(dataset, adapter)
-      : { compatible: true };
-    option.disabled = !result.compatible;
-    option.dataset.label ||= option.textContent;
-    option.textContent =
-      option.dataset.label + (result.compatible ? "" : " — " + result.message);
+    option.disabled = false;
+    if (option.dataset.label) option.textContent = option.dataset.label;
   }
-  const chosen = elements.experimentAdapter.selectedOptions[0];
-  const invalid = Boolean(dataset && chosen?.disabled);
+  const valid =
+    Boolean(selectedAdapter()) &&
+    !elements.experimentAdapter.selectedOptions[0]?.disabled;
   elements.experimentAdapter.setCustomValidity(
-    invalid ? "Choose an algorithm compatible with the selected dataset" : "",
+    valid ? "" : "Choose an available adapter",
   );
-  elements.experimentAdapter.setAttribute("aria-invalid", String(invalid));
+  elements.experimentAdapter.setAttribute("aria-invalid", String(!valid));
 }
 
 function populateExperimentDataBundles() {
@@ -13515,27 +14102,37 @@ function populateExperimentDataBundles() {
     adapter = selectedAdapter();
   const container = document.getElementById("experiment-extra-data-inputs");
   const previous = new Map(
-    [...container.querySelectorAll("select")].map((e) => [
-      e.dataset.inputSlot,
-      e.value,
+    [
+      ...container.querySelectorAll("select"),
+      elements.experimentDataBundle,
+    ].map((control) => [
+      control.dataset.inputSlot,
+      experimentDatasetSelectionIds(control),
     ]),
   );
-  previous.set(
-    elements.experimentDataBundle.dataset.inputSlot || slots[0]?.key,
-    elements.experimentDataBundle.value,
-  );
+  const primary = experimentDatasetSelectionIds(elements.experimentDataBundle);
   container.replaceChildren();
-  if (!slots.length)
-    slots.push({
-      key: JSON.stringify(["training_data", 0]),
-      role: "training_data",
-      position: 0,
-      bindings: [],
-    });
+  elements.experimentDataBundle.closest(".field").hidden = !slots.length;
+  const empty = document.getElementById("experiment-data-empty");
+  if (empty) {
+    empty.hidden = Boolean(slots.length);
+    empty.textContent = adapter ? "This adapter does not require a registered dataset." : "Choose an adapter to see its data requirements.";
+  }
+  if (!slots.length) {
+    elements.experimentDataBundle.required = false;
+    elements.experimentDataBundle.setCustomValidity("");
+    elements.experimentDataBundleStatus.textContent =
+      "This adapter does not require a registered dataset.";
+    updateAlgorithmCompatibility();
+    return;
+  }
   slots.forEach((slot, index) => {
+    const many = slot.cardinality === "many";
     const label =
       slot.role === "training_data"
-        ? "Training dataset"
+        ? many
+          ? "Training datasets"
+          : "Training dataset"
         : slot.role.replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase());
     let control = elements.experimentDataBundle;
     if (index) {
@@ -13543,70 +14140,90 @@ function populateExperimentDataBundles() {
       field.className = "field span-4";
       const text = document.createElement("label");
       text.htmlFor = "experiment-data-input-" + index;
-      text.textContent = label + " " + (slot.position + 1);
+      text.textContent = label + (many ? "" : " " + (slot.position + 1));
       control = document.createElement("select");
       control.id = text.htmlFor;
       field.append(text, control);
       container.append(field);
       control.onchange = () => {
         populateExperimentDataBundles();
+        renderAdapterDeclaredFields();
         invalidateExperimentPreview();
-        refreshExperimentModelIO();
+        updateExperimentSubmitState();
       };
     } else
       document.querySelector('[for="experiment-data-bundle"]').textContent =
         label;
     control.dataset.inputSlot = slot.key;
+    control.multiple = many;
+    control.size = many ? 5 : 0;
+    control.required = true;
     control.disabled = false;
-    const value = previous.get(slot.key) || "";
-    const options = trainingDatasetRows.map((dataset) => {
-      const input = {
-        ...dataset,
-        assignments: dataset.assignments.map((a) => ({
-          ...a,
-          role: slot.role,
-          position: slot.position,
-        })),
-      };
-      return {
-        dataset,
-        ...experimentBundleCompatibility(input, adapter, slot.bindings),
-      };
-    });
-    const missing = value && !options.some((o) => o.dataset.id === value);
+    const values = previous.get(slot.key) || (!index ? primary : []);
+    const options = trainingDatasetRows.map((dataset) => ({
+      dataset,
+      ...experimentBundleCompatibility(
+        {
+          ...dataset,
+          assignments: dataset.assignments.map((a) => ({
+            ...a,
+            role: slot.role,
+            position: slot.position,
+          })),
+        },
+        adapter,
+        slot.bindings,
+        { allowAnyContract: true },
+      ),
+    }));
+    const missing = values.filter(
+      (id) => !options.some((option) => option.dataset.id === id),
+    );
     control.innerHTML =
-      '<option value="">Choose ' +
-      escapeHtml(label.toLowerCase()) +
-      "…</option>" +
-      (missing
-        ? `<option value="${escapeHtml(value)}" disabled>Selected files are no longer registered</option>`
-        : "") +
+      (many
+        ? ""
+        : '<option value="">Choose ' +
+          escapeHtml(label.toLowerCase()) +
+          "…</option>") +
+      missing
+        .map(
+          (id) =>
+            `<option value="${escapeHtml(id)}" disabled>Selected dataset is no longer registered</option>`,
+        )
+        .join("") +
       options
         .map(
           ({ dataset, compatible, message }) =>
-            `<option value="${escapeHtml(dataset.id)}" ${!compatible && index > 0 ? "disabled" : ""}>${escapeHtml(trainingDatasetLabel(dataset))}${compatible ? "" : " — " + escapeHtml(message)}</option>`,
+            `<option value="${escapeHtml(dataset.id)}" ${!compatible && !values.includes(dataset.id) ? "disabled" : ""}>${escapeHtml(trainingDatasetLabel(dataset))}${compatible ? "" : " — " + escapeHtml(message)}</option>`,
         )
         .join("");
-    control.value = value;
+    // Retain every selected identity when switching from many to one; do not silently drop data.
+    if (!many && values.length > 1) {
+      control.multiple = true;
+      control.size = 5;
+    }
+    setExperimentDatasetSelection(control, values);
     const invalid =
-      missing ||
-      options.find((o) => o.dataset.id === value)?.compatible === false;
+      missing.length ||
+      (!many && values.length > 1) ||
+      options.some((o) => values.includes(o.dataset.id) && !o.compatible);
     control.setCustomValidity(
-      invalid ? "Choose compatible registered files" : "",
+      invalid
+        ? !many && values.length > 1
+          ? "This adapter accepts one dataset. Keep one selection."
+          : "Choose compatible registered datasets"
+        : "",
     );
     control.setAttribute("aria-invalid", String(Boolean(invalid)));
   });
   updateAlgorithmCompatibility();
-  const chosen = trainingDatasetRows.find(
-    (row) => row.id === elements.experimentDataBundle.value,
-  );
-  const compatibility = chosen
-    ? datasetAlgorithmCompatibility(chosen, adapter)
-    : null;
+  const count = experimentDatasetSelectionIds(
+    elements.experimentDataBundle,
+  ).length;
   elements.experimentDataBundleStatus.textContent =
-    compatibility && !compatibility.compatible
-      ? "Choose a compatible algorithm below. " + compatibility.message
-      : "The selected files and their source information are saved with the experiment.";
+    slots[0].cardinality === "many"
+      ? `${count} dataset${count === 1 ? "" : "s"} selected. Use Command or Ctrl to select multiple datasets. Selections are saved in their selected order.`
+      : "The selected dataset and its source information are saved with the experiment.";
   if (renderedAdapterDeclaredScope) renderAdapterDeclaredFields();
 }
 
@@ -13614,126 +14231,178 @@ function experimentBundleCompatibility(
   bundle,
   adapter = selectedAdapter(),
   selectedBindings = null,
+  { allowAnyContract = false } = {},
 ) {
   const bindings =
     selectedBindings ||
     declaredAdapterInputFields(adapter)
       .map((field) => field.data_binding)
       .filter(Boolean);
-  if (!bindings.length)
-    return {
-      compatible: false,
-      message: "Unsupported: this adapter has no training dataset binding.",
-    };
+  if (!bindings.length) return { compatible: true, message: "" };
   const assignments = Array.isArray(bundle?.assignments)
     ? bundle.assignments
     : [];
-  const positions = new Set();
+  const positions = new Set(),
+    versions = new Set();
   for (const item of assignments) {
-    const role = String(item?.role || "");
-    const position = Number(item?.position || 0);
+    const role = String(item?.role || ""),
+      position = Number(item?.position || 0);
     const identity = JSON.stringify([role, position]);
     if (positions.has(identity))
       return {
         compatible: false,
-        message: `duplicate ${role} position ${position}`,
+        message: `Duplicate ${role} position ${position}.`,
       };
     positions.add(identity);
-    if (
-      bindings.some((binding) => binding.role === role) &&
-      !bindings.some(
-        (binding) =>
-          binding.role === role && Number(binding.position || 0) === position,
-      )
-    ) {
+    const version = datasetAssignmentVersionId(item);
+    if (version && versions.has(version))
       return {
         compatible: false,
-        message: `adapter cannot consume ${role} position ${position}`,
+        message: "The same dataset cannot be selected twice.",
       };
-    }
-  }
-  for (const binding of bindings) {
-    const assignment = assignments.find(
-      (item) =>
-        String(item?.role || "") === String(binding.role || "") &&
-        Number(item?.position || 0) === Number(binding.position || 0),
-    );
-    if (!assignment)
-      return { compatible: false, message: `missing ${binding.role} role` };
-    const location = assignment.config?.location;
-    const locationReady =
-      location?.kind === "cluster" &&
-      location?.status === "AVAILABLE" &&
-      location?.manifest_sha256 === assignment.version?.manifest_sha256;
-    const contracts = adapterDataContracts(binding, adapter);
-    const metadata = assignment.version?.metadata || {};
+    if (version) versions.add(version);
     if (
-      contracts.length &&
-      (!contracts.includes(metadata.contract) ||
-        metadata.validation?.status !== "PASSED")
+      bindings.some((b) => b.role === role) &&
+      !bindings.some(
+        (b) =>
+          b.role === role &&
+          (b.cardinality === "many" || Number(b.position || 0) === position),
+      )
     )
       return {
         compatible: false,
-        message: "Dataset has not passed this adapter's data requirements.",
+        message: `This adapter cannot consume ${role} position ${position}.`,
       };
-    if (binding.value_path === "location.path" && !locationReady)
+  }
+  for (const binding of bindings) {
+    const matches = assignments
+      .filter(
+        (item) =>
+          String(item?.role || "") === String(binding.role || "") &&
+          (binding.cardinality === "many" ||
+            Number(item?.position || 0) === Number(binding.position || 0)),
+      )
+      .sort((a, b) => Number(a.position || 0) - Number(b.position || 0));
+    if (!matches.length)
       return {
         compatible: false,
-        message: "No verified copy on the training cluster.",
+        message: `Choose ${binding.role.replaceAll("_", " ")}.`,
       };
     if (
-      String(assignment.version?.status || "").toUpperCase() !== "READY" &&
-      !locationReady
-    ) {
+      binding.cardinality === "many" &&
+      matches.some((item, index) => Number(item.position || 0) !== index)
+    )
       return {
         compatible: false,
-        message: `${binding.role} is ${assignment.version?.status || "unverified"}; complete import or transfer to the cluster`,
+        message: "Dataset positions must be contiguous.",
       };
+    for (const assignment of matches) {
+      const location = assignment.config?.location;
+      const locationReady =
+        location?.kind === "cluster" &&
+        location?.status === "AVAILABLE" &&
+        location?.manifest_sha256 === assignment.version?.manifest_sha256;
+      const contracts =
+        allowAnyContract && binding.contract_selector
+          ? [
+              ...new Set([
+                ...(binding.contracts || []),
+                ...(binding.contract ? [binding.contract] : []),
+                ...Object.values(binding.contract_choices || {}).flat(),
+              ]),
+            ]
+          : adapterDataContracts(binding, adapter);
+      const metadata = assignment.version?.metadata || {};
+      if (
+        contracts.length &&
+        (!contracts.includes(metadata.contract) ||
+          metadata.validation?.status !== "PASSED")
+      )
+        return {
+          compatible: false,
+          message: "Dataset has not passed this adapter's data requirements.",
+        };
+      if (
+        ["location.path", "selection"].includes(binding.value_path) &&
+        !locationReady
+      )
+        return {
+          compatible: false,
+          message: "No verified copy on the training cluster.",
+        };
+      if (
+        String(assignment.version?.status || "").toUpperCase() !== "READY" &&
+        !locationReady
+      )
+        return {
+          compatible: false,
+          message: `${binding.role} is ${assignment.version?.status || "unverified"}; complete import or transfer to the cluster.`,
+        };
+      if (metadata.storage_location === "workstation")
+        return {
+          compatible: false,
+          message:
+            "Stored on the collection workstation; transfer to the training cluster first.",
+        };
+      const formats = (binding.formats || []).map((value) =>
+        String(value).toLowerCase(),
+      );
+      const format = String(assignment.version?.format || "");
+      if (formats.length && !formats.includes(format.toLowerCase()))
+        return {
+          compatible: false,
+          message: `Incompatible format ${format || "undeclared"}.`,
+        };
+      const value = datasetBindingValue(assignment, binding);
+      if (
+        !value ||
+        (binding.value_path === "selection" &&
+          (!value.path || !value.manifest_sha256 || !value.version_id))
+      )
+        return {
+          compatible: false,
+          message: `Missing ${binding.value_path || "version.path"}.`,
+        };
     }
-    if (assignment.version?.metadata?.storage_location === "workstation") {
-      return {
-        compatible: false,
-        message:
-          "Stored on the collection workstation; transfer to the training cluster first.",
-      };
-    }
-    const formats = Array.isArray(binding.formats)
-      ? binding.formats.map((item) => String(item).toLowerCase())
-      : [];
-    const format = String(assignment.version?.format || "");
-    if (formats.length && !formats.includes(format.toLowerCase())) {
-      return { compatible: false, message: `format ${format || "undeclared"}` };
-    }
-    const value = datasetBindingValue(assignment, binding);
-    if (!value)
-      return {
-        compatible: false,
-        message: `missing ${binding.value_path || "version.path"}`,
-      };
   }
   return { compatible: true, message: "" };
 }
 
 async function loadDataBundles(force = false) {
+  if (dataBundlesLoadPromise) return dataBundlesLoadPromise;
   if (dataBundlesLoaded && !force) {
     populateExperimentDataBundles();
+    if (typeof populateEvaluationTargetDatasets === "function")
+      populateEvaluationTargetDatasets();
+    updateExperimentSubmitState();
     return;
   }
-  elements.experimentDataBundle.disabled = true;
-  elements.experimentDataBundleStatus.textContent =
-    "Loading prepared datasets…";
-  try {
-    const payload = await api("/api/data/selections");
-    trainingDatasetRows = listFrom(payload, ["datasets"]);
-    dataBundlesLoaded = true;
-    populateExperimentDataBundles();
-  } catch (error) {
+  dataBundlesLoadPromise = (async () => {
+    elements.experimentDataBundle.disabled = true;
     elements.experimentDataBundleStatus.textContent =
-      "Could not load datasets: " + error.message;
-    elements.experimentDataBundle.setCustomValidity(
-      "Dataset selection could not be verified",
-    );
-  }
+      "Loading prepared datasets…";
+    trainingDatasetsLoadError = "";
+    try {
+      const payload = await api("/api/data/selections");
+      trainingDatasetRows = listFrom(payload, ["datasets"]);
+      dataBundlesLoaded = true;
+      populateExperimentDataBundles();
+      if (typeof populateEvaluationTargetDatasets === "function")
+        populateEvaluationTargetDatasets();
+    } catch (error) {
+      trainingDatasetsLoadError =
+        "Dataset selection could not be verified: " + error.message;
+      elements.experimentDataBundleStatus.textContent =
+        trainingDatasetsLoadError;
+      elements.experimentDataBundle.setCustomValidity(
+        trainingDatasetsLoadError,
+      );
+    } finally {
+      dataBundlesLoadPromise = null;
+      updateExperimentSubmitState();
+    }
+  })();
+  return dataBundlesLoadPromise;
 }
 
 function dataVersionStatus(version) {
@@ -14903,6 +15572,7 @@ function applyCollectionAdapterDefaults() {
     collectionTimeLimit: defaults.resources.time_limit,
   };
   Object.entries(fields).forEach(([key, value]) => setValue(key, value));
+  updateCpuResources();
   const objects = {
     collectionConfig: defaults.config,
     collectionSoftware: defaults.software,
@@ -16067,8 +16737,7 @@ const interactiveTutorialTours = {
         gate: "field",
         title: "Name this tutorial experiment",
         instruction:
-          "Enter a unique name. Use the generated value if you want a clearly marked tutorial record.",
-        useValue: ({ token }) => `${token}-experiment`,
+          "Enter a unique, meaningful name for this tutorial experiment.",
       },
       {
         id: "adapter",
@@ -16106,13 +16775,25 @@ const interactiveTutorialTours = {
         validate: tutorialNonEmpty,
       },
       {
+        id: "training-data",
+        selector: "#training-data-section",
+        skipIf: () => !experimentInputSlots(selectedAdapter()).length,
+        waitForTarget: true,
+        gate: "field",
+        title: "Choose training datasets",
+        instruction:
+          "Select compatible datasets for each input required by the adapter. Complete this step to reveal Runtime.",
+        validate: (target) => target.dataset.stepState === "complete",
+      },
+      {
         id: "runtime",
-        selector: "#experiment-runtime",
+        selector: "#training-runtime-section",
+        waitForTarget: true,
         gate: "field",
         title: "Choose a runnable runtime",
         instruction:
-          "Select a detected runnable candidate; resolve adapter evidence first if none exists.",
-        validate: tutorialNonEmpty,
+          "Select a runnable runtime and complete any required profile configuration to reveal Training settings.",
+        validate: (target) => target.dataset.stepState === "complete",
       },
       {
         id: "adapter-fields",
@@ -19054,7 +19735,11 @@ function trackingLinksHtml(entity, { compact = false } = {}) {
       const label = item.provider === "wandb" ? "W&B" : item.label || provider;
       const identity = url
         ? `<a class="tracking-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="Open ${escapeHtml(provider)}">${escapeHtml(label)}</a>`
-        : `<strong>${escapeHtml(provider)}</strong>`;
+        : `<span class="secondary" title="${escapeHtml(provider)}">${escapeHtml(label)} · ${escapeHtml(
+            ({ queued: "Waiting to sync", error: "Sync failed", blocked: "Connection blocked" })[
+              String(item.status || "").toLowerCase()
+            ] || "Link unavailable"
+          )}</span>`;
       const lastError = String(item.last_error || item.error || "").trim();
       return `<span class="tracking-provider-status">${identity}${lastError ? `<span class="tracking-provider-error" title="${escapeHtml(lastError)}">${escapeHtml(lastError)}</span>` : ""}</span>`;
     })
@@ -19452,6 +20137,7 @@ async function loadSettings(force = false) {
 }
 
 function updateExperimentFields() {
+  updateCpuResources();
   const manualGpu = elements.gpuMode.value === "manual";
   elements.experimentGpuCount.disabled = !manualGpu;
   elements.experimentGpuCount.required = manualGpu;
@@ -19483,6 +20169,7 @@ function loadActiveTab(tab, force = false) {
     return loadCollection(force);
   }
   if (tab === "datasets") return loadDataRegistry(force);
+  if (tab === "notes") return window.loadNotes?.(force) || Promise.resolve();
   if (tab === "runs") return loadRuns(true);
   if (tab === "evaluations") return loadEvaluations(force);
   if (tab === "evaluation-runs") return loadEvaluations(force);
@@ -19510,7 +20197,7 @@ function activateTab(tab, updateHash = true, requestedView = null) {
     "hands",
   ];
   const isData = ["data", "collection", "datasets"].includes(tab);
-  const isExperiments = ["experiments", "adapters", "runs"].includes(tab);
+  const isExperiments = ["experiments", "adapters", "runs", "notes"].includes(tab);
   const isEvaluations = [
     "evaluations",
     "evaluation-suites",
@@ -19659,7 +20346,7 @@ elements.refreshButton.addEventListener("click", () =>
 );
 
 elements.refreshExperiments.addEventListener("click", () =>
-  loadExperiments(true),
+  activeTab === "notes" ? window.loadNotes?.(true) : loadExperiments(true),
 );
 elements.experimentPreviewButton.addEventListener("click", previewExperiment);
 elements.newExperimentPreset.addEventListener("click", openExperimentPreset);
@@ -19675,12 +20362,24 @@ elements.experimentForm.addEventListener("submit", (event) => {
   createExperiment(true);
 });
 function experimentFormChanged(event) {
+  ++experimentConfigurationLoadRequest;
+  ++experimentDatasetUseRequest;
+  rememberExperimentInput(event?.target);
+  if (
+    [
+      "experiment-runtime",
+      "experiment-runtime-profile-select",
+      "experiment-runtime-profile",
+    ].includes(event?.target?.id)
+  )
+    rememberExperimentRuntime();
   if (
     event?.target?.dataset.adapterInputPath !== "native.config.training_preset"
   )
     updateTrainingPresetLabel();
   invalidateExperimentPreview();
   elements.toast.querySelectorAll(".is-error").forEach(dismissToast);
+  refreshExperimentModelIO();
   updateExperimentSubmitState();
 }
 elements.experimentForm.addEventListener("input", experimentFormChanged);
@@ -19712,7 +20411,7 @@ elements.experimentAdapter.addEventListener("change", () => {
   populateExperimentAdapters(selectedId);
   elements.experimentAdapter.setCustomValidity("");
   elements.experimentAdapter.removeAttribute("aria-invalid");
-  applySelectedAdapter();
+  applySelectedAdapter({ preserveEdits: true });
 });
 elements.experimentSource.addEventListener("input", scheduleSourceBranchLoad);
 elements.experimentSource.addEventListener("change", () => {
@@ -19814,6 +20513,8 @@ elements.experimentRuntimeProfileSelect.addEventListener("change", () =>
   applyRuntimeProfileSelection(true),
 );
 elements.gpuMode.addEventListener("change", updateExperimentFields);
+elements.experimentGpuCount.addEventListener("input", updateCpuResources);
+elements.collectionGpuCount.addEventListener("input", updateCpuResources);
 elements.checkpointMode.addEventListener("change", updateExperimentFields);
 elements.wandbEnabled.addEventListener("change", updateExperimentFields);
 elements.mlflowEnabled.addEventListener("change", updateExperimentFields);
@@ -19925,6 +20626,7 @@ elements.evaluationSuite.addEventListener("change", () => {
 });
 elements.evaluationRunId.addEventListener("input", () => {
   const runId = elements.evaluationRunId.value.trim();
+  if (elements.evaluationTargetDataset) elements.evaluationTargetDataset.value = "";
   elements.evaluationCheckpoint.value = "";
   pendingEvaluationSuiteId = elements.evaluationSuite.value;
   clearTimeout(evaluationSuiteReloadTimer);
@@ -19942,6 +20644,15 @@ elements.evaluationRunId.addEventListener("input", () => {
       pendingEvaluationSuiteId = "";
   }, 350);
 });
+for (const control of [elements.evaluationTargetDataset, elements.evaluationUnseenHand]) {
+  control?.addEventListener("change", async () => {
+    pendingEvaluationSuiteId = elements.evaluationSuite.value;
+    scheduleEvaluationTargetValidation();
+    await loadEvaluationSuites(false);
+    pendingEvaluationSuiteId = "";
+    scheduleEvaluationTargetValidation();
+  });
+}
 elements.evaluationCheckpoint.addEventListener("input", () =>
   scheduleEvaluationTargetValidation(),
 );
@@ -19993,6 +20704,36 @@ elements.evaluationDetailActions.addEventListener(
   "click",
   handleCancellationAction,
 );
+elements.evaluationDetailActions.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-evaluation-retry-submission]");
+  if (!button || button.disabled) return;
+  const id = button.dataset.evaluationRetrySubmission;
+  button.disabled = true;
+  button.textContent = "Checking Slurm receipt...";
+  try {
+    await api(`/api/evaluations/${encodeURIComponent(id)}/retry-submission`, {
+      method: "POST", body: JSON.stringify({ gateway: elements.gateway.value }),
+    });
+    await viewEvaluation(id, null, { polling: true });
+  } catch (error) {
+    showNotice(elements.evaluationsError, `Evaluation retry was not confirmed: ${error.message}. Refresh this evaluation before retrying.`, { scope: `evaluation-retry:${id}` });
+    await viewEvaluation(id, null, { polling: true });
+  }
+});
+elements.evaluationDetailActions.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-evaluation-reread-result]");
+  if (!button || button.disabled) return;
+  const id = button.dataset.evaluationRereadResult;
+  button.disabled = true;
+  button.textContent = "Reading result...";
+  try {
+    await api(`/api/evaluations/${encodeURIComponent(id)}/reread-result`, { method: "POST" });
+    await viewEvaluation(id, null, { polling: true });
+  } catch (error) {
+    showNotice(elements.evaluationsError, `Evaluation result was not re-read: ${error.message}`, { scope: `evaluation-reread:${id}` });
+    await viewEvaluation(id, null, { polling: true });
+  }
+});
 
 elements.refreshDataRegistry.addEventListener("click", () =>
   loadDataRegistry(true),
@@ -20272,54 +21013,92 @@ activateTab(
 );
 
 window.useDataset = async (versionId) => {
-  const dataset = dataResourceRows.find(row => row.id === versionId && row.category === "dataset");
+  const request = ++experimentDatasetUseRequest;
+  const dataset = dataResourceRows.find(
+    (row) => row.id === versionId && row.category === "dataset",
+  );
   if (dataset?.archived_at)
-    throw new Error("This dataset is archived. Restore it before using it in an experiment.");
+    throw new Error(
+      "This dataset is archived. Restore it before using it in an experiment.",
+    );
   if (dataset && !datasetCanTrain(dataset))
     throw new Error("This dataset is not currently available for training.");
-  let job = dataPreparationRows.find(row => row.version_id === versionId && row.training_ready);
+  let job = dataPreparationRows.find(
+    (row) => row.version_id === versionId && row.training_ready,
+  );
   if (!job) {
     const payload = await api("/api/data/exports/jobs");
+    if (request !== experimentDatasetUseRequest) return;
     dataPreparationRows = listFrom(payload, ["exports", "jobs"]);
-    job = dataPreparationRows.find(row => row.version_id === versionId && row.training_ready);
+    job = dataPreparationRows.find(
+      (row) => row.version_id === versionId && row.training_ready,
+    );
   }
   if (job) return window.usePreparedDataset(job);
   return window.useRegisteredDataset(versionId);
 };
 
 window.useRegisteredDataset = async (versionId) => {
+  const request = ++experimentDatasetUseRequest;
   void activateTab("experiments", true, "submit");
   await loadTrainingInputs();
+  if (request !== experimentDatasetUseRequest) return;
   const dataset = trainingDatasetRows.find((row) => row.id === versionId);
   if (!dataset)
     throw new Error("These files are no longer available. Refresh Datasets.");
-  elements.experimentDataBundle.value = versionId;
+  setExperimentDatasetSelection(elements.experimentDataBundle, [versionId]);
   populateExperimentDataBundles();
+  if (!selectedAdapter())
+    throw new Error("Choose an algorithm first, then select the dataset in Data.");
+  if (!selectedExperimentDataBundle()?.datasets.some((row) => row.id === versionId))
+    throw new Error(
+      "The selected algorithm does not take a registered dataset. Choose an algorithm that does, then select the dataset in Data.",
+    );
   renderAdapterDeclaredFields();
   invalidateExperimentPreview();
   refreshExperimentModelIO();
   showToast(
-    "Dataset selected. Choose a compatible adapter and review the experiment settings.",
+    "Dataset selected. Review the algorithm and complete the experiment steps.",
   );
 };
 
 window.usePreparedDataset = async (job) => {
+  const request = ++experimentDatasetUseRequest;
   void activateTab("experiments", true, "submit");
   await loadTrainingInputs();
-  if (!trainingDatasetRows.some(dataset => dataset.id === job.version_id))
-    throw new Error("This dataset is no longer available for training. Refresh Datasets.");
+  if (request !== experimentDatasetUseRequest) return;
+  if (!trainingDatasetRows.some((dataset) => dataset.id === job.version_id))
+    throw new Error(
+      "This dataset is no longer available for training. Refresh Datasets.",
+    );
   const setup = job.training_setup;
   const identity = job.adapter;
-  if (!identity?.adapter_id || !identity?.adapter_version_id || !identity?.adapter_version_number)
-    throw new Error("The prepared dataset does not identify its exact adapter version.");
-  const { adapter } = await api(`/api/adapters/${encodeURIComponent(identity.adapter_id)}?version_number=${encodeURIComponent(identity.adapter_version_number)}`);
+  if (
+    !identity?.adapter_id ||
+    !identity?.adapter_version_id ||
+    !identity?.adapter_version_number
+  )
+    throw new Error(
+      "The prepared dataset does not identify its exact adapter version.",
+    );
+  const { adapter } = await api(
+    `/api/adapters/${encodeURIComponent(identity.adapter_id)}?version_number=${encodeURIComponent(identity.adapter_version_number)}`,
+  );
+  if (request !== experimentDatasetUseRequest) return;
   if (!adapter || adapterArchived(adapter))
     throw new Error(
       "The training adapter is unavailable. Restore it in Adapters.",
     );
-  if (adapterVersionId(adapter) !== identity.adapter_version_id ||
-      adapter.selected_version?.manifest_sha256 !== identity.adapter_manifest_sha256)
-    throw new Error("The registered adapter differs from the prepared dataset's pinned version.");
+  if (
+    adapterVersionId(adapter) !== identity.adapter_version_id ||
+    adapter.selected_version?.manifest_sha256 !==
+      identity.adapter_manifest_sha256
+  )
+    throw new Error(
+      "The registered adapter differs from the prepared dataset's pinned version.",
+    );
+  experimentEditedValues.clear();
+  preservedExperimentRuntime = null;
   loadedExperimentCanonicalContext = null;
   loadedExperimentAdapterSnapshot = { ...adapter, _pinnedExperiment: true };
   const scope = adapterDeclaredScope(loadedExperimentAdapterSnapshot);
@@ -20327,27 +21106,27 @@ window.usePreparedDataset = async (job) => {
   populateExperimentAdapters(adapterOptionId(adapter));
   elements.experimentAdapter.value = adapterOptionId(adapter);
   applySelectedAdapter({ loadSource: false });
-  elements.experimentName.value =
-    (job.name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "")
-      .slice(0, 70) || "recorded-dataset") +
-    "-" +
-    String(setup.adapter).replace(/[^a-z0-9-]+/g, "-");
   renderTrackingNamePreview();
-  elements.experimentDataBundle.value = job.version_id;
+  setExperimentDatasetSelection(elements.experimentDataBundle, [
+    job.version_id,
+  ]);
   populateExperimentDataBundles();
   renderAdapterDeclaredFields();
   if (setup.preset) applyTrainingPreset(setup.preset);
   for (const [key, value] of Object.entries(setup.native_config || {})) {
     const path = "native.config." + key;
     const field = adapterInputFields().find((item) => item.path === path);
-    const control = field && document.getElementById(adapterFieldControlId(path));
-    if (!control) throw new Error("Prepared dataset selected an undeclared adapter setting: " + key);
+    const control =
+      field && document.getElementById(adapterFieldControlId(path));
+    if (!control)
+      throw new Error(
+        "Prepared dataset selected an undeclared adapter setting: " + key,
+      );
     setAdapterFieldControlValue(control, field, value);
     adapterDeclaredScopeValues(renderedAdapterDeclaredScope, true)?.set(path, {
-      kind: field.kind, raw: adapterFieldRawValue(control), touched: true,
+      kind: field.kind,
+      raw: adapterFieldRawValue(control),
+      touched: true,
     });
   }
   renderAdapterDeclaredFields();
@@ -20355,6 +21134,7 @@ window.usePreparedDataset = async (job) => {
   elements.experimentForm.scrollIntoView({ block: "start" });
   installPinnedSourceRevision(setup, "dataset preparation");
   await inspectRepositoryRuntime();
+  if (request !== experimentDatasetUseRequest) return;
   const profile = runtimeProfiles.find((p) => p.id === setup.runtime_profile);
   if (profile) {
     elements.experimentRuntime.value = profile.backend;
@@ -20362,6 +21142,12 @@ window.usePreparedDataset = async (job) => {
     elements.experimentRuntimeProfileSelect.value = profile.id;
     applyRuntimeProfileSelection();
   }
+  for (const control of elements.experimentForm.querySelectorAll(
+    "input, select, textarea",
+  ))
+    rememberExperimentInput(control);
+  rememberExperimentRuntime();
+  updateExperimentSubmitState();
   showToast(
     profile
       ? "Dataset, adapter, pinned source and runtime selected. Preview the training run when ready."

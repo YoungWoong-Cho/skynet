@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {JSDOM} from 'jsdom';
+import {indexHtml} from './index_page.cjs';
 
-const w = new JSDOM(await readFile(new URL('../static/index.html', import.meta.url), 'utf8'), {
+const w = new JSDOM(indexHtml(), {
   runScripts: 'outside-only', pretendToBeVisual: true, url: 'http://localhost:8080/#runs',
 }).window;
 const observers = [], Observer = w.MutationObserver;
@@ -64,6 +65,44 @@ try {
   el('evaluation-suite').value='different-robot';w.updateEvaluationEnvironmentFromSuite();
   assert.match(el('evaluation-suite-status').textContent,/Joint identities differ/);
   assert.equal(w.evaluationSuiteIsRunnable(incompatible),false);
+  const targets = [
+    {id:'wuji-target', name:'WUJI target', assignments:[{version:{metadata:{contract:'skynet.unidex-pointcloud-faas/v1'}}}]},
+    {id:'hat-target', name:'HAT target', assignments:[{version:{metadata:{contract:'skynet.hat-rgb-fingertips/v1'}}}]},
+    {id:'rgb-target', name:'RGB target', assignments:[{version:{metadata:{contract:'skynet.egoverse-rgb-joints/v1'}}}]}
+  ];
+  const unidexSuite = {...other, requires_target_dataset:true, target_dataset_contract:'skynet.unidex-pointcloud-faas/v1'};
+  const requests = [];
+  w.api=async endpoint=>{requests.push(endpoint);return endpoint === '/api/data/selections' ? {datasets:targets} : {suites:[unidexSuite]};};
+  await w.loadDataBundles(true);
+  await w.loadEvaluationSuites(true);
+  assert.equal(el('evaluation-target-fields').hidden,false);
+  assert.equal(el('evaluation-target-dataset').required,true);
+  assert.deepEqual(Array.from(el('evaluation-target-dataset').options, o=>o.value),['','wuji-target']);
+  el('evaluation-target-dataset').value='wuji-target';
+  const unseenSignature=w.evaluationTargetSignature();
+  await w.loadEvaluationSuites(false);
+  assert.match(requests.at(-1),/target_dataset_id=wuji-target&unseen_embodiment=true/);
+  assert.equal(w.evaluationDatasetInput().target_dataset_id,'wuji-target');
+  el('evaluation-unseen-hand').checked=false;
+  assert.notEqual(w.evaluationTargetSignature(),unseenSignature);
+  await w.loadEvaluationSuites(false);
+  assert.match(requests.at(-1),/unseen_embodiment=false/,'Target and unseen changes invalidate the suite cache scope');
+  const hatSuite = {...other, requires_target_dataset:true, target_dataset_contract:'skynet.hat-rgb-fingertips/v1'};
+  w.api=async()=>({suites:[hatSuite]});
+  await w.loadEvaluationSuites(true);
+  assert.equal(el('evaluation-target-fields').hidden,false,'HAT can select a held-out hand in the actual form');
+  assert.deepEqual(Array.from(el('evaluation-target-dataset').options, o=>o.value),['','hat-target']);
+  assert.equal(el('evaluation-target-dataset').value,'','Switching policy contracts clears an incompatible target');
+  el('evaluation-target-dataset').value='hat-target';
+  el('evaluation-unseen-hand').checked=true;
+  assert.equal(w.evaluationDatasetInput().target_dataset_id,'hat-target');
+  assert.equal(w.evaluationDatasetInput().unseen_embodiment,true);
+  w.api=async()=>({suites:[simulation]});
+  await w.loadEvaluationSuites(true);
+  assert.equal(el('evaluation-target-fields').hidden,true);
+  assert.equal(el('evaluation-target-dataset').disabled,true);
+  assert.equal(el('evaluation-target-dataset').value,'');
+  assert.equal(Object.keys(w.evaluationDatasetInput()).length,0,'Single embodiment loaders keep their existing input contract');
   runId.value='deleted-recording';
   w.api=async()=>({suites:[],unavailable_suites:[{id:'same-episode',reason:'The original recording is no longer registered'}]});
   await w.loadEvaluationSuites(true);

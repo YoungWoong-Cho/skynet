@@ -183,7 +183,8 @@ def test_native_sdk_keeps_ownership_of_wandb_stream(tmp_path):
     assert not list(tmp_path.iterdir())
 
 
-def test_controller_ingests_existing_job_once_and_preserves_pending_samples(tmp_path):
+@pytest.mark.parametrize("interrupted,strict", [(False, False), (True, False), (True, True)])
+def test_controller_ingests_existing_job_once_and_preserves_pending_samples(tmp_path, interrupted, strict):
     settings = WandBSettings(api_key="fake", entity="team", auto_flush=False)
     bridge = FakeWandBBridge(tmp_path / "run", settings)
     bridge.ensure_run(
@@ -229,21 +230,68 @@ def test_controller_ingests_existing_job_once_and_preserves_pending_samples(tmp_
     }
     empty = {"records": [], "cursors": {}, "latest": 0, "oldest": 0}
     response = {
-        "records": [record],
-        "cursors": {"node-a.jsonl": 100},
+        "records": [{**record, "timestamp_ms": 120000 + index * 15000} for index in range(3)],
+        "cursors": {"node-a.jsonl": 300},
         "latest": time.time(),
         "oldest": time.time(),
     }
+    enqueue_batch = bridge.log_system_metrics_batch
+    batches = []
+
+    def persist_then_interrupt(run_id, samples):
+        batches.append(samples)
+        result = enqueue_batch(run_id, samples)
+        if interrupted and len(batches) == 1:
+            raise OSError("interrupted after durable append, before source cursor save")
+        return result
+
     with (
         patch.object(gpu_tracking, "WandBBridge", return_value=bridge),
         patch.object(gpu_tracking, "_read", side_effect=[empty, response, response]),
         patch.object(gpu_tracking, "_sample_existing") as probe,
+        patch.object(bridge, "log_system_metrics_batch", side_effect=persist_then_interrupt),
     ):
-        assert gpu_tracking.sync_gpu_statistics(service, run, tmp_path, force=True) == 1
+        if strict:
+            with pytest.raises(OSError, match="interrupted after durable append"):
+                gpu_tracking.sync_gpu_statistics(service, run, tmp_path, force=True, raise_on_error=True)
+        else:
+            assert gpu_tracking.sync_gpu_statistics(service, run, tmp_path, force=True) == (0 if interrupted else 3)
+        if interrupted:
+            assert not (tmp_path / "run/gpu-statistics.json").exists()
+            assert bridge.pending_count() == 3
         assert gpu_tracking.sync_gpu_statistics(service, run, tmp_path, force=True) == 0
+    assert [len(batch) for batch in batches] == [3, 0]
     assert probe.call_count == 1
     assert probe.call_args.args[2]["slurm_job_id"] == "123"
-    assert len(bridge.system_rows) == 1
-    assert bridge.system_rows[0]["_runtime"] == 20
+    assert len(bridge.system_rows) == 3
+    assert [row["_runtime"] for row in bridge.system_rows] == [20, 35, 50]
     state = json.loads((tmp_path / "run/gpu-statistics.json").read_text())
     assert state["attempt"]["cursors"] == response["cursors"]
+
+
+def test_terminal_gpu_sync_cannot_report_success_when_another_sync_owns_the_lock(tmp_path):
+    service = SimpleNamespace()
+    run = {"id": "run"}
+    with gpu_tracking._LOCK:
+        assert gpu_tracking.sync_gpu_statistics(service, run, tmp_path) == 0
+        with pytest.raises(RuntimeError, match="already in progress"):
+            gpu_tracking.sync_gpu_statistics(service, run, tmp_path, force=True, raise_on_error=True)
+
+
+def test_different_runs_can_sync_gpu_metrics_concurrently_but_same_run_cannot(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    locks = {"gpu-tracking:first": threading.Lock(), "gpu-tracking:second": threading.Lock()}
+    service = SimpleNamespace(database=SimpleNamespace(operation_lock=lambda name: locks[name]))
+    barrier = threading.Barrier(2)
+    def sync(service, run, root, force, **kwargs):
+        assert gpu_tracking.sync_gpu_statistics(service, run, root) == 0
+        with pytest.raises(RuntimeError, match="already in progress"):
+            gpu_tracking.sync_gpu_statistics(service, run, root, force=True, raise_on_error=True)
+        barrier.wait(timeout=5)
+        return 1
+    monkeypatch.setattr(gpu_tracking, "_sync", sync)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(gpu_tracking.sync_gpu_statistics, service, {"id": identifier}, tmp_path,
+                               force=True, raise_on_error=True) for identifier in ("first", "second")]
+        assert [future.result() for future in futures] == [1, 1]

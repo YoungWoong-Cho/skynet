@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import re
 import json
-import subprocess
+import inspect
+import shlex
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from html import escape
 from pathlib import Path
 
 import anyio
@@ -15,36 +17,48 @@ from fastapi.staticfiles import StaticFiles
 
 from .availability import ClusterApplication, unavailable_response
 from .cluster_config import CLUSTER
-from .cluster_runtime import ClusterError
+from .cluster_runtime import ClusterClient, ClusterError
+from .gpu_quota import idle_partition_quota, idle_quota_usage, missing_idle_account_quotas
 
 
 APP_ROOT = Path(__file__).resolve().parent.parent
 STATIC_ROOT = APP_ROOT / "static"
+GATEWAY_OPTIONS_PLACEHOLDER = "<!-- gateway-options -->"  # Filled by index() in every gateway <select>.
 
-WORK_ROOT = CLUSTER.paths.work_root
 SLURM_BIN = CLUSTER.commands.slurm_bin
-GPU_USAGE = CLUSTER.commands.gpu_usage
 GPU_USAGE_LONG_COMMAND = CLUSTER.commands.gpu_usage_shell_command("-l")
 GPU_USAGE_USER_COMMAND = CLUSTER.commands.gpu_usage_shell_command("-u")
 SSH_HOSTS = tuple(CLUSTER.gateways)
+DASHBOARD_TIMEOUT = 20  # Seconds allowed for each gateway's dashboard query.
 GPU_USAGE_COLUMNS = tuple(CLUSTER.dashboard.gpu_usage_columns)
 OVERFLOW_PARTITIONS = frozenset(CLUSTER.dashboard.overflow_partitions)
 OVERFLOW_ACCOUNT = CLUSTER.dashboard.overflow_account_label
-ALLOWED_GATEWAYS = frozenset(("auto", *SSH_HOSTS))
+NORMAL_ACCOUNT_QUEUES = tuple(dict.fromkeys(
+    (queue.account, queue.partition) for queue in CLUSTER.queues.values() if not queue.preemptible
+))
+IDLE_QUOTA_PROGRAM = "\n".join((
+    inspect.getsource(idle_partition_quota),
+    inspect.getsource(missing_idle_account_quotas),
+    "import json,sys",
+    "print(json.dumps(missing_idle_account_quotas(sys.stdin.read(), json.loads(sys.argv[1]))))",
+))
 
 QUERY_COMMAND = rf'''export PATH={SLURM_BIN}:$PATH
 LC_ALL=C squeue -h -o '%i|%u|%T|%P|%D|%N|%b|%M|%l|%j|%R|%a'
 printf '\n__SKYNET_JOBS__\n'
 printf '\n__SKYNET_USAGE__\n'
-LC_ALL=C {GPU_USAGE_LONG_COMMAND} 2>/dev/null || true
+skynet_dashboard_usage=$(LC_ALL=C {GPU_USAGE_LONG_COMMAND} 2>/dev/null || true)
+printf '%s\n' "$skynet_dashboard_usage"
 printf '\n__SKYNET_USER_USAGE__\n'
 LC_ALL=C {GPU_USAGE_USER_COMMAND} 2>/dev/null || true
+printf '\n__SKYNET_IDLE_QUOTAS__\n'
+printf '%s\n' "$skynet_dashboard_usage" | LC_ALL=C timeout 10s python3 -c {shlex.quote(IDLE_QUOTA_PROGRAM)} {shlex.quote(json.dumps(NORMAL_ACCOUNT_QUEUES))} 2>/dev/null || printf '[]\n'
 '''
 
 def _create_cluster_application():
     # These imports construct services and connect to the central database.
     # Defer the entire dependency graph so the local page can open offline.
-    from .background_owner import BackgroundOwner
+    from .background_owner import BackgroundOwner, stop_background_services
     from .changes import ChangeFeed, change_router
     from .collection_api import router as collection_router
     from .hands_api import router as hands_router
@@ -54,6 +68,7 @@ def _create_cluster_application():
     from .pipeline_api import router as pipeline_router, service as pipeline_service
     from .policy_exports_api import router as policy_exports_router, service as policy_exports
     from .slack_api import slack_router
+    from .notes import notes_router
     from .workspaces import WorkspaceMiddleware, session_router
 
     def start_services():
@@ -63,19 +78,16 @@ def _create_cluster_application():
         live_archive.start(enabled=storage["enabled"], cleanup_enabled=storage["cleanup_source"])
 
     def stop_services():
-        live_archive.stop()
-        policy_exports.stop()
-        pipeline_service.stop()
+        stop_background_services((live_archive, policy_exports, pipeline_service))
 
     api = FastAPI(title="Skynet Slurm Console", version="0.2.0", docs_url="/api/docs", redoc_url=None)
     api.add_middleware(WorkspaceMiddleware, services=pipeline_service)
     api.add_api_route("/api/cluster", cluster, methods=["GET"])
-    api.add_api_route("/api/workspace/init", initialize_workspace, methods=["POST"])
     api.include_router(session_router(pipeline_service.directory))
     for router in (
         pipeline_router, maintenance_router, slack_router(pipeline_service),
         collection_router, hands_router, live_xr_router,
-        policy_exports_router,
+        policy_exports_router, notes_router(pipeline_service),
     ):
         api.include_router(router)
     feed = ChangeFeed(pipeline_service.system.database)
@@ -111,56 +123,6 @@ app = FastAPI(
     openapi_url=None,
     lifespan=lifespan,
 )
-
-
-class ClusterUnavailable(RuntimeError):
-    pass
-
-
-def _ssh(host: str, command: str, *, stdin: str | None = None, timeout: int = 20) -> str:
-    process = subprocess.run(
-        [
-            "ssh",
-            "-T",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=6",
-            "-o",
-            "ServerAliveInterval=5",
-            "-o",
-            "ServerAliveCountMax=1",
-            host,
-            command,
-        ],
-        input=stdin,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
-    if process.returncode != 0:
-        detail = (process.stderr or process.stdout or "SSH command failed").strip()
-        raise ClusterUnavailable(f"{host}: {detail}")
-    return process.stdout
-
-
-def _gateway_candidates(gateway: str) -> tuple[str, ...]:
-    if gateway not in ALLOWED_GATEWAYS:
-        raise HTTPException(status_code=422, detail="Unknown SSH gateway")
-    if gateway == "auto":
-        return SSH_HOSTS
-    return (gateway,)
-
-
-def _run_with_fallback(command: str, gateway: str, *, timeout: int = 20) -> tuple[str, str]:
-    errors: list[str] = []
-    for host in _gateway_candidates(gateway):
-        try:
-            return host, _ssh(host, command, timeout=timeout)
-        except (ClusterUnavailable, subprocess.TimeoutExpired) as error:
-            errors.append(str(error))
-    raise ClusterUnavailable("; ".join(errors) or "No SSH gateways are configured")
 
 
 def _tres_gpu_count(tres: str) -> int:
@@ -430,13 +392,37 @@ def _attach_account_users(
 def _parse_snapshot(output: str, gateway: str) -> dict[str, object]:
     job_output, separator, remaining_output = output.partition("__SKYNET_JOBS__")
     if not separator:
-        raise ClusterUnavailable("Slurm returned an unexpected response")
+        raise ClusterError("Slurm returned an unexpected response")
     usage_with_marker, _, user_usage_output = remaining_output.partition("__SKYNET_USER_USAGE__")
+    user_usage_output, idle_separator, idle_quota_output = user_usage_output.partition("__SKYNET_IDLE_QUOTAS__")
     usage_output = usage_with_marker.split("__SKYNET_USAGE__", 1)[-1] if "__SKYNET_USAGE__" in usage_with_marker else usage_with_marker
 
     jobs = [job for line in job_output.splitlines() if line.strip() if (job := _parse_job(line))]
     jobs.sort(key=lambda job: ({"RUNNING": 0, "COMPLETING": 1, "PENDING": 2}.get(str(job["state"]), 3), str(job["id"])))
     account_usage = _parse_account_usage(usage_output)
+    quota_errors = []
+    if idle_separator:
+        try:
+            receipts = json.loads(idle_quota_output)
+            if not isinstance(receipts, list) or any(not isinstance(receipt, dict) for receipt in receipts):
+                raise ValueError("Slurm returned an invalid idle quota response")
+            present = {str(row["account"]) for row in account_usage}
+            for account, partition in NORMAL_ACCOUNT_QUEUES:
+                if account in present:
+                    continue
+                matches = [receipt for receipt in receipts
+                           if receipt.get("account") == account and receipt.get("partition") == partition]
+                try:
+                    if len(matches) != 1:
+                        raise ValueError("Slurm did not return the account's idle quota")
+                    metrics = idle_quota_usage(matches[0], GPU_USAGE_COLUMNS)
+                except ValueError as error:
+                    quota_errors.append({"account": account, "partition": partition, "message": str(error)})
+                    continue
+                account_usage.append({"account": account, **metrics})
+                present.add(account)
+        except (ValueError, TypeError) as error:
+            quota_errors.append({"message": f"Could not verify idle account quotas: {error}"})
     _attach_account_users(account_usage, jobs, _parse_user_usage(user_usage_output))
     total_gpu_limit = 0
     total_gpu_allocated = 0
@@ -453,6 +439,7 @@ def _parse_snapshot(output: str, gateway: str) -> dict[str, object]:
         "gateway": gateway,
         "jobs": jobs,
         "account_usage": account_usage,
+        "quota_errors": quota_errors,
         "summary": {
             "gpu_total": total_gpu_limit,
             "gpu_allocated": total_gpu_allocated,
@@ -463,40 +450,19 @@ def _parse_snapshot(output: str, gateway: str) -> dict[str, object]:
     }
 
 
-def _as_http_error(error: Exception) -> HTTPException:
-    if isinstance(error, subprocess.TimeoutExpired):
-        detail = "SSH operation timed out"
-    else:
-        detail = str(error)
-    return HTTPException(status_code=503, detail=detail)
-
-
-@app.get("/api/health")
-def health():
-    if cluster_application.application is None:
-        return cluster_application.pending_response(ok=False, gateways=list(SSH_HOSTS))
-    return {"ok": True, "gateways": list(SSH_HOSTS)}
-
-
 def cluster(gateway: str = Query(default="auto")) -> dict[str, object]:
+    client = ClusterClient(SSH_HOSTS)
     try:
-        active_gateway, output = _run_with_fallback(QUERY_COMMAND, gateway)
-        return _parse_snapshot(output, active_gateway)
-    except (ClusterUnavailable, subprocess.TimeoutExpired):
-        return unavailable_response(gateways=list(SSH_HOSTS))
-
-
-def initialize_workspace(gateway: str = Query(default="auto")) -> dict[str, object]:
-    from .pipeline_api import service as pipeline_service
-
-    try:
-        work_root = pipeline_service.work_root
-        result = pipeline_service.storage.configure(work_root, work_root, pipeline_service.cluster, gateway)
-        return {"ok": True, **result}
+        client.candidates(gateway)
     except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
-    except (ClusterError, subprocess.TimeoutExpired) as error:
-        raise _as_http_error(error) from error
+        raise HTTPException(status_code=422, detail="Unknown SSH gateway") from error
+    try:
+        active_gateway, output = client.run_with_fallback(
+            QUERY_COMMAND, gateway, attempt_timeout=DASHBOARD_TIMEOUT
+        )
+        return _parse_snapshot(output, active_gateway)
+    except ClusterError:
+        return unavailable_response(gateways=list(SSH_HOSTS))
 
 
 @app.get("/", include_in_schema=False)
@@ -507,6 +473,10 @@ def index() -> HTMLResponse:
         version = f"{stat.st_mtime_ns:x}-{stat.st_size:x}"
         html = re.sub(rf'/static/{re.escape(name)}(?:\?[^"\s]*)?',
                       f"/static/{name}?v={version}", html)
+    hosts = [escape(host) for host in SSH_HOSTS]
+    options = f'<option value="auto">Auto: {", then ".join(hosts)}</option>' + "".join(
+        f'<option value="{host}">Prefer {host}</option>' for host in hosts)
+    html = html.replace(GATEWAY_OPTIONS_PLACEHOLDER, options)
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 

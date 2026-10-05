@@ -33,11 +33,24 @@ class ObservationStore:
             ).fetchone():
                 raise ValueError('This recording is being deleted. Finish its pending deletion first.')
 
+    @staticmethod
+    def _guard_retirement(connection, keys):
+        if keys and connection.execute('''SELECT 1 FROM data_version_retirements r,
+            LATERAL jsonb_array_elements(COALESCE(r.plan_json::jsonb->'observations','[]'::jsonb)) item
+            WHERE r.state IN ('PENDING','FAILED') AND item->>'artifact_key'=ANY(?) LIMIT 1''',
+            (list(keys),)).fetchone():
+            raise ValueError('This point-cloud observation is being retired; finish its storage cleanup first')
+
     def attach(self, job_id, nodes, sources):
         by_key = {source['sha256']: source for source in sources}
         with self.database.transaction() as c:
             self._guard_sources(c, [source['session_id'] for source in sources])
-            for node in nodes:
+            referenced_keys = sorted({key for node in nodes for key in [node['artifact_key'], *node['dependencies']]})
+            c.execute('SELECT artifact_key FROM observation_artifacts WHERE artifact_key=ANY(?) ORDER BY artifact_key FOR UPDATE',
+                      (referenced_keys,)).fetchall()
+            # A deterministic lock order also coordinates retirement with a
+            # new consumer arriving from another server process.
+            for node in sorted(nodes, key=lambda n: n['artifact_key']):
                 key, spec = node['artifact_key'], node['spec']
                 if content_digest(spec) != key:
                     raise ValueError('Observation identity differs from its immutable specification')
@@ -45,9 +58,12 @@ class ObservationStore:
                 c.execute('''INSERT INTO observation_artifacts
                     (artifact_key,spec_json,state,created_at,updated_at) VALUES (?,?,'MISSING',?,?)
                     ON CONFLICT(artifact_key) DO NOTHING''', (key, canonical_json(spec), now, now))
-                existing = c.execute('SELECT spec_json FROM observation_artifacts WHERE artifact_key=?', (key,)).fetchone()
+                existing = c.execute('SELECT spec_json FROM observation_artifacts WHERE artifact_key=? FOR UPDATE', (key,)).fetchone()
                 if json.loads(existing[0]) != spec:
                     raise ValueError('Observation key collision')
+            self._guard_retirement(c, referenced_keys)
+            for node in nodes:
+                key = node['artifact_key']
                 source = by_key[node['source_sha256']]
                 c.execute('INSERT INTO observation_sources VALUES (?,?,?) ON CONFLICT DO NOTHING',
                           (key, source['session_id'], source['path']))
@@ -57,8 +73,29 @@ class ObservationStore:
 
     def for_job(self, job_id):
         with self.database.connection() as c:
-            return {r['artifact_key']: self._artifact(r) for r in c.execute('''SELECT a.* FROM observation_artifacts a
+            result = {r['artifact_key']: self._artifact(r) for r in c.execute('''SELECT a.* FROM observation_artifacts a
                 JOIN observation_job_inputs i ON i.artifact_key=a.artifact_key WHERE i.job_id=?''', (job_id,))}
+            self._guard_retirement(c, list(result))
+            return result
+
+    def ready_captures(self, sources):
+        """Only previously verified captures linked to these authorized sources."""
+        if not sources:
+            return {}
+        requested = {(source['session_id'], source['path']): source['sha256'] for source in sources}
+        placeholders = ','.join('(?,?)' for _ in requested)
+        parameters = [value for pair in requested for value in pair]
+        result = {}
+        with self.database.connection() as c:
+            for row in c.execute('''SELECT a.*,s.session_id,s.recording_path
+                FROM observation_artifacts a JOIN observation_sources s USING(artifact_key)
+                WHERE a.state='READY' AND a.spec_json::jsonb->>'modality' IN ('rgb','depth')
+                AND (s.session_id,s.recording_path) IN (''' + placeholders + ')', parameters):
+                item = self._artifact(row)
+                source_sha = requested[(item.pop('session_id'), item.pop('recording_path'))]
+                if item['spec'].get('source_sha256') == source_sha:
+                    result.setdefault(source_sha, []).append(item)
+        return result
 
     def progress(self, job_id):
         with self.database.connection() as c:
@@ -75,7 +112,8 @@ class ObservationStore:
             claimed = []
             for node in nodes:
                 self._guard_sources(c, [r[0] for r in c.execute('SELECT session_id FROM observation_sources WHERE artifact_key=?', (node['artifact_key'],))])
-                row = c.execute('SELECT * FROM observation_artifacts WHERE artifact_key=?', (node['artifact_key'],)).fetchone()
+                row = c.execute('SELECT * FROM observation_artifacts WHERE artifact_key=? FOR UPDATE', (node['artifact_key'],)).fetchone()
+                self._guard_retirement(c, [node['artifact_key'], *node.get('dependency_keys', node['dependencies'])])
                 if not row or row['state'] != 'MISSING':
                     continue
                 if any(c.execute('SELECT state FROM observation_artifacts WHERE artifact_key=?', (key,)).fetchone()[0] != 'READY'
@@ -202,7 +240,8 @@ class ObservationStore:
                     (artifact_key,spec_json,state,path,manifest_sha256,created_at,updated_at)
                     VALUES (?,?,'READY',?,?,?,?) ON CONFLICT(artifact_key) DO NOTHING''',
                     (key, canonical_json(spec), artifact['path'], artifact['manifest_sha256'], now, now))
-                row = c.execute('SELECT * FROM observation_artifacts WHERE artifact_key=?', (key,)).fetchone()
+                row = c.execute('SELECT * FROM observation_artifacts WHERE artifact_key=? FOR UPDATE', (key,)).fetchone()
+                self._guard_retirement(c, [key])
                 if (json.loads(row['spec_json']) != spec or row['state'] != 'READY'
                         or row['path'] != artifact['path'] or row['manifest_sha256'] != artifact['manifest_sha256']):
                     raise ValueError('Shared recording identity was already registered differently')
@@ -212,6 +251,10 @@ class ObservationStore:
 
     @staticmethod
     def bind_version(connection, job_id, version_id):
+        keys = [r[0] for r in connection.execute('''SELECT a.artifact_key FROM observation_artifacts a
+            JOIN observation_job_inputs i USING(artifact_key) WHERE i.job_id=?
+            ORDER BY a.artifact_key FOR UPDATE OF a''', (job_id,))]
+        ObservationStore._guard_retirement(connection, keys)
         missing = connection.execute('''SELECT 1 FROM observation_job_inputs i JOIN observation_artifacts a USING(artifact_key)
             WHERE i.job_id=? AND a.state<>'READY' LIMIT 1''', (job_id,)).fetchone()
         if missing:

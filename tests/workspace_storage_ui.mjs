@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { JSDOM } from "jsdom";
-const w = new JSDOM(await readFile(new URL("../static/index.html", import.meta.url), "utf8"),
+import { indexHtml } from "./index_page.cjs";
+const w = new JSDOM(indexHtml(),
   { runScripts: "outside-only", url: "http://skynet/#settings" }).window;
 const el = id => w.document.getElementById(id);
 const flush = async () => { for (let i=0;i<4;i++) await new Promise(r=>setImmediate(r)); };

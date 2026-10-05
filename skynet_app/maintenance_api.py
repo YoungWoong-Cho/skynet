@@ -12,7 +12,7 @@ from .cluster_runtime import ClusterError
 from .maintenance import Maintenance
 
 router = APIRouter(prefix="/api/maintenance")
-Kind = Literal["experiment", "run", "evaluation", "adapter", "suite", "dataset", "prepared", "recording", "recording-file"]
+Kind = Literal["experiment", "draft-revision", "run", "evaluation", "adapter", "suite", "dataset", "prepared", "recording", "recording-file"]
 
 
 class DeleteRequest(BaseModel):
@@ -23,6 +23,7 @@ class DeleteRequest(BaseModel):
 
 class CleanupRequest(DeleteRequest):
     paths: list[str] = Field(min_length=1, max_length=500)
+    scope: Literal["all", "pretrained", "dependencies"] = "all"
 
 
 def manager():
@@ -87,12 +88,12 @@ def delete(kind: Kind, identifier: str, request: DeleteRequest):
 
 
 @router.get("/storage")
-def inspect(gateway: str = "auto"):
-    return invoke(lambda: manager().inspect_storage(gateway))
+def inspect(gateway: str = "auto", scope: Literal["all", "pretrained", "dependencies"] = "all"):
+    return invoke(lambda: manager().inspect_storage(gateway, scope=scope))
 
 
 @router.post("/storage/cleanup")
 def cleanup(request: CleanupRequest):
     return invoke(
-        lambda: manager().clean_storage(request.paths, request.token, request.gateway)
+        lambda: manager().clean_storage(request.paths, request.token, request.gateway, scope=request.scope)
     )

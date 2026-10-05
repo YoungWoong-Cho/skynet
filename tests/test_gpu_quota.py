@@ -5,7 +5,7 @@ import pytest
 
 from skynet_app.adapters import ManifestAdapter, builtin_adapter_manifests
 from skynet_app.experiments import ExperimentSpec
-from skynet_app.gpu_quota import account_gpu_quota, idle_partition_quota
+from skynet_app.gpu_quota import account_gpu_quota, idle_partition_quota, idle_quota_usage, missing_idle_account_quotas
 from skynet_app.pipeline_api import PipelineService
 
 
@@ -90,3 +90,32 @@ def test_idle_probe_resolves_partition_qos_and_checks_current_allocations(monkey
         assert result["qos"] == "research-budget"
         assert result["limits"] == {"gpu:l40s": 4, "gpu:a40": 8}
     assert len(calls) == 3
+
+
+def test_dashboard_probes_only_missing_accounts_and_isolates_failure(monkeypatch):
+    calls = []
+    def probe(account, partition):
+        calls.append((account, partition))
+        if account == "unavailable":
+            raise OSError("Quota service unavailable")
+        return {"account": account, "partition": partition, "active_allocations": 0,
+                "limits": {"gpu:a40": 4}}
+    monkeypatch.setattr("skynet_app.gpu_quota.idle_partition_quota", probe)
+    result = missing_idle_account_quotas(
+        "| Account | a40 |\n| present | 1 / 8 |",
+        [("present", "present"), ("unavailable", "missing"), ("idle", "normal")],
+    )
+    assert calls == [("unavailable", "missing"), ("idle", "normal")]
+    assert result[0]["error"] == "Quota service unavailable"
+    assert result[1]["limits"] == {"gpu:a40": 4}
+
+
+def test_idle_usage_preserves_unknown_limits_and_applies_total_limit():
+    receipt = {"active_allocations": 0, "limits": {"gpu:a40": 8, "gpu:l40s": 8}}
+    metrics = idle_quota_usage(receipt, ["l40s", "a40", "rtx_6000"])
+    assert metrics["rtx_6000"] == {"usage": 0, "limit": None}
+    assert metrics["total_gpus"] == {"usage": 0, "limit": 16}
+    receipt["limits"]["gpu"] = 4
+    metrics = idle_quota_usage(receipt, ["l40s", "a40", "rtx_6000"])
+    assert metrics["a40"] == {"usage": 0, "limit": 4}
+    assert metrics["total_gpus"] == {"usage": 0, "limit": 4}

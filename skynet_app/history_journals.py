@@ -128,7 +128,31 @@ def changes(connection, database, run_id, needles):
     return result
 
 
-def apply(connection, database, plans, needles):
+def prepare(database, plans, needles):
+    """Build journal replacements without holding the repository write lock."""
+    result, bodies = {}, []
+    with database.connection() as connection:
+        for plan in plans:
+            key = (plan["owner"], plan["run_id"], plan["filename"])
+            row = connection.execute(
+                "SELECT payload FROM tracking_journals WHERE owner_id=? AND scope=? AND filename=?", key
+            ).fetchone()
+            if row is None:
+                raise ValueError("Tracking journal changed. Review deletion again")
+            original = bytes(row[0])
+            if hashlib.sha256(original).hexdigest() != plan["before"]:
+                raise ValueError("Tracking journal changed. Review deletion again")
+            content = cleaned_payload(plan['filename'], decode_payload(database.payload_store, original), needles)
+            if hashlib.sha256(content).hexdigest() != plan['after']:
+                raise ValueError("Tracking cleanup changed. Review deletion again")
+            result[key] = content
+            text = content.decode()
+            bodies.extend([text] if plan['filename'] == 'tracking-artifact-links.json' else
+                          [text[start:start + CHUNK_BYTES] for start in range(0, len(text), CHUNK_BYTES)])
+    return result, bodies
+
+
+def apply(connection, database, plans, needles, prepared=None):
     for plan in plans:
         key = (plan["owner"], plan["run_id"], plan["filename"])
         row = connection.execute(
@@ -138,7 +162,7 @@ def apply(connection, database, plans, needles):
         original = bytes(row[0])
         if hashlib.sha256(original).hexdigest() != plan["before"]:
             raise ValueError("Tracking journal changed. Review deletion again")
-        content = cleaned_payload(
+        content = prepared[key] if prepared is not None else cleaned_payload(
             plan["filename"], decode_payload(database.payload_store, original), needles
         )
         if hashlib.sha256(content).hexdigest() != plan["after"]:

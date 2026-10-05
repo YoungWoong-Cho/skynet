@@ -104,6 +104,63 @@ def default_scene_camera_recipes(source_revision):
             "scene_right": camera("third_person_camera_right", "CameraRight", [0.0, -1.5, 1.5], side_rotation(math.pi/2))}
 
 
+def camera_recipe_from_capture(camera, source_revision, camera_id="scene_front"):
+    """Accept frozen renderer settings or a measured, fixed-scene calibration.
+
+    Recorded calibrations omit USD prim and clipping/focus settings. These come
+    only from the same pinned source recipe; measured intrinsics/pose are used
+    explicitly and checked again against sensor output during live evaluation.
+    """
+    if all(key in camera for key in ("prim_path", "offset", "projection")):
+        offset, projection = camera["offset"], camera["projection"]
+        if not isinstance(offset, dict) or not isinstance(projection, dict):
+            raise ValueError("Invalid frozen camera offset or projection")
+        position, rotation = np.asarray(offset.get("pos"), dtype=float), np.asarray(offset.get("rot"), dtype=float)
+        if (position.shape != (3,) or rotation.shape != (4,) or not np.isfinite(position).all()
+                or not np.isfinite(rotation).all() or not np.isclose(np.linalg.norm(rotation), 1., atol=.01)
+                or offset.get("convention") not in {"world", "ros", "opengl"}):
+            raise ValueError("Invalid frozen camera pose")
+        if (not isinstance(camera.get("prim_path"), str) or not camera["prim_path"]
+                or not set(projection).issubset(PROJECTION_KEYS)):
+            raise ValueError("Invalid frozen camera prim or projection")
+        for key in ("focal_length", "horizontal_aperture"):
+            value = projection.get(key)
+            if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                raise ValueError("Invalid frozen camera projection: " + key)
+        return deepcopy(camera)
+    try:
+        from observation_geometry import intrinsic_matrix
+    except ImportError:
+        from ops.datasets.observation_geometry import intrinsic_matrix
+    base = deepcopy(default_scene_camera_recipes(source_revision)[camera_id])
+    if camera.get("sensor") != base["sensor"] or camera.get("mount") != "fixed_scene":
+        raise ValueError("Frozen camera must identify the pinned fixed-scene sensor")
+    width, height = camera.get("width"), camera.get("height")
+    if type(width) is not int or type(height) is not int or width <= 0 or height <= 0:
+        raise ValueError("Invalid frozen camera dimensions")
+    k = intrinsic_matrix(camera.get("intrinsic_matrix"))
+    if (not np.allclose(k[[0, 1], [1, 0]], 0, atol=1e-8)
+            or not np.allclose(k[:2, 2], [width / 2, height / 2], atol=1e-5)):
+        raise ValueError("Pinned scene cameras require centered, zero-skew intrinsics")
+    measured_pose = pose_from_ros(camera.get("position_world"), camera.get("quaternion_world_ros"))
+    # This legacy capture form has no separately frozen render recipe. Verify
+    # the source-pinned conversion camera before reconstructing its calibration;
+    # otherwise a recording camera could silently differ from prepared pixels.
+    rotation = np.asarray(base["offset"]["rot"], dtype=float)
+    expected_pose = pose_from_ros(base["offset"]["pos"], rotation / np.linalg.norm(rotation))
+    expected_pose[:3, :3] = expected_pose[:3, :3] @ np.array([[0., 0., 1.], [-1., 0., 0.], [0., -1., 0.]])
+    focal = base["projection"]["focal_length"]
+    expected_focal_pixels = width * focal / base["projection"]["horizontal_aperture"]
+    if (not np.allclose(measured_pose, expected_pose, rtol=1e-5, atol=1e-5)
+            or not np.allclose([k[0, 0], k[1, 1]], expected_focal_pixels, rtol=1e-5, atol=1e-5)):
+        raise ValueError("Recorded calibration differs from its pinned observation camera recipe")
+    base.update(width=width, height=height,
+                offset=dict(pos=camera["position_world"], rot=camera["quaternion_world_ros"], convention="ros"))
+    base["projection"].update(horizontal_aperture=float(width * focal / k[0, 0]),
+                              vertical_aperture=float(height * focal / k[1, 1]))
+    return base
+
+
 def render_identity(profile, renderer_revision):
     """Portable identity; caller pins remote bundle metadata before planning."""
     revision = profile["source_revision"]
@@ -195,7 +252,7 @@ def bind_scene_assets(scene, receipts):
     bind(scene)
 
 
-def configure_cameras(cfg, jobs):
+def configure_cameras(cfg, jobs, *, replay=True):
     """Configure only requested native sensors and output modalities, no history."""
     cfg._apply_observation_preset("state")
     # This only creates camera configs; unrequested sensors are removed below.
@@ -235,11 +292,132 @@ def configure_cameras(cfg, jobs):
         camera.update_latest_camera_pose = True
     # Observations are read directly from sensors. Manager histories/noise and
     # all reset/startup randomization are excluded from the capture recipe.
-    cfg.observations = {}
-    cfg.events = {}
-    cfg.recorders, cfg.terminations = {}, {}
+    if replay:
+        cfg.observations = {}
+        cfg.events = {}
+        cfg.recorders, cfg.terminations = {}, {}
     cfg.num_rerenders_on_reset = 4
     return selected
+
+
+def configure_capture_settings():
+    """Use identical full-frame RTX and explicit capture settings for replay/rollout."""
+    import carb
+    settings = carb.settings.get_settings()
+    for index, value in enumerate((0.0, 0.0, 1.0, 1.0)):
+        settings.set_float(f"/rtx/dataWindowNDC/{index}", value)
+    settings.set_bool("/rtx/dataWindow/fitOutputToDataWindow", True)
+    settings.set_bool("/exts/omni.replicator.core/Orchestrator/enabled", True)
+    settings.set_bool("/omni/replicator/captureOnPlay", False)
+    settings.set_bool("/omni/replicator/captureMotionBlur", False)
+
+
+def read_camera(sensor, render, modalities, *, camera_id="scene_front", render_mode=None):
+    """Read settled native pixels and their calibration without advancing physics."""
+    def array(value):
+        return value.detach().cpu().numpy() if hasattr(value, "detach") else np.asarray(value)
+    for _ in range(32):
+        ready = True
+        for annotator in sensor._annotators.values():
+            output = annotator.get_data()
+            if isinstance(output, dict):
+                output = output["data"]
+            ready = ready and bool(output.size)
+        if ready:
+            break
+        render()
+    else:
+        raise RuntimeError("Camera render product stayed empty without physics stepping: "
+                           + camera_id + "; render mode=" + str(render_mode))
+    sensor.update(0.0, force_recompute=True)
+    data = sensor.data
+    result = {"intrinsics": array(data.intrinsic_matrices)[0].copy(),
+              "world_from_camera": pose_from_ros(array(data.pos_w)[0], array(data.quat_w_ros)[0])}
+    for modality in modalities:
+        key = "rgb" if modality == "rgb" else "distance_to_image_plane"
+        values = array(data.output[key])[0]
+        result[modality] = values[:, :, :3].copy() if modality == "rgb" else values.reshape(values.shape[:2]).astype("float32")
+    return result
+
+
+def capture_current_frame(env):
+    """Settle offscreen products with the replay scheduler and zero physics time."""
+    import omni.replicator.core as rep
+    import omni.timeline
+    timeline = omni.timeline.get_timeline_interface()
+    before = timeline.get_current_time()
+    with capture_deadline():
+        rep.orchestrator.step(rt_subframes=4, pause_timeline=False, delta_time=0.0, wait_for_render=True)
+    if not np.isclose(timeline.get_current_time(), before, rtol=0, atol=1e-12):
+        raise RuntimeError("Observation capture advanced the simulation timeline")
+    env.scene.update(dt=env.physics_dt)
+
+
+def install_frozen_hand(profile, *, staging_root=None, asset_receipts=None):
+    """Install verified hand assets into a private, parent-owned temporary area.
+
+    Used by observation replay and live policy evaluation. The caller retains
+    the returned directory until native simulation stops; its parent process
+    owns final cleanup because Kit may exit without returning to Python.
+    """
+    bundle = profile.get("hand_bundle")
+    if not bundle:
+        return None, None, None
+    original = Path(bundle["root"])
+    if _digest(original / "manifest.json") != _sha(bundle.get("manifest_sha256")):
+        raise ValueError("Frozen hand manifest changed")
+    manifest = json.loads((original / "manifest.json").read_text())
+    if manifest.get("digest") != bundle["digest"]:
+        raise ValueError("Renderer installed a different frozen hand bundle")
+    if staging_root is not None:
+        staging = Path(staging_root)
+        if not staging.is_absolute() or staging.is_symlink():
+            raise ValueError("Renderer staging root must be an absolute nonsymlink directory")
+        staging.mkdir(parents=True, exist_ok=True)
+    work = tempfile.TemporaryDirectory(prefix="observation-hand-", dir=staging_root)
+    hand_root = Path(work.name)
+    try:
+        for name, receipt in manifest["files"].items():
+            source = (original / name).resolve()
+            destination = hand_root / name
+            if (not source.is_relative_to(original.resolve()) or not destination.resolve().is_relative_to(hand_root.resolve())
+                    or _digest(source) != receipt["sha256"] or source.stat().st_size != receipt["size_bytes"]):
+                raise ValueError("Frozen hand asset changed: " + name)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+            if asset_receipts is not None:
+                asset_receipts[str(destination.resolve())] = receipt
+        shutil.copyfile(original / "manifest.json", hand_root / "manifest.json")
+        sys.path.insert(0, str(hand_root))
+        from runtime import install, validate_environment
+        manifest = install(hand_root)
+        return work, manifest, validate_environment
+    except BaseException:
+        work.cleanup()
+        raise
+
+
+def verify_scene_assets(profile, asset_receipts, generated_asset_root=None):
+    """Verify loaded USD layers using the same frozen inventory for replay/rollout."""
+    import omni.usd
+    stage = omni.usd.get_context().get_stage()
+    runtime = Path(profile["runtime"]).resolve()
+    generated = Path(generated_asset_root).resolve() if generated_asset_root is not None else None
+    verified = {}
+    for layer in stage.GetUsedLayers():
+        filename = str(layer.realPath)
+        if not filename or filename.startswith(("anon:", "omniverse://", "http://", "https://")):
+            continue
+        path = Path(filename).resolve()
+        receipt = asset_receipts.get(str(path))
+        if receipt is None and not path.is_relative_to(runtime) and not (generated and path.is_relative_to(generated)):
+            raise ValueError("Loaded USD layer is absent from its pinned inventory: " + str(path))
+        if receipt:
+            actual_sha = _digest(path)
+            if path.stat().st_size != receipt["size_bytes"] or actual_sha != receipt["sha256"]:
+                raise ValueError("Frozen simulation asset changed: " + str(path))
+            verified[str(path)] = actual_sha
+    return verified
 
 
 class DexVerseRenderer:
@@ -292,20 +470,13 @@ class DexVerseRenderer:
             self.app = self.ns["simulation_app"]
             # Keep Isaac Sim's default fast shutdown. The worker commits its
             # verified result before close(), which may terminate this process.
-            import carb
-            settings = carb.settings.get_settings()
             # Freeze RTX's documented full-frame, no-overscan projection.
             # Calibration and exported pixels must use the same image extent.
-            for index, value in enumerate((0.0, 0.0, 1.0, 1.0)):
-                settings.set_float(f"/rtx/dataWindowNDC/{index}", value)
             # Full [0,0,1,1] already fits the output exactly. This also avoids
             # Replicator cropping an empty one-dimensional startup buffer.
-            settings.set_bool("/rtx/dataWindow/fitOutputToDataWindow", True)
             # Isaac Lab's headless kit disables Replicator's capture graph. We
             # use explicit, zero-delta capture instead of automatic playback.
-            settings.set_bool("/exts/omni.replicator.core/Orchestrator/enabled", True)
-            settings.set_bool("/omni/replicator/captureOnPlay", False)
-            settings.set_bool("/omni/replicator/captureMotionBlur", False)
+            configure_capture_settings()
             import torch
             self.torch = torch
             # Isaac Lab keeps tensors across episodes. Keep their creation,
@@ -325,42 +496,11 @@ class DexVerseRenderer:
 
     def _create_environment(self):
         from wrist import configure_virtual_wrist
-        manifest = None
-        bundle = self.profile.get("hand_bundle")
-        if bundle:
-            original = Path(bundle["root"])
-            if _digest(original / "manifest.json") != _sha(bundle.get("manifest_sha256")):
-                raise ValueError("Frozen hand manifest changed")
-            manifest = json.loads((original / "manifest.json").read_text())
-            if manifest.get("digest") != bundle["digest"]:
-                raise ValueError("Renderer installed a different frozen hand bundle")
-            # URDF conversion has a mutable USD cache. Build in this producer's
-            # private workspace from verified originals, never a shared cache.
-            # Fast native shutdown may skip Python finally blocks. In a worker,
-            # keep generated USD assets under the supervisor-owned staging root
-            # so they can be removed after the entire process group has stopped.
-            if self.staging_root is not None:
-                staging = Path(self.staging_root)
-                if not staging.is_absolute() or staging.is_symlink():
-                    raise ValueError("Renderer staging root must be an absolute nonsymlink directory")
-                staging.mkdir(parents=True, exist_ok=True)
-            self.hand_work = tempfile.TemporaryDirectory(prefix="observation-hand-", dir=self.staging_root)
-            hand_root = Path(self.hand_work.name)
-            for name, receipt in manifest["files"].items():
-                source = (original / name).resolve()
-                destination = hand_root / name
-                if (not source.is_relative_to(original.resolve()) or not destination.resolve().is_relative_to(hand_root.resolve())
-                        or _digest(source) != receipt["sha256"] or source.stat().st_size != receipt["size_bytes"]):
-                    raise ValueError("Frozen hand asset changed: " + name)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(source, destination)
-                self.asset_receipts[str(destination.resolve())] = receipt
-            shutil.copyfile(original / "manifest.json", hand_root / "manifest.json")
-            sys.path.insert(0, str(hand_root))
-            from runtime import install, validate_environment
-            manifest = install(hand_root)
+        self.hand_work, manifest, validate_environment = install_frozen_hand(
+            self.profile, staging_root=self.staging_root, asset_receipts=self.asset_receipts)
+        if manifest:
             self.profile["hand_manifest"] = manifest
-            self.generated_asset_root = (hand_root / "usd").resolve()
+            self.generated_asset_root = (Path(self.hand_work.name) / "usd").resolve()
         cfg, _ = self.ns["create_environment_config"]()
         self.cameras = configure_cameras(cfg, self.jobs)
         # ManagerBase skips setup for {}, but ObservationManager then requires
@@ -438,26 +578,11 @@ class DexVerseRenderer:
     def _verify_used_assets(self):
         # USD enumerates referenced layers after loading; verify the frozen
         # physical assets actually used, without rereading the complete bundle.
-        import omni.usd
-        stage = omni.usd.get_context().get_stage()
-        checked = set()
-        for layer in stage.GetUsedLayers():
-            filename = str(layer.realPath)
-            if not filename or filename.startswith(("anon:", "omniverse://", "http://", "https://")):
-                continue
-            path = Path(filename).resolve()
-            receipt = self.asset_receipts.get(str(path))
-            if receipt is None and not self._runtime_or_generated_asset(path):
-                raise ValueError("Loaded USD layer is absent from its pinned inventory: " + str(path))
-            if receipt:
-                actual_sha = _digest(path)
-                if path.stat().st_size != receipt["size_bytes"] or actual_sha != receipt["sha256"]:
-                    raise ValueError("Frozen simulation asset changed: " + str(path))
-                checked.add(str(path))
-                self.scene_asset_digests[str(path)] = actual_sha
+        verified = verify_scene_assets(self.profile, self.asset_receipts, self.generated_asset_root)
+        self.scene_asset_digests.update(verified)
         # Imported URDF geometry is baked into generated USD layers. Its source
         # bundle is already fully verified by install()/read_bundle().
-        self.verified_asset_paths = sorted(checked)
+        self.verified_asset_paths = sorted(verified)
 
     def begin_episode(self, source, payload, episode, step_dt):
         from trajectory import restore_episode_conditions
@@ -498,50 +623,19 @@ class DexVerseRenderer:
         self.capture_metadata = metadata
 
     def capture(self, state, jobs):
-        from recording_metadata import array
         if not self.app.is_running() or self.app.is_exiting():
             raise RuntimeError("Renderer exited before finishing requested observations")
         self.restore_state(self.env, state)
         # Explicit capture pumps offscreen render products even at time 0.
         # Replicator 1.12.27 documents delta_time=0 as no timeline advance;
         # subframes settle rendering while physics remains paused.
-        import omni.replicator.core as rep
-        import omni.timeline
-        timeline = omni.timeline.get_timeline_interface()
-        before = timeline.get_current_time()
-        with capture_deadline():
-            rep.orchestrator.step(rt_subframes=4, pause_timeline=False,
-                                  delta_time=0.0, wait_for_render=True)
-        if not np.isclose(timeline.get_current_time(), before, rtol=0, atol=1e-12):
-            raise RuntimeError("Observation capture advanced the simulation timeline")
-        self.env.scene.update(dt=self.env.physics_dt)
+        capture_current_frame(self.env)
         result = {}
         for camera_id in dict.fromkeys(j["camera_id"] for j in jobs):
             sensor = self.env.scene[self.cameras[camera_id]["camera"]["sensor"]]
-            # Render products can initialize asynchronously. Do not pass
-            # an empty Replicator buffer into TiledCamera's Warp reshape.
-            for warmup in range(32):
-                ready = True
-                for annotator in sensor._annotators.values():
-                    output = annotator.get_data()
-                    if isinstance(output, dict):
-                        output = output["data"]
-                    ready = ready and bool(output.size)
-                if ready:
-                    break
-                self.env.sim.render()
-            else:
-                raise RuntimeError("Camera render product stayed empty without physics stepping: "
-                                   + camera_id + "; render mode=" + str(self.env.sim.render_mode))
-            sensor.update(0.0, force_recompute=True)
-            data = sensor.data
-            item = {"intrinsics": array(data.intrinsic_matrices)[0].copy(),
-                    "world_from_camera": pose_from_ros(array(data.pos_w)[0], array(data.quat_w_ros)[0])}
-            for modality in {j["modality"] for j in jobs if j["camera_id"] == camera_id}:
-                key = "rgb" if modality == "rgb" else "distance_to_image_plane"
-                values = array(data.output[key])[0]
-                item[modality] = values[:, :, :3].copy() if modality == "rgb" else values.reshape(values.shape[:2]).astype("float32")
-            result[camera_id] = item
+            result[camera_id] = read_camera(sensor, self.env.sim.render,
+                {j["modality"] for j in jobs if j["camera_id"] == camera_id},
+                camera_id=camera_id, render_mode=self.env.sim.render_mode)
         return result
 
     def __exit__(self, *_):

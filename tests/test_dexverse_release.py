@@ -1,5 +1,6 @@
 import hashlib
 import importlib.util
+import json
 import pickle
 import sys
 from pathlib import Path
@@ -7,6 +8,7 @@ from types import ModuleType
 
 import numpy as np
 import pytest
+from skynet_app.cluster_runtime import DEFAULT_GATEWAY
 from skynet_app.dexverse_release import historical_task, release_profile
 from skynet_app.trajectory import validate_identity, validate_recorded_identity
 
@@ -106,6 +108,7 @@ def test_import_preserves_every_episode_and_is_idempotent(tmp_path, importer, ve
     assert len(job["recordings"]) == 2
     assert job["profile"]["robot"] == original["robot_type"]
     assert job["archive"]["source_removed"] is True
+    assert job["gateway"] == job["archive"]["gateway"] == "auto"
     for i, name in enumerate(job["recordings"]):
         with (Path(job["archive"]["root"]) / name).open("rb") as stream:
             split = importer.ArrayUnpickler(stream).load()
@@ -127,6 +130,14 @@ def test_import_preserves_every_episode_and_is_idempotent(tmp_path, importer, ve
     first.write_bytes(b"changed")
     with pytest.raises(ValueError, match="changed"):
         importer.import_task(request, entry)
+
+
+def test_import_records_the_gateway_named_by_its_request(tmp_path, importer):
+    request, entry, _, _ = make_source(tmp_path, 0)
+    job = importer.import_task(dict(request, gateway="import-host"), entry)
+    assert job["gateway"] == job["archive"]["gateway"] == "import-host"
+    receipt = next((tmp_path / "datasets").rglob("import.json"))
+    assert json.loads(receipt.read_text()) == job
 
 
 def test_corrupt_source_is_not_published(tmp_path, importer):
@@ -155,6 +166,7 @@ def test_release_names_do_not_confuse_changed_v1_goals():
     v0 = release_profile(base, "Dexverse-OpenFaucet-v0", "/cluster")
     v1 = release_profile(base, "Dexverse-OpenFaucet-v1", "/cluster")
     assert "work_root" not in v0 and "work_root" not in v1
+    assert v0["gateway"] == v1["gateway"] == DEFAULT_GATEWAY
     assert base["work_root"] == "/cluster/workstation"
     assert (
         v0["recording_schema_version"] == 3 and v0["repository"] == base["repository"]

@@ -9,6 +9,7 @@ The application talks to the cluster through the `sky1` and `sky2` SSH login ali
 Run the service on a trusted workstation or server. Use a loopback binding with an SSH tunnel, or restrict direct network access to the trusted team. The application can submit and cancel Slurm jobs and execute adapter-defined workloads as your cluster user. Adapter manifests use structured argv rather than shell command strings, but a manifest can still select any executable available to that user. Registry authors are therefore trusted operators. Email workspaces separate saved experiment configurations, custom training adapters, repository selections, tracking credentials, training runs and evaluations. Emails are deliberately unverified: anyone who enters an email can open its workspace. This is workspace organization, not identity authentication or a cluster execution sandbox. All workloads still use the configured cluster SSH account.
 
 ```bash
+# If data/operator.env exists, add: --env-file data/operator.env
 uv run uvicorn skynet_app.main:app --host 127.0.0.1 --port 8080
 ```
 
@@ -49,8 +50,15 @@ Start the local server. Restrict development reloads to source folders so saved 
 ```bash
 export SKYNET_SSH_HOSTS=sky1,sky2
 # Configure config/database.json as described in docs/central-database.md.
+# If data/operator.env exists, add: --env-file data/operator.env
 uv run uvicorn skynet_app.main:app --reload --reload-dir skynet_app --reload-dir ops --host 127.0.0.1 --port 8080
 ```
+
+If this installation already has a private `data/operator.env`, include
+`--env-file data/operator.env` in every server start or restart so its approved
+operator settings are loaded. Omit the option when the file does not exist;
+a new installation does not need to create it. See [operator settings](docs/deployment.md)
+for the existing convention. Skynet does not accept simulator licenses by default.
 
 Open `http://127.0.0.1:8080` and enter your email. No password or email verification is required. See [email workspaces](docs/email-workspaces.md) for migration and shared-data behavior. The generated API documentation is available at `http://127.0.0.1:8080/api/docs`.
 
@@ -192,7 +200,7 @@ The following environment variables can override deployment-specific values with
 - `SKYNET_QUEUE_<POLICY>_ACCOUNT`
 - `SKYNET_QUEUE_<POLICY>_MAX_TIME_SECONDS`
 
-The active, non-secret profile is returned by `GET /api/settings` and `GET /api/capabilities`. Do not put credentials in the profile because these endpoints expose it to the browser.
+The active, non-secret profile is returned by `GET /api/settings`. Do not put credentials in the profile because this endpoint exposes it to the browser.
 
 ## Versioned Adapter Registry
 
@@ -213,7 +221,7 @@ Created experiment revisions embed the selected manifest and its SHA-256. Later 
 
 Non-runtime defaults fill only fields omitted by the request. Precedence is explicit experiment input, adapter manifest defaults, then operator cluster defaults. A runtime recommendation is only a recommendation and follows the stricter resolution rules in the next section.
 
-The complete JSON Schema is returned as `adapter_manifest_schema` by `GET /api/capabilities`. A minimal declarative example is:
+The adapter editor validates the declarative manifest using the canonical `POST /api/adapters/validate` route. A minimal declarative example is:
 
 ```json
 {
@@ -308,7 +316,8 @@ For Conda, automatic resolution requires a lock file or an explicit deterministi
 The UI uses the same JSON API exposed to automation:
 
 - `GET /api/settings` returns non-secret application and active cluster-profile settings.
-- `GET /api/capabilities` returns the adapter manifest schema, experiment schema, runtime backends, cluster profile, and safety limits.
+- `GET /api/settings` returns the workspace settings, runtime profiles, and cluster profile used by the browser.
+- Operations use the browser-backed API routes only; retired bundle CRUD, manual reconcile, and legacy initialization/connection aliases are removed.
 - `GET /api/adapters?include_archived=true` lists registry entries; `POST /api/adapters` creates one.
 - `GET /api/adapters/{id}` returns version history; `PUT` or `PATCH` appends a version.
 - `POST /api/adapters/{id}/clone`, `/archive`, and `/restore` implement lifecycle operations; `DELETE /api/adapters/{id}` also archives.
@@ -335,6 +344,8 @@ There is one Slurm cluster behind two interchangeable login gateways:
 - Selecting a gateway tries it first and then falls back to the other alias if SSH cannot be established.
 - Cluster reads may be retried safely on either gateway.
 - Submission resolves one healthy gateway and invokes `sbatch --parsable` once. It does not retry an ambiguous submission on a second host, which avoids accidental duplicate jobs.
+- Job state comes from Slurm accounting (`sacct`) and the live controller (`squeue`) in one query. A finished accounting record is used as is; otherwise the controller's record is, so jobs are still followed while accounting is down.
+- A job that neither source describes any more is settled from the exit record its own batch script wrote (`attempts/<job>/final.json`): exit 0 completes it through the normal checkpoint or result checks, any other exit fails it without queueing another attempt. With no exit record the attempt is held and says so; cancelling it settles it.
 - Automatic node placement normally omits `#SBATCH --nodelist`; manual placement validates and emits one concrete node.
 - Isaac Sim / Isaac Lab evaluations and evaluator readiness jobs use `isaac_evaluation_placement` in the cluster profile: L40S goes to `grom`, A40 to `megazord`, and an unresolved `any` GPU uses `grom`. Both nodes support up to eight GPUs. Validation, submission, and retries enforce the same policy, including manual evaluator commands. Other node/GPU combinations are rejected; busy nodes queue without falling back elsewhere. Training and non-Isaac-Sim evaluators retain their normal placement.
 - Jobs are restricted to one node but may use multiple same-type GPUs on that node.

@@ -3,17 +3,15 @@ import hashlib
 import inspect
 import json
 from pathlib import Path
-import re
 import shlex
 from time import time
 
-from .cluster_config import CLUSTER
-from .cluster_runtime import WORK_ROOT, ClusterError, SubmissionOutcomeUnknown
+from .cluster_config import CLUSTER, cpus_for_gpus
+from .cluster_runtime import DEFAULT_GATEWAY, WORK_ROOT, ClusterError, SubmissionOutcomeUnknown
 from .database import canonical_json
-from .dexverse_versions import environment_profile
 from .live_xr_review import ArrayUnpickler
 from .isaac_job import isaac_environment
-from .observation_contracts import plan_artifacts, PREPARE_SCHEMA
+from .observation_contracts import plan_artifacts, reuse_recorded_captures, PREPARE_SCHEMA
 from .observation_store import ObservationStore
 from .preparation_states import TERMINAL_FAILURE_STATES, observed_state
 
@@ -98,47 +96,8 @@ class ObservationPreparation:
         return files
 
     def profile(self, session):
-        original = session['profile']
-        base = json.loads((self.service.live.root / 'config/live_video.json').read_text())
-        profile = environment_profile(base, original['task'], cluster_root=WORK_ROOT)
-        if profile['source_revision'] != original.get('source_revision'):
-            raise ValueError('No pinned observation renderer matches this recording’s DexVerse revision')
-        for key in ('robot', 'task', 'hand', 'hand_name', 'task_name', 'recording_schema_version'):
-            if key in original:
-                profile[key] = original[key]
-        if original.get('hand_bundle'):
-            bundle = original['hand_bundle']
-            if not re.fullmatch('[a-f0-9]{64}', bundle.get('digest', '')):
-                raise ValueError('Recording has no immutable hand identity')
-            profile['hand_bundle'] = dict(bundle, root=f"{WORK_ROOT}/hands/{profile['robot']}/{bundle['digest']}")
-            from .simulation_hands import find_bundle
-            try:
-                local = find_bundle(profile['robot'], bundle['digest'], app_root=self.service.live.root)
-            except ValueError:
-                _, raw_manifest = self.cluster.read_file(profile['hand_bundle']['root'] + '/manifest.json', 'sky2', max_bytes=4_000_000)
-                raw_manifest = raw_manifest.encode()
-            else:
-                manifest_file = local / 'manifest.json'
-                if manifest_file.stat().st_size > 4_000_000:
-                    raise ValueError('Frozen hand manifest exceeds its size limit')
-                raw_manifest = manifest_file.read_bytes()
-            manifest = json.loads(raw_manifest)
-            if (manifest.get('schema') != 'skynet.simulation-hand/v1' or manifest.get('digest') != bundle['digest']
-                    or manifest.get('robot') != profile['robot']):
-                raise ValueError('Frozen hand manifest differs from the original recording')
-            manifest_sha = hashlib.sha256(raw_manifest).hexdigest()
-            if bundle.get('manifest_sha256', manifest_sha) != manifest_sha:
-                raise ValueError('Frozen hand manifest checksum changed')
-            profile['hand_bundle']['manifest_sha256'] = manifest_sha
-        if profile.get('asset_bundle'):
-            _, content = self.cluster.read_file(profile['asset_bundle'] + '/manifest.json', 'sky2', max_bytes=4_000_000)
-            manifest = json.loads(content)
-            inventory = (manifest.get('integrity') or {}).get('inventory_sha256', '')
-            if manifest.get('schema_version') != 'dataset-bundle/v1' or not re.fullmatch('[a-f0-9]{64}', inventory):
-                raise ValueError('Simulation asset bundle has no verified inventory')
-            profile['asset_bundle_manifest_sha256'] = hashlib.sha256(content.encode()).hexdigest()
-            profile['asset_inventory_sha256'] = inventory
-        return dict(profile, device='cuda:0')
+        from .simulation_profiles import frozen_cluster_profile
+        return frozen_cluster_profile(self.service.live.root, self.cluster, session)
 
     def ensure(self, job, sources):
         """Attach the immutable plan, schedule missing layers, return ready refs."""
@@ -161,6 +120,7 @@ class ObservationPreparation:
             planned, worker_sources = plan['nodes'], plan['sources']
         else:
             planned, profiles, worker_sources = [], {}, []
+            captures = self.store.ready_captures(sources)
             for source in sources:
                 required = dict(contract, streams=[stream for stream in contract['streams']
                     if stream['name'] not in source.get('shared_image_streams', {})])
@@ -172,6 +132,7 @@ class ObservationPreparation:
                 profile = profiles[session_id]
                 identity = render_identity(profile, renderer_revision)
                 nodes = plan_artifacts(source['sha256'], {'episode_index': 0, 'episode_key': source['sha256']}, required, identity)
+                nodes = reuse_recorded_captures(nodes, captures.get(source['sha256'], []))
                 planned.extend(nodes)
                 worker_sources.append(dict(source, episode_key=source['sha256'], episode_index=0,
                                            profile=profile, render_recipe=identity))
@@ -259,7 +220,7 @@ class ObservationPreparation:
             identity = (bundle['root'], bundle['manifest_sha256'])
             if identity in uploaded_hands:
                 continue
-            if upload(local, WORK_ROOT, self.cluster, 'sky2') != bundle['root']:
+            if upload(local, WORK_ROOT, self.cluster, DEFAULT_GATEWAY) != bundle['root']:
                 raise ValueError('Frozen hand upload has an unexpected path')
             uploaded_hands.add(identity)
         relative = f'observations/{token}'
@@ -268,7 +229,7 @@ class ObservationPreparation:
         if len(raw_request.encode()) > MAX_REQUEST_BYTES:
             raise ValueError('Observation request exceeds the worker JSON size limit')
         capsule[relative + '/request.json'] = raw_request
-        self.cluster.write_capsule_files(identifier, capsule, 'sky2')
+        self.cluster.write_capsule_files(identifier, capsule, DEFAULT_GATEWAY)
         queue = CLUSTER.queues['normal']
         rendering = request['mode'] == 'render'
         runtime_id = 'isaacsim-5.1.0_isaaclab-2.3.2_py311' if rendering else 'xpolicylab-act'
@@ -281,14 +242,16 @@ class ObservationPreparation:
                 raise ValueError('Observation rendering requires a configured Isaac-compatible cluster node')
             node = placement.default_node
             gpu = [f'#SBATCH --nodelist={node}', f'#SBATCH --gres=gpu:{placement.nodes[node].gpu_type}:1']
+        # Rendering holds one GPU; point-cloud derivation is a CPU-only job.
+        cpus = cpus_for_gpus(1) if rendering else 8
         script = '\n'.join([
             '#!/bin/bash', f'#SBATCH --job-name=observe-{identifier[:8]}',
             f'#SBATCH --account={queue.account}', f'#SBATCH --partition={queue.partition}',
-            '#SBATCH --cpus-per-task=8', '#SBATCH --mem=48G', '#SBATCH --time=04:00:00', *gpu,
+            f'#SBATCH --cpus-per-task={cpus}', '#SBATCH --mem=48G', '#SBATCH --time=04:00:00', *gpu,
             f'#SBATCH --output={root}/observations.log', f'#SBATCH --error={root}/observations.log',
             'set -euo pipefail', 'umask 077',
             'export PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1',
-            'export OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 MKL_NUM_THREADS=8',
+            f'export OMP_NUM_THREADS={cpus} OPENBLAS_NUM_THREADS={cpus} MKL_NUM_THREADS={cpus}',
             f'export LD_LIBRARY_PATH={shlex.quote(environment + "/lib")}:"${{LD_LIBRARY_PATH:-}}"',
             *(isaac_environment(request['sources'][0]['profile'], root) if rendering else ['export CUDA_VISIBLE_DEVICES=']),
             shlex.join([environment + '/bin/python', root + '/worker/observation_prepare.py',
@@ -298,7 +261,7 @@ class ObservationPreparation:
 
     def _with_failure_log(self, producer, message):
         try:
-            _, output = self.cluster.read_log(producer['root'] + '/observations.log', 'sky2', lines=100, max_bytes=8000)
+            _, output = self.cluster.read_log(producer['root'] + '/observations.log', DEFAULT_GATEWAY, lines=100, max_bytes=8000)
             if output.strip():
                 message += ': ' + output.strip()[-2000:]
         except (ClusterError, ValueError):
@@ -312,7 +275,7 @@ class ObservationPreparation:
         statuses = {}
         if job_ids:
             try:
-                _, statuses = self.cluster.job_statuses(job_ids, 'sky2')
+                _, statuses = self.cluster.job_statuses(job_ids, DEFAULT_GATEWAY)
             except ClusterError:
                 # A failed shared read cannot mark any existing attempt failed.
                 pass
@@ -324,7 +287,7 @@ class ObservationPreparation:
                 if not producer.get('script'):
                     producer = self._stage(producer)
                 if not producer.get('cluster_job_id'):
-                    submitted = self.cluster.submit_script(producer['script'], producer['id'], 'sky2',
+                    submitted = self.cluster.submit_script(producer['script'], producer['id'], DEFAULT_GATEWAY,
                         submission_key=f"{producer['id']}-observations-{producer['attempt_token']}")
                     producer = self.store.update(producer, state='PENDING', cluster_job_id=submitted.job_id)
                 # New submissions stay pending until the next shared status read.
@@ -343,7 +306,7 @@ class ObservationPreparation:
                     # diagnostics must not leave its artifacts queued forever.
                     message = f'Observation job ended as {state}'
                     try:
-                        _, raw = self.cluster.read_file(producer['root'] + '/result.json', 'sky2', max_bytes=10_000_000)
+                        _, raw = self.cluster.read_file(producer['root'] + '/result.json', DEFAULT_GATEWAY, max_bytes=10_000_000)
                         result = json.loads(raw)
                         if (result.get('request_id') == producer['id']
                                 and result.get('attempt_token') == producer['attempt_token'] and result.get('error')):
@@ -351,7 +314,7 @@ class ObservationPreparation:
                     except (ClusterError, ValueError):
                         message = self._with_failure_log(producer, message)
                     raise ValueError(message)
-                _, raw = self.cluster.read_optional_file(producer['root'] + '/result.json', 'sky2', max_bytes=10_000_000)
+                _, raw = self.cluster.read_optional_file(producer['root'] + '/result.json', DEFAULT_GATEWAY, max_bytes=10_000_000)
                 if raw is None:
                     now = time()
                     since = producer.get('result_missing_since')
@@ -374,7 +337,7 @@ class ObservationPreparation:
                     key = artifact['artifact_key']
                     if key not in expected or artifact.get('path') != expected[key]['output_dir']:
                         raise ValueError('Observation result has an unexpected artifact path')
-                    _, content = self.cluster.read_file(artifact['path'] + '/manifest.json', 'sky2', max_bytes=4_000_000)
+                    _, content = self.cluster.read_file(artifact['path'] + '/manifest.json', DEFAULT_GATEWAY, max_bytes=4_000_000)
                     if hashlib.sha256(content.encode()).hexdigest() != artifact.get('manifest_sha256'):
                         raise ValueError('Observation manifest checksum differs from worker receipt')
                     manifest = json.loads(content)

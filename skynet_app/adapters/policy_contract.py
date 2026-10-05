@@ -1,6 +1,7 @@
 """Portable observation/action checks shared by planning and rollout workers."""
 
 import math
+from copy import deepcopy
 
 try:
     from .recording_time import frequency_stride
@@ -47,6 +48,59 @@ def recorded_contract(metadata, *, images=True, control_hz=None):
         "color_space": capture.get("color_space") if images else None,
         "source_revision": capture.get("source_revision"),
     }
+
+
+def unidex_contract(metadata, *, control_hz=None):
+    """Exact target-hand geometry and point-cloud contract for FAAS execution.
+
+    FAAS82 is the upstream policy representation. Mapping it to these asset-bound
+    simulator actuators and preparing this camera recipe are Skynet components.
+    """
+    try:
+        from .unidex_input import dataset_pointcloud_recipe
+    except ImportError:
+        from unidex_input import dataset_pointcloud_recipe
+    try:
+        from ops.datasets.action_codecs.unidex import load_codec
+        from ops.datasets.observation_render import camera_recipe_from_capture
+    except ImportError:
+        from action_codecs.unidex import load_codec
+        from observation_render import camera_recipe_from_capture
+    if metadata.get("contract") != "skynet.unidex-pointcloud-faas/v1":
+        raise ValueError("UniDex evaluation requires its prepared point-cloud/FAAS dataset contract")
+    episodes = metadata.get("episodes") or []
+    hands = {episode.get("hand_id") for episode in episodes}
+    if not episodes or len(hands) != 1 or None in hands:
+        raise ValueError("Choose an evaluation dataset containing exactly one verified hand")
+    capture = episodes[0].get("capture") or metadata.get("capture") or {}
+    codec = load_codec(next(iter(hands)), capture)
+    camera = (capture.get("cameras") or {}).get("scene_front") or {}
+    keys = (("sensor", "prim_path", "width", "height", "offset", "projection") if "prim_path" in camera else
+            ("sensor", "mount", "width", "height", "intrinsic_matrix", "position_world", "quaternion_world_ros"))
+    if any(key not in camera for key in keys):
+        raise ValueError("UniDex evaluation requires the frozen scene-front camera geometry")
+    camera = {key: deepcopy(camera[key]) for key in keys}
+    camera_recipe_from_capture(camera, capture.get("source_revision"))
+    if (camera["width"], camera["height"]) != (256, 256):
+        raise ValueError("UniDex evaluation requires the recorded 256 by 256 camera")
+    pointcloud = dataset_pointcloud_recipe(metadata)
+    for episode in episodes:
+        episode_capture = episode.get("capture") or metadata.get("capture") or {}
+        load_codec(codec.robot_id, episode_capture)
+        recorded_camera = (episode_capture.get("cameras") or {}).get("scene_front") or {}
+        if any(recorded_camera.get(key) != camera[key] for key in keys):
+            raise ValueError("Evaluation dataset contains different scene-front camera recipes")
+        representation = episode.get("action_representation") or {}
+        if representation.get("codec_sha256") != codec.digest or representation.get("frame") != "camera_opengl":
+            raise ValueError("UniDex evaluation requires the exact recorded FAAS codec and camera frame")
+    result = recorded_contract({**metadata, "capture": capture,
+                               "policy_to_source_indices": list(range(codec.action_dim))},
+                              images=False, control_hz=control_hz)
+    result.update(observation_mode="pointcloud", cameras={"scene_front": camera}, color_space="RGB",
+                  pointcloud_recipe=deepcopy(pointcloud), codec_sha256=codec.digest,
+                  state_representation="absolute_faas82_camera_opengl",
+                  action_representation="chunk_relative_faas82_to_native_controller_commands")
+    return result
 
 
 def contract_issues(contract):
@@ -134,7 +188,7 @@ def environment_mapping(contract, names, scales, offsets, step_dt):
     return [names.index(expected[i]) for i in contract["policy_to_source_indices"]]
 
 
-def validate_observation(contract, observation):
+def validate_observation(contract, observation, *, require_pointcloud=True):
     import numpy as np
     state = np.asarray(observation["state"])
     if state.shape != (len(contract["joint_names"]),) or not np.isfinite(state).all():
@@ -143,6 +197,31 @@ def validate_observation(contract, observation):
         image = np.asarray(observation.get("images", {}).get(name))
         if image.dtype != np.uint8 or image.shape != (camera["height"], camera["width"], 3):
             raise ValueError(f"Camera {name} does not match the policy's RGB uint8 image contract")
+    if contract.get("action_representation") in {"hat128_to_wuji2_position_optimizer", "hat128_to_native_position_optimizer"}:
+        try:
+            from observation_geometry import rigid_transform
+        except ImportError:
+            from ops.datasets.observation_geometry import rigid_transform
+        rigid_transform(observation.get("world_from_camera"))
+        rigid_transform(observation.get("world_from_root"))
+    if contract.get("observation_mode") == "pointcloud":
+        if require_pointcloud:
+            try:
+                from .unidex_input import validate_pointcloud_recipe
+            except ImportError:
+                from unidex_input import validate_pointcloud_recipe
+            recipe = validate_pointcloud_recipe(contract.get("pointcloud_recipe"))
+            count = recipe["num_points"]
+            cloud = np.asarray(observation.get("pointcloud"))
+            if (cloud.shape != (count, 6) or cloud.dtype != np.float32 or not np.isfinite(cloud).all()
+                    or np.any(cloud[:, 3:] < 0) or np.any(cloud[:, 3:] > 1)):
+                raise ValueError(f"UniDex observation requires finite metric XYZRGB{count} with colors in [0, 1]")
+        try:
+            from observation_geometry import rigid_transform
+        except ImportError:
+            from ops.datasets.observation_geometry import rigid_transform
+        rigid_transform(observation.get("world_from_camera"))
+        rigid_transform(observation.get("world_from_root"))
 
 
 def validate_actions(contract, actions):

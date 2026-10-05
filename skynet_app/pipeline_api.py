@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from skynet_app.evaluation_contracts import bind_suite_to_dataset
+from skynet_app.evaluation_targets import attach_evaluation_target, evaluation_target_contract
 from skynet_app.recorded_evaluation import recorded_episode_sources
 from skynet_app import data_selection
 from skynet_app.gpu_tracking import sync_gpu_statistics
 from skynet_app.model_io import resolve_model_io, preview_spec
 
 import math
+import logging
 import ipaddress
 import urllib.parse
 
@@ -18,15 +20,15 @@ import os
 import re
 import shlex
 from .db_backend import INTEGRITY_ERRORS, DATABASE_ERRORS
-import subprocess
 import threading
+import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Mapping
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
-from fastapi.responses import PlainTextResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from .adapters import (
@@ -41,12 +43,15 @@ from .adapters import (
     resolve_adapter_plan,
     resolve_gpu_count,
     resolve_gpu_type,
+    resolve_training_progress_contract,
 )
+from .adapters.dataset_inputs import evaluation_context_json
 from .gpu_quota import account_gpu_quota, idle_partition_quota
 from .cluster_config import CLUSTER
 from .evaluation_placement import resolve_evaluation_resources, uses_isaac_sim
 from .evaluation_compatibility import inspect_compatibility, compose_evaluator, declaration_matches, policy_loader, dataset_metadata
 from .cluster_runtime import (
+    ACTIVE_STATES,
     ClusterClient,
     ClusterError,
     SLURM_BIN,
@@ -56,25 +61,22 @@ from .cluster_runtime import (
 from .data_resource_policy import RESOURCE_TYPES, validate_resource_type, validate_resource_metadata
 from .data_imports import build_huggingface_import_job
 from .data_paths import validate_mount_path
-from .data_preview import build_data_bundle_preview, resolve_data_bundle_preview_media
 from .credential_store import (
     CredentialStore,
     CredentialStoreError,
     KeyringCredentialStore,
 )
-from .database import Database, canonical_json, content_sha256, utc_now
+from .database import Database, canonical_json, content_sha256, new_id, utc_now
 from .workspace_schema import visible_sql
-from .workspace_storage import WorkspaceStorage, paths_for_root, validate_work_root
+from .workspace_storage import WorkspaceStorage, paths_for_root, validate_work_root, evaluation_execution_directory
 from .slack_notifications import SlackNotifications
 from .job_status import attach_attempt_display_status, attach_job_display_status
 from .workspaces import WorkspaceServices, require_workspace_records
 from .experiments import (
     CanonicalResult,
-    EvaluationSpec,
     ExperimentSpec,
     FULL_COMMIT_RE,
     ResourceSpec,
-    ResolvedVariant,
     canonical_sha256,
     explicit_train_parameter_paths,
     expand_sweep,
@@ -91,6 +93,7 @@ from .slurm import (
 from .source_control import SourceDiscovery, resolve_runtime
 from .source_metadata_cache import SourceMetadataStore
 from .training_metrics import INTERNAL_PROGRESS_METRICS, is_scalar, recorded_scalar_metrics
+from .training_progress_log import BOUNDARY_NOT_READY
 from .source_validation import (
     CACHE_KIND as REPOSITORY_ARGUMENT_VALIDATION_CACHE_KIND,
     repository_argument_validation_cache_parameters,
@@ -105,6 +108,7 @@ from .tracking import (
     TrackingSettings,
     WandBBridge,
     WandBSettings,
+    compact_tracking_parameters,
     mlflow_experiment_url,
     mlflow_run_url,
     sanitize,
@@ -115,17 +119,41 @@ from pydantic import ConfigDict, SecretStr
 
 
 TRANSIENT_STATES = {"PREEMPTED", "TIMEOUT", "NODE_FAIL", "BOOT_FAIL", "REVOKED"}
-ACTIVE_STATES = {
-    "PENDING",
-    "CONFIGURING",
-    "RUNNING",
-    "COMPLETING",
-    "REQUEUED",
-    "RESIZING",
-    "SUSPENDED",
-}
 TERMINAL_FAILURE_STATES = {"FAILED", "OUT_OF_MEMORY", "DEADLINE", "SPECIAL_EXIT"}
+# The job holds its allocation: executing, or in the epilog the controller reports.
+EXECUTING_STATES = frozenset({"RUNNING", "COMPLETING"})
+# The gateway's NFS view can trail a job's end, so what a finished job left behind
+# (an evaluation's result.json, a training launch boundary) is read again for a
+# short window before its absence is final.
+RESULT_READ_GRACE = timedelta(minutes=10)
+# A job the scheduler no longer describes is settled from the exit record its own batch
+# script wrote ({run}/attempts/{job}/final.json); without one it is held, never guessed.
+EXIT_RECORD_SOURCE = "exit-record"
+EXIT_RECORD_REASON = "Taken from the job's exit record; Slurm no longer has a record of this job"
+FORGOTTEN_JOB_CANCELLED = "Cancellation requested; Slurm no longer lists this job"
+FORGOTTEN_JOB_HELD = (
+    "Slurm no longer lists this job and it left no exit record. "
+    "Its outcome is unknown: cancel it, or wait for Slurm accounting."
+)
+HELD_RECHECK_SECONDS = 600
 GPU_USAGE_LONG_COMMAND = CLUSTER.commands.gpu_usage_shell_command("-l")
+
+
+def _within_result_read_grace(finished_at: str | None) -> bool:
+    if not finished_at:
+        return False
+    try:
+        finished = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if finished.tzinfo is None:
+        return False
+    return datetime.now(timezone.utc) - finished < RESULT_READ_GRACE
+# v1 acknowledged completion before the last data event in older journals.
+# A distinct reconciliation marker migrates those already-FINISHED bindings;
+# finish event identities remain stable and include their data watermark.
+WANDB_TERMINAL_SYNC_PROTOCOL = "file-stream-watermark-v1"
+
 LOCAL_CAPSULE_ROOT = Path(
     os.environ.get(
         "SKYNET_LOCAL_CAPSULE_ROOT",
@@ -174,6 +202,12 @@ def _progress_iso(value: datetime | None) -> str | None:
     if value is None:
         return None
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _checkpoint_training_step(value: Any) -> int | None:
+    if value is not None and (type(value) is not int or value < 0):
+        raise ValueError("Checkpoint training step must be a nonnegative integer")
+    return value
 
 
 def _progress_integer(value: Any) -> int | None:
@@ -304,11 +338,7 @@ def parse_declared_training_progress(
     *, resolved_spec: Any = None,
 ) -> list[dict[str, Any]]:
     """Normalize bounded adapter-declared log matches; no adapter grammar lives here."""
-    resolved = (
-        contract
-        if isinstance(contract, TrainingProgressContract)
-        else TrainingProgressContract.model_validate(contract)
-    )
+    resolved = resolve_training_progress_contract(contract, resolved_spec)
     source = resolved.source
     if source.kind == "jsonl":
         total = _resolved_training_total(resolved_spec, resolved.total_path)
@@ -376,7 +406,7 @@ def _training_progress_contract(
         progress = plan.get("progress") if isinstance(plan, Mapping) else None
         if progress:
             try:
-                return TrainingProgressContract.model_validate(progress), "pinned_plan"
+                return resolve_training_progress_contract(progress, run.get("resolved_spec_json")), "pinned_plan"
             except Exception:
                 return None
 
@@ -392,7 +422,7 @@ def _training_progress_contract(
     progress = train.get("progress") if isinstance(train, Mapping) else None
     if progress:
         try:
-            return TrainingProgressContract.model_validate(progress), "pinned_manifest"
+            return resolve_training_progress_contract(progress, spec), "pinned_manifest"
         except ValueError:
             return None
 
@@ -404,9 +434,8 @@ def _training_progress_contract(
         return None
     for manifest in builtin_adapter_manifests():
         if manifest.slug == adapter_name and manifest.train.progress is not None:
-            return manifest.train.progress, "builtin_compatibility"
+            return resolve_training_progress_contract(manifest.train.progress, spec), "builtin_compatibility"
     return None
-
 
 
 def training_progress_summary(
@@ -495,15 +524,39 @@ def training_progress_summary(
     baseline: tuple[datetime, int, str | None] | None = None
     baseline_observed_at: datetime | None = None
     resume_checkpoint_id = (current_attempt or {}).get("resume_checkpoint_id")
+    previous_attempt = (
+        len(attempt_rows) > 1
+        or (_progress_integer((current_attempt or {}).get("attempt_number")) or 0) > 1
+    )
+    pinned_resume = bool((current_attempt or {}).get("has_initial_checkpoint"))
+    for document, paths in (
+        ((current_attempt or {}).get("execution_snapshot_json"), (
+            "plan.native_config.initial_checkpoint", "migration_provenance.checkpoint",
+            "resolved_spec.native.config.initial_checkpoint",
+        )),
+        (spec, ("native.config.initial_checkpoint",)),
+    ):
+        if isinstance(document, str):
+            try:
+                document = json.loads(document)
+            except ValueError:
+                document = None
+        pinned_resume = pinned_resume or any(
+            bool(_mapping_path(document, path)[1]) for path in paths
+        )
     if resume_checkpoint_id is not None:
         checkpoint = checkpoint_by_id.get(str(resume_checkpoint_id))
         baseline_step = _progress_integer((checkpoint or {}).get("training_step"))
         if checkpoint is not None and baseline_step is not None and started_at is not None:
             baseline = (started_at, baseline_step, current_attempt_id)
             baseline_observed_at = _progress_timestamp(checkpoint.get("created_at"))
-    elif contract and contract.starts_at_zero and started_at and current_restart_count == 0:
-        # Only adapters declaring a fresh, zero-based loop may use attempt start.
-        # The rate still requires a measured completed-work sample.
+    elif (
+        contract and contract.starts_at_zero and started_at
+        and current_restart_count == 0 and not previous_attempt and not pinned_resume
+    ):
+        # starts_at_zero describes a fresh loop, not an automatic retry that
+        # restores a checkpoint without populating resume_checkpoint_id. Unknown
+        # retry baselines require two observations from the current attempt.
         baseline = (started_at, 0, current_attempt_id)
         baseline_observed_at = started_at
 
@@ -571,7 +624,15 @@ def training_progress_summary(
             **common, eta_seconds=None, eta_state="waiting", eta_reason="waiting_for_progress"
         )
 
-    rate_samples = ([baseline] if baseline is not None else []) + current_samples
+    # A JSONL backfill can attach one poll timestamp to hundreds of old steps.
+    # It provides one timing observation at the highest observed step, not a
+    # measured interval starting at the first row in that batch.
+    timing_observations: dict[datetime, tuple[datetime, int, str | None]] = {}
+    for sample in ([baseline] if baseline is not None else []) + current_samples:
+        previous = timing_observations.get(sample[0])
+        if previous is None or sample[1] > previous[1]:
+            timing_observations[sample[0]] = sample
+    rate_samples = sorted(timing_observations.values(), key=lambda sample: sample[0])
     anchor = rate_samples[0]
     latest = rate_samples[-1]
     for candidate in rate_samples[1:-1]:
@@ -848,9 +909,160 @@ def _training_stage_attempts(
 
 def _evaluation_busy_reason(run: Mapping[str, Any]) -> str | None:
     active_states = {"SUBMITTING", "SUBMITTED", "PENDING_SLURM", "RUNNING", "RETRY_PENDING", "CANCELLING"}
-    if any(str(stage.get("status", "")).upper() in active_states for stage in run.get("stages", [])):
-        return "This run already has active training or evaluation work. Wait for it to finish, or cancel that work before starting another evaluation."
+    for stage in run.get("stages", []):
+        if str(stage.get("status", "")).upper() not in active_states:
+            continue
+        context = (stage.get("resolved_config_json") or {}).get("context") or {}
+        if stage.get("stage_type") == "EVALUATE" and context.get("execution_key") == stage.get("id") and stage.get("id"):
+            continue
+        return "This run already has active training or an evaluation using shared execution files. Wait for it to finish, or cancel that work before starting another evaluation."
     return None
+
+
+_MANUAL_RESUME_CHECKPOINT_PROBE = r'''import fnmatch, hashlib, json, os, re, stat, sys
+from pathlib import Path
+request = json.loads(sys.argv[1])
+root = Path(request["root"])
+receipt_path = root / "checkpoints/latest.json"
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+def checked_stat(path):
+    try:
+        value = path.lstat()
+    except FileNotFoundError:
+        return None
+    require(not stat.S_ISLNK(value.st_mode), "Checkpoint search contains a symlink")
+    return value
+def strict_glob(base, pattern):
+    # pathlib glob/rglob may suppress directory access errors. Only actual
+    # missing paths mean no candidate; unreadable storage must fail closed.
+    parts = Path(pattern).parts
+    require(parts and not Path(pattern).is_absolute() and ".." not in parts,
+            "Checkpoint glob must stay relative to its namespace")
+    require(all("**" not in part or part == "**" for part in parts),
+            "Recursive checkpoint glob must use a complete path component")
+    def walk(path, remaining):
+        value = checked_stat(path)
+        if value is None:
+            return
+        if not remaining:
+            if not pattern.endswith("/") or stat.S_ISDIR(value.st_mode):
+                yield path
+            return
+        if not stat.S_ISDIR(value.st_mode):
+            return
+        part, rest = remaining[0], remaining[1:]
+        if part == "**":
+            yield from walk(path, rest)
+            with os.scandir(path) as entries:
+                children = [Path(entry.path) for entry in entries]
+            for child in children:
+                child_stat = checked_stat(child)
+                if child_stat is not None and stat.S_ISDIR(child_stat.st_mode):
+                    yield from walk(child, remaining)
+        elif not any(character in part for character in "*?["):
+            yield from walk(path / part, rest)
+        else:
+            with os.scandir(path) as entries:
+                children = [Path(entry.path) for entry in entries if fnmatch.fnmatchcase(entry.name, part)]
+            for child in children:
+                yield from walk(child, rest)
+    yield from walk(base, parts)
+def read_receipt(path):
+    require(not path.is_symlink() and path.resolve().is_relative_to(root.resolve()), "Resume receipt escapes the run namespace")
+    value = checked_stat(path)
+    if value is None:
+        return None
+    require(stat.S_ISREG(value.st_mode) and value.st_size <= 131072, "Invalid resume receipt file")
+    value = json.loads(path.read_text())
+    require(isinstance(value, dict), "Resume receipt must be an object")
+    return value
+contract = request["contract"]
+patterns = contract["candidate_globs"]
+require(isinstance(patterns, list), "Checkpoint candidate globs must be a list")
+for pattern in patterns:
+    require(isinstance(pattern, str) and bool(pattern), "Checkpoint candidate glob must be non-empty")
+    require(not Path(pattern).is_absolute() and ".." not in Path(pattern).parts,
+            "Checkpoint candidate glob must stay relative to the run namespace")
+candidates = {path for pattern in patterns for path in strict_glob(root, pattern)}
+receipt = read_receipt(receipt_path)
+if receipt is None:
+    require(not candidates, "Checkpoint files exist but latest.json is missing; recover the runner receipt before resuming")
+    print(json.dumps({"present": False}))
+    sys.exit(0)
+require(isinstance(receipt, dict), "Resume receipt must be an object")
+require(receipt.get("schema_version") == 2 and receipt.get("run_id") == request["run_id"], "Resume receipt identity differs from the run")
+require(receipt.get("final") is False and receipt.get("resumable") is True, "Checkpoint is not resumable training state")
+cleanup = receipt.get("cleanup")
+require(isinstance(cleanup, dict) and cleanup.get("performed") is False and not cleanup.get("removed") and not cleanup.get("removed_outputs"), "Checkpoint training state was pruned")
+require(receipt.get("contract") == contract, "Resume receipt differs from the pinned checkpoint contract")
+value = receipt.get("path")
+require(isinstance(value, str) and value, "Checkpoint path is missing")
+target = Path(value)
+require(target.is_absolute() and ".." not in target.parts, "Checkpoint path is invalid")
+relative = target.relative_to(root)
+require(relative != Path(".") and target.resolve().is_relative_to(root.resolve()), "Checkpoint escapes the run namespace")
+require(target in candidates, "Checkpoint path does not match its pinned glob")
+pattern = contract["basename_regex"]
+require(not pattern or re.fullmatch(pattern, target.name), "Checkpoint basename differs from its pinned contract")
+require(not target.is_symlink() and (target.is_file() or target.is_dir()), "Checkpoint target is missing or unsafe")
+require(type(receipt.get("is_directory")) is bool and receipt["is_directory"] == target.is_dir(), "Checkpoint type differs from its receipt")
+kind = contract["candidate_kind"]
+require(kind == "any" or (kind == "directory" and target.is_dir()) or (kind == "file" and target.is_file()), "Checkpoint type differs from its pinned contract")
+require(isinstance(receipt.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", receipt["sha256"]), "Checkpoint SHA-256 is invalid")
+for key in ("size_bytes", "file_count"):
+    require(type(receipt.get(key)) is int and receipt[key] > 0, "Checkpoint size or file count is invalid")
+step = receipt.get("training_step")
+require(step is None or (type(step) is int and step >= 0), "Checkpoint training step is invalid")
+def fingerprint():
+    paths = [target, *sorted(strict_glob(target, "**/*"))] if target.is_dir() else [target]
+    rows = []
+    for path in paths:
+        require(not path.is_symlink(), "Checkpoint contains a symlink")
+        s = path.stat()
+        require(stat.S_ISREG(s.st_mode) or stat.S_ISDIR(s.st_mode), "Checkpoint contains a special file")
+        rows.append((str(path), s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns))
+    return rows
+def file_sha(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+before = fingerprint()
+if target.is_file():
+    identity = dict(sha256=file_sha(target), size_bytes=target.stat().st_size, file_count=1, is_directory=False)
+else:
+    # This is the existing runner schema-2 directory identity wire format.
+    # Fixed stdlib code avoids importing/executing the remote runtime wrapper.
+    records, size, count = [], 0, 0
+    for child in sorted(strict_glob(target, "**/*"), key=lambda p: p.relative_to(target).as_posix()):
+        relative = child.relative_to(target).as_posix()
+        if child.is_file():
+            child_size = child.stat().st_size
+            records.append(dict(path=relative, type="file", sha256=file_sha(child), size_bytes=child_size))
+            size += child_size
+            count += 1
+        else:
+            records.append(dict(path=relative, type="directory"))
+    digest = hashlib.sha256(json.dumps(records, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    identity = dict(sha256=digest, size_bytes=size, file_count=count, is_directory=True)
+require(before == fingerprint(), "Checkpoint changed during verification")
+require(identity == {key: receipt[key] for key in identity}, "Checkpoint SHA-256/size verification failed")
+require(receipt == read_receipt(receipt_path), "Resume receipt changed during verification")
+# A run-level receipt does not identify its producer. Only a single historical
+# training attempt plus that attempt's identical receipt proves that mapping.
+producer = None
+attempts = request["attempts"]
+if len(attempts) == 1:
+    item = attempts[0]
+    job = item["job_id"]
+    require(re.fullmatch(r"[0-9]+(?:_[0-9]+)?", job), "Invalid training attempt job ID")
+    if read_receipt(root / "attempts" / job / "checkpoints/latest.json") == receipt:
+        producer = item["id"]
+print(json.dumps({"present": True, "receipt": receipt, "identity": identity, "producer": producer}))
+'''
 
 
 def _resumable_checkpoint(run: Mapping[str, Any]) -> Mapping[str, Any] | None:
@@ -1070,6 +1282,8 @@ def manual_run_actions(
 class EvaluationRequest(BaseModel):
     run_id: str | None = None
     checkpoint_path: str | None = None
+    target_dataset_id: str | None = None
+    unseen_embodiment: bool = False
     suite_id: str
     environment: str | None = None
     tasks: list[str] = Field(default_factory=list)
@@ -1100,6 +1314,8 @@ class EvaluationRequest(BaseModel):
 class EvaluationTargetValidationRequest(BaseModel):
     run_id: str | None = None
     checkpoint_path: str | None = None
+    target_dataset_id: str | None = None
+    unseen_embodiment: bool = False
     suite_id: str | None = None
     environment: str | None = None
     tasks: list[str] = Field(default_factory=list)
@@ -1440,29 +1656,6 @@ class DataDerivationCreateRequest(BaseModel):
     runtime_lock_sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
 
 
-class DataBundleAssignmentRequest(BaseModel):
-    role: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-    version_id: str = Field(min_length=1)
-    position: int | None = Field(default=None, ge=0)
-    mount_path: str | None = Field(default=None, max_length=4096)
-    required: bool = True
-    config: dict[str, Any] = Field(default_factory=dict)
-
-
-    @field_validator("mount_path")
-    @classmethod
-    def validate_relative_mount(cls, value: str | None) -> str | None:
-        return validate_mount_path(value)
-
-
-class DataBundleCreateRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=255)
-    version: str = Field(min_length=1, max_length=255)
-    description: str = Field(default="", max_length=4096)
-    assignments: list[DataBundleAssignmentRequest] = Field(min_length=1)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
 class PipelineService:
     def __init__(
         self,
@@ -1491,8 +1684,13 @@ class PipelineService:
         self.source_discovery = SourceDiscovery(self.cluster)
         self.source_metadata = SourceMetadataStore(self.database)
         self._reconcile_lock = self.database.operation_lock("pipeline")
+        self._reconcile_scan_lock = self.database.operation_lock("pipeline-scan")
+        self._tracking_reconcile_lock = self.database.operation_lock("tracking-reconcile")
+        self._tracking_delivery_lock = self.database.operation_lock("tracking-delivery")
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._tracking_thread: threading.Thread | None = None
+        self._tracking_delivery_thread: threading.Thread | None = None
         self._progress_refresh_lock = threading.Lock()
         self._progress_refresh_pending: dict[tuple[str, str], int] = {}
         self._progress_refresh_inflight: set[tuple[str, str]] = set()
@@ -1526,7 +1724,7 @@ class PipelineService:
     def _seed_registries(self) -> None:
         if self.database.workspace_id is not None:
             return
-        with self.database.operation_lock("pipeline"):
+        with self.database.operation_lock("registry-seeding"):
             self._seed_registries_unlocked()
 
     def _seed_registries_unlocked(self) -> None:
@@ -1581,28 +1779,70 @@ class PipelineService:
                 enabled=suite.current,
             )
 
+    def prepare_background_restart(self) -> None:
+        if any(thread and thread.is_alive() for thread in (self._thread, self._tracking_thread, self._tracking_delivery_thread)):
+            raise RuntimeError("Previous pipeline workers have not stopped")
+        self._stop.clear()
+
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
-        self._stop.clear()
+        self.prepare_background_restart()
         self._thread = threading.Thread(target=self._loop, name="skynet-reconciler", daemon=True)
+        self._tracking_thread = threading.Thread(target=self._tracking_loop, name="skynet-tracking", daemon=True)
         self._thread.start()
+        self._tracking_thread.start()
+        self._tracking_delivery_thread = threading.Thread(target=self._tracking_delivery_loop, name="skynet-tracking-delivery", daemon=True)
+        self._tracking_delivery_thread.start()
 
-    def stop(self) -> None:
+    def request_stop(self) -> None:
         self._stop.set()
         with self._progress_refresh_lock:
             self._progress_refresh_pending.clear()
-        if self._thread:
-            self._thread.join(timeout=3)
+
+    def stop(self) -> None:
+        self.request_stop()
+        for thread in (self._thread, self._tracking_thread, self._tracking_delivery_thread):
+            if thread:
+                thread.join()
 
     def _loop(self) -> None:
         while not self._stop.wait(15):
             try:
                 self.reconcile()
             except Exception:
-                # Reconciliation errors are exposed through explicit API calls and events;
-                # the daemon must remain alive for the next cluster recovery.
+                # The next pass retries after cluster/database recovery.
                 continue
+
+    def _tracking_loop(self) -> None:
+        while not self._stop.wait(15):
+            try:
+                self.reconcile_tracking()
+            except Exception:
+                logging.getLogger(__name__).exception("Tracking reconciliation failed")
+
+    def _tracking_delivery_loop(self) -> None:
+        while not self._stop.wait(15):
+            try:
+                self.flush_tracking()
+            except Exception:
+                logging.getLogger(__name__).exception("Tracking delivery failed")
+
+    def flush_tracking(self) -> dict[str, Any]:
+        # Durable uploads must not wait for telemetry collection of every run.
+        # This cross-process lock and each journal's cursor preserve exactly the
+        # existing delivery/recovery path; no alternate W&B IDs are generated.
+        if not self._tracking_delivery_lock.acquire(blocking=False):
+            return {"ok": True, "skipped": "already running"}
+        try:
+            reports = {}
+            for provider in ("wandb", "mlflow"):
+                if self._stop.is_set():
+                    break
+                reports[provider] = self._flush_tracking_provider(provider, limit=10, event_limit=100)
+            return {"ok": True, "providers": reports}
+        finally:
+            self._tracking_delivery_lock.release()
 
     @staticmethod
     def _selected_version(record: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1644,12 +1884,12 @@ class PipelineService:
             raise ValueError(f"unknown or archived adapter: {requested}")
         if len(matches) > 1:
             raise ValueError(f"adapter key is ambiguous; use its registry ID: {requested}")
-        detail = self.database.get_adapter(
-            str(matches[0]["id"]), version_number=version_number, include_versions=True
+        version = self.database.get_adapter_version(
+            str(matches[0]["id"]), version_number=version_number,
         )
-        if not detail:
+        if version is None:
             raise ValueError(f"adapter version was not found: {requested}@{version_number}")
-        version = self._selected_version(detail)
+        detail = {**matches[0], "selected_version": version, "versions": [version]}
         manifest = AdapterManifest.model_validate(version["manifest"])
         return detail, version, manifest
 
@@ -1682,42 +1922,17 @@ class PipelineService:
         version: dict[str, Any]
         manifest: AdapterManifest
         if database is not None and requested_adapter_id:
-            registered = database.get_adapter(
-                str(requested_adapter_id), include_versions=True
+            version = database.get_adapter_version(
+                str(requested_adapter_id),
+                version_id=str(requested_version_id) if requested_version_id else None,
+                version_number=int(version_number) if version_number is not None else None,
             )
-            if not registered:
-                raise ValueError(
-                    f"registered adapter was not found: {requested_adapter_id}"
-                )
-            record = registered
-            versions = list(record.get("versions") or [])
-            if requested_version_id:
-                selected = next(
-                    (
-                        item
-                        for item in versions
-                        if str(item.get("id")) == str(requested_version_id)
-                    ),
-                    None,
-                )
-            elif version_number is not None:
-                selected = next(
-                    (
-                        item
-                        for item in versions
-                        if int(item.get("version_number") or 0) == int(version_number)
-                    ),
-                    None,
-                )
-            else:
-                selected = self._selected_version(record)
-            if selected is None:
-                requested_version = requested_version_id or version_number or "selected"
+            if version is None:
                 raise ValueError(
                     f"registered adapter version was not found: "
-                    f"{requested_adapter_id}@{requested_version}"
+                    f"{requested_adapter_id}@{requested_version_id or version_number or 'latest'}"
                 )
-            version = selected
+            record = {"id": version["adapter_id"]}
             manifest = AdapterManifest.model_validate(version["manifest"])
         else:
             record, version, manifest = self._adapter_selection(
@@ -1725,13 +1940,9 @@ class PipelineService:
                 int(version_number) if version_number is not None else None,
             )
             if requested_version_id and str(version.get("id")) != str(requested_version_id):
-                selected = next(
-                    (
-                        item
-                        for item in record.get("versions", [])
-                        if str(item.get("id")) == str(requested_version_id)
-                    ),
-                    None,
+                selected = database.get_adapter_version(
+                    record["id"], version_id=str(requested_version_id),
+                    version_number=int(version_number) if version_number is not None else None,
                 )
                 if selected is None:
                     raise ValueError(
@@ -1783,7 +1994,7 @@ class PipelineService:
         evaluation: Mapping[str, Any],
         run: Mapping[str, Any] | None = None,
     ) -> dict[str, dict[str, bool | str]]:
-        parent = run or self.database.get_run(str(evaluation.get("run_id") or ""))
+        parent = run or self.database.get_run(str(evaluation.get("run_id") or ""), include_payloads=False)
         if not parent:
             return {
                 "cancel": {
@@ -1803,7 +2014,40 @@ class PipelineService:
             item for item in list(parent.get("attempts") or [])
             if item.get("stage_id") == evaluation.get("stage_id")
         ]
-        return {"cancel": manual_cancel_action(stage, attempts)}
+        latest = max(attempts, key=lambda item: int(item.get("attempt_number") or 0), default={})
+        submission_failed = latest.get("status") == "SUBMISSION_FAILED" and not latest.get("slurm_job_id")
+        execution_failed = bool(latest.get("slurm_job_id")) and latest.get("status") in (
+            TRANSIENT_STATES | TERMINAL_FAILURE_STATES
+        )
+        retryable = bool(
+            stage and stage.get("status") == "FAILED"
+            and evaluation.get("status") == "FAILED"
+            and (submission_failed or execution_failed)
+            and not any(item.get("status") in (_PROGRESS_RUNNING_STATES |
+                        (_PROGRESS_WAITING_STATES - TRANSIENT_STATES) | {"SUBMISSION_UNCONFIRMED"})
+                        for item in attempts if item.get("id") != latest.get("id"))
+        )
+        # The job finished its episodes; only reading result.json failed.
+        rereadable = bool(
+            stage and stage.get("status") == "FAILED"
+            and evaluation.get("status") == "FAILED"
+            and latest.get("status") == "SUCCEEDED"
+            and evaluation.get("result_path")
+        )
+        return {
+            "cancel": manual_cancel_action(stage, attempts),
+            "retry_submission": {
+                "enabled": retryable,
+                "label": "Retry evaluation" if execution_failed else "Retry submission",
+                "reason": "" if retryable else "Only a failed evaluation with no active attempt can be retried.",
+            },
+            "reread_result": {
+                "enabled": rereadable,
+                "label": "Re-read result",
+                "reason": "" if rereadable else
+                "Only a failed evaluation whose Slurm job succeeded can re-read its result.",
+            },
+        }
 
     @staticmethod
     def _binding_value_for_canonical(legacy_value: Any, binding: Any) -> Any:
@@ -2173,110 +2417,120 @@ class PipelineService:
     def _apply_manifest_data_bindings(
         cls, canonical: dict[str, Any], manifest: AdapterManifest
     ) -> dict[str, Any]:
+        from .adapters.dataset_inputs import resolve_data_selections, validate_selection_sources
+        from .training_contracts import data_contract_error
+
         cls._apply_training_preset(canonical, manifest)
-        for field in manifest.train.input_fields:
-            if field.default is not None:
-                cls._set_missing_canonical_path(canonical, field.path, field.default)
+        cls._apply_manifest_input_defaults(canonical, manifest)
         bundle = (canonical.get("data") or {}).get("bundle")
         assignments = bundle.get("assignments") if isinstance(bundle, Mapping) else None
         if not isinstance(assignments, list):
             return canonical
-        for assignment in assignments:
-            if not isinstance(assignment, Mapping):
-                raise ValueError("Dataset bundle assignments must be objects with a role and prepared version.")
-            validate_mount_path(assignment.get("mount_path"))
-        if not any(field.data_binding for field in manifest.train.input_fields):
+        fields = [field for field in manifest.train.input_fields if field.data_binding]
+        if not fields:
             raise ValueError(
                 "Dataset bundle selection is unsupported by this adapter version: "
                 "it declares no training dataset binding. Remove the bundle and use "
                 "the repository's dataset configuration, or select an adapter with "
                 "a compatible training_data binding."
             )
+        by_role = {}
+        for assignment in assignments:
+            if not isinstance(assignment, Mapping):
+                raise ValueError("Dataset bundle assignments must be objects with a role and prepared version.")
+            validate_mount_path(assignment.get("mount_path"))
+            position = assignment.get("position", 0)
+            if type(position) is not int or position < 0:
+                raise ValueError("Dataset inputs require nonnegative integer positions")
+            by_role.setdefault(str(assignment.get("role") or ""), []).append(assignment)
         consumed = {(field.data_binding.role, field.data_binding.position)
-                    for field in manifest.train.input_fields if field.data_binding}
-        bound_roles = {role for role, _ in consumed}
-        identities = [(str(item.get("role") or ""), int(item.get("position") or 0))
-                      for item in assignments if isinstance(item, Mapping)]
-        if len(identities) != len(set(identities)):
-            raise ValueError("Dataset bundle contains duplicate role positions; choose an unambiguous bundle")
-        for role, position in identities:
-            if role in bound_roles and (role, position) not in consumed:
-                raise ValueError(f"This adapter cannot consume {role} at position {position}. Choose a bundle with only the declared dataset inputs.")
-        for field in manifest.train.input_fields:
+                    for field in fields if field.data_binding.cardinality == "one"}
+        many_roles = {field.data_binding.role for field in fields if field.data_binding.cardinality == "many"}
+        if many_roles & {role for role, _ in consumed}:
+            raise ValueError("An adapter cannot declare both one and many inputs for the same role")
+        bound_roles = many_roles | {role for role, _ in consumed}
+        for role, selected in by_role.items():
+            positions = [item.get("position", 0) for item in selected]
+            if len(positions) != len(set(positions)):
+                raise ValueError("Dataset bundle contains duplicate role positions; choose an unambiguous bundle")
+            selected.sort(key=lambda item: item.get("position", 0))
+            if role in many_roles and sorted(positions) != list(range(len(selected))):
+                raise ValueError("Multiple dataset inputs require consecutive positions starting at zero")
+            if role in bound_roles and role not in many_roles:
+                for position in positions:
+                    if (role, position) not in consumed:
+                        raise ValueError(f"This adapter cannot consume {role} at position {position}. Choose a bundle with only the declared dataset inputs.")
+            if role in bound_roles:
+                validate_selection_sources([dict(
+                    version_id=(item.get("version", {}).get("metadata") or {}).get("registered_version_id"),
+                    manifest_sha256=item.get("version", {}).get("manifest_sha256"),
+                    metadata=item.get("version", {}).get("metadata") or {},
+                ) for item in selected])
+        for field in fields:
             binding = field.data_binding
-            if binding is None:
-                continue
             present, value = cls._manifest_input_lookup(canonical, field.path)
-            matching = [
-                item for item in assignments
-                if isinstance(item, Mapping) and str(item.get("role") or "") == binding.role
-            ]
-            matching.sort(key=lambda item: int(item.get("position") or 0))
-            assignment = next(
-                (item for item in matching if int(item.get("position") or 0) == binding.position),
-                None,
-            )
-            if assignment is None:
-                raise ValueError(
-                    f"{field.path}: selected data bundle does not provide role "
-                    f"{binding.role} at position {binding.position}"
-                )
-            version = assignment.get("version")
-            if not isinstance(version, Mapping):
-                raise ValueError(
-                    f"{field.path}: selected data bundle role {binding.role} has no version snapshot"
-                )
-            location = (assignment.get("config") or {}).get("location", {})
-            from .training_contracts import data_contract_error
-            error = data_contract_error(binding, version.get("metadata") or {}, canonical)
-            if error:
-                raise ValueError(f"{field.path}: {error}")
-            location_ready = (location.get("status") == "AVAILABLE" and location.get("kind") == "cluster" and location.get("manifest_sha256") == version.get("manifest_sha256"))
-            if binding.value_path == "location.path" and not location_ready:
-                raise ValueError("Choose a verified training-cluster copy of this dataset")
-            if str(version.get("status") or "").upper() != "READY" and not location_ready:
-                raise ValueError(f"Selected {binding.role} is {version.get('status') or 'unverified'}, not ready on the cluster. Complete its import or transfer before training.")
-            if (version.get("metadata") or {}).get("storage_location") == "workstation":
-                raise ValueError(
-                    "This dataset is stored on the collection workstation. "
-                    "Transfer it to the training cluster and register that copy before submitting training."
-                )
-            if binding.formats and str(version.get("format") or "").casefold() not in {
-                item.casefold() for item in binding.formats
-            }:
-                actual_format = str(version.get("format") or "undeclared")
-                raise ValueError(
-                    f"{field.path}: selected {binding.role} format {actual_format} is incompatible; "
-                    f"accepted formats: {', '.join(binding.formats)}"
-                )
-            bound_value = {
-                "version.path": version.get("path"),
-                "mount_path": assignment.get("mount_path"),
-                "location.path": location.get("path"),
-                "version.manifest_sha256": version.get("manifest_sha256"),
-            }[binding.value_path]
-            if isinstance(bound_value, str) and bound_value:
-                if present and value not in (None, "", bound_value):
-                    raise ValueError(
-                        f"{field.path} conflicts with the selected dataset bundle. "
-                        "Clear the explicit dataset path to use the bundle, or "
-                        "remove the bundle to use the explicit path."
-                    )
-                if present and value in (None, ""):
-                    if field.path.startswith("native.overrides."):
-                        canonical["native"]["overrides"].pop(field.path.removeprefix("native.overrides."))
-                    else:
+            selected = by_role.get(binding.role, [])
+            if binding.cardinality == "one":
+                selected = [item for item in selected if item.get("position", 0) == binding.position]
+            if not selected:
+                raise ValueError(f"{field.path}: selected data bundle does not provide role {binding.role} at position {binding.position}")
+            for assignment in selected:
+                version = assignment.get("version")
+                if not isinstance(version, Mapping):
+                    raise ValueError(f"{field.path}: selected data bundle role {binding.role} has no version snapshot")
+                location = (assignment.get("config") or {}).get("location", {})
+                error = data_contract_error(binding, version.get("metadata") or {}, canonical)
+                if error:
+                    raise ValueError(f"{field.path}: {error}")
+                location_ready = (location.get("status") == "AVAILABLE" and location.get("kind") == "cluster" and location.get("manifest_sha256") == version.get("manifest_sha256"))
+                if binding.value_path in {"location.path", "selection"} and not location_ready:
+                    raise ValueError("Choose a verified training-cluster copy of every dataset")
+                if str(version.get("status") or "").upper() != "READY" and not location_ready:
+                    raise ValueError(f"Selected {binding.role} is {version.get('status') or 'unverified'}, not ready on the cluster. Complete its import or transfer before training.")
+                if (version.get("metadata") or {}).get("storage_location") == "workstation":
+                    raise ValueError("This dataset is stored on the collection workstation. Transfer it to the training cluster and register that copy before submitting training.")
+                if binding.formats and str(version.get("format") or "").casefold() not in {item.casefold() for item in binding.formats}:
+                    raise ValueError(f"{field.path}: selected {binding.role} format {version.get('format') or 'undeclared'} is incompatible; accepted formats: {', '.join(binding.formats)}")
+            if binding.value_path == "selection":
+                selections = resolve_data_selections(canonical, binding.role, runtime=True)
+                bound_value = selections if binding.cardinality == "many" else next(item for item in selections if item["position"] == binding.position)
+                if present and value != bound_value:
+                    # Normalize only an exact, previously derived full selection.
+                    # Explicit changes to paths, hashes or metadata still fail.
+                    complete = resolve_data_selections(canonical, binding.role)
+                    previous = complete if binding.cardinality == "many" else next(item for item in complete if item["position"] == binding.position)
+                    if value == previous:
                         parent = canonical
                         parts = field.path.split(".")
                         for part in parts[:-1]:
                             parent = parent[part]
-                        parent.pop(parts[-1])
-                cls._set_missing_canonical_path(canonical, field.path, bound_value)
+                        parent[parts[-1]] = copy.deepcopy(bound_value)
+                        value = bound_value
             else:
-                raise ValueError(
-                    f"{field.path}: selected data bundle role {binding.role} does not provide "
-                    f"{binding.value_path}"
-                )
+                assignment = selected[0]
+                version = assignment["version"]
+                location = (assignment.get("config") or {}).get("location", {})
+                bound_value = {"version.path": version.get("path"), "mount_path": assignment.get("mount_path"),
+                               "location.path": location.get("path"), "version.manifest_sha256": version.get("manifest_sha256")}[binding.value_path]
+                if not isinstance(bound_value, str) or not bound_value:
+                    raise ValueError(f"{field.path}: selected data bundle role {binding.role} does not provide {binding.value_path}")
+            if present and value is not None and value != "" and value != [] and value != bound_value:
+                raise ValueError(f"{field.path} conflicts with the selected dataset bundle. Clear the explicit dataset input to use the bundle.")
+            if present and (value is None or value == "" or value == []):
+                if field.path.startswith("native.overrides."):
+                    canonical["native"]["overrides"].pop(field.path.removeprefix("native.overrides."))
+                else:
+                    parent = canonical
+                    parts = field.path.split(".")
+                    for part in parts[:-1]:
+                        parent = parent[part]
+                    parent.pop(parts[-1])
+            cls._set_missing_canonical_path(canonical, field.path, bound_value)
+        if "training_data" in many_roles:
+            from .model_io import resolve_model_io
+            io = resolve_model_io(manifest.model_dump(mode="json"), canonical)
+            if io.get("compatible") is False:
+                raise ValueError(io["note"])
         return canonical
 
     @classmethod
@@ -2286,6 +2540,41 @@ class PipelineService:
         if manifest.train.strict_native_config:
             declared = {field.path.removeprefix("native.config.").split(".")[0] for field in manifest.train.input_fields if field.path.startswith("native.config.")}
             unknown = set((canonical.get("native") or {}).get("config") or {}) - declared
+            runner_checkpoint_keys = unknown & {"initial_checkpoint", "initial_checkpoint_mode"}
+            if runner_checkpoint_keys:
+                # These keys were previously rejected. Admit only a verified
+                # full-state runner contract, without changing declared model
+                # inputs or any non-strict adapter's existing behavior.
+                native = canonical.get("native") or {}
+                config = native.get("config") or {}
+                path = config.get("initial_checkpoint")
+                if (
+                    not isinstance(path, str) or not path.strip() or path != path.strip()
+                    or not PurePosixPath(path).is_absolute() or ".." in PurePosixPath(path).parts
+                    or any(character in path for character in ("\x00", "\n", "\r"))
+                ):
+                    raise ValueError("Initial checkpoint requires a nonempty absolute path")
+                if config.get("initial_checkpoint_mode", "resume") != "resume":
+                    raise ValueError("This adapter does not declare this checkpoint mode; use its declared weights-only initialization settings")
+                if not manifest.capabilities.supports_resume:
+                    raise ValueError("This adapter does not support full-state checkpoint resume")
+                policy = (canonical.get("train") or {}).get("checkpoint") or {}
+                default_auto_resume = manifest.defaults.checkpoint.auto_resume
+                if policy.get("auto_resume", True if default_auto_resume is None else default_auto_resume) is not True:
+                    raise ValueError("Full-state checkpoint resume requires auto_resume=true; otherwise the runner would ignore it")
+                resume_argv = native.get("resume_argv") or manifest.train.resume_argv
+                if not resume_argv and manifest.legacy_handler:
+                    from .adapters import ManifestAdapter
+                    resume_argv = ManifestAdapter(manifest).resolve(
+                        ExperimentSpec.model_validate(canonical)
+                    ).resume_argv
+                if not isinstance(resume_argv, (list, tuple)) or not any(
+                    isinstance(argument, str) and any(token in argument for token in (
+                        "{{tokens.resume_checkpoint}}", "{{SKYNET_RESUME_CHECKPOINT}}",
+                    )) for argument in resume_argv
+                ):
+                    raise ValueError("Full-state checkpoint resume requires resume_argv that consumes the checkpoint path")
+                unknown -= runner_checkpoint_keys
             if (canonical.get("native") or {}).get("overrides"):
                 raise ValueError("This adapter only accepts its declared training settings")
             if unknown:
@@ -2323,6 +2612,7 @@ class PipelineService:
         from .recording_sampling import experiment_sampling
         for variant in expand_sweep(spec):
             document = variant.resolved_spec.model_dump(mode="python")
+            cls._apply_manifest_data_bindings(document, manifest)
             cls._validate_manifest_input_fields(
                 document, manifest
             )
@@ -3910,9 +4200,8 @@ class PipelineService:
             item["lifecycle"] = "SUBMITTED" if item["locked"] else "DRAFT"
         variants = self.database.list_variants(revision["id"]) if revision else []
         runs = self.database.list_runs(
-            experiment_revision_id=revision["id"] if revision else None,
-            limit=10000,
-        )
+            experiment_revision_id=revision["id"], limit=10000,
+        ) if revision else []
         _attach_run_progress_summaries(self.database, runs)
         experiment["variants"] = variants
         experiment["runs"] = runs
@@ -4290,6 +4579,19 @@ class PipelineService:
         *,
         experiment_revision_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        with self.database.connection() as connection:
+            candidate = connection.execute(
+                f"""SELECT s.id FROM workflow_stages s
+                JOIN runs r ON r.id=s.run_id JOIN variants v ON v.id=r.variant_id
+                JOIN experiment_revisions er ON er.id=v.experiment_revision_id
+                WHERE er.experiment_id=? AND {visible_sql('workflow_stages', 's')}
+                  AND er.id=COALESCE(?, (SELECT id FROM experiment_revisions
+                    WHERE experiment_id=? ORDER BY revision_number DESC LIMIT 1))
+                  AND s.status IN ('DRAFT','PENDING','RETRY_PENDING') LIMIT 1""",
+                (experiment_id, experiment_revision_id, experiment_id),
+            ).fetchone()
+        if candidate is None:
+            return []
         experiment = self.database.get_experiment(experiment_id)
         if not experiment:
             raise KeyError("Experiment not found")
@@ -4368,6 +4670,7 @@ class PipelineService:
             attempts = [item for item in run["attempts"] if stage and item["stage_id"] == stage["id"]]
             attempt = max(attempts, key=lambda item: item["attempt_number"], default=None)
             if attempt and attempt.get("slurm_job_id"):
+                self._repair_recovered_submission_tracking({**attempt, "run_id": run_id, "stage_type": "TRAIN"})
                 return {"run_id": run_id, "status": run["status"], "slurm_job_id": attempt["slurm_job_id"]}
             if not attempt or stage["status"] != "SUBMITTING" or attempt["status"] != "SUBMITTING" or not str(attempt.get("slurm_reason") or "").startswith("Submission outcome unknown"):
                 raise ValueError("Only an unconfirmed training submission can be recovered. Cancelled submissions cannot be restarted here.")
@@ -4535,7 +4838,7 @@ class PipelineService:
         resume_checkpoint_id: str | None = None,
         pinned_execution: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        run = self.database.get_run(run_id)
+        run = self.database.get_run(run_id, execution_stage_ids=[stage_id])
         if not run:
             raise KeyError("Run not found")
         stage = next(item for item in run["stages"] if item["id"] == stage_id)
@@ -4708,12 +5011,22 @@ class PipelineService:
                 plan.blockers.append(compatibility_error)
         if plan is None:
             plan = resolve_adapter_plan(spec)
+        policy_resources = spec.resources.with_gpu_cpu_policy(resolve_gpu_count(spec, plan))
+        if policy_resources is not spec.resources:
+            execution_provenance["transformations"].append({
+                "kind": "cluster_cpu_per_gpu_policy",
+                "before": spec.resources.cpus_per_task,
+                "after": policy_resources.cpus_per_task,
+            })
+            spec = spec.model_copy(update={"resources": policy_resources})
         if is_evaluation_stage:
             # Reapply current cluster safety policy to historical pinned plans,
             # including automatic ledger resumes, before snapshots or submission.
             evaluation_context = copy.deepcopy(stage["resolved_config_json"].get("context") or {})
             if not evaluation_context:
                 evaluation_context = copy.deepcopy(plan.native_config.get("canonical_evaluation") or {})
+            if evaluation_context.get("worker_resources"):
+                evaluation_context["worker_resources"]["cpus_per_task"] = CLUSTER.defaults.cpus_per_gpu
             evaluation_context.setdefault("environment", stage["resolved_config_json"].get("environment"))
             plan.native_config["canonical_evaluation"] = evaluation_context
             try:
@@ -4795,7 +5108,10 @@ class PipelineService:
         )
         attempt_snapshot["storage"] = {
             "work_root": self.storage.root_for_run(run_id),
-            "run_directory": self._run_directory(run_id),
+            "run_directory": evaluation_execution_directory(
+                self._run_directory(run_id),
+                evaluation_context.get("execution_key") if is_evaluation_stage else None,
+            ),
         }
         if repository_argument_validation is not None:
             attempt_snapshot["repository_argument_validation"] = (
@@ -4846,11 +5162,9 @@ class PipelineService:
                     "stage_id": stage_id,
                 }
             )
-            capsule_files["evaluation-context.json"] = json.dumps(
-                evaluation_context, indent=2, sort_keys=True
-            ) + "\n"
+            capsule_files["adapter-support/evaluation-context.json"] = evaluation_context_json(evaluation_context)
         capsule_files["attempt-snapshot.json"] = json.dumps(
-            attempt_snapshot, indent=2, sort_keys=True
+            attempt_snapshot, separators=(",", ":"), sort_keys=True
         ) + "\n"
         try:
             compiled = compile_sbatch(
@@ -4949,7 +5263,11 @@ class PipelineService:
                 self._require_native_tracking_bindings(run_id, native_providers)
             capsule = self._local_capsule(run_id, compiled)
             self._save_submission_script(run_id, attempt["id"], compiled.script)
-            secret_gateway = selected_gateway
+            # Keep scheduler scripts small regardless of dataset count. Files
+            # are pinned by their checksum manifest and verified before sbatch.
+            secret_gateway, _ = self.cluster.write_capsule_files(
+                run_id, compiled.upload_files, selected_gateway, immutable=True,
+            )
             for relative_path, content in native_tracking_runtime[
                 "secret_contents"
             ].items():
@@ -6034,12 +6352,12 @@ class PipelineService:
                     f"{name} tracking is enabled but its validated {missing} is unavailable"
                 )
 
-    def _flush_tracking_provider(self, provider: str, *, limit: int = 100) -> dict[str, Any]:
+    def _flush_tracking_provider(self, provider: str, *, limit: int = 100, event_limit: int | None = None, run_ids: set[str] | None = None) -> dict[str, Any]:
         attempted = delivered = 0
         errors: list[str] = []
-        bindings = self.database.list_tracking_bindings_for_provider(
+        bindings = [binding for binding in self.database.list_tracking_bindings_for_provider(
             provider, scope_type="run", statuses=("QUEUED", "ERROR")
-        )[:limit]
+        ) if run_ids is None or str(binding["scope_id"]) in run_ids][:limit]
         for existing in bindings:
             run_id = str(existing["scope_id"])
             capsule = LOCAL_CAPSULE_ROOT / run_id
@@ -6072,14 +6390,14 @@ class PipelineService:
                     )
                     errors.append(message)
                     continue
-                report = bridge.drain_spool()
+                report = bridge.drain_spool(limit=event_limit)
                 attempted += report.attempted
                 delivered += report.delivered
                 errors.extend(report.errors)
                 binding = bridge.binding(run_id)
                 remote_id = (binding or {}).get("remote_id")
                 remote_url = (binding or {}).get("url") or existing.get("remote_url")
-                run = self.database.get_run(run_id) or {}
+                run = self.database.get_run(run_id, include_details=False) or {}
                 experiment_scope_id = str(run.get("experiment_id") or "")
                 experiment_binding = (
                     next(
@@ -6265,7 +6583,7 @@ class PipelineService:
             "max_steps": effective["max_steps"],
             "precision": effective["precision"],
         }
-        return {
+        return compact_tracking_parameters({
             "seed": run["seed"],
             **{key: value for key, value in common_params.items() if value is not None},
             "gpu_count": resolve_gpu_count(spec, resolve_adapter_plan(spec)),
@@ -6277,7 +6595,7 @@ class PipelineService:
             "adapter": spec.source.adapter,
             "adapter_version": run.get("adapter_version"),
             "data_bundle_id": data.get("bundle_id") or data.get("bundle"),
-        }
+        })
 
     def _tracking_failure(
         self, provider: str, run: Mapping[str, Any], error: BaseException | str
@@ -6339,6 +6657,7 @@ class PipelineService:
         attempt_snapshot: Mapping[str, Any] | None = None,
         providers: list[Any] | None = None,
         continuation_attempt_number: int | None = None,
+        auto_flush: bool | None = None,
     ) -> None:
         del capsule
         local_run_id = str(run["id"])
@@ -6352,6 +6671,8 @@ class PipelineService:
                 run_name = self._tracking_run_name(provider, spec, run)
                 if name == "mlflow":
                     settings = self._mlflow_settings(provider)
+                    if auto_flush is not None:
+                        settings = replace(settings, auto_flush=auto_flush)
                     bridge = self._mlflow_bridge(LOCAL_CAPSULE_ROOT / local_run_id, settings)
                     experiment_name = (
                         self._tracking_provider_value(provider, "experiment")
@@ -6444,6 +6765,8 @@ class PipelineService:
                         self.database.update_run(local_run_id, mlflow_run_id=remote_run_id)
                 elif name == "wandb":
                     settings = self._wandb_settings(provider)
+                    if auto_flush is not None:
+                        settings = replace(settings, auto_flush=auto_flush)
                     entity = settings.entity
                     if not entity:
                         if not settings.configured:
@@ -6748,7 +7071,7 @@ class PipelineService:
                     "error": None,
                 }
                 if slurm_state in ACTIVE_STATES:
-                    app_state = "RUNNING" if slurm_state in {"RUNNING", "COMPLETING"} else "PENDING"
+                    app_state = "RUNNING" if slurm_state in EXECUTING_STATES else "PENDING"
                     self._update_data_import_observation(record["id"], state=app_state, **common)
                     continue
                 if slurm_state.startswith("CANCELLED"):
@@ -6852,12 +7175,13 @@ class PipelineService:
 
         repaired = 0
         for run_id, attempt in latest_by_run.items():
-            run = self.database.get_run(run_id)
-            if not run:
-                continue
             try:
+                run = self.database.get_run(run_id, include_details=False)
+                if not run:
+                    continue
                 spec = ExperimentSpec.model_validate(run["resolved_spec_json"])
             except Exception:
+                logging.getLogger(__name__).exception("Tracking repair could not read run: %s", run_id)
                 continue
             providers = self._active_tracking_providers(spec)
             if not providers:
@@ -6892,6 +7216,10 @@ class PipelineService:
                 except json.JSONDecodeError:
                     snapshot = None
             try:
+                # Fetch immutable execution bodies only when a binding is actually
+                # missing. Scanning healthy runs must not download every capsule.
+                if not isinstance(snapshot, Mapping):
+                    run = self.database.get_run(run_id) or run
                 self._start_tracking(
                     spec,
                     run,
@@ -6899,6 +7227,7 @@ class PipelineService:
                     str(attempt["slurm_job_id"]),
                     attempt_snapshot=snapshot if isinstance(snapshot, Mapping) else None,
                     providers=missing,
+                    auto_flush=False,
                 )
             except Exception as error:
                 for provider in missing:
@@ -6909,6 +7238,16 @@ class PipelineService:
                     )
             repaired += len(missing)
         return repaired
+
+    def _repair_recovered_submission_tracking(self, attempt: Mapping[str, Any]) -> None:
+        # The scheduler receipt is already durable. Optional telemetry cannot
+        # invalidate it, and reconciliation retries a missing/error binding.
+        try:
+            self._repair_missing_active_tracking_bindings([attempt])
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Recovered submission tracking remains pending: %s", attempt["run_id"]
+            )
 
     def _record_recovered_submission(self, unknown: Mapping[str, Any], recovered: Any) -> None:
         submitted_at = utc_now()
@@ -7004,16 +7343,20 @@ class PipelineService:
                 record_event=True,
             )
 
+        elif transition.get("applied") and not is_evaluation:
+            self._repair_recovered_submission_tracking({**unknown, "slurm_job_id": recovered.job_id})
+
     def _stopped_for_time_limit(self, attempt: Mapping[str, Any]) -> bool:
         """Distinguish our graceful warning exit from an arbitrary trainer failure."""
         path = (
             f"{self._run_directory(attempt['run_id'])}/attempts/"
             f"{attempt['slurm_job_id']}/state/interruption.json"
         )
+        # Only a gateway that answers can say the receipt is missing.
+        _, content = self.cluster.read_optional_file(path, attempt.get("gateway") or "auto", max_bytes=65_536)
         try:
-            _, content = self.cluster.read_log(path, attempt.get("gateway") or "auto", lines=30)
-            receipt = json.loads(content)
-        except (ClusterError, ValueError):
+            receipt = json.loads(content or "")
+        except ValueError:
             return False
         return isinstance(receipt, dict) and all(
             receipt.get(key) == value for key, value in {
@@ -7025,8 +7368,44 @@ class PipelineService:
             }.items()
         )
 
+    @staticmethod
+    def _accounting_state_and_reason(record: Mapping[str, Any]) -> tuple[str, str | None]:
+        raw = str(record.get("StateRaw") or record["State"]).strip()
+        state = re.split(r"[+\s]", str(record["State"]).strip(), maxsplit=1)[0].upper()
+        reason = record.get("Reason")
+        if not reason or str(reason).strip().upper() in {"NONE", "UNKNOWN", "N/A"}:
+            cancelled_by = record.get("CancelledBy")
+            reason = (f"CANCELLED by {cancelled_by}" if state == "CANCELLED" and cancelled_by
+                      else raw if raw.upper() != state else None)
+        return state, reason
+
+    @classmethod
+    def _active_accounting_unchanged(cls, row: Mapping[str, Any], record: Mapping[str, Any]) -> bool:
+        """A read-only scheduler snapshot needs no lifecycle lock or write.
+
+        Any actual change takes the locked, fresh-read path below. A concurrent
+        cancellation after this snapshot is handled by its own operation or the
+        next scan; this fast path never writes stale state over that operation.
+        """
+        state, reason = cls._accounting_state_and_reason(record)
+        if state not in ACTIVE_STATES:
+            return False
+        status = "RUNNING" if state in EXECUTING_STATES else "PENDING"
+        parent_status = row.get("evaluation_status") if row["stage_type"] == "EVALUATE" else row.get("run_status")
+        restarts = _progress_integer(record.get("Restarts"))
+        return (
+            row["status"] == status and parent_status == status
+            and row["stage_status"] == ("RUNNING" if status == "RUNNING" else "PENDING_SLURM")
+            and (status != "RUNNING" or bool(row.get("started_at")))
+            and (restarts is None or restarts <= int(row.get("restart_count") or 0))
+            and all(row.get(key) == value for key, value in {
+                "slurm_state": state, "slurm_reason": reason,
+                "exit_code": record.get("ExitCode"), "node_list": record.get("NodeList"),
+            }.items())
+        )
+
     def reconcile(self) -> dict[str, Any]:
-        if not self._reconcile_lock.acquire(blocking=False):
+        if not self._reconcile_scan_lock.acquire(blocking=False):
             return {
                 "ok": True,
                 "skipped": "already running",
@@ -7034,9 +7413,8 @@ class PipelineService:
                 "tracking_bindings_repaired": 0,
             }
         try:
-            # Completed jobs can still have metrics waiting on a rate-limit cooldown.
-            self._flush_tracking_provider("wandb", limit=10)
-            repairs = self.database.repair_workflow_state_invariants()
+            with self._reconcile_lock:
+                repairs = self.database.repair_workflow_state_invariants()
             recovered_submissions = 0
             with self.database.connection() as connection:
                 unknown_rows = [
@@ -7072,7 +7450,8 @@ class PipelineService:
                     continue
                 if recovered is None:
                     continue
-                self._record_recovered_submission(unknown, recovered)
+                with self._reconcile_lock:
+                    self._record_recovered_submission(unknown, recovered)
                 recovered_submissions += 1
             self._repair_missing_attempt_log_paths()
             try:
@@ -7085,8 +7464,13 @@ class PipelineService:
                     dict(row)
                     for row in connection.execute(
                     f"""
-                    SELECT a.*, s.run_id, s.stage_type, s.auto_resume, s.max_attempts,
-                           s.resolved_config_json, s.status AS stage_status,
+                    SELECT a.id, a.stage_id, a.slurm_job_id, a.status, a.gateway,
+                           a.started_at, a.finished_at, a.submitted_at, a.restart_count,
+                           a.attempt_number, a.stdout_path, a.stderr_path,
+                           a.slurm_state, a.slurm_reason, a.exit_code, a.node_list,
+                           s.run_id, s.stage_type, s.auto_resume, s.max_attempts,
+                           s.status AS stage_status, r.status AS run_status,
+                           (SELECT status FROM evaluations WHERE stage_id=s.id) AS evaluation_status,
                            er.experiment_id,
                            (
                                SELECT COUNT(*) FROM job_attempts budget_attempt
@@ -7109,7 +7493,7 @@ class PipelineService:
                     """
                     ).fetchall()
                 ]
-            tracking_bindings_repaired = self._repair_missing_active_tracking_bindings(rows)
+            tracking_bindings_repaired = 0  # Repaired by the independent tracking worker.
             if not rows:
                 self._dispatch_active_experiments()
                 return {
@@ -7121,296 +7505,314 @@ class PipelineService:
                     "recovered_submissions": recovered_submissions,
                     "tracking_bindings_repaired": tracking_bindings_repaired,
                 }
-            _, statuses = self.cluster.job_statuses([row["slurm_job_id"] for row in rows])
-            self._sync_attempt_restart_counts(rows, statuses)
-            training_run_ids = {
-                str(row["run_id"])
-                for row in rows
-                if str(row["stage_type"]).upper() == "TRAIN"
-            }
-            for training_run_id in training_run_ids:
-                current_run = self.database.get_run(training_run_id)
-                if current_run:
-                    self._ingest_training_progress(current_run)
-                    sync_gpu_statistics(self, current_run, LOCAL_CAPSULE_ROOT)
-                self._publish_training_progress_tracking(training_run_id)
+            statuses = self._scheduler_statuses(rows)
             updated = 0
             experiments: set[str] = set(repairs["experiment_ids"])
             for row in rows:
+                if self._stop.is_set():
+                    break
                 record = statuses.get(row["slurm_job_id"])
-                if not record:
+                if not record or self._active_accounting_unchanged(row, record):
                     continue
-                raw_state = str(record.get("StateRaw") or record["State"]).strip()
-                state = re.split(r"[+\s]", str(record["State"]).strip(), maxsplit=1)[0].upper()
-                reason = record.get("Reason")
-                if not reason or str(reason).strip().upper() in {"NONE", "UNKNOWN", "N/A"}:
-                    cancelled_by = record.get("CancelledBy")
-                    if state == "CANCELLED" and cancelled_by:
-                        reason = f"CANCELLED by {cancelled_by}"
-                    elif raw_state.upper() != state:
-                        reason = raw_state
-                    else:
-                        reason = None
-                accounting_started = self._slurm_accounting_timestamp(record.get("Start"))
-                accounting_finished = self._slurm_accounting_timestamp(record.get("End"))
-                experiments.add(row["experiment_id"])
-                is_evaluation_stage = row["stage_type"] == "EVALUATE"
-                evaluation = (
-                    self._evaluation_for_stage(row["run_id"], row["stage_id"])
-                    if is_evaluation_stage
-                    else None
-                )
-                common = {
-                    "slurm_state": state,
-                    "slurm_reason": reason,
-                    "exit_code": record.get("ExitCode"),
-                    "node_list": record.get("NodeList"),
-                }
-                if (
-                    state == "FAILED"
-                    and record.get("ExitCode") == "124:0"
-                    and self._stopped_for_time_limit(row)
-                ):
-                    state = "TIMEOUT"
-                    common["slurm_reason"] = "Stopped at the Slurm time-limit warning; checkpoint preserved if available"
-                cancellation_requested = (
-                    str(row.get("stage_status") or "").upper() == "CANCELLING"
-                    or str(row.get("status") or "").upper() == "CANCELLING"
-                )
-                if state in ACTIVE_STATES:
-                    if cancellation_requested:
-                        attempt_updates = {"status": "CANCELLING", **common}
-                        if state == "RUNNING" and not row["started_at"]:
+                with self._reconcile_lock:
+                    with self.database.connection() as connection:
+                        current = connection.execute(
+                            """SELECT a.status, a.slurm_job_id, a.restart_count,
+                               a.started_at, s.status AS stage_status,
+                               (SELECT id FROM job_attempts WHERE stage_id=s.id
+                                ORDER BY attempt_number DESC LIMIT 1) AS latest_id
+                            FROM job_attempts a JOIN workflow_stages s ON s.id=a.stage_id
+                            WHERE a.id=?""", (row["id"],),
+                        ).fetchone()
+                    if (current is None or current["latest_id"] != row["id"]
+                            or current["slurm_job_id"] != row["slurm_job_id"]
+                            or current["stage_status"] not in
+                                {'SUBMITTING','SUBMITTED','PENDING_SLURM','RUNNING','CANCELLING'}):
+                        continue
+                    row.update(dict(current))
+                    self._sync_attempt_restart_counts([row], statuses)
+                    record = statuses.get(row["slurm_job_id"])
+                    if not record:
+                        continue
+                    state, reason = self._accounting_state_and_reason(record)
+                    accounting_started = self._slurm_accounting_timestamp(record.get("Start"))
+                    accounting_finished = self._slurm_accounting_timestamp(record.get("End"))
+                    experiments.add(row["experiment_id"])
+                    is_evaluation_stage = row["stage_type"] == "EVALUATE"
+                    evaluation = (
+                        self._evaluation_for_stage(row["run_id"], row["stage_id"])
+                        if is_evaluation_stage
+                        else None
+                    )
+                    common = {
+                        "slurm_state": state,
+                        "slurm_reason": reason,
+                        "exit_code": record.get("ExitCode"),
+                        "node_list": record.get("NodeList"),
+                    }
+                    stopped_for_time_limit = False
+                    if (
+                        state == "FAILED"
+                        and record.get("ExitCode") == "124:0"
+                        # An exit record cannot tell a time limit from a cancellation
+                        # that followed its warning, so it never queues a new attempt.
+                        and record.get("Source") != EXIT_RECORD_SOURCE
+                    ):
+                        try:
+                            stopped_for_time_limit = self._stopped_for_time_limit(row)
+                        except ClusterError:
+                            continue  # The gateway failed, not the receipt.
+                    if stopped_for_time_limit:
+                        state = "TIMEOUT"
+                        common["slurm_reason"] = "Stopped at the Slurm time-limit warning; checkpoint preserved if available"
+                    cancellation_requested = (
+                        str(row.get("stage_status") or "").upper() == "CANCELLING"
+                        or str(row.get("status") or "").upper() == "CANCELLING"
+                    )
+                    if state in ACTIVE_STATES:
+                        if cancellation_requested:
+                            attempt_updates = {"status": "CANCELLING", **common}
+                            if state in EXECUTING_STATES and not row["started_at"]:
+                                attempt_updates["started_at"] = accounting_started or utc_now()
+                            self.database.transition_workflow_state(
+                                attempt_id=row["id"],
+                                attempt_updates=attempt_updates,
+                                stage_id=row["stage_id"],
+                                stage_updates={"status": "CANCELLING", "completed_at": None},
+                                run_id=None if is_evaluation_stage else row["run_id"],
+                                run_updates=None if is_evaluation_stage else {
+                                    "status": "CANCELLING",
+                                    "completed_at": None,
+                                },
+                                evaluation_id=evaluation["id"] if evaluation else None,
+                                evaluation_updates={
+                                    "status": "CANCELLING",
+                                    "completed_at": None,
+                                } if evaluation else None,
+                            )
+                            self._signal_stage_cancellation(
+                                entity_type="evaluation" if evaluation else "run",
+                                entity_id=str(evaluation["id"])
+                                if evaluation else str(row["run_id"]),
+                                attempt=row,
+                                record_event=False,
+                            )
+                            updated += 1
+                            continue
+                        attempt_status = "RUNNING" if state in EXECUTING_STATES else "PENDING"
+                        stage_status = "RUNNING" if state in EXECUTING_STATES else "PENDING_SLURM"
+                        attempt_updates = {"status": attempt_status, **common}
+                        if state in EXECUTING_STATES and not row["started_at"]:
                             attempt_updates["started_at"] = accounting_started or utc_now()
                         self.database.transition_workflow_state(
                             attempt_id=row["id"],
                             attempt_updates=attempt_updates,
                             stage_id=row["stage_id"],
-                            stage_updates={"status": "CANCELLING", "completed_at": None},
+                            stage_updates={"status": stage_status},
                             run_id=None if is_evaluation_stage else row["run_id"],
-                            run_updates=None if is_evaluation_stage else {
-                                "status": "CANCELLING",
-                                "completed_at": None,
-                            },
+                            run_updates=None if is_evaluation_stage else {"status": attempt_status},
                             evaluation_id=evaluation["id"] if evaluation else None,
-                            evaluation_updates={
-                                "status": "CANCELLING",
-                                "completed_at": None,
-                            } if evaluation else None,
-                        )
-                        self._signal_stage_cancellation(
-                            entity_type="evaluation" if evaluation else "run",
-                            entity_id=str(evaluation["id"])
-                            if evaluation else str(row["run_id"]),
-                            attempt=row,
-                            record_event=False,
+                            evaluation_updates={"status": attempt_status} if evaluation else None,
                         )
                         updated += 1
                         continue
-                    attempt_status = "RUNNING" if state == "RUNNING" else "PENDING"
-                    stage_status = "RUNNING" if state == "RUNNING" else "PENDING_SLURM"
-                    attempt_updates = {"status": attempt_status, **common}
-                    if state == "RUNNING" and not row["started_at"]:
-                        attempt_updates["started_at"] = accounting_started or utc_now()
-                    self.database.transition_workflow_state(
-                        attempt_id=row["id"],
-                        attempt_updates=attempt_updates,
-                        stage_id=row["stage_id"],
-                        stage_updates={"status": stage_status},
-                        run_id=None if is_evaluation_stage else row["run_id"],
-                        run_updates=None if is_evaluation_stage else {"status": attempt_status},
-                        evaluation_id=evaluation["id"] if evaluation else None,
-                        evaluation_updates={"status": attempt_status} if evaluation else None,
-                    )
-                    updated += 1
-                    continue
-                if state == "COMPLETED":
-                    finished = accounting_finished or utc_now()
-                    attempt_success_updates = {
-                        "status": "SUCCEEDED",
-                        "started_at": row["started_at"] or accounting_started or row["submitted_at"] or finished,
-                        "finished_at": finished,
-                        **common,
-                    }
-                    if is_evaluation_stage:
-                        ingestion_error, completed_episodes = self._ingest_evaluation_result(row)
-                        if ingestion_error:
+                    if state == "COMPLETED":
+                        finished = accounting_finished or utc_now()
+                        attempt_success_updates = {
+                            "status": "SUCCEEDED",
+                            "started_at": row["started_at"] or accounting_started or row["submitted_at"] or finished,
+                            "finished_at": finished,
+                            **common,
+                        }
+                        if is_evaluation_stage:
+                            try:
+                                ingestion_error, completed_episodes = self._ingest_evaluation_result(row)
+                            except ClusterError:
+                                continue  # The gateway failed, not the result.
+                            if ingestion_error and _within_result_read_grace(accounting_finished):
+                                # Keep the attempt open; the next cycle reads the result again.
+                                continue
+                            if ingestion_error:
+                                self.database.transition_workflow_state(
+                                    attempt_id=row["id"],
+                                    attempt_updates=attempt_success_updates,
+                                    stage_id=row["stage_id"],
+                                    stage_updates={"status": "FAILED", "completed_at": finished},
+                                    evaluation_id=evaluation["id"] if evaluation else None,
+                                    evaluation_updates={"status": "FAILED", "completed_at": finished}
+                                    if evaluation else None,
+                                    event={
+                                        "entity_type": "evaluation" if evaluation else "run",
+                                        "entity_id": evaluation["id"] if evaluation else row["run_id"],
+                                        "event_type": "EVALUATION_RESULT_INVALID",
+                                        "new_status": "FAILED",
+                                        "details": {"error": ingestion_error, "job_id": row["slurm_job_id"]},
+                                    },
+                                )
+                                updated += 1
+                                continue
                             self.database.transition_workflow_state(
                                 attempt_id=row["id"],
                                 attempt_updates=attempt_success_updates,
                                 stage_id=row["stage_id"],
-                                stage_updates={"status": "FAILED", "completed_at": finished},
+                                stage_updates={"status": "SUCCEEDED", "completed_at": finished},
                                 evaluation_id=evaluation["id"] if evaluation else None,
-                                evaluation_updates={"status": "FAILED", "completed_at": finished}
-                                if evaluation else None,
-                                event={
-                                    "entity_type": "evaluation" if evaluation else "run",
-                                    "entity_id": evaluation["id"] if evaluation else row["run_id"],
-                                    "event_type": "EVALUATION_RESULT_INVALID",
-                                    "new_status": "FAILED",
-                                    "details": {"error": ingestion_error, "job_id": row["slurm_job_id"]},
-                                },
+                                evaluation_updates={
+                                    "status": "SUCCEEDED",
+                                    "progress_completed": completed_episodes,
+                                    "completed_at": finished,
+                                } if evaluation else None,
                             )
                             updated += 1
                             continue
+                        if row["stage_type"] == "TRAIN":
+                            with self.database.connection() as connection:
+                                row["resolved_config_json"] = connection.execute(
+                                    "SELECT resolved_config_json FROM workflow_stages WHERE id=?",
+                                    (row["stage_id"],),
+                                ).fetchone()[0]
+                            checkpoint_globs: list[str] = []
+                            try:
+                                checkpoint_globs = self._checkpoint_globs(row["resolved_config_json"])
+                                self._capture_checkpoint(
+                                    row["run_id"],
+                                    row["id"],
+                                    required=bool(checkpoint_globs),
+                                    gateway=row["gateway"] or "auto",
+                                )
+                            except ClusterError:
+                                continue  # The gateway failed, not the checkpoint.
+                            except (*DATABASE_ERRORS, ConnectionError):
+                                raise  # Nor did the database's failure change what the job produced.
+                            except Exception as error:
+                                message = sanitize(str(error))
+                                self.database.transition_workflow_state(
+                                    attempt_id=row["id"],
+                                    attempt_updates=attempt_success_updates,
+                                    stage_id=row["stage_id"],
+                                    stage_updates={"status": "FAILED", "completed_at": finished},
+                                    run_id=row["run_id"],
+                                    run_updates={"status": "FAILED", "completed_at": finished},
+                                    event={
+                                        "entity_type": "run",
+                                        "entity_id": row["run_id"],
+                                        "event_type": "CHECKPOINT_FINALIZATION_FAILED",
+                                        "old_status": row["status"],
+                                        "new_status": "FAILED",
+                                        "details": {
+                                            "error": message,
+                                            "attempt_id": row["id"],
+                                            "job_id": row["slurm_job_id"],
+                                            "slurm_state": state,
+                                            "exit_code": record.get("ExitCode"),
+                                            "process_status": "SUCCEEDED",
+                                            "checkpoint_globs": checkpoint_globs,
+                                        },
+                                    },
+                                )
+                                updated += 1
+                                continue
                         self.database.transition_workflow_state(
                             attempt_id=row["id"],
                             attempt_updates=attempt_success_updates,
                             stage_id=row["stage_id"],
                             stage_updates={"status": "SUCCEEDED", "completed_at": finished},
-                            evaluation_id=evaluation["id"] if evaluation else None,
-                            evaluation_updates={
-                                "status": "SUCCEEDED",
-                                "progress_completed": completed_episodes,
-                                "completed_at": finished,
-                            } if evaluation else None,
+                            run_id=None if is_evaluation_stage else row["run_id"],
+                            run_updates=None if is_evaluation_stage else {"status": "SUCCEEDED", "completed_at": finished},
                         )
                         updated += 1
                         continue
-                    if row["stage_type"] == "TRAIN":
-                        checkpoint_globs: list[str] = []
-                        try:
-                            checkpoint_globs = self._checkpoint_globs(row["resolved_config_json"])
-                            self._capture_checkpoint(
-                                row["run_id"],
-                                row["id"],
-                                required=bool(checkpoint_globs),
-                                gateway=row["gateway"] or "auto",
-                            )
-                        except Exception as error:
-                            message = sanitize(str(error))
-                            self.database.transition_workflow_state(
-                                attempt_id=row["id"],
-                                attempt_updates=attempt_success_updates,
-                                stage_id=row["stage_id"],
-                                stage_updates={"status": "FAILED", "completed_at": finished},
-                                run_id=row["run_id"],
-                                run_updates={"status": "FAILED", "completed_at": finished},
-                                event={
-                                    "entity_type": "run",
-                                    "entity_id": row["run_id"],
-                                    "event_type": "CHECKPOINT_FINALIZATION_FAILED",
-                                    "old_status": row["status"],
-                                    "new_status": "FAILED",
-                                    "details": {
-                                        "error": message,
-                                        "attempt_id": row["id"],
-                                        "job_id": row["slurm_job_id"],
-                                        "slurm_state": state,
-                                        "exit_code": record.get("ExitCode"),
-                                        "process_status": "SUCCEEDED",
-                                        "checkpoint_globs": checkpoint_globs,
-                                    },
-                                },
-                            )
-                            self._finish_tracking(row["run_id"], "FAILED")
-                            updated += 1
-                            continue
-                    self.database.transition_workflow_state(
-                        attempt_id=row["id"],
-                        attempt_updates=attempt_success_updates,
-                        stage_id=row["stage_id"],
-                        stage_updates={"status": "SUCCEEDED", "completed_at": finished},
-                        run_id=None if is_evaluation_stage else row["run_id"],
-                        run_updates=None if is_evaluation_stage else {"status": "SUCCEEDED", "completed_at": finished},
-                    )
-                    if not is_evaluation_stage:
-                        self._ingest_training_progress(self.database.get_run(row["run_id"]) or {})
-                        self._finish_tracking(row["run_id"], "FINISHED")
-                    updated += 1
-                    continue
-                if (
-                    not cancellation_requested
-                    and state in TRANSIENT_STATES
-                    and row["auto_resume"]
-                    and row["budget_attempt_count"] < row["max_attempts"]
-                ):
-                    finished = accounting_finished or utc_now()
-                    self.database.transition_workflow_state(
-                        attempt_id=row["id"],
-                        attempt_updates={
-                            "status": state,
-                            "started_at": row["started_at"] or accounting_started or row["submitted_at"] or finished,
-                            "finished_at": finished,
-                            **common,
-                        },
-                        stage_id=row["stage_id"],
-                        stage_updates={"status": "RETRY_PENDING", "completed_at": None},
-                        run_id=None if is_evaluation_stage else row["run_id"],
-                        run_updates=None if is_evaluation_stage else {"status": "RETRY_PENDING", "completed_at": None},
-                        evaluation_id=evaluation["id"] if evaluation else None,
-                        evaluation_updates={"status": "RETRY_PENDING", "completed_at": None}
-                        if evaluation else None,
-                        event={
-                            "entity_type": "evaluation" if evaluation else "run",
-                            "entity_id": evaluation["id"] if evaluation else row["run_id"],
-                            "event_type": "AUTO_RESUME_QUEUED",
-                            "old_status": state,
-                            "new_status": "RETRY_PENDING",
-                            "details": {"attempt": row["attempt_number"], "job_id": row["slurm_job_id"]},
-                        },
-                    )
-                    updated += 1
-                    continue
-                if state in TRANSIENT_STATES | TERMINAL_FAILURE_STATES | {"CANCELLED"}:
-                    finished = accounting_finished or utc_now()
-                    target_status = (
-                        "CANCELLED"
-                        if cancellation_requested or state == "CANCELLED"
-                        else "FAILED"
-                    )
-                    event_details = {
-                                "attempt_id": row["id"],
-                                "job_id": row["slurm_job_id"],
-                                "state": state,
-                                "state_raw": raw_state,
-                                "cancelled_by": record.get("CancelledBy"),
-                                "reason": reason,
-                                "accounting_start_raw": record.get("Start"),
-                                "accounting_end_raw": record.get("End"),
-                                "started_at": row["started_at"] or accounting_started,
+                    if (
+                        not cancellation_requested
+                        and state in TRANSIENT_STATES
+                        and row["auto_resume"]
+                        and row["budget_attempt_count"] < row["max_attempts"]
+                    ):
+                        finished = accounting_finished or utc_now()
+                        self.database.transition_workflow_state(
+                            attempt_id=row["id"],
+                            attempt_updates={
+                                "status": state,
+                                "started_at": row["started_at"] or accounting_started or row["submitted_at"] or finished,
                                 "finished_at": finished,
-                                "exit_code": record.get("ExitCode"),
-                                "node_list": record.get("NodeList"),
-                    }
-                    self.database.transition_workflow_state(
-                        attempt_id=row["id"],
-                        attempt_updates={
-                            "status": target_status if cancellation_requested else state,
-                            "started_at": row["started_at"] or accounting_started or row["submitted_at"] or finished,
-                            "finished_at": finished,
-                            **common,
-                        },
-                        stage_id=row["stage_id"],
-                        stage_updates={"status": target_status, "completed_at": finished},
-                        run_id=None if is_evaluation_stage else row["run_id"],
-                        run_updates=None if is_evaluation_stage else {
-                            "status": target_status,
-                            "completed_at": finished,
-                        },
-                        evaluation_id=evaluation["id"] if evaluation else None,
-                        evaluation_updates={"status": target_status, "completed_at": finished}
-                        if evaluation else None,
-                        event={
-                            "entity_type": "evaluation" if evaluation else "run",
-                            "entity_id": evaluation["id"] if evaluation else row["run_id"],
-                            "event_type": "JOB_CANCELLED"
-                            if target_status == "CANCELLED"
-                            else "JOB_FAILED",
-                            "old_status": row["status"],
-                            "new_status": target_status,
-                            "details": event_details,
-                        },
-                    )
-                    if not is_evaluation_stage:
-                        self._finish_tracking(
-                            row["run_id"],
-                            "KILLED" if target_status == "CANCELLED" else "FAILED",
+                                **common,
+                            },
+                            stage_id=row["stage_id"],
+                            stage_updates={"status": "RETRY_PENDING", "completed_at": None},
+                            run_id=None if is_evaluation_stage else row["run_id"],
+                            run_updates=None if is_evaluation_stage else {"status": "RETRY_PENDING", "completed_at": None},
+                            evaluation_id=evaluation["id"] if evaluation else None,
+                            evaluation_updates={"status": "RETRY_PENDING", "completed_at": None}
+                            if evaluation else None,
+                            event={
+                                "entity_type": "evaluation" if evaluation else "run",
+                                "entity_id": evaluation["id"] if evaluation else row["run_id"],
+                                "event_type": "AUTO_RESUME_QUEUED",
+                                "old_status": state,
+                                "new_status": "RETRY_PENDING",
+                                "details": {"attempt": row["attempt_number"], "job_id": row["slurm_job_id"]},
+                            },
                         )
-                    updated += 1
+                        updated += 1
+                        continue
+                    if state in TRANSIENT_STATES | TERMINAL_FAILURE_STATES | {"CANCELLED"}:
+                        finished = accounting_finished or utc_now()
+                        target_status = (
+                            "CANCELLED"
+                            if cancellation_requested or state == "CANCELLED"
+                            else "FAILED"
+                        )
+                        event_details = {
+                                    "attempt_id": row["id"],
+                                    "job_id": row["slurm_job_id"],
+                                    "state": state,
+                                    "state_raw": str(record.get("StateRaw") or record["State"]).strip(),
+                                    "cancelled_by": record.get("CancelledBy"),
+                                    "reason": reason,
+                                    "accounting_start_raw": record.get("Start"),
+                                    "accounting_end_raw": record.get("End"),
+                                    "started_at": row["started_at"] or accounting_started,
+                                    "finished_at": finished,
+                                    "exit_code": record.get("ExitCode"),
+                                    "node_list": record.get("NodeList"),
+                                    "source": record.get("Source"),
+                        }
+                        self.database.transition_workflow_state(
+                            attempt_id=row["id"],
+                            attempt_updates={
+                                "status": target_status if cancellation_requested else state,
+                                "started_at": row["started_at"] or accounting_started or row["submitted_at"] or finished,
+                                "finished_at": finished,
+                                **common,
+                            },
+                            stage_id=row["stage_id"],
+                            stage_updates={"status": target_status, "completed_at": finished},
+                            run_id=None if is_evaluation_stage else row["run_id"],
+                            run_updates=None if is_evaluation_stage else {
+                                "status": target_status,
+                                "completed_at": finished,
+                            },
+                            evaluation_id=evaluation["id"] if evaluation else None,
+                            evaluation_updates={"status": target_status, "completed_at": finished}
+                            if evaluation else None,
+                            event={
+                                "entity_type": "evaluation" if evaluation else "run",
+                                "entity_id": evaluation["id"] if evaluation else row["run_id"],
+                                "event_type": "JOB_CANCELLED"
+                                if target_status == "CANCELLED"
+                                else "JOB_FAILED",
+                                "old_status": row["status"],
+                                "new_status": target_status,
+                                "details": event_details,
+                            },
+                        )
+                        updated += 1
             for experiment_id in experiments:
-                self._dispatch_experiment(experiment_id)
-                self._refresh_experiment_status(experiment_id)
+                if self._stop.is_set():
+                    break
+                with self._reconcile_lock:
+                    self._dispatch_experiment(experiment_id)
+                    self._refresh_experiment_status(experiment_id)
             return {
                 "ok": True,
                 "checked": len(rows),
@@ -7421,7 +7823,222 @@ class PipelineService:
                 "tracking_bindings_repaired": tracking_bindings_repaired,
             }
         finally:
-            self._reconcile_lock.release()
+            self._reconcile_scan_lock.release()
+
+    # Jobs the last scan found missing from the scheduler, and its condition then.
+    _forgotten_jobs: frozenset[str] = frozenset()
+    _scheduler_condition: str | None = None
+    # When each held job's evidence is read again; nothing new appears between scans.
+    _held_recheck: dict[str, float] | None = None
+
+    def _scheduler_statuses(self, rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """Scheduler records for the active attempts in ``rows``.
+
+        Accounting can be down and the controller forgets a finished job, so a job
+        that both have lost is settled from its own exit record. An unreachable
+        scheduler leaves every attempt as it is; dispatch still runs.
+        """
+        try:
+            snapshot = self.cluster.job_status_snapshot([row["slurm_job_id"] for row in rows])
+        except ClusterError as error:
+            self._note_scheduler_condition(f"Slurm cannot be queried ({error})")
+            self._forgotten_jobs = frozenset()
+            return {}
+        self._note_scheduler_condition(
+            f"Slurm accounting is unavailable ({snapshot.accounting_error}); using the live controller"
+            if snapshot.accounting_error else None
+        )
+        statuses = dict(snapshot.statuses)
+        if snapshot.controller_error is not None:
+            self._forgotten_jobs = frozenset()
+            return statuses
+        forgotten = frozenset(
+            str(row["slurm_job_id"]) for row in rows if str(row["slurm_job_id"]) not in statuses
+        )
+        # One scan can race a submission's first appearance; act on the second.
+        confirmed, self._forgotten_jobs = forgotten & self._forgotten_jobs, forgotten
+        if self._held_recheck is None:
+            self._held_recheck = {}
+        for job in set(self._held_recheck) - forgotten:
+            del self._held_recheck[job]
+        for row in rows:
+            if self._stop.is_set():
+                break
+            job = str(row["slurm_job_id"])
+            if job not in confirmed:
+                continue
+            cancelling = "CANCELLING" in {
+                str(row.get("status") or "").upper(), str(row.get("stage_status") or "").upper()}
+            if not cancelling and time.monotonic() < self._held_recheck.get(job, 0.0):
+                continue
+            record = self._forgotten_job_status(row, cancelling)
+            if record:
+                statuses[job] = record
+        return statuses
+
+    def _note_scheduler_condition(self, condition: str | None) -> None:
+        if condition == self._scheduler_condition:
+            return
+        logger = logging.getLogger(__name__)
+        if condition:
+            logger.warning("Job status is degraded: %s", sanitize(condition))
+        else:
+            logger.info("Job status is back to normal")
+        self._scheduler_condition = condition
+
+    def _forgotten_job_status(self, row: Mapping[str, Any], cancelling: bool) -> dict[str, Any] | None:
+        """A scheduler record for a job that neither accounting nor the controller describes.
+
+        The job's own exit record settles it. With none, a requested cancellation has
+        taken effect; otherwise the attempt is held and says why.
+        """
+        try:
+            record = self._exit_record_status(row)
+        except ClusterError:
+            return None  # Unreadable is not absent; the next scan reads it again.
+        if record:
+            return record
+        if cancelling:
+            return {"State": "CANCELLED", "StateRaw": "CANCELLED", "Reason": FORGOTTEN_JOB_CANCELLED,
+                    "Source": "absent"}
+        if row.get("slurm_reason") != FORGOTTEN_JOB_HELD:
+            self.database.update_job_attempt(row["id"], slurm_reason=FORGOTTEN_JOB_HELD)
+        self._held_recheck[str(row["slurm_job_id"])] = time.monotonic() + HELD_RECHECK_SECONDS
+        return None
+
+    def _exit_record_status(self, row: Mapping[str, Any]) -> dict[str, Any] | None:
+        """The scheduler record a finished job left in its own capsule, if it can be trusted.
+
+        A clean exit is a completion, which the normal path still validates against its
+        checkpoint or result. Any other exit is a failure of unknown Slurm cause. A gateway
+        that cannot read the capsule raises ClusterError.
+        """
+        capsule = f"{self._run_directory(row['run_id'])}/attempts/{row['slurm_job_id']}"
+        gateway = row.get("gateway") or "auto"
+        _, content = self.cluster.read_optional_file(f"{capsule}/final.json", gateway, max_bytes=65_536)
+        try:
+            receipt = json.loads(content) if content else None
+            finished = datetime.fromisoformat(receipt["finished_at"])
+            exit_code, restarts = receipt["exit_code"], receipt["restart_count"]
+            proven = (
+                receipt.get("schema_version") == 1
+                and str(receipt.get("job_id")) == str(row["slurm_job_id"])
+                and type(exit_code) is int and type(restarts) is int
+                # A requeued job keeps the record of its previous execution until it exits again.
+                and restarts >= int(row.get("restart_count") or 0)
+                and finished.tzinfo is not None
+            )
+        except (KeyError, TypeError, ValueError):
+            proven = False
+        if not proven:
+            return None
+        state = "COMPLETED" if exit_code == 0 else "FAILED"
+        record = {
+            "State": state, "StateRaw": state, "ExitCode": f"{exit_code}:0",
+            "Reason": EXIT_RECORD_REASON, "NodeList": receipt.get("node_list"),
+            "End": str(int(finished.timestamp())), "Restarts": str(restarts),
+            "Source": EXIT_RECORD_SOURCE,
+        }
+        # The exit record has no start time; the launch record of the same execution does.
+        _, manifest = self.cluster.read_optional_file(
+            f"{capsule}/system-manifest.json", gateway, max_bytes=1_000_000)
+        try:
+            started = datetime.fromisoformat(json.loads(manifest or "")["captured_at"])
+            if started.tzinfo is not None and started <= finished:
+                record["Start"] = str(int(started.timestamp()))
+        except (KeyError, TypeError, ValueError):
+            pass
+        return record
+
+    def reconcile_tracking(self) -> dict[str, Any]:
+        """Sync optional telemetry independently of scheduler state transitions.
+
+        Terminal runs with unfinished bindings are the durable work queue. A crash
+        after recording SUCCEEDED but before enqueueing finish_run is retried from
+        those persisted rows; no in-memory completion notification is required.
+        """
+        if not self._tracking_reconcile_lock.acquire(blocking=False):
+            return {"ok": True, "skipped": "already running"}
+        try:
+            with self.database.connection() as connection:
+                rows = [dict(row) for row in connection.execute(
+                    f"""
+                    SELECT DISTINCT ON (s.run_id)
+                           a.id, a.attempt_number, a.slurm_job_id, a.stage_id,
+                           s.run_id, s.stage_type,
+                           er.experiment_id, r.status AS run_status
+                    FROM job_attempts a
+                    JOIN workflow_stages s ON s.id = a.stage_id
+                    JOIN runs r ON r.id = s.run_id
+                    JOIN variants v ON v.id = r.variant_id
+                    JOIN experiment_revisions er ON er.id = v.experiment_revision_id
+                    WHERE {visible_sql('job_attempts', 'a')}
+                      AND a.slurm_job_id IS NOT NULL AND s.stage_type = 'TRAIN'
+                      AND (
+                        r.status IN ('SUBMITTED','PENDING','RUNNING','RETRY_PENDING','CANCELLING')
+                        OR (r.status IN ('SUCCEEDED','FAILED','CANCELLED') AND (
+                            EXISTS (
+                                SELECT 1 FROM tracking_bindings b
+                                WHERE b.scope_type='run' AND b.scope_id=r.id
+                                  AND b.status <> 'BLOCKED'
+                                  AND (b.status <> CASE r.status
+                                      WHEN 'SUCCEEDED' THEN 'FINISHED'
+                                      WHEN 'CANCELLED' THEN 'KILLED' ELSE 'FAILED' END
+                                      OR (b.provider='wandb' AND COALESCE(
+                                          b.metadata_json::jsonb ->> 'terminal_sync_protocol', '') <> '{WANDB_TERMINAL_SYNC_PROTOCOL}'))
+                            ) OR EXISTS (
+                                SELECT 1 FROM jsonb_array_elements(
+                                    CASE WHEN jsonb_array_length(COALESCE(
+                                        v.resolved_spec_json::jsonb #> '{{tracking,providers}}', '[]'::jsonb)) > 0
+                                    THEN v.resolved_spec_json::jsonb #> '{{tracking,providers}}'
+                                    WHEN NULLIF(v.resolved_spec_json::jsonb #>> '{{tracking,mlflow_tracking_uri}}', '') IS NOT NULL
+                                    THEN '[{{"provider":"mlflow","enabled":true}}]'::jsonb
+                                    ELSE '[]'::jsonb END
+                                ) AS requested(value)
+                                WHERE COALESCE((requested.value ->> 'enabled')::boolean, true)
+                                  AND NOT EXISTS (
+                                      SELECT 1 FROM tracking_bindings b
+                                      WHERE b.scope_type='run' AND b.scope_id=r.id
+                                        AND b.provider=(requested.value ->> 'provider')
+                                  )
+                            )
+                        ))
+                      )
+                    ORDER BY s.run_id, a.attempt_number DESC
+                    """
+                ).fetchall()]
+            repaired = self._repair_missing_active_tracking_bindings(rows)
+            synced = 0
+            for row in rows:
+                if self._stop.is_set():
+                    break
+                run_id = str(row["run_id"])
+                try:
+                    run = self.database.get_run(run_id, execution_stage_ids=[row["stage_id"]])
+                    if not run:
+                        continue
+                    self._ingest_training_progress(run, raise_on_error=run["status"] == "SUCCEEDED")
+                    status = {"SUCCEEDED": "FINISHED", "FAILED": "FAILED", "CANCELLED": "KILLED"}.get(run["status"])
+                    if status:
+                        spec = ExperimentSpec.model_validate(run["resolved_spec_json"])
+                        bindings = {binding["provider"]: binding for binding in self.database.list_tracking_bindings("run", run_id)}
+                        pending = [provider for provider in self._active_tracking_providers(spec)
+                                   if self._tracking_terminal_pending(
+                                       bindings.get(str(self._tracking_provider_value(provider, "provider")), {}),
+                                       status, str(self._tracking_provider_value(provider, "provider")))]
+                        if pending:
+                            self._sync_tracking_outputs(run_id, status=status, providers=pending)
+                    else:
+                        sync_gpu_statistics(self, run, LOCAL_CAPSULE_ROOT)
+                        self._publish_training_progress_tracking(run_id)
+                    synced += 1
+                except Exception:
+                    # Persisted run/binding state remains eligible for the next pass.
+                    logging.getLogger(__name__).exception("Run tracking reconciliation failed: %s", run_id)
+            self.flush_tracking()
+            return {"ok": True, "synced": synced, "tracking_bindings_repaired": repaired}
+        finally:
+            self._tracking_reconcile_lock.release()
 
     def _sync_attempt_restart_counts(
         self, attempts: list[dict[str, Any]], statuses: Mapping[str, Mapping[str, Any]]
@@ -7441,16 +8058,25 @@ class PipelineService:
             attempt.update(updates)
 
     def _dispatch_active_experiments(self) -> None:
-        for experiment in self.database.list_experiments(status="ACTIVE", limit=1000):
-            self._dispatch_experiment(experiment["id"])
-            self._refresh_experiment_status(experiment["id"])
+        with self.database.connection() as connection:
+            experiments = connection.execute(
+                f"SELECT id FROM experiments WHERE status='ACTIVE' AND {visible_sql('experiments', '')} LIMIT 1000"
+            ).fetchall()
+        for experiment in experiments:
+            if self._stop.is_set():
+                break
+            with self._reconcile_lock:
+                self._dispatch_experiment(experiment["id"])
+                self._refresh_experiment_status(experiment["id"])
 
     def _refresh_experiment_status(self, experiment_id: str) -> None:
-        experiment = self.database.get_experiment(experiment_id)
-        revision = experiment["latest_revision"] if experiment else None
-        runs = self.database.list_runs(
-            experiment_revision_id=revision["id"], limit=10000
-        ) if revision else []
+        with self.database.connection() as connection:
+            runs = connection.execute(
+                f"""SELECT r.status FROM runs r JOIN variants v ON v.id=r.variant_id
+                WHERE v.experiment_revision_id=(SELECT id FROM experiment_revisions
+                    WHERE experiment_id=? ORDER BY revision_number DESC LIMIT 1)
+                  AND {visible_sql('runs', 'r')}""", (experiment_id,),
+            ).fetchall()
         states = {run["status"] for run in runs}
         if not runs or states <= {"DRAFT"}:
             self.database.update_experiment(experiment_id, status="DRAFT")
@@ -7493,10 +8119,14 @@ class PipelineService:
     ) -> dict[str, Any] | None:
         path = f"{self._run_directory(run_id)}/checkpoints/selected-for-inference.json"
         try:
-            _, content = self.cluster.read_log(path, gateway, lines=100)
-        except ClusterError as error:
+            _, content = self.cluster.read_optional_file(path, gateway, max_bytes=1_000_000)
+        except ClusterError:
             if required:
-                raise RuntimeError(f"required inference checkpoint descriptor is unavailable: {error}") from error
+                raise  # Unreadable is not absent: the caller reads again later.
+            return None
+        if content is None:
+            if required:
+                raise RuntimeError("required inference checkpoint descriptor is missing")
             return None
         try:
             payload = json.loads(content)
@@ -7575,14 +8205,12 @@ class PipelineService:
             _, probe = self.cluster.run_with_fallback(
                 "if test -e "
                 + shlex.quote(checkpoint_path)
-                + "; then printf '%s' SKYNET_CHECKPOINT_PRESENT; else exit 44; fi",
+                + "; then printf '%s' SKYNET_CHECKPOINT_PRESENT; else printf '%s' SKYNET_CHECKPOINT_MISSING; fi",
                 gateway,
             )
-        except ClusterError as error:
+        except ClusterError:
             if required:
-                raise RuntimeError(
-                    f"required inference checkpoint target is unavailable: {error}"
-                ) from error
+                raise  # Unreadable is not absent: the caller probes again later.
             return None
         if "SKYNET_CHECKPOINT_PRESENT" not in probe:
             if required:
@@ -7593,6 +8221,7 @@ class PipelineService:
                 run_id,
                 produced_by_attempt_id=attempt_id,
                 checkpoint_type="INFERENCE",
+                training_step=_checkpoint_training_step(payload.get("training_step")),
                 path=checkpoint_path,
                 sha256=checkpoint_sha256.lower(),
                 size_bytes=size_bytes,
@@ -7606,19 +8235,18 @@ class PipelineService:
             return None
 
     def _evaluation_for_stage(self, run_id: str, stage_id: str) -> dict[str, Any] | None:
-        return next(
-            (
-                evaluation
-                for evaluation in self.database.list_evaluations(run_id=run_id)
-                if evaluation.get("stage_id") == stage_id
-            ),
-            None,
-        )
+        # Internal lifecycle operations need the ledger identity, not the UI's
+        # enriched dataset/capsule context for every evaluation of this run.
+        with self.database.connection() as connection:
+            return self.database._decode(connection.execute(
+                f"SELECT * FROM evaluations WHERE run_id=? AND stage_id=? AND {visible_sql('evaluations', '')}",
+                (run_id, stage_id),
+            ).fetchone())
 
     def _queue_list_progress_refresh(self, kind: str, records: list[dict[str, Any]]) -> bool:
         """Keep optional remote progress reads off the list response path."""
         now = __import__("time").monotonic()
-        active_states = _PROGRESS_RUNNING_STATES if kind == "training" else {"PENDING", "SUBMITTED", "RUNNING"}
+        active_states = _PROGRESS_RUNNING_STATES if kind == "training" else {"RUNNING"}
         eligible = active_states | (_PROGRESS_SUCCESS_STATES | _PROGRESS_FAILURE_STATES if kind == "training" else set())
         keys = {(kind, str(record["id"])) for record in records}
         with self._progress_refresh_lock:
@@ -7673,7 +8301,7 @@ class PipelineService:
                     self._progress_refresh_inflight.discard(key)
                     self._progress_refresh_due[key] = __import__("time").monotonic() + (4 if priority == 0 else 60)
 
-    def _ingest_training_progress(self, value: Mapping[str, Any]) -> int:
+    def _ingest_training_progress(self, value: Mapping[str, Any], *, raise_on_error: bool = False) -> int:
         status = str(value.get("status") or value.get("state") or "").upper()
         terminal_states = _PROGRESS_SUCCESS_STATES | _PROGRESS_FAILURE_STATES
         if status not in _PROGRESS_RUNNING_STATES | terminal_states:
@@ -7717,6 +8345,22 @@ class PipelineService:
         )
         if not isinstance(path, str) or not path:
             return 0
+        restart_count = _progress_integer(attempt.get("restart_count")) or 0
+        execution_boundary = None
+        if jsonl and attempt.get("slurm_job_id") and run.get("run_directory"):
+            job_id = str(attempt["slurm_job_id"])
+            if not re.fullmatch(r"\d+(?:_[0-9]+)?", job_id):
+                raise ValueError("Invalid training progress Slurm job id")
+            execution_boundary = {
+                "boundary_path": str(PurePosixPath(run["run_directory"]) / "attempts" / job_id
+                                     / "state" / f"training-progress-start-{restart_count}.json"),
+                "job_id": job_id,
+                "restart_count": restart_count,
+                # Old first attempts predate launch receipts and have no previous
+                # execution's log. Resumes require a proven launch boundary.
+                "required": restart_count > 0 or len(attempts) > 1
+                            or (_progress_integer(attempt.get("attempt_number")) or 1) > 1,
+            }
         throttle_key = f"{run['id']}:{attempt_id}"
         final_key = (throttle_key, attempt.get("restart_count"), attempt.get("finished_at"))
         final_reads = getattr(self, "_training_progress_final_reads", set())
@@ -7726,6 +8370,8 @@ class PipelineService:
         last_reads = getattr(self, "_training_progress_last_reads", {})
         final_failures = getattr(self, "_training_progress_final_failures", {})
         if final_read and monotonic_now < final_failures.get(final_key, 0):
+            if raise_on_error:
+                raise ClusterError("Final training progress is awaiting a read retry")
             return 0
         if not final_read and monotonic_now - float(last_reads.get(throttle_key, 0.0)) < source.poll_seconds:
             return 0
@@ -7738,18 +8384,27 @@ class PipelineService:
                 lines=source.tail_lines,
                 max_bytes=1_000_000,
                 **({"contains": json.dumps(source.required_key)} if jsonl else {}),
+                **({"execution_boundary": execution_boundary} if execution_boundary else {}),
             )
-        except ClusterError:
+        except ClusterError as error:
+            ended = _progress_timestamp(attempt.get("finished_at"))
+            if (final_read and BOUNDARY_NOT_READY in str(error)
+                    and ended is not None and datetime.now(timezone.utc) - ended >= RESULT_READ_GRACE):
+                # The launcher publishes the boundary before it starts the trainer. An
+                # execution that ended without one left no row that is provably its own.
+                logging.getLogger(__name__).warning(
+                    "Run %s: the execution that ended at %s published no training progress "
+                    "boundary; its progress is final with no new rows", run["id"], attempt.get("finished_at"))
+                final_reads.add(final_key)
+                self._training_progress_final_reads = final_reads
+                final_failures.pop(final_key, None)
+                return 0
             if final_read:
                 final_failures[final_key] = __import__("time").monotonic() + 60
                 self._training_progress_final_failures = final_failures
+            if raise_on_error:
+                raise
             return 0
-        if final_read:
-            # Terminal structured logs are stable. Bypass the live poll throttle once,
-            # so short jobs and their final epoch reach both the UI and tracking.
-            final_reads.add(final_key)
-            self._training_progress_final_reads = final_reads
-            final_failures.pop(final_key, None)
         records = parse_declared_training_progress(
             content, contract, resolved_spec=run.get("resolved_spec_json")
         )
@@ -7757,6 +8412,16 @@ class PipelineService:
         if expected_total is not None:
             records = [record for record in records if record["total"] == expected_total]
         if not records:
+            if final_read and attempt_status in _PROGRESS_SUCCESS_STATES:
+                # An empty/temporarily unavailable tail is not completion evidence.
+                final_failures[final_key] = __import__("time").monotonic() + 60
+                self._training_progress_final_failures = final_failures
+                if raise_on_error:
+                    raise ClusterError("Successful training has no valid final progress evidence yet")
+            elif final_read:
+                final_reads.add(final_key)
+                self._training_progress_final_reads = final_reads
+                final_failures.pop(final_key, None)
             return 0
 
         segment: list[dict[str, Any]] = []
@@ -7779,7 +8444,6 @@ class PipelineService:
         ):
             candidates.insert(0, segment[0])
 
-        restart_count = _progress_integer(attempt.get("restart_count")) or 0
         samples = self.database.list_training_progress_samples(
             str(run["id"]), attempt_id=attempt_id
         )
@@ -7796,17 +8460,30 @@ class PipelineService:
         observed_now = datetime.now(timezone.utc)
         latest_elapsed = latest.get("elapsed_seconds")
         changed = 0
-        current_segment_started = reset_detected or any(
+        current_segment_started = execution_boundary is not None or reset_detected or any(
             completed <= candidates[0]["completed"] for completed in existing
         )
+
+        pending_samples: list[dict[str, Any]] = []
+
+        def enrich_metrics(sample: Mapping[str, Any], metrics: Mapping[str, Any]) -> int:
+            if sample.get("_pending"):
+                known = sample["evidence_json"].setdefault("metrics", {})
+                additions = {key: value for key, value in metrics.items() if key not in known}
+                known.update(additions)
+                return int(bool(additions))
+            # All persisted evidence was fetched above. Avoid a transaction for
+            # every unchanged row of an append-only tail on every progress poll.
+            known = (sample.get("evidence_json") or {}).get("metrics", {})
+            additions = {key: value for key, value in metrics.items() if key not in known}
+            return int(bool(additions) and self.database.enrich_training_progress_metrics(sample["id"], additions))
+
         for record in candidates:
             completed = int(record["completed"])
             if completed in existing:
                 current_segment_started = True
                 if jsonl:
-                    changed += self.database.enrich_training_progress_metrics(
-                        existing[completed]["id"], record["metrics"]
-                    )
+                    changed += enrich_metrics(existing[completed], record["metrics"])
                 continue
             if jsonl and not current_segment_started and completed in prior:
                 previous = prior[completed]
@@ -7817,18 +8494,14 @@ class PipelineService:
                 ):
                     # Append-only logs retain the previous execution's prefix.
                     # Enrich those observations instead of relabeling them as a restart.
-                    changed += self.database.enrich_training_progress_metrics(
-                        previous["id"], record["metrics"]
-                    )
+                    changed += enrich_metrics(previous, record["metrics"])
                     continue
             current_segment_started = True
             recorded_at = observed_now
             elapsed = record.get("elapsed_seconds")
             if latest_elapsed is not None and elapsed is not None and latest_elapsed >= elapsed:
                 recorded_at -= timedelta(seconds=latest_elapsed - elapsed)
-            sample = self.database.record_training_progress_sample(
-                str(run["id"]),
-                attempt_id,
+            sample = dict(
                 restart_count=restart_count,
                 completed=completed,
                 total=int(record["total"]),
@@ -7839,12 +8512,21 @@ class PipelineService:
                     "stream": "file" if jsonl else source.stream,
                     "path": path,
                     "elapsed_seconds": elapsed,
+                    **({"execution_boundary": execution_boundary["boundary_path"]}
+                       if execution_boundary else {}),
                     **({"metrics": record["metrics"]} if jsonl else {}),
                 },
                 recorded_at=_progress_iso(recorded_at),
             )
-            existing[completed] = sample
+            pending_samples.append(sample)
+            existing[completed] = {"_pending": True, "evidence_json": sample["evidence"]}
             changed += 1
+        self.database.record_training_progress_samples(str(run["id"]), attempt_id, pending_samples)
+        if final_read:
+            # Mark a terminal source consumed only after every sample is persisted.
+            final_reads.add(final_key)
+            self._training_progress_final_reads = final_reads
+            final_failures.pop(final_key, None)
         return changed
 
     @staticmethod
@@ -7880,6 +8562,7 @@ class PipelineService:
         *,
         providers: list[Any] | None = None,
         include_native: bool = False,
+        raise_on_error: bool = False,
     ) -> int:
         # Reconciliation and manual sync may overlap. Serialize the read/delta/
         # append sequence per run, including calls made by another service instance.
@@ -7887,7 +8570,7 @@ class PipelineService:
             lock = self._training_tracking_locks.setdefault((self.database.url is not None, run_id), self.database.operation_lock("training-metrics:" + run_id))
         with lock:
             return self._publish_training_progress_tracking_locked(
-                run_id, providers=providers, include_native=include_native
+                run_id, providers=providers, include_native=include_native, raise_on_error=raise_on_error
             )
 
     def _publish_training_progress_tracking_locked(
@@ -7896,10 +8579,11 @@ class PipelineService:
         *,
         providers: list[Any] | None = None,
         include_native: bool = False,
+        raise_on_error: bool = False,
     ) -> int:
         """Publish persisted progress samples without adapter-specific knowledge."""
 
-        run = self.database.get_run(run_id)
+        run = self.database.get_run(run_id, include_details=False)
         if not run:
             return 0
         try:
@@ -7935,11 +8619,14 @@ class PipelineService:
                 else:
                     raise ValueError(f"unsupported tracking provider: {name}")
                 if not bridge.binding(run_id):
+                    if raise_on_error:
+                        raise TrackingRequestError(f"{name} run binding is not ready for final metrics")
                     continue
                 emitted: dict[str, set[str]] = {}
                 for key, names in bridge.metric_names_by_idempotency_key().items():
                     sample_key = key.split(":metrics:", 1)[0]
                     emitted.setdefault(sample_key, set()).update(names)
+                pending_metrics: list[dict[str, Any]] = []
                 for sample in samples:
                     sample_id = str(sample.get("id") or "")
                     if not sample_id:
@@ -7958,23 +8645,26 @@ class PipelineService:
                         # Enriched samples append only previously omitted metrics,
                         # retaining their original step/time and existing curves.
                         idempotency_key += ":metrics:" + content_sha256(canonical_json(metrics))
-                    bridge.log_metrics(
-                        run_id,
-                        metrics,
-                        step=int(sample.get("completed") or 0),
-                        timestamp_ms=self._training_progress_timestamp_ms(
-                            sample.get("recorded_at")
-                        ),
-                        idempotency_key=idempotency_key,
-                    )
+                    pending_metrics.append({
+                        "metrics": metrics,
+                        "step": int(sample.get("completed") or 0),
+                        "timestamp_ms": self._training_progress_timestamp_ms(sample.get("recorded_at")),
+                        "idempotency_key": idempotency_key,
+                    })
                     emitted.setdefault(sample_key, set()).update(metrics)
                     published += 1
                 if name == "wandb":
-                    report = bridge.drain_spool()
+                    bridge.log_metrics_batch(run_id, pending_metrics)
+                    report = bridge.drain_spool(limit=100)
                     if report.errors:
                         raise TrackingRequestError(report.errors[0])
+                else:
+                    for sample in pending_metrics:
+                        bridge.log_metrics(run_id, **sample)
             except Exception as error:
                 self._tracking_failure(name, run, error)
+                if raise_on_error:
+                    raise
         return published
 
     def _set_evaluation_status(
@@ -7995,7 +8685,7 @@ class PipelineService:
 
     def _ingest_evaluation_progress(self, evaluation: Mapping[str, Any]) -> None:
         """Import changed canonical episode records while an evaluation is running."""
-        if evaluation.get("status") not in {"PENDING", "SUBMITTED", "RUNNING"}:
+        if evaluation.get("status") != "RUNNING":
             return
 
         # The list and detail endpoints can be polled together. Keep that from
@@ -8007,7 +8697,7 @@ class PipelineService:
         last_reads[evaluation["id"]] = now
         self._evaluation_progress_last_reads = last_reads
 
-        run = self.database.get_run(str(evaluation["run_id"]))
+        run = self.database.get_run(str(evaluation["run_id"]), execution_stage_ids=[evaluation["stage_id"]])
         if not run:
             return
         attempts = [
@@ -8159,12 +8849,16 @@ class PipelineService:
         evaluation = self._evaluation_for_stage(attempt["run_id"], attempt["stage_id"])
         if not evaluation:
             return "evaluation record is missing", 0
+        # Only a gateway that answers can say the result is missing; a failed
+        # read raises ClusterError and the caller reads again later.
+        _, content = self.cluster.read_optional_file(
+            evaluation["result_path"],
+            attempt["gateway"] or "auto",
+            max_bytes=20_000_000,
+        )
+        if content is None:
+            return "canonical result file is missing", 0
         try:
-            _, content = self.cluster.read_file(
-                evaluation["result_path"],
-                attempt["gateway"] or "auto",
-                max_bytes=20_000_000,
-            )
             result = CanonicalResult.model_validate_json(content)
             if result.run_id != attempt["run_id"]:
                 raise ValueError("canonical result run_id does not match the evaluated run")
@@ -8254,8 +8948,32 @@ class PipelineService:
                     )
                 except INTEGRITY_ERRORS:
                     pass
-            self._sync_tracking_outputs(str(attempt["run_id"]))
+            # Optional telemetry is reconciled by its independent worker. A
+            # busy GPU-metric lock or unavailable provider cannot invalidate a
+            # fully checked and persisted episode ledger.
+            run_id = str(attempt["run_id"])
+            run = self.database.get_run(run_id)
+            if run:
+                spec = ExperimentSpec.model_validate(run["resolved_spec_json"])
+                active = {
+                    str(self._tracking_provider_value(provider, "provider"))
+                    for provider in self._active_tracking_providers(spec)
+                }
+                for binding in self.database.list_tracking_bindings("run", run_id):
+                    if binding["provider"] not in active or binding["status"] == "BLOCKED":
+                        continue
+                    self.database.upsert_tracking_binding(
+                        binding["provider"], "run", run_id,
+                        remote_id=binding.get("remote_id"),
+                        remote_url=binding.get("remote_url"),
+                        status="QUEUED", metadata=binding.get("metadata_json") or {},
+                        last_error=binding.get("last_error"),
+                    )
             return None, len(result.episodes)
+        except INTEGRITY_ERRORS as error:
+            return sanitize(str(error)), 0
+        except (*DATABASE_ERRORS, ConnectionError):
+            raise  # The database failed, not the result: the caller ingests it again.
         except Exception as error:
             message = sanitize(str(error))
             return message, 0
@@ -8417,6 +9135,15 @@ class PipelineService:
                     })
         return dict(list(metrics.items())[:200]), links
 
+    @staticmethod
+    def _tracking_terminal_pending(binding: Mapping[str, Any], status: str, provider: str) -> bool:
+        if binding.get("status") == "BLOCKED":
+            return False
+        return (binding.get("status") != status or (
+            provider == "wandb" and
+            (binding.get("metadata_json") or {}).get("terminal_sync_protocol") != WANDB_TERMINAL_SYNC_PROTOCOL
+        ))
+
     def _sync_tracking_outputs(
         self,
         run_id: str,
@@ -8425,9 +9152,17 @@ class PipelineService:
         providers: list[Any] | None = None,
         central_authoritative: bool = False,
     ) -> None:
-        run = self.database.get_run(run_id)
+        # Evaluation stages can hold large immutable plans, and their attempts
+        # must never replace the training job identity in training telemetry.
+        with self.database.connection() as connection:
+            training_stage_ids = [row[0] for row in connection.execute(
+                "SELECT id FROM workflow_stages WHERE run_id=? AND stage_type='TRAIN'", (run_id,)
+            ).fetchall()]
+        run = self.database.get_run(run_id, execution_stage_ids=training_stage_ids)
         if not run:
             return
+        if status is None:
+            status = {"SUCCEEDED": "FINISHED", "FAILED": "FAILED", "CANCELLED": "KILLED"}.get(run["status"])
         spec = ExperimentSpec.model_validate(run["resolved_spec_json"])
         providers = (
             list(providers)
@@ -8441,7 +9176,7 @@ class PipelineService:
         )
         latest_job_id = ""
         for attempt in reversed(run.get("attempts") or []):
-            if attempt.get("slurm_job_id"):
+            if attempt.get("stage_id") in training_stage_ids and attempt.get("slurm_job_id"):
                 latest_job_id = str(attempt["slurm_job_id"])
                 break
         self._start_tracking(
@@ -8450,40 +9185,78 @@ class PipelineService:
             LOCAL_CAPSULE_ROOT / run_id,
             latest_job_id,
             providers=providers,
+            auto_flush=False,
         )
         self._publish_training_progress_tracking(
             run_id,
             providers=providers,
             include_native=central_authoritative,
+            raise_on_error=bool(status),
         )
-        sync_gpu_statistics(self, run, LOCAL_CAPSULE_ROOT, force=True)
+        sync_gpu_statistics(self, run, LOCAL_CAPSULE_ROOT, force=True, raise_on_error=run["status"] == "SUCCEEDED")
         metrics, links = self._final_tracking_payload(
-            self.database.get_run(run_id) or run
+            self.database.get_run(run_id, execution_stage_ids=training_stage_ids) or run
         )
+        final_key = f"final:{run_id}:{latest_job_id}:{status}" if status else None
         for provider in providers:
             name = str(self._tracking_provider_value(provider, "provider"))
             if name in native_providers:
-                # The repository process is the sole history/final-state writer for
-                # a declared native provider. The central bridge still owns the
-                # durable binding, tags, parameters, and app URL above.
+                # The trainer owns history and final state remotely. Only drain
+                # the central metadata queue here; never issue a second finish.
+                if status:
+                    try:
+                        if name == "wandb":
+                            bridge = self._wandb_bridge(LOCAL_CAPSULE_ROOT / run_id, replace(self._wandb_settings(provider), auto_flush=False))
+                        else:
+                            bridge = self._mlflow_bridge(LOCAL_CAPSULE_ROOT / run_id, replace(self._mlflow_settings(provider), auto_flush=False))
+                        report = bridge.drain_spool(limit=100)
+                        existing = next((item for item in self.database.list_tracking_bindings("run", run_id) if item["provider"] == name), {})
+                        self.database.upsert_tracking_binding(
+                            name, "run", run_id,
+                            remote_id=existing.get("remote_id"), remote_url=existing.get("remote_url"),
+                            status=status if not report.errors and report.remaining == 0 else "QUEUED",
+                            metadata={**(existing.get("metadata_json") or {}),
+                                      **({"terminal_sync_protocol": WANDB_TERMINAL_SYNC_PROTOCOL, "terminal_state_owner": "native"}
+                                         if name == "wandb" and not report.errors and report.remaining == 0 else {})},
+                            last_error=report.errors[0] if report.errors else None,
+                        )
+                    except Exception as error:
+                        self._tracking_failure(name, run, error)
                 continue
             try:
                 if name == "mlflow":
                     bridge: Any = self._mlflow_bridge(
-                        LOCAL_CAPSULE_ROOT / run_id, self._mlflow_settings(provider)
+                        LOCAL_CAPSULE_ROOT / run_id, replace(self._mlflow_settings(provider), auto_flush=False)
                     )
                 elif name == "wandb":
                     bridge = self._wandb_bridge(
-                        LOCAL_CAPSULE_ROOT / run_id, self._wandb_settings(provider)
+                        LOCAL_CAPSULE_ROOT / run_id, replace(self._wandb_settings(provider), auto_flush=False)
                     )
                 else:
                     raise ValueError(f"unsupported tracking provider: {name}")
-                bridge.drain_spool()
                 if metrics:
-                    bridge.log_metrics(run_id, metrics)
-                for link in links:
-                    bridge.log_artifact_link(run_id, **link)
-                result = bridge.finish_run(run_id, status=status) if status else None
+                    digest = ":metrics:" + content_sha256(canonical_json(metrics))
+                    # The key names the job that was latest when the run ended. The same final
+                    # metrics published earlier under another job are not a new history row.
+                    if not (final_key and any(
+                        key.startswith(f"final:{run_id}:") and key.endswith(digest)
+                        for key in bridge.metric_idempotency_keys()
+                    )):
+                        bridge.log_metrics(
+                            run_id, metrics, **({"idempotency_key": final_key + digest} if final_key else {}))
+                artifact_links = [{**link,
+                    **({"idempotency_key": final_key + ":artifact:" + content_sha256(canonical_json(link))} if final_key else {})}
+                    for link in links]
+                if name == "wandb":
+                    bridge.log_artifact_links(run_id, artifact_links)
+                else:
+                    for link in artifact_links:
+                        bridge.log_artifact_link(run_id, **link)
+                if status:
+                    bridge.finish_run(run_id, status=status, idempotency_key=final_key + (
+                        ":finish:file-stream-v1" if name == "wandb" else ":finish"))
+                report = bridge.drain_spool(limit=100)
+                delivered = not report.errors and report.remaining == 0
                 binding = bridge.binding(run_id)
                 existing = next(
                     (
@@ -8500,17 +9273,70 @@ class PipelineService:
                     remote_url=(binding or {}).get("url") or existing.get("remote_url"),
                     status=(
                         status or "CONNECTED"
-                        if not result or result.delivered
+                        if delivered
                         else "QUEUED"
                     ),
-                    metadata=existing.get("metadata_json") or {},
-                    last_error=result.error if result else None,
+                    metadata={**(existing.get("metadata_json") or {}),
+                              **({"terminal_sync_protocol": WANDB_TERMINAL_SYNC_PROTOCOL, "terminal_state_owner": "skynet"}
+                                 if name == "wandb" and status and delivered else {})},
+                    last_error=report.errors[0] if report.errors else None,
                 )
             except Exception as error:
                 self._tracking_failure(name, run, error)
 
     def _finish_tracking(self, run_id: str, status: str) -> None:
         self._sync_tracking_outputs(run_id, status=status)
+
+    def _recover_manual_resume_checkpoint(
+        self, run: Mapping[str, Any], stage: Mapping[str, Any],
+        pinned: Mapping[str, Any], gateway: str,
+    ) -> Mapping[str, Any] | None:
+        """Register verified runner evidence only during explicit manual resume.
+
+        Automatic retries already read latest.json directly. Missing receipts
+        permit initial replay; invalid or unavailable evidence must not.
+        """
+        plan = pinned["plan"]
+        request = {
+            "run_id": str(run["id"]), "root": str(self._run_directory(str(run["id"]))),
+            "contract": {
+                "candidate_globs": list(plan.get("checkpoint_globs") or []),
+                "candidate_kind": plan.get("checkpoint_candidate_kind", "any"),
+                "basename_regex": plan.get("checkpoint_basename_regex"),
+                "inference_required_globs": list(plan.get("checkpoint_inference_required_globs") or []),
+            },
+            "attempts": [
+                {"id": str(item["id"]), "job_id": str(item.get("slurm_job_id") or "")}
+                for item in _training_stage_attempts(run, stage)
+            ],
+        }
+        try:
+            _, output = self.cluster.run_with_fallback(
+                "python3 - " + shlex.quote(canonical_json(request))
+                + " # SKYNET_MANUAL_RESUME_CHECKPOINT", gateway,
+                stdin=_MANUAL_RESUME_CHECKPOINT_PROBE, timeout=900,
+            )
+            evidence = json.loads(output)
+        except (ClusterError, ValueError) as error:
+            raise ValueError(f"Cannot verify manual resume checkpoint: {sanitize(str(error))}") from error
+        if not isinstance(evidence, Mapping) or type(evidence.get("present")) is not bool:
+            raise ValueError("Invalid manual resume checkpoint verification response")
+        if not evidence["present"]:
+            return None
+        payload = evidence.get("receipt")
+        if not isinstance(payload, Mapping) or evidence.get("identity") != {
+            key: payload.get(key) for key in ("sha256", "size_bytes", "file_count", "is_directory")
+        }:
+            raise ValueError("Manual resume checkpoint verification is incomplete")
+        producer = evidence.get("producer")
+        if producer is not None and producer not in {item["id"] for item in request["attempts"]}:
+            raise ValueError("Manual resume checkpoint has an unknown producing attempt")
+        return self.database.create_checkpoint(
+            str(run["id"]), checkpoint_type="FULL_RESUME", path=payload["path"],
+            produced_by_attempt_id=producer, training_step=payload.get("training_step"),
+            sha256=payload["sha256"], size_bytes=payload["size_bytes"], is_resumable=True,
+            is_selected_for_inference=False, status="AVAILABLE", metadata=payload,
+        )
 
     def retry_run(self, run_id: str, mode: str, gateway: str) -> dict[str, Any]:
         if mode != "resume":
@@ -8530,6 +9356,8 @@ class PipelineService:
             pinned_stage, pinned_stage_error = _pinned_training_execution(
                 run, stage, prefer_initial_attempt=True
             )
+            if checkpoint is None and pinned_stage and (pinned_stage.get("plan") or {}).get("resume_argv"):
+                checkpoint = self._recover_manual_resume_checkpoint(run, stage, pinned_stage, gateway)
             can_resume_checkpoint = bool(
                 checkpoint
                 and pinned_stage
@@ -8665,7 +9493,7 @@ class PipelineService:
             raise
 
     def run_attempt_log(self, run_id: str, attempt_id: str, stream: str, lines: int) -> str:
-        run = self.database.get_run(run_id)
+        run = self.database.get_run(run_id, include_payloads=False)
         if not run:
             raise KeyError("Run not found")
         attempt = next(
@@ -8677,7 +9505,7 @@ class PipelineService:
         return self._read_attempt_log(attempt, stream, lines)
 
     def run_log(self, run_id: str, stream: str, lines: int) -> str:
-        run = self.database.get_run(run_id)
+        run = self.database.get_run(run_id, include_payloads=False)
         if not run:
             raise KeyError("Run not found")
         attempts = run["attempts"]
@@ -8758,6 +9586,103 @@ class PipelineService:
             run=run,
             stage=stage,
         )
+
+    def retry_evaluation_submission(self, evaluation_id: str, gateway: str) -> dict[str, Any]:
+        """Retry a frozen evaluation after verifying submission or terminal accounting."""
+        evaluation = self.database.get_evaluation(evaluation_id)
+        if not evaluation:
+            raise KeyError("Evaluation not found")
+        run = self.database.get_run(evaluation["run_id"], execution_stage_ids=[evaluation["stage_id"]])
+        action = self.evaluation_manual_actions(evaluation, run)["retry_submission"]
+        if not action["enabled"]:
+            raise ValueError(str(action["reason"]))
+        attempts = [a for a in run["attempts"] if a["stage_id"] == evaluation["stage_id"]]
+        latest = max(attempts, key=lambda a: a["attempt_number"])
+        selected_gateway = latest["gateway"] or gateway
+        recovered = None
+        job_id = latest.get("slurm_job_id")
+        if job_id:
+            # Accepted jobs require fresh terminal accounting. A stale FAILED
+            # database row is not permission to duplicate a live/requeued job.
+            snapshot = self.cluster.job_status_snapshot([str(job_id)], selected_gateway)
+            record = snapshot.statuses.get(str(job_id))
+            if record is None and snapshot.controller_error is None:
+                record = self._exit_record_status({**latest, "run_id": run["id"]})
+            state = str((record or {}).get("State") or "UNKNOWN").upper()
+            if state not in TRANSIENT_STATES | TERMINAL_FAILURE_STATES:
+                raise ValueError(f"Retry requires a confirmed failed Slurm job; {job_id} is {state}")
+        else:
+            # A failed lookup must never be interpreted as no Slurm receipt.
+            recovered = self.cluster.recover_submission(run["id"], latest["id"], selected_gateway)
+        with self._reconcile_lock:
+            current = self.database.get_evaluation(evaluation_id)
+            parent = self.database.get_run(run["id"], include_payloads=False)
+            current_attempts = [a for a in parent["attempts"] if a["stage_id"] == evaluation["stage_id"]]
+            newest = max(current_attempts, key=lambda a: a["attempt_number"])
+            action = self.evaluation_manual_actions(current, parent)["retry_submission"]
+            if not action["enabled"] or newest["id"] != latest["id"]:
+                return {"evaluation": current, "skipped": "Submission state changed while checking the receipt"}
+            transition = self.database.transition_workflow_state(
+                stage_id=evaluation["stage_id"],
+                stage_updates={"status": "SUBMITTING" if recovered else "RETRY_PENDING", "completed_at": None},
+                evaluation_id=evaluation_id,
+                evaluation_updates={"status": "SUBMITTING" if recovered else "RETRY_PENDING", "completed_at": None},
+                expected_stage_statuses=("FAILED",),
+                event={"entity_type": "evaluation", "entity_id": evaluation_id,
+                       "event_type": "EVALUATION_RUNTIME_RETRY_REQUESTED" if job_id else "EVALUATION_SUBMISSION_RETRY_REQUESTED", "old_status": "FAILED",
+                       "new_status": "SUBMITTING" if recovered else "RETRY_PENDING",
+                       "details": {"previous_attempt_id": latest["id"], "receipt_recovered": bool(recovered)}},
+            )
+            if transition.get("applied") is False:
+                return {"evaluation": self.database.get_evaluation(evaluation_id), "skipped": "Evaluation state changed"}
+            if recovered:
+                self._record_recovered_submission({**latest, "run_id": run["id"],
+                    "stage_type": "EVALUATE", "stage_status": "SUBMITTING",
+                    "evaluation_id": evaluation_id, "run_started_at": run.get("started_at")}, recovered)
+        if not recovered:
+            # Reuse the same stage, model, dataset, budget, and episode ledger.
+            self._submit_stage(run["id"], evaluation["stage_id"], selected_gateway)
+        return {"evaluation": self.database.get_evaluation(evaluation_id)}
+
+    def reread_evaluation_result(self, evaluation_id: str) -> dict[str, Any]:
+        """Validate and ingest result.json of a job that already succeeded.
+
+        No episode is rerun: the same canonical result file and checks as the
+        automatic completion path decide the outcome."""
+        evaluation = self.database.get_evaluation(evaluation_id)
+        if not evaluation:
+            raise KeyError("Evaluation not found")
+        stage_ids = [evaluation["stage_id"]]
+        run = self.database.get_run(evaluation["run_id"], execution_stage_ids=stage_ids)
+        action = self.evaluation_manual_actions(evaluation, run)["reread_result"]
+        if not action["enabled"]:
+            raise ValueError(str(action["reason"]))
+        with self._reconcile_lock:
+            current = self.database.get_evaluation(evaluation_id)
+            parent = self.database.get_run(run["id"], execution_stage_ids=stage_ids)
+            if not self.evaluation_manual_actions(current, parent)["reread_result"]["enabled"]:
+                return {"evaluation": current, "skipped": "Evaluation state changed"}
+            latest = max((a for a in parent["attempts"] if a["stage_id"] == evaluation["stage_id"]),
+                         key=lambda a: a["attempt_number"])
+            error, completed = self._ingest_evaluation_result({**latest, "run_id": parent["id"]})
+            if error:
+                raise ValueError(f"The evaluation result is still unreadable: {error}")
+            transition = self.database.transition_workflow_state(
+                stage_id=evaluation["stage_id"],
+                stage_updates={"status": "SUCCEEDED"},
+                evaluation_id=evaluation_id,
+                evaluation_updates={"status": "SUCCEEDED", "progress_completed": completed},
+                expected_stage_statuses=("FAILED",),
+                event={"entity_type": "evaluation", "entity_id": evaluation_id,
+                       "event_type": "EVALUATION_RESULT_REREAD", "old_status": "FAILED",
+                       "new_status": "SUCCEEDED",
+                       "details": {"attempt_id": latest["id"], "job_id": latest.get("slurm_job_id"),
+                                   "completed_episodes": completed}},
+            )
+            if transition.get("applied") is False:
+                return {"evaluation": self.database.get_evaluation(evaluation_id),
+                        "skipped": "Evaluation state changed"}
+        return {"evaluation": self.database.get_evaluation(evaluation_id)}
 
     def cancel_evaluation(self, evaluation_id: str) -> dict[str, Any]:
         evaluation = self.database.get_evaluation(evaluation_id)
@@ -8997,6 +9922,8 @@ class PipelineService:
         environment: str | None,
         tasks: list[str],
         run: Mapping[str, Any] | None = None,
+        target_dataset_id: str | None = None,
+        unseen_embodiment: bool = False,
     ) -> tuple[dict[str, Any] | None, str | None, list[str], dict[str, str]]:
         errors: dict[str, str] = {}
         normalized_suite_id = str(suite_id or "").strip()
@@ -9013,6 +9940,7 @@ class PipelineService:
             return None, None, [], errors
 
         try:
+            suite = attach_evaluation_target(self.database, suite, (run or {}).get("resolved_spec_json") or {}, target_dataset_id, unseen_embodiment)
             suite = bind_suite_to_dataset(suite, (run or {}).get("resolved_spec_json") or {})
         except ValueError as error:
             errors["tasks"] = str(error)
@@ -9123,6 +10051,11 @@ class PipelineService:
         compatibility["implementation_sha256"] = adapter_manifest_sha256(evaluator_manifest)
         if resources is not None:
             evaluator_document["resources"] = resources.model_dump(mode="json", by_alias=True)
+        # Each evaluation worker owns one GPU. Apply the cluster CPU policy
+        # before multiplying worker resources into the Slurm allocation.
+        evaluator_document["resources"] = ResourceSpec.model_validate(
+            evaluator_document["resources"]
+        ).with_gpu_cpu_policy(1).model_dump(mode="json", by_alias=True)
         # Evaluation uses its episode ledger, not the training checkpoint signal policy.
         evaluator_document["train"]["checkpoint"]["auto_resume"] = False
         worker_resources = copy.deepcopy(evaluator_document["resources"])
@@ -9144,6 +10077,7 @@ class PipelineService:
         suite_config = copy.deepcopy(suite["config_json"])
         context = {
             "schema_version": "skynet.evaluation-context/v1",
+            "execution_key": execution_key,
             "compatibility": compatibility,
             "run_id": run["id"],
             "checkpoint": {
@@ -9206,11 +10140,19 @@ class PipelineService:
                 },
             },
         }
+        if suite_config.get("target_dataset"):
+            from .simulation_profiles import freeze_target_simulation_profile
+            context["target_dataset"] = copy.deepcopy(suite_config["target_dataset"])
+            context["unseen_embodiment"] = bool(suite_config.get("unseen_embodiment"))
+            data_selection.assert_available(self.database, context["target_dataset"])
+            context["target_simulation_profile"] = freeze_target_simulation_profile(
+                self.database, self.cluster, context["target_dataset"], Path(__file__).resolve().parent.parent
+            )
         if suite_config.get("initial_state") == "single_training_episode":
             context["recorded_episode_sources"] = recorded_episode_sources(
                 self.database, self.cluster, training_document
             )
-        elif environment == "isaac_lab":
+        elif environment == "isaac_lab" and not context.get("target_dataset"):
             # A reference demonstration is independent of the simulator reset policy.
             # Only an unambiguous, verified single training recording is selected.
             try:
@@ -9253,6 +10195,9 @@ class PipelineService:
                 runtime=evaluator_spec.runtime.model_dump(mode="json"),
                 gpu_count=resolve_gpu_count(evaluator_spec, plan),
                 gpu_type=resolve_gpu_type(evaluator_spec, plan),
+                node_inventory=(self.cluster.node_names(evaluator_runtime_gateway)
+                                if placement_resources.node.mode == "auto"
+                                and not placement_resources.node.eligible_names else None),
             )
             evaluator_spec = evaluator_spec.model_copy(update={"resources": placed_resources})
             worker_resources["node"] = placed_resources.node.model_dump(mode="json")
@@ -9321,7 +10266,7 @@ class PipelineService:
         if not normalized_run_id:
             errors["run_id"] = "Training run ID is required."
         else:
-            run = self.database.get_run(normalized_run_id)
+            run = self.database.get_run(normalized_run_id, execution_stage_ids=[])
             if run is None:
                 errors["run_id"] = "Training run was not found."
 
@@ -9397,6 +10342,8 @@ class PipelineService:
         checkpoint_path: str | None,
         *,
         suite_id: str | None = None,
+        target_dataset_id: str | None = None,
+        unseen_embodiment: bool = False,
         environment: str | None = None,
         tasks: list[str] | None = None,
         episodes_per_task: int = 20,
@@ -9420,7 +10367,7 @@ class PipelineService:
 
         suite, resolved_environment, resolved_tasks, suite_errors = (
             self._resolve_evaluation_suite_selection(
-                suite_id, environment, list(tasks or []), run
+                suite_id, environment, list(tasks or []), run, target_dataset_id, unseen_embodiment
             )
         )
         suite_config = suite["config_json"] if suite is not None else {}
@@ -9457,6 +10404,8 @@ class PipelineService:
                     "run_id": run["id"],
                     "checkpoint_id": checkpoint["id"],
                     "suite_id": suite["id"],
+                    "target_dataset": suite_config.get("target_dataset"),
+                    "unseen_embodiment": suite_config.get("unseen_embodiment", False),
                     "tasks": resolved_tasks,
                     "seeds": list(seeds or [42]),
                     "resources": resources.model_dump(mode="json", by_alias=True) if resources else None,
@@ -9527,10 +10476,21 @@ class PipelineService:
         return validation
 
     def create_evaluation(self, request: EvaluationRequest) -> dict[str, Any]:
-        with self._reconcile_lock:
-            return self._create_evaluation(request)
+        evaluation = self._create_evaluation(request, dispatch=False)
+        if evaluation["status"] == "PENDING":
+            # The durable stage and complete ledger now exist. Submission owns
+            # the stage through claim_stage_and_create_job_attempt; SSH/Slurm
+            # acknowledgement must not hold the workspace-wide planning lock.
+            submission = self._submit_stage(evaluation["run_id"], evaluation["stage_id"], request.gateway)
+            refreshed = self.database.get_evaluation(evaluation["id"])
+            assert refreshed is not None
+            for key in ("blocker", "evaluator_implementation"):
+                refreshed[key] = evaluation[key]
+            refreshed["submission"] = submission
+            return refreshed
+        return evaluation
 
-    def _create_evaluation(self, request: EvaluationRequest) -> dict[str, Any]:
+    def _create_evaluation(self, request: EvaluationRequest, *, dispatch: bool = True) -> dict[str, Any]:
         target, run, checkpoint = self._resolve_evaluation_target(
             request.run_id, request.checkpoint_path
         )
@@ -9549,7 +10509,7 @@ class PipelineService:
             raise ValueError(busy_reason)
         suite, canonical_environment, tasks, suite_errors = (
             self._resolve_evaluation_suite_selection(
-                request.suite_id, request.environment, request.tasks, run
+                request.suite_id, request.environment, request.tasks, run, request.target_dataset_id, request.unseen_embodiment
             )
         )
         if suite_errors:
@@ -9568,18 +10528,9 @@ class PipelineService:
 
         checkpoint_id = checkpoint["id"]
         checkpoint_path = checkpoint["path"]
-        stage = self.database.create_stage(
-            run["id"],
-            stage_type="EVALUATE",
-            name=f"eval-{suite['name']}-{len(run['evaluations']) + 1}",
-            status="BLOCKED",
-            auto_resume=request.auto_resume,
-            max_attempts=request.max_attempts,
-            resolved_config={
-                "schema_version": "skynet.evaluation-stage/v1",
-                "blocker": "evaluation plan resolution is pending",
-            },
-        )
+        # Planning needs a stable output namespace, not a durable stage. A
+        # failed profile/plan must not leave an invisible target-data reference.
+        stage_id = new_id()
         (
             evaluator_spec,
             plan,
@@ -9597,7 +10548,7 @@ class PipelineService:
             episodes_per_task=request.episodes_per_task,
             parallelism=request.parallelism,
             headless=request.headless,
-            execution_key=stage["id"],
+            execution_key=stage_id,
             resources=request.resources,
             manual_argv=request.argv,
             manual_resume_argv=request.resume_argv,
@@ -9612,60 +10563,75 @@ class PipelineService:
         blocker_message = "; ".join(blockers) if blockers else None
         suite_snapshot = copy.deepcopy(context["suite"])
         checkpoint_snapshot = copy.deepcopy(context["checkpoint"])
-        stage = self.database.update_stage(
-            stage["id"],
-            status=status,
-            resolved_config_json={
-                "schema_version": "skynet.evaluation-stage/v1",
-                "training_adapter": training_adapter,
-                "evaluator_adapter": evaluator_adapter,
-                "suite": suite_snapshot,
-                "checkpoint": checkpoint_snapshot,
-                "context": context,
-                "context_sha256": canonical_sha256(context),
-                "spec": resolved_spec,
-                "spec_sha256": canonical_sha256(resolved_spec),
-                "plan": resolved_plan,
-                "plan_sha256": canonical_sha256(resolved_plan),
-                "plan_source": plan_source,
-                "argv": list(plan.argv),
-                "resume_argv": list(plan.resume_argv),
-                "checkpoint_path": checkpoint_path,
-                "suite_id": request.suite_id,
-                "environment": canonical_environment,
-                "tasks": tasks,
-                "task_selection": {
-                    "mode": suite_snapshot.get("task_selection_mode", "subset"),
-                    "reason": suite_snapshot.get("task_selection_reason", ""),
+        # Runtime/cluster probes above are read-only and must not serialize all
+        # workspace submissions. Revalidate mutable prerequisites immediately
+        # before publishing the stage and episode ledger under the lifecycle lock.
+        with self._reconcile_lock:
+            current_target, current_run, current_checkpoint = self._resolve_evaluation_target(
+                run["id"], checkpoint_path
+            )
+            if not current_target["run_valid"] or current_run is None:
+                raise ValueError("Training run changed while planning evaluation")
+            if not current_target["checkpoint_valid"] or current_checkpoint is None or current_checkpoint["id"] != checkpoint_id:
+                raise ValueError("Evaluation checkpoint changed while planning evaluation")
+            data_selection.assert_available(self.database, current_run)
+            busy_reason = _evaluation_busy_reason(current_run)
+            if busy_reason:
+                raise ValueError(busy_reason)
+            stage = self.database.create_stage(
+                run["id"],
+                stage_id=stage_id,
+                stage_type="EVALUATE",
+                name=f"eval-{suite['name']}-{stage_id}",
+                status=status,
+                auto_resume=request.auto_resume,
+                max_attempts=request.max_attempts,
+                resolved_config={
+                    "schema_version": "skynet.evaluation-stage/v1",
+                    "training_adapter": training_adapter,
+                    "evaluator_adapter": evaluator_adapter,
+                    "suite": suite_snapshot,
+                    "checkpoint": checkpoint_snapshot,
+                    "context": context,
+                    "context_sha256": canonical_sha256(context),
+                    "spec": resolved_spec,
+                    "spec_sha256": canonical_sha256(resolved_spec),
+                    "plan": resolved_plan,
+                    "plan_sha256": canonical_sha256(resolved_plan),
+                    "plan_source": plan_source,
+                    "argv": list(plan.argv),
+                    "resume_argv": list(plan.resume_argv),
+                    "checkpoint_path": checkpoint_path,
+                    "suite_id": request.suite_id,
+                    "environment": canonical_environment,
+                    "tasks": tasks,
+                    "task_selection": {
+                        "mode": suite_snapshot.get("task_selection_mode", "subset"),
+                        "reason": suite_snapshot.get("task_selection_reason", ""),
+                    },
+                    "parallelism": request.parallelism,
+                    "headless": request.headless,
+                    "blocker": blocker_message,
                 },
-                "parallelism": request.parallelism,
-                "headless": request.headless,
-                "blocker": blocker_message,
-            },
-        )
-        evaluation = self.database.create_evaluation(
-            run["id"],
-            stage_id=stage["id"],
-            checkpoint_id=checkpoint_id,
-            evaluation_suite_id=suite["id"],
-            evaluator_adapter=suite["evaluator_adapter"],
-            evaluator_version=suite["evaluator_version"],
-            suite_name=suite["name"],
-            suite_version=suite["suite_version"],
-            tasks=tasks,
-            seeds=request.seeds,
-            episodes_per_task=request.episodes_per_task,
-            status=status,
-            result_path=context["result_path"],
-        )
-        for task in tasks:
-            for seed in request.seeds:
-                for episode_index in range(request.episodes_per_task):
-                    self.database.upsert_evaluation_episode(
-                        evaluation["id"], task=task, seed=seed, episode_index=episode_index
-                    )
+            )
+            evaluation = self.database.create_evaluation(
+                run["id"],
+                stage_id=stage["id"],
+                checkpoint_id=checkpoint_id,
+                evaluation_suite_id=suite["id"],
+                evaluator_adapter=suite["evaluator_adapter"],
+                evaluator_version=suite["evaluator_version"],
+                suite_name=suite["name"],
+                suite_version=suite["suite_version"],
+                tasks=tasks,
+                seeds=request.seeds,
+                episodes_per_task=request.episodes_per_task,
+                status=status,
+                result_path=context["result_path"],
+            )
+            self.database.initialize_evaluation_episodes(evaluation["id"])
         submission = None
-        if status == "PENDING":
+        if status == "PENDING" and dispatch:
             submission = self._submit_stage(run["id"], stage["id"], request.gateway)
         evaluation = self.database.get_evaluation(evaluation["id"])
         assert evaluation is not None
@@ -9701,9 +10667,30 @@ def _http_error(error: Exception) -> HTTPException:
     return HTTPException(status_code=500, detail=str(error))
 
 
+def _display_payload(value, *, metadata=False):
+    """A screen projection, never an execution/validation input or stored receipt.
+
+    Full bodies remain available in the existing entity detail endpoints. Keep
+    manifest IDs/hashes so a summary always identifies its authoritative source.
+    """
+    if isinstance(value, list):
+        return [_display_payload(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result = {}
+    for key, item in value.items():
+        if key == "capsule_files" or (metadata and key == "shared_artifacts"):
+            continue
+        if metadata and key == "episodes" and isinstance(item, list):
+            result[key] = len(item)
+            continue
+        result[key] = _display_payload(item, metadata=key in {"metadata", "metadata_json"})
+    return result
+
+
 @router.get("/data/datasets")
 def list_datasets(include_archived: bool = Query(default=False)) -> dict[str, Any]:
-    return {"datasets": service.database.list_datasets(include_archived=include_archived)}
+    return {"datasets": _display_payload(service.database.list_datasets(include_archived=include_archived))}
 
 
 @router.get("/data/datasets/{version_id}")
@@ -9723,6 +10710,31 @@ def edit_dataset(version_id: str, request: DatasetEditRequest) -> dict[str, Any]
         raise _http_error(error) from error
 
 
+@router.get("/data/datasets/{version_id}/preview")
+def dataset_input_preview(version_id: str) -> dict[str, Any]:
+    from .dataset_previews import available_dataset, describe
+    try:
+        return describe(service.database, available_dataset(service.database, version_id))
+    except Exception as error:
+        raise _http_error(error) from error
+
+
+@router.get("/data/datasets/{version_id}/preview/episodes/{episode_index}/frames")
+def dataset_input_preview_frames(
+    version_id: str, episode_index: int,
+    start: int = Query(default=0, ge=0), count: int = Query(default=60, ge=1, le=120),
+    gateway: str = Query(default="auto"),
+):
+    from .dataset_previews import available_dataset, previews
+    from fastapi.responses import Response
+    try:
+        dataset = available_dataset(service.database, version_id)
+        payload = previews.frames(service.database, service.cluster, dataset, episode_index, start, count, gateway)
+        return Response(payload, media_type="application/json", headers={"Cache-Control": "private, no-store"})
+    except Exception as error:
+        raise _http_error(error) from error
+
+
 @router.get("/data/resources")
 def list_data_resources(
     category: str | None = Query(default=None, pattern=r"^(dataset|file)$"),
@@ -9734,14 +10746,14 @@ def list_data_resources(
 ) -> dict[str, Any]:
     return {
         "resource_types": RESOURCE_TYPES,
-        "resources": service.database.list_data_resources(
+        "resources": _display_payload(service.database.list_data_resources(
             category=category,
             provider=provider,
             namespace=namespace,
             kind=kind,
             include_archived=include_archived,
             include_versions=include_versions,
-        )
+        ))
     }
 
 
@@ -9863,19 +10875,11 @@ def get_data_import_log(
     return PlainTextResponse(content, headers={"X-Skynet-Gateway": gateway})
 
 
-@router.get("/data/versions/{version_id}")
-def get_data_resource_version(version_id: str) -> dict[str, Any]:
-    version = service.database.get_data_resource_version(version_id)
-    if version is None:
-        raise HTTPException(status_code=404, detail="Data resource version not found")
-    return {"version": version}
-
-
 @router.get("/data/derivations")
 def list_data_derivations(
     limit: int = Query(default=1000, ge=1, le=10000),
 ) -> dict[str, Any]:
-    return {"derivations": service.database.list_data_derivations(limit=limit)}
+    return {"derivations": _display_payload(service.database.list_data_derivations(limit=limit))}
 
 
 @router.post("/data/derivations", status_code=201)
@@ -9884,166 +10888,6 @@ def create_data_derivation(request: DataDerivationCreateRequest) -> dict[str, An
         payload = request.model_dump(mode="python")
         payload["inputs"] = [item.model_dump(mode="python") for item in request.inputs]
         return {"derivation": service.database.create_data_derivation(**payload)}
-    except Exception as error:
-        raise _http_error(error) from error
-
-
-@router.get("/data/derivations/{derivation_id}")
-def get_data_derivation(derivation_id: str) -> dict[str, Any]:
-    derivation = service.database.get_data_derivation(derivation_id)
-    if derivation is None:
-        raise HTTPException(status_code=404, detail="Data derivation not found")
-    return {"derivation": derivation}
-
-
-@router.get("/data/bundles")
-def list_data_bundles(
-    include_archived: bool = Query(default=False),
-) -> dict[str, Any]:
-    return {
-        "bundles": service.database.list_data_bundles(
-            include_archived=include_archived
-        )
-    }
-
-
-@router.post("/data/bundles", status_code=201)
-def create_data_bundle(request: DataBundleCreateRequest) -> dict[str, Any]:
-    try:
-        payload = request.model_dump(mode="python")
-        payload["assignments"] = [
-            item.model_dump(mode="python") for item in request.assignments
-        ]
-        return {"bundle": service.database.create_data_bundle(**payload)}
-    except Exception as error:
-        raise _http_error(error) from error
-
-
-@router.get("/data/bundles/{bundle_id}")
-def get_data_bundle(bundle_id: str) -> dict[str, Any]:
-    bundle = service.database.get_data_bundle(bundle_id)
-    if bundle is None:
-        raise HTTPException(status_code=404, detail="Data bundle not found")
-    return {"bundle": bundle}
-
-
-@router.get("/data/bundles/{bundle_id}/preview")
-def preview_data_bundle(
-    bundle_id: str,
-    gateway: str = Query(default="auto", min_length=1, max_length=64),
-) -> dict[str, Any]:
-    bundle = service.database.get_data_bundle(bundle_id)
-    if bundle is None:
-        raise HTTPException(status_code=404, detail="Data bundle not found")
-    try:
-        return {
-            "preview": build_data_bundle_preview(bundle, service.cluster, gateway)
-        }
-    except Exception as error:
-        raise _http_error(error) from error
-
-
-@router.get("/data/bundles/{bundle_id}/preview/media")
-def get_data_bundle_preview_media(
-    bundle_id: str,
-    request: Request,
-    role: str = Query(min_length=1, max_length=128),
-    position: int = Query(default=0, ge=0, le=10000),
-    path: str = Query(min_length=1, max_length=2048),
-    gateway: str = Query(default="auto", min_length=1, max_length=64),
-) -> StreamingResponse:
-    bundle = service.database.get_data_bundle(bundle_id)
-    if bundle is None:
-        raise HTTPException(status_code=404, detail="Data bundle not found")
-    try:
-        media_source = resolve_data_bundle_preview_media(
-            bundle,
-            service.cluster,
-            role=role,
-            position=position,
-            relative_path=path,
-            gateway=gateway,
-        )
-    except Exception as error:
-        raise _http_error(error) from error
-
-    if media_source["kind"] == "provider":
-        return RedirectResponse(
-            url=media_source["url"],
-            status_code=307,
-            headers={
-            "Cache-Control": "private, max-age=3600",
-            "X-Content-Type-Options": "nosniff",
-            },
-        )
-
-    host = media_source["host"]
-    media_path = media_source["path"]
-    media_type = media_source["media_type"]
-    try:
-        _, size = service.cluster.file_size(media_path, host)
-    except Exception as error:
-        raise _http_error(error) from error
-    if size < 1:
-        raise HTTPException(status_code=404, detail="Preview media file is empty")
-
-    start = 0
-    end = size - 1
-    partial = False
-    range_header = request.headers.get("range")
-    if range_header:
-        match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
-        if not match or (not match.group(1) and not match.group(2)):
-            raise HTTPException(
-                status_code=416,
-                detail="Unsupported media byte range",
-                headers={"Content-Range": f"bytes */{size}"},
-            )
-        if match.group(1):
-            start = int(match.group(1))
-            end = int(match.group(2)) if match.group(2) else size - 1
-            if start >= size or end < start:
-                raise HTTPException(
-                    status_code=416,
-                    detail="Media byte range is outside the file",
-                    headers={"Content-Range": f"bytes */{size}"},
-                )
-            end = min(end, size - 1)
-        else:
-            suffix_size = int(match.group(2))
-            if suffix_size < 1:
-                raise HTTPException(
-                    status_code=416,
-                    detail="Media suffix range must be positive",
-                    headers={"Content-Range": f"bytes */{size}"},
-                )
-            start = max(0, size - suffix_size)
-        partial = True
-
-    length = end - start + 1
-    headers = {
-        "Accept-Ranges": "bytes",
-        "Content-Length": str(length),
-        "Cache-Control": "private, max-age=3600",
-        "Content-Disposition": "inline",
-        "X-Content-Type-Options": "nosniff",
-    }
-    if partial:
-        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
-    return StreamingResponse(
-        service.cluster.stream_file_range(
-            media_path, host, start=start, end=end
-        ),
-        status_code=206 if partial else 200,
-        media_type=media_type,
-        headers=headers,
-    )
-
-
-@router.delete("/data/bundles/{bundle_id}")
-def archive_data_bundle(bundle_id: str) -> dict[str, Any]:
-    try:
-        return {"bundle": service.database.archive_data_bundle(bundle_id)}
     except Exception as error:
         raise _http_error(error) from error
 
@@ -10085,7 +10929,7 @@ def adapters(include_archived: bool = Query(default=False)) -> dict[str, Any]:
             "repository": version.get("repository_url") or row.get("repository_url"),
             "capabilities": capabilities,
         })
-    return {"adapters": records}
+    return {"adapters": _display_payload(records)}
 
 
 @router.post("/adapters")
@@ -10128,7 +10972,6 @@ def adapter_detail(
 
 
 @router.put("/adapters/{adapter_id}")
-@router.patch("/adapters/{adapter_id}")
 def edit_adapter(adapter_id: str, request: AdapterEditRequest) -> dict[str, Any]:
     try:
         manifest = AdapterManifest.model_validate(request.manifest)
@@ -10164,7 +11007,6 @@ def clone_adapter(adapter_id: str, request: AdapterCloneRequest) -> dict[str, An
 
 
 @router.delete("/adapters/{adapter_id}")
-@router.post("/adapters/{adapter_id}/archive")
 def archive_adapter(adapter_id: str) -> dict[str, Any]:
     try:
         return {"adapter": service.database.archive_adapter(adapter_id)}
@@ -10184,22 +11026,6 @@ def restore_adapter(adapter_id: str) -> dict[str, Any]:
 def validate_adapter(adapter_id: str, request: AdapterValidationRequest) -> dict[str, Any]:
     try:
         return service.validate_adapter_registry_entry(adapter_id, request)
-    except Exception as error:
-        raise _http_error(error) from error
-
-
-@router.get("/adapters/{adapter_id}/validations")
-def adapter_validations(
-    adapter_id: str,
-    version_number: int | None = Query(default=None, ge=1),
-    limit: int = Query(default=100, ge=1, le=1000),
-) -> dict[str, Any]:
-    try:
-        return {
-            "validations": service.database.list_adapter_validations(
-                adapter_id, version_number=version_number, limit=limit
-            )
-        }
     except Exception as error:
         raise _http_error(error) from error
 
@@ -10297,23 +11123,13 @@ def inspect_source(
         if adapter_version_id and not adapter_id:
             raise ValueError("adapter_version_id requires adapter_id")
         if adapter_id:
-            record = service.database.get_adapter(adapter_id, include_versions=True)
-            if not record:
-                raise ValueError(f"adapter was not found: {adapter_id}")
-            if adapter_version_id:
-                version = next(
-                    (
-                        item for item in record.get("versions", [])
-                        if str(item.get("id")) == adapter_version_id
-                    ),
-                    None,
+            version = service.database.get_adapter_version(
+                adapter_id, version_id=adapter_version_id,
+            )
+            if version is None:
+                raise ValueError(
+                    f"adapter version was not found: {adapter_id}@{adapter_version_id or 'latest'}"
                 )
-                if version is None:
-                    raise ValueError(
-                        f"adapter version was not found: {adapter_id}@{adapter_version_id}"
-                    )
-            else:
-                version = service._selected_version(record)
             try:
                 manifest = AdapterManifest.model_validate(version["manifest"])
             except (TypeError, ValueError) as error:
@@ -10426,38 +11242,17 @@ def inspect_source(
         raise _http_error(error) from error
 
 
-@router.get("/capabilities")
-def capabilities() -> dict[str, Any]:
-    return {
-        "adapter_manifest_schema": AdapterManifest.model_json_schema(),
-        "experiment_schema": ExperimentSpec.model_json_schema(by_alias=True),
-        "runtime_backends": ["uv", "conda", "apptainer", "existing"],
-        "runtime_profiles": CLUSTER.public_runtime_profiles(),
-        "cluster": {**CLUSTER.public_dict(), "paths": service.storage.public_paths()},
-        "safety": {"multi_node": False, "arbitrary_adapter_code": False, "readme_execution": False},
-    }
-
-
-@router.get("/runtime-profiles")
-def runtime_profiles(
-    gateway: str = Query(default="auto", min_length=1, max_length=64),
-    verify: bool = Query(default=False),
-) -> dict[str, Any]:
-    try:
-        return {"runtime_profiles": service.runtime_profiles(gateway, verify=verify)}
-    except Exception as error:
-        raise _http_error(error) from error
-
-
 @router.get("/evaluation-suites")
 def evaluation_suites(
     run_id: str | None = Query(default=None, min_length=1, max_length=128),
+    target_dataset_id: str | None = Query(default=None, min_length=1, max_length=128),
+    unseen_embodiment: bool = Query(default=False),
 ) -> dict[str, Any]:
     evaluator_manifest: AdapterManifest | None = None
     evaluator_identity: dict[str, Any] | None = None
     spec_document: dict[str, Any] | None = None
     if run_id is not None:
-        run = service.database.get_run(run_id)
+        run = service.database.get_run(run_id, execution_stage_ids=[])
         if run is None:
             raise HTTPException(status_code=404, detail="Training run was not found.")
         try:
@@ -10483,12 +11278,28 @@ def evaluation_suites(
     unavailable_suites = []
     checkpoint = next((c for c in (run.get("checkpoints", []) if run_id else [])
                        if c.get("is_selected_for_inference") and c.get("status") == "AVAILABLE" and not c.get("pruned_at")), None)
+    target_config = {}
+    target_error = None
+    if run_id is not None:
+        try:
+            target_config = attach_evaluation_target(service.database, {"config_json": {}},
+                spec_document or {}, target_dataset_id, unseen_embodiment)["config_json"]
+        except ValueError as error:
+            target_error = str(error)
     for original in service.database.list_evaluation_suites():
         row = original
         compatibility = None
         resolved_manifest = evaluator_manifest
         if run_id is not None:
+            row = copy.deepcopy(row)
+            row["config_json"].update(target_config)
+            if target_error:
+                # Resolve the same target once for the entire picker.
+                row["config_json"]["target_error"] = target_error
             compatibility, row = inspect_compatibility(spec_document or {}, evaluator_manifest, row, checkpoint)
+            if row["config_json"].get("target_error"):
+                compatibility.update(status="incompatible", label="Incompatible", ready=False)
+                compatibility["messages"].append(row["config_json"].pop("target_error"))
             resolved_manifest = compose_evaluator(spec_document or {}, evaluator_manifest, row)
             if compatibility["ready"] and row["config_json"].get("initial_state") == "single_training_episode":
                 try:
@@ -10507,6 +11318,7 @@ def evaluation_suites(
         allowed_gpu_types = sorted({node.gpu_type for node in placement.nodes.values()}) if placement else []
         suites.append({
             **row,
+            "config_json": {key: value for key, value in config.items() if key != "target_dataset"},
             "slug": row["id"],
             "can_delete": service.database.workspace_id in (None, "legacy"),
             "is_default": bool(compatibility and compatibility["ready"] and config.get("initial_state") == "single_training_episode"),
@@ -10514,6 +11326,8 @@ def evaluation_suites(
             "allowed_gpu_types": allowed_gpu_types if isaac_evaluation else None,
             "maximum_episodes_per_task": config.get("maximum_episodes_per_task"),
             "label": row["description"] or row["name"],
+            "requires_target_dataset": bool(evaluation_target_contract(spec_document or {})),
+            "target_dataset_contract": evaluation_target_contract(spec_document or {}),
             "evaluator": row["evaluator_adapter"], "version": row["suite_version"],
             "tasks": config.get("tasks", []), "task_options": config.get("task_options", []),
             "default_tasks": config.get("default_tasks", []),
@@ -10558,15 +11372,11 @@ def create_experiment(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
 def list_experiments() -> dict[str, Any]:
     records = service.database.list_experiments(limit=1000)
     dataset_links = service.database.dataset_preset_links()
+    datasets_by_experiment: dict[str, set[str]] = {}
+    for link in dataset_links:
+        datasets_by_experiment.setdefault(link["experiment_id"], set()).add(link["version_id"])
     for record in records:
-        record["dataset_ids"] = sorted({link["version_id"] for link in dataset_links
-                                        if link["experiment_id"] == record["id"]})
-        runs = service.database.list_runs(
-            experiment_revision_id=record["latest_revision_id"], limit=10000
-        )
-        record["run_count"] = len(runs)
-        record["variant_count"] = len({run["variant_id"] for run in runs})
-        record["adapter"] = runs[0]["adapter_name"] if runs else None
+        record["dataset_ids"] = sorted(datasets_by_experiment.get(record["id"], ()))
         record["revision_number"] = record["latest_revision_number"]
         record["locked"] = bool(record.get("latest_revision_submitted_at"))
         record["lifecycle"] = "SUBMITTED" if record["locked"] else "DRAFT"
@@ -11486,7 +12296,7 @@ def resolve_attempt_common_hyperparameters(
         },
     }
 @router.get("/runs/{run_id}")
-def get_run(run_id: str) -> dict[str, Any]:
+def get_run(run_id: str, include_payloads: bool = True) -> dict[str, Any]:
     run = service.database.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
@@ -11516,7 +12326,19 @@ def get_run(run_id: str) -> dict[str, Any]:
     run["evaluation_blocker"] = _evaluation_busy_reason(run)
     run["tracking_actions"] = service.run_tracking_actions(run)
     _attach_run_progress_summaries(service.database, [run])
-    return {"run": run}
+    if include_payloads:
+        return {"run": run}
+    display = _display_payload(run)
+    # These repeat the same pinned code/data in several forms; the UI consumes
+    # the derived attempt contract above and the top-level training snapshot.
+    for attempt in display.get("attempts", []):
+        snapshot = attempt.get("execution_snapshot_json") or {}
+        attempt["execution_snapshot_json"] = {
+            key: snapshot[key] for key in ("adapter", "resolved_spec", "schema_version") if key in snapshot
+        }
+    for stage in display.get("stages", []):
+        stage.pop("resolved_config_json", None)
+    return {"run": display}
 
 
 @router.post("/runs/{run_id}/tracking/{provider}/attach")
@@ -11600,7 +12422,7 @@ def get_evaluation(evaluation_id: str) -> dict[str, Any]:
     if not evaluation:
         raise HTTPException(status_code=404, detail="Evaluation not found")
     service._queue_list_progress_refresh("evaluation", [evaluation])
-    run = service.database.get_run(evaluation["run_id"])
+    run = service.database.get_run(evaluation["run_id"], include_payloads=False)
     evaluation["attempts"] = [
         attempt
         for attempt in (run["attempts"] if run else [])
@@ -11629,6 +12451,22 @@ def get_evaluation(evaluation_id: str) -> dict[str, Any]:
 def cancel_evaluation(evaluation_id: str) -> dict[str, Any]:
     try:
         return service.cancel_evaluation(evaluation_id)
+    except Exception as error:
+        raise _http_error(error) from error
+
+
+@router.post("/evaluations/{evaluation_id}/retry-submission")
+def retry_evaluation_submission(evaluation_id: str, request: GatewayRequest) -> dict[str, Any]:
+    try:
+        return service.retry_evaluation_submission(evaluation_id, request.gateway)
+    except Exception as error:
+        raise _http_error(error) from error
+
+
+@router.post("/evaluations/{evaluation_id}/reread-result")
+def reread_evaluation_result(evaluation_id: str) -> dict[str, Any]:
+    try:
+        return service.reread_evaluation_result(evaluation_id)
     except Exception as error:
         raise _http_error(error) from error
 
@@ -11696,7 +12534,7 @@ def get_evaluation_episode_log(
 
 @router.get("/data/selections")
 def get_training_data_selections():
-    return {"datasets": data_selection.choices(service.database)}
+    return {"datasets": _display_payload(data_selection.choices(service.database))}
 
 
 @router.get("/evaluations/{evaluation_id}/episodes/{episode_id}/viewer")
@@ -11707,11 +12545,14 @@ def get_evaluation_episode_viewer(evaluation_id: str, episode_id: str):
     episode = next((item for item in evaluation.get("episodes", []) if item["id"] == episode_id), None)
     if not episode:
         raise HTTPException(status_code=404, detail="Rollout not found")
-    run = service.database.get_run(evaluation["run_id"]) or {}
+    run = service.database.get_run(evaluation["run_id"], execution_stage_ids=[evaluation["stage_id"]]) or {}
     attempts = [a for a in run.get("attempts", []) if a.get("stage_id") == evaluation.get("stage_id")]
     gateway = (max(attempts, key=lambda a: a.get("attempt_number") or 0).get("gateway") if attempts else "auto") or "auto"
     spec = run.get("resolved_spec_json") or {}
-    robot = (dataset_metadata(spec).get("capture") or {}).get("robot")
+    stage = next((item for item in run.get("stages", []) if item.get("id") == evaluation.get("stage_id")), {})
+    target = ((stage.get("resolved_config_json") or {}).get("context") or {}).get("target_dataset")
+    metadata = target.get("metadata", {}) if target else dataset_metadata(spec)
+    robot = (metadata.get("capture") or {}).get("robot")
     missing = {"state": "UNAVAILABLE", "robot": robot,
                "detail": "This episode has no saved replay trace. Camera separation and keypoints are available for new recorded-simulator evaluations."}
     if not episode.get("video_path"):
@@ -11737,8 +12578,9 @@ def get_evaluation_episode_viewer(evaluation_id: str, episode_id: str):
         raise _http_error(error) from error
     try:
         from .rollout_preview import enrich_demonstration
-        viewer = enrich_demonstration(service.database, service.cluster, spec, viewer, gateway,
-                                      task=episode.get("task"), duration=(episode.get("episode_length") or 0) * float((dataset_metadata(spec).get("capture") or {}).get("step_dt", 0)))
+        if not target:
+            viewer = enrich_demonstration(service.database, service.cluster, spec, viewer, gateway,
+                                          task=episode.get("task"), duration=(episode.get("episode_length") or 0) * float((metadata.get("capture") or {}).get("step_dt", 0)))
     except (ValueError, OSError, ClusterError) as error:
         if viewer:
             viewer.setdefault("warnings", []).append("Demonstration could not be restored: " + str(error))
@@ -11862,6 +12704,8 @@ def validate_evaluation_target(
         request.run_id,
         request.checkpoint_path,
         suite_id=request.suite_id,
+        target_dataset_id=request.target_dataset_id,
+        unseen_embodiment=request.unseen_embodiment,
         environment=request.environment,
         tasks=request.tasks,
         episodes_per_task=request.episodes_per_task,
@@ -11883,21 +12727,12 @@ def create_evaluation(request: EvaluationRequest) -> dict[str, Any]:
         raise _http_error(error) from error
 
 
-@router.post("/reconcile")
-def reconcile() -> dict[str, Any]:
-    try:
-        return service.reconcile()
-    except Exception as error:
-        raise _http_error(error) from error
-
-
 @router.get("/tracking/connections")
 def list_tracking_connections() -> dict[str, Any]:
     return service.tracking_connections()
 
 
 @router.post("/tracking/connections/{provider}/connect")
-@router.post("/tracking/connections/{provider}", include_in_schema=False)
 def configure_tracking_connection(
     provider: str, request: TrackingConnectionRequest
 ) -> dict[str, Any]:
@@ -11919,11 +12754,6 @@ def disconnect_tracking_connection(provider: str) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail=str(error)) from error
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-
-
-@router.delete("/tracking/connections/{provider}", include_in_schema=False)
-def delete_tracking_connection(provider: str) -> dict[str, Any]:
-    return disconnect_tracking_connection(provider)
 
 
 @router.get("/settings")

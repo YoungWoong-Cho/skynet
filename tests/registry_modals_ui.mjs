@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {JSDOM} from 'jsdom';
-const w = new JSDOM(await readFile(new URL('../static/index.html', import.meta.url),'utf8'), {runScripts:'outside-only', pretendToBeVisual:true, url:'http://localhost:8080/?data_view=registry#data'}).window;
+import {indexHtml} from './index_page.cjs';
+const w = new JSDOM(indexHtml(), {runScripts:'outside-only', pretendToBeVisual:true, url:'http://localhost:8080/?data_view=registry#data'}).window;
 const observers=[]; const NativeObserver=w.MutationObserver;
 w.MutationObserver=class extends NativeObserver {constructor(callback){super(callback);observers.push(this);}};
 const el=id=>w.document.getElementById(id);

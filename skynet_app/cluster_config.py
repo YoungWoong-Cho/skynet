@@ -223,6 +223,7 @@ class DashboardProfile(ProfileModel):
 
 
 class ClusterDefaults(ProfileModel):
+    cpus_per_gpu: int = Field(default=8, ge=1)
     queue_policy: str
     gateway: str = "auto"
     runtime_backend: str = "auto"
@@ -293,6 +294,8 @@ class ClusterProfile(ProfileModel):
             raise ValueError("default queue policy is not configured")
         if self.defaults.gpu_type not in self.gpu_aliases:
             raise ValueError("default GPU type is not configured")
+        if self.defaults.gateway not in ("auto", *self.gateways):
+            raise ValueError("default gateway is not configured")
         if self.isaac_evaluation_placement:
             for node in self.isaac_evaluation_placement.nodes.values():
                 if not self.gpu_aliases.get(node.gpu_type):
@@ -399,6 +402,13 @@ def get_cluster_profile() -> ClusterProfile:
 
 
 CLUSTER = get_cluster_profile()
+
+
+def cpus_for_gpus(gpu_count: int) -> int:
+    """Workspace scheduling policy, independent of model or adapter defaults."""
+    if gpu_count < 1:
+        raise ValueError("GPU jobs require a positive resolved GPU count")
+    return CLUSTER.defaults.cpus_per_gpu * gpu_count
 
 
 __all__ = [

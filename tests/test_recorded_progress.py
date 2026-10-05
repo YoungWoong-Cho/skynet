@@ -172,7 +172,11 @@ def test_epoch_ingestion_and_wandb_publication_are_idempotent(tmp_path, monkeypa
     assert service._ingest_training_progress(db.get_run(run["id"])) == 20
     assert calls[0] == (
         "/cluster/run/artifacts/logs.json.txt",
-        {"lines": 1000, "max_bytes": 1_000_000, "contains": '"train_loss"'},
+        {"lines": 1000, "max_bytes": 1_000_000, "contains": '"train_loss"',
+         "execution_boundary": {
+             "boundary_path": "/cluster/run/attempts/1234/state/training-progress-start-0.json",
+             "job_id": "1234", "restart_count": 0, "required": True,
+         }},
     )
     service._training_progress_last_reads = {}
     assert service._ingest_training_progress(db.get_run(run["id"])) == 0

@@ -15,15 +15,13 @@ import time
 import uuid
 from typing import Any
 
-from psycopg import OperationalError, InterfaceError
-
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import MutableHeaders
 
-from .availability import unavailable_response
+from .availability import DATABASE_CONNECTION_ERRORS, outage, unavailable_response
 from .database import APP_ROOT, Database
 from .workspace_schema import LEGACY_WORKSPACE, normalize_email
 
@@ -102,6 +100,9 @@ class WorkspaceServices:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._notification_thread: threading.Thread | None = None
+        self._tracking_thread: threading.Thread | None = None
+        self._tracking_delivery_thread: threading.Thread | None = None
+        self.poll_interval = 15
 
     def for_workspace(self, identifier: str):
         with self._lock:
@@ -127,13 +128,26 @@ class WorkspaceServices:
         return getattr(self.current(), name)
 
     def start(self):
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, name="skynet-workspaces", daemon=True)
-        self._thread.start()
-        self._notification_thread = threading.Thread(target=self._notification_loop, name="skynet-notifications", daemon=True)
-        self._notification_thread.start()
+        with self._lock:
+            alive = any(thread and thread.is_alive() for thread in self._worker_threads())
+            if alive:
+                if self._stop.is_set():
+                    raise RuntimeError("Workspace workers have not stopped")
+                return
+            for service in self._services.values():
+                service.prepare_background_restart()
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._loop, name="skynet-workspaces", daemon=True)
+            self._thread.start()
+            self._notification_thread = threading.Thread(target=self._notification_loop, name="skynet-notifications", daemon=True)
+            self._notification_thread.start()
+            self._tracking_thread = threading.Thread(target=self._tracking_loop, name="skynet-workspace-tracking", daemon=True)
+            self._tracking_thread.start()
+            self._tracking_delivery_thread = threading.Thread(target=self._tracking_delivery_loop, name="skynet-workspace-tracking-delivery", daemon=True)
+            self._tracking_delivery_thread.start()
+
+    def _worker_threads(self):
+        return (self._thread, self._notification_thread, self._tracking_thread, self._tracking_delivery_thread)
 
     def _notification_loop(self):
         # Independent of cluster polling: Slack latency never delays job management.
@@ -158,31 +172,64 @@ class WorkspaceServices:
                     logging.getLogger(__name__).error("Slack dispatcher failed (%s)", type(error).__name__)
 
     def _loop(self):
-        while not self._stop.wait(15):
-            with self.system.database.connection() as connection:
-                identifiers = [row[0] for row in connection.execute("SELECT id FROM workspaces ORDER BY created_at")]
+        self._workspace_loop("reconcile")
+
+    def _tracking_loop(self):
+        self._workspace_loop("reconcile_tracking")
+
+    def _tracking_delivery_loop(self):
+        self._workspace_loop("flush_tracking")
+
+    def _workspace_loop(self, operation):
+        while not self._stop.wait(self.poll_interval):
+            try:
+                with self.system.database.connection() as connection:
+                    identifiers = [row[0] for row in connection.execute("SELECT id FROM workspaces ORDER BY created_at")]
+            except Exception as error:
+                logging.getLogger(__name__).error("Workspace discovery failed (%s)", type(error).__name__)
+                continue
             # The legacy workspace stays reconciled even before it is claimed.
             for identifier in identifiers:
                 if self._stop.is_set():
                     break
                 token = CURRENT_WORKSPACE.set(identifier)
                 try:
-                    self.for_workspace(identifier).reconcile()
+                    getattr(self.for_workspace(identifier), operation)()
                 except Exception:
-                    logging.getLogger(__name__).exception("Workspace reconciliation failed: %s", identifier)
+                    logging.getLogger(__name__).exception("Workspace %s failed: %s", operation, identifier)
                 finally:
                     CURRENT_WORKSPACE.reset(token)
 
-    def stop(self):
+    def request_stop(self):
         self._stop.set()
-        if self._thread:
-            self._thread.join(timeout=5)
-        if self._notification_thread:
-            self._notification_thread.join(timeout=6)
         with self._lock:
             services = list(self._services.values())
+        failures = []
         for service in services:
-            service.stop()
+            try:
+                service.request_stop()
+            except Exception as error:
+                failures.append(error)
+        if failures:
+            raise ExceptionGroup("Workspace stop signals are incomplete", failures)
+
+    def stop(self):
+        self.request_stop()
+        for thread in self._worker_threads():
+            if thread:
+                thread.join(timeout=5)
+        if any(thread and thread.is_alive() for thread in self._worker_threads()):
+            raise RuntimeError("Workspace workers are still stopping")
+        with self._lock:
+            services = list(self._services.values())
+        failures = []
+        for service in services:
+            try:
+                service.stop()
+            except Exception as error:
+                failures.append(error)
+        if failures:
+            raise ExceptionGroup("Workspace service shutdown is incomplete", failures)
 
 
 class WorkspaceMiddleware:
@@ -200,18 +247,19 @@ class WorkspaceMiddleware:
 
         try:
             await self._dispatch(scope, receive, track_send)
-        except (OperationalError, InterfaceError, ConnectionError) as error:
+        except DATABASE_CONNECTION_ERRORS as error:
             if started or scope["type"] != "http":
                 raise
-            logging.getLogger(__name__).error("Workspace database unavailable (%s)", type(error).__name__)
-            await unavailable_response(code="database_unavailable")(scope, receive, send)
+            code, detail = outage(error)
+            logging.getLogger(__name__).error("Workspace request failed (%s): %s", type(error).__name__, detail)
+            await unavailable_response(code=code, detail=detail)(scope, receive, send)
 
     async def _dispatch(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         request = Request(scope)
         path = request.url.path
-        if not path.startswith("/api/") or path == "/api/health":
+        if not path.startswith("/api/"):
             return await self.app(scope, receive, send)
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             origin = request.headers.get("origin")
@@ -229,9 +277,10 @@ class WorkspaceMiddleware:
         expected = request.headers.get("x-skynet-workspace")
         if expected and expected != workspace["id"]:
             return await JSONResponse({"detail": "The workspace changed in another tab. Reload this page.", "code": "workspace_changed"}, status_code=409)(scope, receive, send)
-        settings_request = path.startswith(("/api/workspace/", "/api/tracking/", "/api/notifications/"))
+        # Settings and notes live in the central database and never touch the workspace's cluster storage.
+        storage_free = path.startswith(("/api/workspace/", "/api/tracking/", "/api/notifications/", "/api/notes"))
         if (request.method not in {"GET", "HEAD", "OPTIONS", "DELETE"}
-                and not settings_request and not path.endswith(("/cancel", "/reconcile"))):
+                and not storage_free and not path.endswith("/cancel")):
             work_root = await run_in_threadpool(
                 lambda: self.services.for_workspace(workspace["id"]).storage.work_root
             )

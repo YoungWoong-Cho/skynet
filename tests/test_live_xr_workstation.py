@@ -198,7 +198,7 @@ def test_existing_frozen_image_session_can_still_stop_gracefully(
     calls = []
 
     class Client:
-        def ssh(self, *a, **k):
+        def run_with_fallback(self, *a, **k):
             calls.append((a, k))
 
         def cancel(self, *a, **k):

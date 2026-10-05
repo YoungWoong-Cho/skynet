@@ -86,7 +86,7 @@ def _sample_existing(service, directory, attempt, nodes):
     )
 
 
-def _sync(service, run, capsule_root, force):
+def _sync(service, run, capsule_root, force, *, raise_on_error=False):
     run_id = str(run.get("id") or "")
     if not run_id or not run.get("run_directory"):
         return 0
@@ -109,6 +109,8 @@ def _sync(service, run, capsule_root, force):
         replace(service._wandb_settings(provider), auto_flush=False),
     )
     if not bridge.binding(run_id):
+        if raise_on_error:
+            raise RuntimeError("W&B run binding is not ready for GPU metrics")
         return 0
     if not force and time.monotonic() - _LAST_POLLS.get(run_id, 0) < 30:
         return 0
@@ -158,6 +160,7 @@ def _sync(service, run, capsule_root, force):
         start = service._training_progress_timestamp_ms(
             run.get("started_at") or attempt.get("started_at")
         )
+        samples = []
         for record in response["records"]:
             if str(record.get("job_id")) != job_id:
                 continue
@@ -170,16 +173,17 @@ def _sync(service, run, capsule_root, force):
             ).hexdigest()
             key = "gpu-statistics:" + attempt["id"] + ":" + identity
             if key not in emitted:
-                bridge.log_system_metrics(
-                    run_id,
-                    metrics,
-                    timestamp_ms=timestamp,
-                    runtime_seconds=(timestamp - start) / 1000,
-                    idempotency_key=key,
-                )
+                samples.append({
+                    "metrics": metrics,
+                    "timestamp_ms": timestamp,
+                    "runtime_seconds": (timestamp - start) / 1000,
+                    "idempotency_key": key,
+                })
                 emitted.add(key)
                 published += 1
             state["latest"] = record
+        bridge.log_system_metrics_batch(run_id, samples)
+        # Advance the source cursor only after all samples are durably queued.
         state[attempt["id"]] = {
             "cursors": response["cursors"],
             "finished_at": attempt.get("finished_at"),
@@ -191,22 +195,30 @@ def _sync(service, run, capsule_root, force):
     else:
         bridge._atomic_write(state_path, json.dumps(state).encode())
     state_path.with_name("gpu-statistics-error.txt").unlink(missing_ok=True)
-    report = bridge.drain_spool()
+    report = bridge.drain_spool(limit=100)
     if report.errors:
-        service._tracking_failure("wandb", run, RuntimeError(report.errors[0]))
+        error = RuntimeError(report.errors[0])
+        service._tracking_failure("wandb", run, error)
+        if raise_on_error:
+            raise error
     return published
 
 
-def sync_gpu_statistics(service, run, capsule_root, *, force=False):
-    if not _LOCK.acquire(blocking=False):
+def sync_gpu_statistics(
+    service, run, capsule_root, *, force=False, raise_on_error=False
+):
+    database = getattr(service, "database", None)
+    # Different runs have independent GPU logs and delivery cursors. Keep
+    # same-run writers serialized across hosts without blocking other runs.
+    lock = (database.operation_lock("gpu-tracking:" + str(run.get("id")))
+            if database is not None else _LOCK)
+    if not lock.acquire(blocking=False):
+        if raise_on_error:
+            raise RuntimeError("GPU metric synchronization is already in progress")
         return 0
     try:
         try:
-            database = getattr(service, "database", None)
-            if database is not None:
-                with database.operation_lock("gpu-tracking:" + str(run.get("id"))):
-                    return _sync(service, run, capsule_root, force)
-            return _sync(service, run, capsule_root, force)
+            return _sync(service, run, capsule_root, force, raise_on_error=raise_on_error)
         except Exception as error:
             # Telemetry must never change the training outcome. Keep an actionable
             # diagnostic alongside the local run rather than failing the trainer.
@@ -215,6 +227,8 @@ def sync_gpu_statistics(service, run, capsule_root, *, force=False):
             )
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(str(sanitize(str(error)))[:2000])
+            if raise_on_error:
+                raise
             return 0
     finally:
-        _LOCK.release()
+        lock.release()

@@ -8,7 +8,7 @@ import shlex
 from uuid import uuid4
 
 from .cluster_config import CLUSTER
-from .cluster_runtime import ClusterError, SubmissionOutcomeUnknown, WORK_ROOT
+from .cluster_runtime import DEFAULT_GATEWAY, ClusterError, SubmissionOutcomeUnknown, WORK_ROOT
 from .database import canonical_json
 from .training_contracts import RECORDING_DATASET_FORMAT as DATASET_FORMAT
 from .remote_artifacts import RemoteArtifact
@@ -25,7 +25,7 @@ class ClusterPolicyPreparation(RecordingPreflight):
     def _archived_sources(self, job):
         archive = getattr(self.live, "archive", None)
         if archive is None:
-            raise ValueError("Collection archiving is unavailable; preparation requires a verified sky2 copy")
+            raise ValueError("Collection archiving is unavailable; preparation requires a verified copy on the training cluster")
         sources = []
         sessions = {}
         for item in job["sources"]:
@@ -36,15 +36,15 @@ class ClusterPolicyPreparation(RecordingPreflight):
             descriptor = session.get("archive") or {}
             if descriptor.get("state") not in {"VERIFIED", "CLEANUP_PENDING", "READY"}:
                 archive.ensure(session_id)
-                raise ArchivePending("Waiting for the collection archive to be verified on sky2")
-            _, gateway, recording = archive.resolve(session, item["path"])
-            if gateway != "sky2":
-                raise ValueError("Prepared collection sources must be stored on sky2")
+                raise ArchivePending("Waiting for the collection archive to be verified on the training cluster")
+            transport, _, recording = archive.resolve(session, item["path"])
+            if transport is not archive.cluster:
+                raise ValueError("Prepared collection sources must be stored on the training cluster")
             images = None
             if item.get("image_path"):
-                _, image_gateway, images = archive.resolve(session, item["image_path"])
-                if image_gateway != "sky2":
-                    raise ValueError("Prepared image sources must be stored on sky2")
+                image_transport, _, images = archive.resolve(session, item["image_path"])
+                if image_transport is not archive.cluster:
+                    raise ValueError("Prepared image sources must be stored on the training cluster")
             sources.append(dict(item, recording=recording, images=images,
                                 session_profile=dict(session.get("profile") or {})))
         return sources
@@ -73,7 +73,7 @@ class ClusterPolicyPreparation(RecordingPreflight):
         queue = CLUSTER.queues["normal"]
         self.update(job["id"], state="STAGING", stage="STAGING", error=None,
                     cluster_partition=queue.partition, cluster_account=queue.account, cluster_cpus=4,
-                    detail="Preparing shared recording data on sky2")
+                    detail="Preparing shared recording data on the training cluster")
         attempt_id = str(uuid4())
         relative = f"preparation/{attempt_id}"
         root = f"{WORK_ROOT}/jobs/runs/{job['id']}/{relative}"
@@ -95,7 +95,7 @@ class ClusterPolicyPreparation(RecordingPreflight):
                        recording_root=f"{WORK_ROOT}/datasets/recordings",
                        receipt_path=root + "/result.json", loader=self._loader_request(job, worker, root))
         files[relative + "/request.json"] = canonical_json(request)
-        self.cluster.write_capsule_files(job["id"], files, "sky2")
+        self.cluster.write_capsule_files(job["id"], files, DEFAULT_GATEWAY)
         profile = CLUSTER.runtime_profiles["xpolicylab-act"]
         interpreter = [str(profile.environment_path) + "/bin/python"]
         dependencies = job.get("conversion_dependencies") or []
@@ -122,7 +122,7 @@ class ClusterPolicyPreparation(RecordingPreflight):
             f"export TMPDIR={shlex.quote(root + '/tmp')}", 'mkdir -p "$TMPDIR"',
             f"export UV_CACHE_DIR={shlex.quote(CLUSTER.paths.uv_cache)}", *setup,
             (('"$UV_BIN" ' if dependencies else "") + shlex.join([*interpreter, worker + "/cluster_worker.py", root + "/request.json"])), ""])
-        return self.update(job["id"], execution="cluster", gateway="sky2", attempt_id=attempt_id,
+        return self.update(job["id"], execution="cluster", attempt_id=attempt_id,
                            cluster_root=root, cluster_script=script, cluster_job_id=None,
                            state="SUBMITTING", stage="SUBMITTING", error=None,
                            detail="Submitting shared recording preparation")
@@ -133,11 +133,12 @@ class ClusterPolicyPreparation(RecordingPreflight):
             if not job.get("cluster_script"):
                 job = self._stage_cluster_attempt(job)
             if not job.get("cluster_job_id"):
-                submission = self.cluster.submit_script(job["cluster_script"], identifier, "sky2",
+                submission = self.cluster.submit_script(job["cluster_script"], identifier, DEFAULT_GATEWAY,
                     submission_key=f"{identifier}-preparation-{job['attempt_id']}")
-                job = self.update(identifier, cluster_job_id=submission.job_id, state="PENDING", stage="QUEUED",
+                job = self.update(identifier, cluster_job_id=submission.job_id, gateway=submission.gateway,
+                                  state="PENDING", stage="QUEUED",
                                   detail="Waiting for 4 CPU slots on the training cluster", error=None)
-            _, statuses = self.cluster.job_statuses([job["cluster_job_id"]], "sky2")
+            _, statuses = self.cluster.job_statuses([job["cluster_job_id"]], DEFAULT_GATEWAY)
             status = statuses.get(job["cluster_job_id"])
             if not status:
                 return
@@ -155,20 +156,20 @@ class ClusterPolicyPreparation(RecordingPreflight):
             if state != "COMPLETED":
                 message = f"Cluster preparation ended as {state}"
                 try:
-                    _, raw = self.cluster.read_file(job["cluster_root"] + "/result.json", "sky2", max_bytes=100_000)
+                    _, raw = self.cluster.read_file(job["cluster_root"] + "/result.json", DEFAULT_GATEWAY, max_bytes=100_000)
                     result = json.loads(raw)
                     if result.get("attempt_id") == job["attempt_id"]:
                         message = result.get("error") or message
                 except (ClusterError, ValueError):
                     # Bootstrap failures happen before the worker can write a receipt.
                     try:
-                        _, output = self.cluster.read_file(job["cluster_root"] + "/export.log", "sky2", max_bytes=8000)
+                        _, output = self.cluster.read_file(job["cluster_root"] + "/export.log", DEFAULT_GATEWAY, max_bytes=8000)
                         if output.strip():
                             message += ": " + output.strip()[-2000:]
                     except (ClusterError, ValueError):
                         pass
                 raise ValueError(message)
-            _, raw = self.cluster.read_file(job["cluster_root"] + "/result.json", "sky2", max_bytes=10_000_000)
+            _, raw = self.cluster.read_file(job["cluster_root"] + "/result.json", DEFAULT_GATEWAY, max_bytes=10_000_000)
             result = json.loads(raw)
             self._publish_cluster_result(job, result)
         except ObservationsPending as exc:
@@ -183,7 +184,7 @@ class ClusterPolicyPreparation(RecordingPreflight):
             self.update(identifier, error=str(exc), detail="Cluster status is temporarily unavailable; refresh to reconnect")
         except Exception as exc:
             self.update(identifier, state="FAILED", stage="FAILED", error=str(exc),
-                        detail="Preparation failed; verified original recordings are preserved on sky2")
+                        detail="Preparation failed; verified original recordings are preserved on the training cluster")
 
     def _publish_cluster_result(self, job, result):
         manifest_sha = result.get("manifest_sha256", "")
@@ -192,7 +193,7 @@ class ClusterPolicyPreparation(RecordingPreflight):
                 or result.get("attempt_id") != job["attempt_id"] or result.get("verified") is not True
                 or not re.fullmatch(r"[a-f0-9]{64}", manifest_sha) or result.get("path") != expected_path):
             raise ValueError("Cluster preparation receipt did not match this attempt")
-        _, raw_manifest = self.cluster.read_file(expected_path + "/manifest.json", "sky2", max_bytes=10_000_000)
+        _, raw_manifest = self.cluster.read_file(expected_path + "/manifest.json", DEFAULT_GATEWAY, max_bytes=10_000_000)
         if hashlib.sha256(raw_manifest.encode()).hexdigest() != manifest_sha:
             raise ValueError("Prepared manifest changed after cluster verification")
         manifest = json.loads(raw_manifest)
@@ -206,7 +207,7 @@ class ClusterPolicyPreparation(RecordingPreflight):
             raise ValueError("Cluster preparation did not validate its training reader")
         self.observations.store.register_shared(job, manifest.get("shared_artifacts", []))
         version = self.register(job, manifest, manifest_sha, remote_path=expected_path)
-        self.database.record_data_location(version["id"], kind="cluster", host="skynet",
+        self.database.record_data_location(version["id"], kind="cluster", host=CLUSTER.id,
                                             path=expected_path, manifest_sha256=manifest_sha)
         self.update(job["id"], version_id=version["id"], manifest_sha256=manifest_sha,
                     size_bytes=version["size_bytes"], episodes=len(manifest["episodes"]), steps=manifest["steps"],
@@ -231,4 +232,4 @@ class ClusterPolicyPreparation(RecordingPreflight):
             version = self.database.get_data_resource_version(job["version_id"])
             location = next((v for v in version.get("locations", []) if v["kind"] == "cluster" and v["status"] == "AVAILABLE"), None)
             path = location["path"] + "/manifest.json" if location else None
-        return RemoteArtifact(self.cluster, "sky2", path) if path else None
+        return RemoteArtifact(self.cluster, DEFAULT_GATEWAY, path) if path else None

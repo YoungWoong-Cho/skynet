@@ -546,15 +546,15 @@ def upload(directory, remote_root, transport, gateway):
     manifest = json.loads((directory / "manifest.json").read_text())
     remote = remote_root + "/hands/" + manifest["robot"] + "/" + manifest["digest"]
     transport._remote_path(remote)
-    marker = transport.ssh(
-        gateway,
+    marker = transport.run_with_fallback(
         "if test -f "
         + shlex.quote(remote + "/READY")
         + "; then cat "
         + shlex.quote(remote + "/READY")
         + "; fi",
-        timeout=10,
-    ).strip()
+        gateway,
+        attempt_timeout=10,
+    )[1].strip()
     if marker == manifest["digest"]:
         return remote
     buffer = io.BytesIO()
@@ -598,10 +598,10 @@ try:
 finally:
  if stage.exists(): shutil.rmtree(stage)
 """
-    transport.ssh(
-        gateway,
+    transport.run_with_fallback(
         "python3 -c " + shlex.quote(script),
+        gateway,
         stdin=json.dumps(request),
-        timeout=60,
+        attempt_timeout=60,
     )
     return remote

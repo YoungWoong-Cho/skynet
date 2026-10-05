@@ -417,6 +417,8 @@ class TrainSpec(CanonicalModel):
 class NodeSpec(CanonicalModel):
     mode: Literal["auto", "manual"] = "auto"
     name: str | None = None
+    eligible_names: list[str] = Field(default_factory=list)
+    excluded_names: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_manual_node(self) -> "NodeSpec":
@@ -425,6 +427,15 @@ class NodeSpec(CanonicalModel):
                 raise ValueError("manual node mode requires one concrete Slurm node")
         else:
             self.name = None
+        for names in (self.eligible_names, self.excluded_names):
+            if any(not re.fullmatch(r"[A-Za-z0-9_.-]+", name) for name in names):
+                raise ValueError("placement requires concrete Slurm node names")
+        if self.mode == "manual" and (self.eligible_names or self.excluded_names):
+            raise ValueError("manual node placement cannot also declare eligible or excluded nodes")
+        if set(self.eligible_names) & set(self.excluded_names):
+            raise ValueError("eligible and excluded nodes must be disjoint")
+        if self.excluded_names and not self.eligible_names:
+            raise ValueError("node exclusions require a verified eligible node set")
         return self
 
 
@@ -472,6 +483,11 @@ def format_slurm_duration(total_seconds: int) -> str:
 
 
 class ResourceSpec(CanonicalModel):
+    def with_gpu_cpu_policy(self, gpu_count: int) -> "ResourceSpec":
+        from .cluster_config import cpus_for_gpus
+        count = cpus_for_gpus(gpu_count)
+        return self if self.cpus_per_task == count else self.model_copy(update={"cpus_per_task": count})
+
     gateway: str = Field(default_factory=lambda: CLUSTER.defaults.gateway)
     queue_policy: str = Field(default_factory=lambda: CLUSTER.defaults.queue_policy)
     account: str = Field(default_factory=lambda: CLUSTER.queue(CLUSTER.defaults.queue_policy).account)
@@ -486,13 +502,22 @@ class ResourceSpec(CanonicalModel):
     @model_validator(mode="before")
     @classmethod
     def infer_queue_policy(cls, value: Any) -> Any:
-        if isinstance(value, dict) and "queue_policy" not in value:
-            value = dict(value)
+        if not isinstance(value, dict):
+            return value
+        value = dict(value)
+        if "queue_policy" not in value:
             pair = (value.get("partition"), value.get("account"))
             value["queue_policy"] = next(
                 (name for name, queue in CLUSTER.queues.items() if pair == (queue.partition, queue.account)),
                 CLUSTER.defaults.queue_policy,
             )
+        # Browser forms select a queue policy, without duplicating cluster account
+        # names. Resolve omitted fields from that policy; reject explicit conflicts.
+        policy = value["queue_policy"]
+        if policy in CLUSTER.queues:
+            queue = CLUSTER.queue(policy)
+            value.setdefault("account", queue.account)
+            value.setdefault("partition", queue.partition)
         return value
 
     @field_validator("gateway")

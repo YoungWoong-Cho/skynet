@@ -9,11 +9,11 @@ from .database import content_sha256
 
 def assert_available(database, *execution_inputs):
     """Reject obsolete pinned inputs before a launch can change run state."""
-    from .data_version_retirement import references
+    from .data_version_retirement import references, _json
 
     with database.connection() as connection:
         versions = connection.execute(
-            "SELECT v.id,v.manifest_sha256,v.path FROM data_resource_versions v "
+            "SELECT v.id,v.manifest_sha256,v.path,r.plan_json AS retirement_plan FROM data_resource_versions v "
             "JOIN data_version_retirements r ON r.version_id=v.id"
         ).fetchall()
         if not versions:
@@ -21,6 +21,9 @@ def assert_available(database, *execution_inputs):
         identifiers = [version["id"] for version in versions]
         needles = {value for version in versions for value in
                    (version["id"], version["manifest_sha256"], version["path"])}
+        needles.update(value for version in versions
+                       for artifact in _json(version['retirement_plan']).get('observations', [])
+                       for value in (artifact['artifact_key'], artifact['path'], artifact['manifest_sha256']))
         needles.update(row["path"] for row in connection.execute(
             "SELECT path FROM data_locations WHERE version_id=ANY(?)", (identifiers,)).fetchall())
         for row in connection.execute(
@@ -60,7 +63,7 @@ def snapshot(database, selections):
             ).fetchone()
             if row is None or (row["dataset_archived_at"] if row["category"] == "dataset" else row["archived_at"]):
                 raise ValueError("The selected dataset is missing or archived")
-            if role == "training_data" and row["category"] != "dataset":
+            if role in {"training_data", "evaluation_target"} and row["category"] != "dataset":
                 raise ValueError("Choose a dataset for training data; files belong to other inputs")
             assignment = database._bundle_manifest_assignment(connection, {
                 "role": role, "position": position, "version_id": version_id,
@@ -88,17 +91,21 @@ def _manifest(assignments, names):
     return {"id": "selection:" + digest, **manifest, "manifest_sha256": digest}
 
 
+def verified_cluster_location(version):
+    locations = [loc for loc in version.get("locations", [])
+                 if loc["kind"] == "cluster" and loc["status"] == "AVAILABLE"
+                 and loc["manifest_sha256"] == version["manifest_sha256"]]
+    return min(locations, key=lambda loc: str(loc["id"])) if locations else None
+
+
 def choices(database):
     """List actual prepared results, including incompatible formats for explanation."""
     result = []
     for version in database.list_datasets(include_presets=False):
-        locations = [loc for loc in version.get("locations", [])
-                     if loc["kind"] == "cluster" and loc["status"] == "AVAILABLE"
-                     and loc["manifest_sha256"] == version["manifest_sha256"]]
-        if not locations and version["status"] != "READY":
+        location = verified_cluster_location(version)
+        if not location and version["status"] != "READY":
             continue
         # One deterministic cluster location per result; saved experiments retain theirs.
-        location = min(locations, key=lambda loc: str(loc["id"])) if locations else None
         selection = {"version_id": version["id"], "location_id": location["id"] if location else None}
         assignment = database.bundle_manifest_assignment({
             "role": "training_data", "position": 0, "version_id": version["id"],

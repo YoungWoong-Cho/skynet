@@ -35,6 +35,7 @@ def resolve_evaluation_resources(
     resources: ResourceSpec, context: Mapping[str, Any], *,
     runtime_profile_id: str | None = None, runtime: Mapping[str, Any] | None = None,
     gpu_count: int | None = None, gpu_type: str | None = None,
+    node_inventory: list[str] | None = None,
 ) -> ResourceSpec:
     if not uses_isaac_sim(context, runtime_profile_id=runtime_profile_id, runtime=runtime):
         return resources
@@ -46,6 +47,35 @@ def resolve_evaluation_resources(
     if count is None:
         raise ValueError("Resolve the Isaac Sim evaluation GPU count before choosing a node")
     allowed = ", ".join(policy.nodes)
+    if resources.node.mode == "auto":
+        concrete_type = policy.nodes[policy.default_node].gpu_type if requested_type == "any" else requested_type
+        eligible = [name for name, node in policy.nodes.items()
+                    if node.gpu_type == concrete_type and node.gpu_count >= count]
+        if resources.node.eligible_names:
+            # A later safety restriction can only narrow an audited allocation.
+            # Keep newly disallowed nodes explicitly excluded on every requeue;
+            # never add nodes absent from the original execution snapshot.
+            previous = set(resources.node.eligible_names)
+            retained = previous & set(eligible)
+            if not retained:
+                raise ValueError("No stored eligible nodes remain compatible with current evaluation placement policy")
+            if retained == previous:
+                return resources
+            document = resources.model_dump(mode="json", by_alias=True)
+            document["node"] = {"mode": "auto", "eligible_names": sorted(retained),
+                                "excluded_names": sorted(set(resources.node.excluded_names) | (previous - retained))}
+            return ResourceSpec.model_validate(document)
+        if node_inventory is not None and len(eligible) > 1:
+            inventory = set(node_inventory)
+            eligible = sorted(set(eligible) & inventory)
+            if not eligible:
+                raise ValueError("No compatible evaluation node exists in the Slurm inventory")
+            document = resources.model_dump(mode="json", by_alias=True)
+            document["node"] = ({"mode": "manual", "name": eligible[0]} if len(eligible) == 1 else
+                                {"mode": "auto", "eligible_names": eligible,
+                                 "excluded_names": sorted(inventory - set(eligible))})
+            document["gpu"] = {"mode": "explicit", "count": count, "type": concrete_type}
+            return ResourceSpec.model_validate(document)
     if resources.node.mode == "manual":
         name = resources.node.name
         if name not in policy.nodes:

@@ -17,7 +17,21 @@ from pathlib import Path
 from psycopg.conninfo import make_conninfo
 
 
+class DatabaseUnreachable(ConnectionError):
+    """The SSH host that fronts the central database refused or dropped the tunnel."""
+
+    def __init__(self, host):
+        super().__init__(
+            "Central database SSH connection failed; check access to " + host
+        )
+        self.host = host
+
+
 class SSHEndpoint:
+    # Seconds to fail fast after consecutive failed tunnels. Every caller shares
+    # one tunnel, so without this an outage becomes one SSH login per request.
+    RETRY_DELAYS = (2, 4, 8, 16, 30)
+
     def __init__(self, config):
         self.config = dict(config)
         host = str(config["ssh_host"])
@@ -48,6 +62,8 @@ class SSHEndpoint:
         self._lock = threading.Lock()
         self._process = None
         self._directory = None
+        self._failures = 0
+        self._retry_at = 0.0
         self._pid = os.getpid()
         atexit.register(self.close)
 
@@ -55,6 +71,8 @@ class SSHEndpoint:
         with self._lock:
             if self._process is None or self._process.poll() is not None:
                 self._close()
+                if time.monotonic() < self._retry_at:
+                    raise DatabaseUnreachable(self.config["ssh_host"])
                 # Unix socket paths have a short OS limit. Do not place these in
                 # the potentially long repository path or expose a TCP listener.
                 self._directory = Path(
@@ -64,6 +82,7 @@ class SSHEndpoint:
                 local = self._directory / ".s.PGSQL.55432"
                 args = [
                     "ssh",
+                    "-C",  # Compress repeated JSON in the PostgreSQL wire stream.
                     "-T",
                     "-o",
                     "BatchMode=yes",
@@ -97,11 +116,14 @@ class SSHEndpoint:
                 while not local.exists():
                     if self._process.poll() is not None or time.monotonic() >= deadline:
                         self._close()
-                        raise ConnectionError(
-                            "Central database SSH connection failed; check access to "
-                            + self.config["ssh_host"]
-                        )
+                        delay = self.RETRY_DELAYS[
+                            min(self._failures, len(self.RETRY_DELAYS) - 1)
+                        ]
+                        self._failures += 1
+                        self._retry_at = time.monotonic() + delay
+                        raise DatabaseUnreachable(self.config["ssh_host"])
                     time.sleep(0.05)
+                self._failures = 0
             credentials = {}
             if self.transport == "ssh-tcp":
                 password_file = Path(self.config["password_file"])

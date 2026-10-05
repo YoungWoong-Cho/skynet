@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import re
@@ -11,12 +10,26 @@ from typing import Any, Literal, Mapping
 
 from pydantic import Field
 
-from skynet_app.adapters import AdapterPlan, resolve_gpu_count, resolve_gpu_type
+from skynet_app.adapters import (
+    AdapterPlan,
+    builtin_adapter_manifests,
+    resolve_gpu_count,
+    resolve_gpu_type,
+    resolve_training_progress_contract,
+)
 from skynet_app.cluster_config import CLUSTER
 from skynet_app.cluster_runtime import HOME_ROOT, SLURM_BIN
 from skynet_app.experiments import CanonicalModel, ExperimentSpec, canonical_sha256
 from skynet_app.evaluation_placement import resolve_evaluation_resources
-from skynet_app.workspace_storage import paths_for_root
+from skynet_app.workspace_storage import paths_for_root, evaluation_execution_directory
+
+
+# git config for submodule fetches: GitHub SSH remotes are rewritten to the
+# HTTPS transport that the top-level clone already uses.
+GITHUB_SSH_TO_HTTPS = (
+    "-c url.https://github.com/.insteadOf=git@github.com: "
+    "-c url.https://github.com/.insteadOf=ssh://git@github.com/"
+)
 
 
 RUNNER_SOURCE = r'''#!/usr/bin/env python3
@@ -31,8 +44,10 @@ import platform
 import re
 import signal
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -85,6 +100,94 @@ def safe_run_path(run_dir, relative, label):
     except ValueError as error:
         raise RuntimeError(f"{label} escapes the run directory: {relative}") from error
     return candidate
+
+
+def capture_training_progress_start(execution, run_dir, capsule_dir):
+    """Bind append-only progress to this process before the trainer can write."""
+    source = execution.get("training_progress_source")
+    if source is None:
+        return None
+    if not isinstance(source, dict) or source.get("kind") != "jsonl":
+        raise RuntimeError("training progress boundary requires a JSONL source")
+    relative = source.get("path")
+    if (
+        not isinstance(relative, str) or not relative
+        or any(part in {"", ".", ".."} for part in relative.split("/"))
+        or any(char in relative for char in ("\\", "\x00", "\n", "\r"))
+    ):
+        raise RuntimeError("training progress source must be relative to the run directory")
+    path = safe_run_path(run_dir, relative, "training progress source")
+    job_id = os.environ.get("SLURM_JOB_ID", "")
+    restart = os.environ.get("SLURM_RESTART_COUNT", "0") or "0"
+    if not re.fullmatch(r"[0-9]+(?:_[0-9]+)?", job_id):
+        raise RuntimeError("training progress boundary requires a valid Slurm job ID")
+    if not re.fullmatch(r"[0-9]+", restart):
+        raise RuntimeError("training progress boundary requires a nonnegative restart count")
+    restart_count = int(restart)
+    target = safe_run_path(
+        capsule_dir, f"state/training-progress-start-{restart_count}.json",
+        "training progress receipt",
+    )
+    if target.exists():
+        raise RuntimeError("training progress start receipt already exists; refusing to overwrite its boundary")
+    offset = 0
+    device = inode = None
+    prefix = b""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except FileNotFoundError:
+        pass
+    else:
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise RuntimeError("training progress source must be a regular file")
+            offset, device, inode = before.st_size, before.st_dev, before.st_ino
+            stream.seek(max(0, offset - 64))
+            prefix = stream.read(min(64, offset))
+            after = os.fstat(stream.fileno())
+            current = path.stat()
+            identity = lambda item: (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns, item.st_ctime_ns)
+            if identity(before) != identity(after) or identity(after) != identity(current):
+                raise RuntimeError("training progress source changed while capturing its boundary")
+    receipt = {
+        "schema_version": "skynet.training-progress-start/v1",
+        "job_id": job_id,
+        "restart_count": restart_count,
+        "path": str(path),
+        "start_byte_offset": offset,
+        "device": device,
+        "inode": inode,
+        "prefix_sha256": hashlib.sha256(prefix).hexdigest(),
+        "prefix_bytes": len(prefix),
+        "at_line_boundary": not offset or prefix.endswith(b"\n"),
+        "captured_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent,
+                                         prefix="." + target.name + ".", delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(receipt, stream, sort_keys=True, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        # An exclusive hard link publishes complete bytes without replacing an
+        # existing receipt, including concurrent launches of the same attempt.
+        try:
+            os.link(temporary, target)
+        except FileExistsError as error:
+            raise RuntimeError("training progress start receipt already exists; refusing to overwrite its boundary") from error
+        directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return receipt
 
 
 def ensure_native_tracking_resume_ids(execution, resume_checkpoint):
@@ -404,6 +507,19 @@ def _checkpoint_sidecar(candidate):
     if candidate.is_dir():
         return candidate / "skynet-checkpoint.json"
     return candidate.with_name(candidate.name + ".skynet-checkpoint.json")
+
+
+def _checkpoint_training_step(candidate):
+    sidecar = _checkpoint_sidecar(candidate)
+    if not sidecar.is_file():
+        return None
+    payload = json.loads(sidecar.read_text())
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"invalid checkpoint metadata: {sidecar}")
+    step = payload.get("global_step")
+    if step is not None and (type(step) is not int or step < 0):
+        raise RuntimeError(f"invalid checkpoint training step: {sidecar}")
+    return step
 
 
 def _checkpoint_score(candidate):
@@ -731,6 +847,7 @@ def snapshot_checkpoints(run_dir, project_dir, execution, *, final=False):
         **identity,
         "final": final,
         "resumable": not final and not cleanup["performed"],
+        "training_step": _checkpoint_training_step(selected),
         "selection": selection,
         "cleanup": cleanup,
         "contract": {
@@ -840,6 +957,8 @@ def main():
         os.environ["SKYNET_EVAL_PROGRESS_PATH"] = str(evaluation_progress)
     (capsule_dir / "state").mkdir(parents=True, exist_ok=True)
     (capsule_dir / "state" / "effective-argv.json").write_text(json.dumps(argv, indent=2) + "\n")
+    if stage == "train":
+        capture_training_progress_start(execution, run_dir, capsule_dir)
     child = subprocess.Popen(argv, cwd=project_dir, start_new_session=True)
     sampler = None
     if stage == "train" and os.environ.get("SLURM_JOB_ID"):
@@ -913,6 +1032,16 @@ class CompiledSlurmJob(CanonicalModel):
     stdout_path_template: str
     stderr_path_template: str
     files: dict[str, str] = Field(default_factory=dict)
+
+    @property
+    def capsule_relative_directory(self) -> str:
+        digest = hashlib.sha256(self.files["checksums.sha256"].encode("utf-8")).hexdigest()
+        return f"submissions/capsules/{digest}"
+
+    @property
+    def upload_files(self) -> dict[str, str]:
+        return {f"{self.capsule_relative_directory}/{name}": content
+                for name, content in self.files.items()}
 
 
 def _shell(value: str) -> str:
@@ -1031,17 +1160,38 @@ def _repo_slug(repository: str) -> str:
     return f"{_safe_identifier(tail, maximum=48)}-{digest}"
 
 
-def _encode_file(path: str, content: str) -> str:
-    encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-    delimiter = f"SKYNET_{hashlib.sha256(path.encode()).hexdigest()[:16]}"
-    return dedent(
-        f"""\
-        mkdir -p "$(dirname {_shell(path)})"
-        base64 --decode > {_shell(path)} <<'{delimiter}'
-        {encoded}
-        {delimiter}
-        """
-    ).rstrip()
+def source_cache_directory(work_root: str, repository: str) -> str:
+    """Shared checkout container; one subdirectory per pinned revision."""
+    return f"{work_root}/repos/{_repo_slug(repository)}"
+
+
+def _capsule_materializers(run_directory: str, files: Mapping[str, str], *, execution_directory: str | None = None) -> list[str]:
+    """Reference immutable, separately uploaded files instead of embedding bodies."""
+    digest = hashlib.sha256(files["checksums.sha256"].encode("utf-8")).hexdigest()
+    capsule = f"{run_directory}/submissions/capsules/{digest}"
+    manifest = f"{capsule}/checksums.sha256"
+    destination = execution_directory or run_directory
+    return [
+        # Pin the manifest itself before trusting the file digests inside it.
+        f"printf '%s  %s\\n' {digest} {_shell(manifest)} | sha256sum -c -",
+        f"(cd {_shell(capsule)} && sha256sum -c checksums.sha256)",
+        *(f"install -D -m 600 {_shell(f'{capsule}/{name}')} {_shell(f'{destination}/{name}')}"
+          for name in sorted(files)),
+    ]
+
+
+def _training_progress_source(spec: ExperimentSpec, plan: AdapterPlan) -> dict[str, Any] | None:
+    """Resolve the same pinned declaration used by the progress observer."""
+    progress = plan.progress
+    if progress is None and spec.source.adapter_manifest is not None:
+        progress = (spec.source.adapter_manifest.get("train") or {}).get("progress")
+    if progress is None:
+        progress = next((manifest.train.progress for manifest in builtin_adapter_manifests()
+                         if manifest.slug == plan.adapter), None)
+    if progress is None:
+        return None
+    source = resolve_training_progress_contract(progress, spec.model_dump(mode="json")).source
+    return source.model_dump(mode="json") if source.kind == "jsonl" else None
 
 
 def _execution_files(
@@ -1061,6 +1211,7 @@ def _execution_files(
         "schema_version": 5,
         "run_id": run_id,
         "stage": stage,
+        "training_progress_source": _training_progress_source(spec, plan) if is_training else None,
         "resume_mode": "checkpoint_argv_suffix" if is_training else "evaluation_ledger",
         "argv": plan.argv,
         "preparation_steps": [
@@ -1103,9 +1254,8 @@ def _execution_files(
         },
     }
     files = {
-        "requested-spec.json": json.dumps(spec.model_dump(mode="json", by_alias=True), indent=2, sort_keys=True) + "\n",
-        "resolved-spec.json": json.dumps(spec.model_dump(mode="json", by_alias=True), indent=2, sort_keys=True) + "\n",
-        "native-config.json": json.dumps(plan.native_config, indent=2, sort_keys=True) + "\n",
+        "resolved-spec.json": json.dumps(spec.model_dump(mode="json", by_alias=True), separators=(",", ":"), sort_keys=True) + "\n",
+        "native-config.json": json.dumps(plan.native_config, separators=(",", ":"), sort_keys=True) + "\n",
         "argv.json": json.dumps(plan.argv, indent=2) + "\n",
         "preparation.json": json.dumps(
             [step.model_dump(mode="json") for step in plan.preparation_steps],
@@ -1115,12 +1265,11 @@ def _execution_files(
         "execution.json": json.dumps(execution, indent=2, sort_keys=True) + "\n",
         "runtime-wrapper.py": RUNNER_SOURCE,
         "gpu_metrics.py": Path(__file__).with_name("gpu_metrics.py").read_text(),
-        "adapter-plan.json": json.dumps(plan.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
     }
-    if spec.source.adapter_manifest is not None:
-        files["adapter-manifest.json"] = json.dumps(
-            spec.source.adapter_manifest, indent=2, sort_keys=True
-        ) + "\n"
+    # The exact plan and adapter manifest are already frozen in the attempt
+    # snapshot. The resolved spec above also carries the pinned manifest.
+    # requested-spec used to be an identical copy of resolved-spec, not the
+    # user's original request (which remains in the experiment revision).
     if spec.runtime.resolution:
         files["runtime-resolution.json"] = json.dumps(
             spec.runtime.resolution, indent=2, sort_keys=True
@@ -1234,6 +1383,11 @@ def compile_slurm_placement_directives(resources: Any) -> list[str]:
     """Render placement directives from a validated ResourceSpec."""
 
     if resources.node.mode != "manual":
+        # --nodelist requires every named node. Excluding the complement of the
+        # verified inventory lets Slurm choose any one compatible node instead.
+        if resources.node.eligible_names:
+            names = ",".join(resources.node.excluded_names)
+            return [f"#SBATCH --exclude={names}"] if names else []
         return []
     assert resources.node.name is not None
     return [f"#SBATCH --nodelist={resources.node.name}"]
@@ -1289,6 +1443,7 @@ def compile_sbatch(
 
     gpu_count = resolve_gpu_count(spec, plan)
     gpu_type = resolve_gpu_type(spec, plan)
+    spec = spec.model_copy(update={"resources": spec.resources.with_gpu_cpu_policy(gpu_count)})
     if stage == "eval":
         try:
             resources = resolve_evaluation_resources(
@@ -1314,8 +1469,13 @@ def compile_sbatch(
             ],
         }
     )
-    run_directory = f"{work_root}/jobs/runs/{run_id}"
-    source_directory = f"{work_root}/repos/{_repo_slug(spec.source.repository)}/{spec.source.revision}"
+    run_root = f"{work_root}/jobs/runs/{run_id}"
+    evaluation_key = canonical_evaluation.get("execution_key") if stage == "eval" and isinstance(canonical_evaluation, Mapping) else None
+    try:
+        run_directory = evaluation_execution_directory(run_root, evaluation_key)
+    except ValueError as error:
+        raise SlurmCompileError(str(error)) from error
+    source_directory = f"{source_cache_directory(work_root, spec.source.repository)}/{spec.source.revision}"
     project_directory = str(PurePosixPath(source_directory) / spec.source.project_subdirectory)
     injected_environment = dict(runtime_environment or {})
     secret_files = dict(secret_environment_files or {})
@@ -1332,8 +1492,8 @@ def compile_sbatch(
         if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", key):
             raise SlurmCompileError(f"invalid secret environment variable: {key}")
         path = PurePosixPath(path_value)
-        run_root = PurePosixPath(run_directory)
-        if not path.is_absolute() or path == run_root or run_root not in path.parents:
+        secret_root = PurePosixPath(run_directory)
+        if not path.is_absolute() or path == secret_root or secret_root not in path.parents:
             raise SlurmCompileError(
                 f"secret environment file must be below the run directory: {key}"
             )
@@ -1348,10 +1508,7 @@ def compile_sbatch(
         native_tracking_run_ids=native_tracking_run_ids,
         native_tracking_resume=native_tracking_resume,
     )
-    materializers = [
-        _encode_file(f"{run_directory}/{name}", content)
-        for name, content in sorted(files.items())
-    ]
+    materializers = _capsule_materializers(run_root, files, execution_directory=run_directory)
     attempt_archivers = [
         f"install -D -m 600 {_shell(f'{run_directory}/{name}')} \"$SKYNET_CAPSULE_DIR/{name}\""
         for name in sorted(files)
@@ -1398,6 +1555,7 @@ def compile_sbatch(
         "HF_HOME": paths.huggingface_cache,
         "TORCH_HOME": paths.torch_cache,
         "SKYNET_RUN_ID": run_id,
+        "SKYNET_RUN_ROOT": run_root,
         "SKYNET_RUN_DIR": run_directory,
         "SKYNET_SOURCE_DIR": source_directory,
         "SKYNET_PROJECT_DIR": project_directory,
@@ -1435,9 +1593,12 @@ def compile_sbatch(
             ]
         )
 
+    # Repositories are fetched over HTTPS with the cluster credential helper.
+    # Submodules declared with GitHub SSH URLs use the same transport because
+    # compute nodes carry no GitHub SSH identity.
     submodule_setup = (
         'git -C "$SKYNET_SOURCE_DIR" submodule sync --recursive\n'
-        '          git -C "$SKYNET_SOURCE_DIR" submodule update --init --recursive'
+        f'          git -C "$SKYNET_SOURCE_DIR" {GITHUB_SSH_TO_HTTPS} submodule update --init --recursive'
         if spec.source.include_submodules
         else ":"
     )
@@ -1590,15 +1751,13 @@ def compile_sbatch(
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, destination)
         metadata_paths = [
-            "adapter-plan.json",
-            "adapter-manifest.json",
+            "attempt-snapshot.json",
             "argv.json",
             "checksums.sha256",
             "dirty.patch",
             "execution.json",
             "job.sbatch",
             "native-config.json",
-            "requested-spec.json",
             "resolved-spec.json",
             "runtime-manifest.json",
             "runtime-resolution.json",
@@ -1645,6 +1804,13 @@ def compile_sbatch(
         f"{run_directory}/runtime-wrapper.py",
         f"{run_directory}/execution.json",
     )
+    placement_guard = []
+    if spec.resources.node.eligible_names:
+        alternatives = "|".join(spec.resources.node.eligible_names)
+        placement_guard = [
+            f'case "${{SLURMD_NODENAME:-}}" in {alternatives}) ;; '
+            '*) echo "preflight: allocation is outside verified evaluation nodes" >&2; exit 78 ;; esac',
+        ]
     script_parts = [
         "#!/usr/bin/env bash",
         f"# skynet-spec-sha256: {spec_sha}",
@@ -1658,10 +1824,11 @@ def compile_sbatch(
         *export_lines,
         f"export SKYNET_DIRTY_POLICY={_shell(spec.source.dirty_policy)}",
         f"export PATH={SLURM_BIN}:/usr/local/bin:/usr/bin:/bin",
-        'export SKYNET_CAPSULE_DIR="$SKYNET_RUN_DIR/attempts/$SLURM_JOB_ID"',
+        'export SKYNET_CAPSULE_DIR="$SKYNET_RUN_ROOT/attempts/$SLURM_JOB_ID"',
         'mkdir -p "$SKYNET_CAPSULE_DIR"',
         "",
         status_trap,
+        *placement_guard,
         BATCH_WARNING_HANDLER,
         "",
         *materializers,

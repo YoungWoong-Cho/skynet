@@ -7,6 +7,7 @@ import re
 from pathlib import PurePosixPath
 from uuid import UUID
 
+from .cluster_runtime import DEFAULT_GATEWAY
 from .database import canonical_json, utc_now
 from .maintenance import Maintenance, fingerprint, in_ids
 from .recording_deletion import RecordingMaintenance
@@ -196,7 +197,7 @@ class RecordingFileMaintenance(RecordingMaintenance):
 
         result = self.live.archive._call(
             self.cluster,
-            "sky2",
+            self.cluster.resolve_gateway(DEFAULT_GATEWAY),
             "revise",
             session_id=job["id"],
             datasets_root=CLUSTER.paths.datasets,

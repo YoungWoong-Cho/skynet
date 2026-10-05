@@ -12,9 +12,27 @@
     if (className) element.className = className;
     return element;
   };
+  async function requestJson(url, options = {}) {
+    if (typeof window.api === "function")
+      return window.api(url, {...options, timeoutMs: 45000});
+    const timeout = AbortSignal.timeout(45000);
+    const response = await fetch(url, {
+      ...options,
+      signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
+    });
+    const value = await response.json();
+    if (!response.ok) throw new Error(typeof value.detail === "string" ? value.detail : "Episode data could not be loaded");
+    return value;
+  }
 
   // Camera metadata uses ROS optical coordinates (+x right, +y down, +z forward).
   function project(point, camera) {
+    if (camera.world_from_camera && camera.intrinsics) {
+      const matrix = camera.world_from_camera, k = camera.intrinsics;
+      const delta = point.map((value, index) => value - matrix[index][3]);
+      const local = [0, 1, 2].map(index => delta.reduce((sum, value, axis) => sum + matrix[axis][index] * value, 0));
+      return local[2] > 0 ? [k[0][0] * local[0] / local[2] + k[0][2], k[1][1] * local[1] / local[2] + k[1][2]] : null;
+    }
     const q = camera.quaternion_world_ros,
       p = camera.position_world,
       k = camera.intrinsic_matrix;
@@ -43,6 +61,8 @@
     next: "M19 4v16M5 4l12 8-12 8Z",
     play: "M7 4l14 8-14 8Z",
     pause: "M7 4v16M17 4v16",
+    left: "m14 6-6 6 6 6",
+    right: "m10 6 6 6-6 6",
   };
   function playbackIcon(button, icon, label) {
     if (button.title === label) return;
@@ -64,6 +84,30 @@
     return `${String(minutes).padStart(2, "0")}:${String(Math.floor(remainder / 100)).padStart(2, "0")}.${String(remainder % 100).padStart(2, "0")}`;
   }
 
+  function sequenceNavigation({host, position, previous, next, onSelect}) {
+    if (!position) {
+      position = node("span");
+      previous = iconButton("left", "Previous recording", () => {});
+      next = iconButton("right", "Next recording", () => {});
+      previous.className = next.className = "";
+      host.classList.add("live-review-recording-actions");
+      host.append(position, previous, next);
+    }
+    let index = 0, count = 0;
+    previous.onclick = () => { if (index > 0) onSelect(index - 1); };
+    next.onclick = () => { if (index + 1 < count) onSelect(index + 1); };
+    return {
+      element: host,
+      update(selected, total) {
+        index = selected; count = total;
+        position.textContent = `${index + 1}/${count}`;
+        position.setAttribute("aria-label", `Recording ${index + 1} of ${count}`);
+        previous.disabled = index === 0;
+        next.disabled = index >= count - 1;
+      },
+    };
+  }
+
   class EpisodeViewer {
     constructor(host, video) {
       this.host = host;
@@ -72,6 +116,8 @@
       this.enabled = new Set(["actual", "prediction", "demonstration"]);
       this.view = "all";
       this.geometry = { hand: true, scene: true };
+      this.geometry.point_cloud = this.geometry.depth = true;
+      this.showState = false;
       host.classList.add("episode-viewer");
       this.main = node("div", null, "episode-viewer-main");
       this.tabs = node("div", null, "episode-viewer-tabs");
@@ -96,6 +142,12 @@
         video.controls = false;
       }
       this.stage.append(this.canvas, this.sceneHost);
+      this.buffering = node("div", "Loading inputs…", "episode-viewer-loading");
+      this.buffering.hidden = true;
+      this.buffering.setAttribute("role", "status");
+      this.stateOverlay = node("pre", null, "episode-viewer-state-overlay");
+      this.stateOverlay.hidden = true;
+      this.stage.append(this.stateOverlay, this.buffering);
       this.legend = node("p", null, "secondary");
       this.retry = node("button", "Retry preview", "button button-outline");
       this.retry.type = "button";
@@ -209,6 +261,16 @@
     message(text) {
       this.status.textContent = text || "";
     }
+    sceneMessage(text) {
+      this.sceneStatus = text || "";
+      if (this.options?.dataset) this.datasetStatus();
+      else this.message(text);
+    }
+    datasetStatus(index = this.frameIndex(this.currentTime())) {
+      if (!this.options?.dataset) return;
+      const error = this.inputErrors?.get(Math.floor(index / this.inputChunkSize) * this.inputChunkSize);
+      this.message(error ? "Saved inputs unavailable: " + error : this.imageError || (this.view === "interactive" ? this.sceneStatus : ""));
+    }
     timeline() {
       return this.options?.timeline?.length
         ? this.options.timeline
@@ -290,8 +352,13 @@
       cancelAnimationFrame(this.animation);
       if (!this.active || !this.playing) return;
       if (this.collection || !(this.video?.readyState >= 2)) {
-        this.clockTime =
+        const nextTime =
           this.clockOffset + (performance.now() - this.clockStart) / 1000;
+        if (this.options.dataset && !this.savedFrames.has(this.frameIndex(nextTime))) {
+          this.ensureInputs(this.frameIndex(nextTime));
+          this.clockStart = performance.now();
+          this.clockOffset = this.clockTime || 0;
+        } else this.clockTime = nextTime;
         const frames = this.timeline();
         const end = this.frameTimeAt(frames.at(-1));
         if (this.clockTime >= end) {
@@ -319,18 +386,7 @@
     }
 
     async json(url, options = {}) {
-      const response = await fetch(url, {
-        ...options,
-        signal: AbortSignal.timeout(45000),
-      });
-      const value = await response.json();
-      if (!response.ok)
-        throw new Error(
-          typeof value.detail === "string"
-            ? value.detail
-            : "Episode data could not be loaded",
-        );
-      return value;
+      return requestJson(url, options);
     }
 
     async load(
@@ -345,8 +401,11 @@
         toolbarActions = null,
         onLoadState = null,
         onFrame = null,
+        dataset = null,
       } = {},
     ) {
+      const previousDataset = this.options?.dataset;
+      const previousView = this.view;
       this.close();
       this.active = true;
       this.frameTime = null;
@@ -361,6 +420,7 @@
         toolbarActions,
         onLoadState,
         onFrame,
+        dataset,
       };
       this.clockTime = 0;
       this.playRequest = 0;
@@ -370,6 +430,17 @@
       const generation = ++this.generation;
       this.base = base;
       this.collection = collection;
+      this.savedFrames = new Map();
+      this.inputBatches = new Map();
+      this.inputRequests = new Map();
+      this.imageCache = new Map();
+      this.inputErrors = new Map();
+      this.imageError = null;
+      this.sceneStatus = "";
+      this.inputChunkSize = Math.max(1, Math.min(120, Number(dataset?.chunkFrames) || 60));
+      this.buffering.hidden = !dataset;
+      this.stateOverlay.hidden = true;
+      if (dataset) this.options.timeline = Array.from({length: dataset.steps}, (_, index) => ({index, time: index / dataset.hz}));
       this.controls.classList.toggle("episode-viewer-playback-recording", collection);
       if (collection) {
         this.buttons.replaceChildren(this.previous, this.play, this.next, this.separator, this.loop);
@@ -389,7 +460,9 @@
       this.hand = null;
       this.handPoseData = null;
       this.handPoseLayer = "actual";
-      this.view = collection ? "interactive" : "all";
+      this.view = dataset && previousDataset?.base === dataset.base
+        ? previousView
+        : dataset?.modalities.some(item => item.modality === "rgb") ? "images" : collection ? "interactive" : "all";
       this.legend.textContent = "";
       this.aside.replaceChildren(
         node("h4", "Hand"),
@@ -398,7 +471,12 @@
       this.renderControls();
       onLoadState?.("loading", "Loading scene…");
       this.message("Loading episode views…");
+      if (dataset) this.draw();
       if (robot) this.loadHand(robot, generation);
+      if (dataset && !base) {
+        await this.accept({state: "READY", viewer: {kind: "collection", frames: [], views: []}}, generation);
+        return;
+      }
       const query = collection ? `?episode=${episode}` : "";
       try {
         const result = await this.json(
@@ -407,13 +485,20 @@
         );
         if (generation !== this.generation) return;
         if (result.state === "PREPARING") {
-          this.message(result.detail);
+          this.sceneMessage(result.detail);
           this.pollTimer = setTimeout(() => this.poll(generation), 1200);
           return;
         }
         await this.accept(result, generation);
       } catch (error) {
         if (generation === this.generation) {
+          if (dataset) {
+            // Stored observations remain inspectable if their raw-source scene
+            // is unavailable. Never generate substitute observations.
+            this.sourceWarning = "Recorded 3D scene unavailable: " + error.message;
+            await this.accept({state: "READY", viewer: {kind: "collection", frames: [], views: []}}, generation);
+            return;
+          }
           this.message(error.message);
           this.retry.hidden = false;
           this.options.onLoadState?.("error", error.message);
@@ -434,6 +519,11 @@
         await this.accept(result, generation);
       } catch (error) {
         if (generation === this.generation) {
+          if (this.options.dataset) {
+            this.sourceWarning = "Recorded 3D scene unavailable: " + error.message;
+            await this.accept({state: "READY", viewer: {kind: "collection", frames: [], views: []}}, generation);
+            return;
+          }
           this.message(error.message);
           this.retry.hidden = false;
           this.options.onLoadState?.("error", error.message);
@@ -443,6 +533,10 @@
 
     async accept(result, generation) {
       if (result.state !== "READY") {
+        if (this.options.dataset) {
+          this.sourceWarning = result.detail || result.error || "Recorded 3D scene is unavailable.";
+          return this.accept({state: "READY", viewer: {kind: "collection", frames: [], views: []}}, generation);
+        }
         this.retry.hidden = result.state !== "FAILED";
         this.message(
           result.detail || "This result has no saved camera or keypoint data.",
@@ -451,12 +545,16 @@
         this.options.onLoadState?.("error", result.detail || "Episode view unavailable.");
         return;
       }
-      const data =
+      let data =
         result.viewer ||
         (await this.json(
           this.base + `/viewer/viewer.json?episode=${this.episode}`,
         ));
       if (generation !== this.generation) return;
+      if (this.options.dataset?.sourceChecksum && data.source_sha256 !== this.options.dataset.sourceChecksum) {
+        this.sourceWarning = "The original recording has changed. Only this dataset's saved inputs are shown.";
+        data = {kind: "collection", frames: [], views: []};
+      }
       this.data = this.options.sourceNames
         ? { ...data, source_names: this.options.sourceNames }
         : data;
@@ -470,7 +568,7 @@
         : "Prediction: model target · Actual: observed hand · Demonstration: original recording";
       if (data.demonstration)
         this.legend.textContent += ` · Source ${data.demonstration.session_id.slice(0, 8)}, recording ${data.demonstration.source_index + 1}. Aligned by elapsed time; hidden when the recording ends.`;
-      this.message((data.warnings || []).join(" "));
+      this.sceneMessage([...(data.warnings || []), this.sourceWarning].filter(Boolean).join(" "));
       if (this.collection) await this.loadScene();
       if (generation !== this.generation) return;
       this.draw();
@@ -499,26 +597,151 @@
             warnings.push("Hand model: " + error.message);
           }
           if (generation !== this.generation || !this.active) return;
-          if (warnings.length) this.message(warnings.join(" · "));
+          if (warnings.length) this.sceneMessage([this.sceneStatus, ...warnings].filter(Boolean).join(" · "));
           this.draw();
         }
       } catch (error) {
         if (generation === this.generation) {
           this.scene?.dispose();
           this.scene = null;
-          this.message("Interactive view unavailable: " + error.message);
+          this.sceneMessage("Interactive view unavailable: " + error.message);
         }
       } finally {
         if (generation === this.generation) delete this.sceneHost.dataset.loading;
       }
     }
 
+    ensureInputs(index) {
+      const dataset = this.options?.dataset;
+      if (!dataset || index < 0 || index >= dataset.steps || !this.active) return;
+      const size = this.inputChunkSize;
+      const start = Math.floor(index / size) * size;
+      if (this.inputBatches.has(start)) {
+        if (index - start >= Math.floor(size / 4) && start + size < dataset.steps)
+          this.ensureInputs(start + size);
+        return;
+      }
+      if (this.inputRequests.has(start) || this.inputErrors.has(start)) return;
+      const generation = this.generation;
+      const controller = new AbortController();
+      this.inputRequests.set(start, {controller});
+      const query = new URLSearchParams({start, count: size, gateway: document.getElementById("gateway")?.value || "auto"});
+      this.json(`${dataset.base}/episodes/${dataset.episode}/frames?${query}`, {signal: controller.signal})
+        .then(result => {
+          if (generation !== this.generation || !this.active) return;
+          this.inputBatches.set(start, result.frames.map(frame => frame.index));
+          const used = new Set(dataset.modalities.map(item => item.modality));
+          for (const frame of result.frames) this.savedFrames.set(frame.index, {
+            ...frame,
+            images: used.has("rgb") ? frame.images : [],
+            state: used.has("state") ? frame.state : [],
+            point_cloud: used.has("point_cloud") ? frame.point_cloud : [],
+            depth: used.has("depth") ? frame.depth : [],
+          });
+          // A few neighboring chunks support seeking without retaining an
+          // entire recording's RGB images in browser memory.
+          while (this.inputBatches.size > 3) {
+            const currentStart = Math.floor(this.frameIndex(this.currentTime()) / size) * size;
+            const remove = [...this.inputBatches.keys()].filter(value => value !== currentStart && value !== start)[0];
+            if (remove === undefined) break;
+            for (const key of this.inputBatches.get(remove)) this.savedFrames.delete(key);
+            this.inputBatches.delete(remove);
+          }
+          this.draw();
+        })
+        .catch(error => {
+          if (generation !== this.generation || !this.active || controller.signal.aborted) return;
+          this.inputErrors.set(start, error.message);
+          this.message("Saved inputs unavailable: " + error.message);
+          this.retry.hidden = false;
+          this.pausePlayback();
+        })
+        .finally(() => {
+          if (generation === this.generation) this.inputRequests.delete(start);
+        });
+    }
+
+    drawInputs(observations, frame) {
+      const images = observations?.images || [];
+      const context = this.canvas.getContext("2d");
+      if (!images.length) {
+        context.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        return;
+      }
+      const width = images.reduce((sum, item) => sum + item.width, 0);
+      const height = Math.max(...images.map(item => item.height));
+      if (this.canvas.width !== width) this.canvas.width = width;
+      if (this.canvas.height !== height) this.canvas.height = height;
+      context.clearRect(0, 0, width, height);
+      let offset = 0;
+      let ready = true;
+      for (const item of images) {
+        const key = `${observations.index}:${item.id}`;
+        let saved = this.imageCache.get(key);
+        if (!saved) {
+          const image = new Image();
+          saved = {image, ready: false};
+          this.imageCache.set(key, saved);
+          const generation = this.generation;
+          image.onload = () => {
+            if (generation !== this.generation || !this.active) return;
+            saved.ready = true;
+            this.draw();
+          };
+          image.onerror = () => {
+            if (generation === this.generation && this.active) {
+              this.imageError = "A saved camera image could not be decoded.";
+              this.datasetStatus();
+            }
+          };
+          image.src = item.data_url;
+          while (this.imageCache.size > 12) this.imageCache.delete(this.imageCache.keys().next().value);
+        }
+        if (saved.ready) {
+          context.drawImage(saved.image, offset, 0, item.width, item.height);
+          context.fillStyle = "rgba(0,0,0,.65)";
+          context.fillRect(offset, 0, item.width, 24);
+          context.fillStyle = "white";
+          context.font = "12px sans-serif";
+          context.fillText(item.label || item.id, offset + 8, 16);
+          if (this.showState && observations.state?.length) {
+            const points = frame?.actual?.map(point => project(point, item));
+            context.save();
+            context.beginPath();
+            context.rect(offset, 0, item.width, item.height);
+            context.clip();
+            context.strokeStyle = context.fillStyle = colors.actual;
+            context.lineWidth = 1.5;
+            for (const [a, b] of this.data?.edges || [])
+              if (points?.[a] && points?.[b]) {
+                context.beginPath();
+                context.moveTo(offset + points[a][0], points[a][1]);
+                context.lineTo(offset + points[b][0], points[b][1]);
+                context.stroke();
+              }
+            for (const point of points || []) if (point) {
+              context.beginPath();
+              context.arc(offset + point[0], point[1], 2.5, 0, Math.PI * 2);
+              context.fill();
+            }
+            context.restore();
+          }
+        } else ready = false;
+        offset += item.width;
+      }
+      this.buffering.hidden = ready;
+      this.stateOverlay.textContent = (observations.state || []).map(item =>
+        `${item.name}: ${item.values.flat(Infinity).map((value, index) => `${item.labels?.[index] ? item.labels[index] + "=" : ""}${Number(value).toFixed(3)}`).join("  ")}`,
+      ).join("\n");
+    }
+
     renderControls() {
       this.tabs.replaceChildren();
-      this.tabs.hidden = this.collection;
+      const dataset = this.options?.dataset;
+      this.tabs.hidden = this.collection && !dataset;
       this.layers.replaceChildren();
       const views = this.data?.views || [];
-      const choices = this.collection ? [] : [
+      const choices = dataset ? [{id: "images", label: "Images"}, {id: "interactive", label: "3D"}] : this.collection ? [] : [
         { id: "all", label: views.length ? "All cameras" : "Video" },
         ...views,
         { id: "interactive", label: "Interactive" },
@@ -527,7 +750,7 @@
         const button = node("button", choice.label, "button button-outline");
         button.type = "button";
         button.setAttribute("aria-pressed", String(this.view === choice.id));
-        button.disabled =
+        button.disabled = dataset ? choice.id === "images" && !dataset.modalities.some(item => item.modality === "rgb") :
           choice.id === "interactive" &&
           !this.data?.scene_objects?.length &&
           !this.data?.frames?.some(
@@ -552,6 +775,18 @@
             actual: "Actual",
             demonstration: "Demonstration",
           };
+      if (dataset && this.view === "images") {
+        if (dataset.modalities.some(item => item.modality === "state")) {
+          const wrapper = node("label", null, "check-field"), input = node("input");
+          input.type = "checkbox";
+          input.checked = this.showState;
+          input.onchange = () => { this.showState = input.checked; this.draw(); };
+          wrapper.append(input, node("span", "State"));
+          this.layers.append(wrapper);
+        }
+        if (this.options.toolbarActions) this.layers.append(this.options.toolbarActions);
+        return;
+      }
       if (this.view === "interactive")
         for (const [key, label] of [
           ["hand", "Hand model"],
@@ -620,6 +855,16 @@
             "No saved " + label.toLowerCase() + " keypoints for this episode";
         this.layers.append(wrapper);
       }
+      if (dataset && this.view === "interactive")
+        for (const [key, label] of [["point_cloud", "Point cloud"], ["depth", "Depth"]]) {
+          if (!dataset.modalities.some(item => item.modality === key)) continue;
+          const wrapper = node("label", null, "check-field"), input = node("input");
+          input.type = "checkbox";
+          input.checked = this.geometry[key];
+          input.onchange = () => { this.geometry[key] = input.checked; this.draw(); };
+          wrapper.append(input, node("span", label));
+          this.layers.append(wrapper);
+        }
       if (this.collection && this.options?.toolbarActions)
         this.layers.append(this.options.toolbarActions);
     }
@@ -762,6 +1007,7 @@
       const time = this.currentTime();
       const timeline = this.timeline();
       const index = this.frameIndex(time);
+      this.datasetStatus(index);
       const current = timeline[index];
       playbackIcon(
         this.play,
@@ -804,10 +1050,14 @@
         else hi = mid - 1;
       }
       const frame = frames[lo];
+      const observations = this.options.dataset ? this.savedFrames.get(index) : null;
+      if (this.options.dataset) this.ensureInputs(index);
       this.updateHandPose(frame);
       this.sceneHelp.hidden = this.view !== "interactive";
       this.canvas.hidden = this.view === "interactive";
       this.sceneHost.hidden = this.view !== "interactive";
+      this.stateOverlay.hidden = !this.options.dataset || this.view !== "images" || !this.showState || !observations?.state?.length;
+      if (this.options.dataset) this.buffering.hidden = Boolean(observations) || this.inputErrors.has(Math.floor(index / this.inputChunkSize) * this.inputChunkSize);
       if (this.view === "interactive") {
         this.scene?.update(
           frame,
@@ -815,7 +1065,12 @@
           this.enabled,
           this.collection,
           this.geometry,
+          observations,
         );
+        return;
+      }
+      if (this.options.dataset) {
+        this.drawInputs(observations, frame);
         return;
       }
       if (!(this.video?.readyState >= 2) || this.frameTime === null) return;
@@ -878,13 +1133,101 @@
       cancelAnimationFrame(this.animation);
       this.scene?.dispose();
       this.scene = null;
+      for (const request of this.inputRequests?.values() || []) request.controller.abort();
+      this.inputRequests?.clear();
+      this.savedFrames?.clear();
+      this.inputBatches?.clear();
+      this.imageCache?.clear();
+      this.sourceWarning = null;
       delete this.sceneHost.dataset.loading;
     }
   }
 
+  class DatasetPreview {
+    constructor(host) {
+      this.host = host;
+      this.generation = 0;
+      this.message = node("p", null, "secondary");
+      this.message.setAttribute("role", "status");
+      this.viewerHost = node("div");
+      this.viewerHost.id = host.id + "-viewer";
+      this.actions = node("div");
+      this.navigation = sequenceNavigation({host: this.actions, onSelect: index => this.select(index)});
+      this.retry = node("button", "Retry preview", "button button-outline");
+      this.retry.type = "button";
+      this.retry.hidden = true;
+      this.retry.onclick = () => this.open(this.id, true);
+      host.append(node("h4", "Input preview"), this.message, this.viewerHost, this.retry);
+    }
+    async open(id, force = false) {
+      if (this.id === id && this.active && !force) return;
+      this.close();
+      this.active = true;
+      this.id = id;
+      const generation = ++this.generation;
+      this.base = `/api/data/datasets/${encodeURIComponent(id)}/preview`;
+      this.message.textContent = "Loading saved inputs…";
+      this.retry.hidden = true;
+      this.viewerHost.hidden = true;
+      try {
+        const result = await requestJson(this.base);
+        if (generation !== this.generation || !this.active) return;
+        if (result.state !== "READY" || !result.episodes?.length) {
+          this.message.textContent = result.detail || "No saved input preview is available for this dataset.";
+          return;
+        }
+        this.data = result;
+        this.message.textContent = "";
+        this.select(0);
+      } catch (error) {
+        if (generation !== this.generation || !this.active) return;
+        this.message.textContent = error.message;
+        this.retry.hidden = false;
+      }
+    }
+    select(index) {
+      const episode = this.data?.episodes[index];
+      if (!episode || !this.active) return;
+      this.navigation.update(index, this.data.episodes.length);
+      this.viewerHost.hidden = false;
+      const source = episode.source_session_id && Number.isInteger(episode.source_recording_index)
+        ? `/api/collection/live/sessions/${encodeURIComponent(episode.source_session_id)}/recordings/${episode.source_recording_index}` : null;
+      window.SkynetEpisodeViewer.open(this.viewerHost.id, null, source, {
+        collection: true,
+        episode: episode.source_episode || 0,
+        simulationHz: episode.hz,
+        toolbarActions: this.actions,
+        dataset: {base: this.base, episode: episode.index, steps: episode.steps, hz: episode.hz, modalities: this.data.modalities, chunkFrames: episode.chunk_frames, sourceChecksum: source ? episode.source_sha256 : null},
+      });
+    }
+    close() {
+      this.active = false;
+      ++this.generation;
+      this.viewerHost.hidden = true;
+      window.SkynetEpisodeViewer.close(this.viewerHost.id);
+    }
+  }
+
+  const datasets = new Map();
   window.SkynetEpisodeViewer = {
+    sequenceNavigation,
+    openDataset(hostId, datasetId) {
+      let preview = datasets.get(hostId);
+      if (!preview) {
+        preview = new DatasetPreview(document.getElementById(hostId));
+        datasets.set(hostId, preview);
+      }
+      preview.open(datasetId);
+      return preview;
+    },
+    closeDataset(hostId) { datasets.get(hostId)?.close(); },
     open(hostId, videoId, base, options) {
       let viewer = instances.get(hostId);
+      if (viewer && viewer.host !== document.getElementById(hostId)) {
+        viewer.close();
+        viewer.observer.disconnect();
+        viewer = null;
+      }
       if (!viewer) {
         viewer = new EpisodeViewer(
           document.getElementById(hostId),

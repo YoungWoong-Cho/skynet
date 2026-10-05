@@ -148,7 +148,13 @@ class PostgresBackend:
             row_factory=record_factory,
             connect_timeout=10,
             application_name="skynet",
-            options="-c timezone=UTC -c lock_timeout=30000",
+            # A disconnected SSH client can leave the server transaction open.
+            # Bound that idle lifetime so its repository write lock cannot
+            # indefinitely block unrelated requests. Active SQL is unaffected.
+            options=(
+                "-c timezone=UTC -c lock_timeout=30000 "
+                "-c idle_in_transaction_session_timeout=120000"
+            ),
         )
         try:
             raw.execute(
@@ -223,12 +229,14 @@ class DistributedRLock:
         try:
             connection = self.backend.connect()
             if blocking:
-                if timeout >= 0:
-                    connection.execute(
-                        "SELECT set_config('lock_timeout', ?, false)",
-                        (str(max(1, int(timeout * 1000))),),
-                    )
+                # Operation-lock waiting follows acquire(timeout), not the
+                # separate 30-second limit for SQL row/write-lock contention.
+                connection.execute(
+                    "SELECT set_config('lock_timeout', ?, false)",
+                    (str(max(1, int(timeout * 1000))) if timeout >= 0 else "0",),
+                )
                 connection.execute("SELECT pg_advisory_lock(?)", (self.key,))
+                connection.execute("SELECT set_config('lock_timeout', '30000', false)")
             elif not connection.execute(
                 "SELECT pg_try_advisory_lock(?)", (self.key,)
             ).fetchone()[0]:

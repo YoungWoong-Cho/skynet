@@ -41,7 +41,8 @@ def test_compiler_enforces_policy_for_simulator_declarations_and_runtime_pins(co
 
 
 @pytest.mark.parametrize("node,gpu,count,error", [
-    ("bishop", "l40s", 1, "not allowed"),
+    ("unlisted-node", "l40s", 1, "not allowed"),
+    ("zhurong", "l40s", 3, "not allowed"),
     ("baymax", "a40", 1, "not allowed"),
     ("grom", "a40", 1, "requires l40s"),
     ("megazord", "l40s", 1, "requires a40"),
@@ -63,10 +64,10 @@ def test_compiler_rejects_unsafe_or_impossible_placements(node, gpu, count, erro
     ("eval", "libero"), ("eval", "egoverse"),
 ])
 def test_training_and_other_evaluators_keep_their_placement(stage, environment):
-    spec = make_spec(node={"mode": "manual", "name": "bishop"})
+    spec = make_spec(node={"mode": "manual", "name": "unlisted-node"})
     plan = resolve_adapter_plan(spec)
     plan.native_config["canonical_evaluation"] = {"environment": environment}
-    assert "#SBATCH --nodelist=bishop" in compile_sbatch(spec, plan, run_id="unrelated", stage=stage).script
+    assert "#SBATCH --nodelist=unlisted-node" in compile_sbatch(spec, plan, run_id="unrelated", stage=stage).script
 
 
 def test_isaac_policy_fails_closed_when_cluster_has_no_allowed_nodes(monkeypatch):
@@ -115,7 +116,7 @@ def test_validation_submission_and_snapshot_agree_even_for_manual_commands(evalu
     assert attempt["execution_snapshot_json"]["resolved_spec"]["resources"]["node"]["name"] == node
 
 
-@pytest.mark.parametrize("old_node,expected", [(None, "grom"), ("bishop", None)])
+@pytest.mark.parametrize("old_node,expected", [(None, "grom"), ("unlisted-node", None)])
 def test_historical_retry_is_constrained_or_blocked_before_submission(evaluation_service, old_node, expected):
     service, cluster, run, suite = evaluation_service
     evaluation = service.create_evaluation(request_for(run, suite))
@@ -147,7 +148,7 @@ def test_readiness_checks_use_same_policy_and_reject_other_nodes():
     suite = "groot_gr1_isaaclab_evaltasks"
     assert "#SBATCH --nodelist=megazord" in render_readiness_sbatch(profile, suite, gpu_type="a40")
     with pytest.raises(ValueError, match="not allowed"):
-        render_readiness_sbatch(profile, suite, node="bishop")
+        render_readiness_sbatch(profile, suite, node="unlisted-node")
 
 
 @pytest.mark.parametrize("slug,suite_name,model", [
@@ -196,7 +197,7 @@ def test_native_evaluators_resolve_safe_resources_and_frozen_capsules(evaluation
 
 def test_invalid_manual_node_is_rejected_by_validation(evaluation_service):
     service, cluster, run, suite = evaluation_service
-    request = request_for(run, suite, "l40s", "bishop")
+    request = request_for(run, suite, "l40s", "unlisted-node")
     before = cluster.submit_count
     validation = service.validate_evaluation_target(run["id"], "/checkpoint", suite_id=suite["id"],
         tasks=[], episodes_per_task=1, resources=request.resources, argv=request.argv)
@@ -228,3 +229,68 @@ def test_eight_parallel_gpus_and_manual_any_gpu_stay_on_one_allowed_node():
     compiled = compile_sbatch(spec, plan, run_id="eight-workers", stage="eval")
     assert "#SBATCH --gres=gpu:a40:8" in compiled.script
     assert "#SBATCH --nodelist=megazord" in compiled.script
+
+
+def test_automatic_placement_lets_slurm_choose_any_verified_node(evaluation_service, monkeypatch):
+    monkeypatch.setitem(CLUSTER.isaac_evaluation_placement.nodes, "verified-peer",
+                        CLUSTER.isaac_evaluation_placement.nodes["grom"].model_copy(deep=True))
+    service, cluster, run, suite = evaluation_service
+    cluster.node_names = lambda gateway="auto": ["grom", "bishop", "dynamics", "verified-peer", "megazord", "unsafe"]
+    request = request_for(run, suite)
+    validation = service.validate_evaluation_target(run["id"], "/checkpoint", suite_id=suite["id"],
+        tasks=[], episodes_per_task=1, seeds=[42], resources=request.resources, argv=request.argv)
+    assert validation["valid"], validation
+    node = validation["resolved_resources"]["node"]
+    assert node["mode"] == "auto" and node["name"] is None
+    assert node["eligible_names"] == ["grom", "verified-peer"]
+    assert node["excluded_names"] == ["bishop", "dynamics", "megazord", "unsafe"]
+    evaluation = service.create_evaluation(request)
+    assert "#SBATCH --nodelist" not in cluster.script
+    assert "#SBATCH --exclude=bishop,dynamics,megazord,unsafe" in cluster.script
+    assert "#SBATCH --nodes=1" in cluster.script
+    assert "case \"${SLURMD_NODENAME:-}\" in grom|verified-peer)" in cluster.script
+    stage = next(s for s in service.database.get_run(run["id"])["stages"] if s["id"] == evaluation["stage_id"])
+    assert stage["resolved_config_json"]["spec"]["resources"]["node"] == node
+
+
+def test_eligible_placement_rejects_policy_changes_and_malformed_inventory(monkeypatch):
+    monkeypatch.setitem(CLUSTER.isaac_evaluation_placement.nodes, "verified-peer",
+                        CLUSTER.isaac_evaluation_placement.nodes["grom"].model_copy(deep=True))
+    resources = make_spec().resources
+    resources.gpu.gpu_type = "l40s"
+    resolved = resolve_evaluation_resources(resources, {"environment": "isaac_lab"},
+        node_inventory=["grom", "verified-peer", "unsafe"])
+    assert resolve_evaluation_resources(resolved, {"environment": "isaac_lab"}) == resolved
+    altered = resolved.model_copy(deep=True)
+    altered.node.eligible_names.append("unsafe")
+    narrowed = resolve_evaluation_resources(altered, {"environment": "isaac_lab"})
+    assert narrowed.node.eligible_names == resolved.node.eligible_names
+    assert "unsafe" in narrowed.node.excluded_names
+    with pytest.raises(ValueError, match="concrete"):
+        resolve_evaluation_resources(resources, {"environment": "isaac_lab"},
+            node_inventory=["grom", "verified-peer", "bad;node"])
+    with pytest.raises(ValueError, match="No compatible"):
+        resolve_evaluation_resources(resources, {"environment": "isaac_lab"}, node_inventory=["unsafe"])
+
+
+def test_historical_allocation_narrows_after_incompatible_node_removed():
+    spec = make_spec()
+    spec.resources.gpu.gpu_type = "l40s"
+    document = spec.resources.model_dump(mode="json", by_alias=True)
+    document['node'] = {'mode': 'auto', 'eligible_names': ['bishop', 'dynamics', 'grom', 'zhurong'],
+                        'excluded_names': ['unsafe']}
+    resources = ResourceSpec.model_validate(document)
+    narrowed = resolve_evaluation_resources(resources, {'environment': 'isaac_lab'})
+    assert narrowed.node.eligible_names == ['grom']
+    assert narrowed.node.excluded_names == ['bishop', 'dynamics', 'unsafe', 'zhurong']
+    assert resources.node.eligible_names == ['bishop', 'dynamics', 'grom', 'zhurong']
+    assert 'zhurong' not in narrowed.node.eligible_names
+    spec.resources = resources
+    plan = resolve_adapter_plan(spec)
+    plan.native_config['canonical_evaluation'] = {'environment': 'isaac_lab'}
+    compiled = compile_sbatch(spec, plan, run_id='narrowed', stage='eval')
+    assert '#SBATCH --exclude=bishop,dynamics,unsafe,zhurong' in compiled.script
+    assert 'in grom)' in compiled.script
+    document['node']['eligible_names'] = ['bishop', 'dynamics', 'zhurong']
+    with pytest.raises(ValueError, match='No stored eligible nodes'):
+        resolve_evaluation_resources(ResourceSpec.model_validate(document), {'environment': 'isaac_lab'})
