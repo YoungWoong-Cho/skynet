@@ -41,11 +41,8 @@ def experiment_sampling(document, manifest=None):
                         action_steps=requirement.get("default_action_steps", 1) if chunk in (None, "") else chunk,
                         window_policy=config.get("window_policy", requirement["window_policy"]) if declaration.get("slug") == "human-policy-hat" else requirement["window_policy"],
                         require_validation=requirement.get("require_validation", False))
-    if many and declaration.get("slug") in {"unidex", "human-policy-hat"}:
+    if many and declaration.get("slug") == "human-policy-hat":
         from .adapters.unidex_subset import apply_frame_budget
-        if declaration.get("slug") == "unidex":
-            from .adapters.unidex_input import collection_pointcloud_recipe
-            collection_pointcloud_recipe(value)
         sampling = apply_frame_budget(value, sampling, config.get("unique_source_frames"),
                                       selection_seed=config.get("data_selection_seed", 20260920))
     return sampling

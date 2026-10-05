@@ -337,7 +337,7 @@ def test_recording_reader_enforces_pinned_dataset_manifest_fingerprint(tmp_path)
         RecordingDataset(path,sha='0'*64)
 
 
-def test_unidex_manifest_preserves_human_task_instruction_and_verified_codec_identity(tmp_path, monkeypatch):
+def test_faas_manifest_preserves_human_task_instruction_and_verified_codec_identity(tmp_path, monkeypatch):
     from recording_prepare import recording_prompt
     src,_,_=source(tmp_path)
     src.update(session_profile={'instructions':'  Pick up the cube.  ','task_name':'Pick up cube'},

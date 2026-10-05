@@ -15,7 +15,4 @@ def load_policy(context, source_dir, manifest):
     if loader == "hat_cartesian":
         from hat_evaluation import RecordedPolicy
         return RecordedPolicy(context, source_dir, manifest)
-    if loader == "unidex_faas":
-        from unidex_evaluation import RecordedPolicy
-        return RecordedPolicy(context, source_dir, manifest)
     raise ValueError(f"Unknown policy loader: {loader}")

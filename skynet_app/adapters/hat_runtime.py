@@ -164,8 +164,8 @@ def main():
     optimizer = policy.configure_optimizers()
     from torchvision.transforms import v2
     augment = v2.ColorJitter(brightness=.4, contrast=.4, saturation=.4)
-    from unidex_data import UniDexMixtureSampler, make_training_dataloader
-    sampler = UniDexMixtureSampler(datasets["train"].hands, args.mixing_policy,
+    from hat_data import HandMixtureSampler, make_training_dataloader
+    sampler = HandMixtureSampler(datasets["train"].hands, args.mixing_policy,
         seed=args.seed, rank=0, replicas=1, batch_size=args.batch_size)
     loaders = {s:context.loader(d,args.batch_size,args.num_workers,shuffle=False,seed=args.seed)
                for s,d in datasets.items() if len(d) and s != "train" and args.validation_enabled}

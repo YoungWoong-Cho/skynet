@@ -24,7 +24,7 @@ def test_flat_catalog_keeps_exact_sources_and_hides_raw_and_files(tmp_path):
     db=Database(tmp_path/'db');parent=resource(db)
     raw= db.create_data_resource_version(parent['id'], revision='raw', format='skynet.episodes/v1',
         path='/raw', manifest_sha256='e'*64, metadata={'sources':[{'session_id':'a'}, {'session_id':'b'}]})
-    first=version(db,parent,metadata={'sources':[{'session_id':'a'}], 'adapter':{'name':'UniDex'}})
+    first=version(db,parent,metadata={'sources':[{'session_id':'a'}], 'adapter':{'name':'HAT'}})
     second=version(db,parent,'two',metadata={'source_version_id':raw['id'], 'adapter':{'name':'HPT'}})
     file=db.create_data_resource(category='file',provider='local',namespace='assets',source_key='hand',kind='simulation_assets')
     version(db,file,'file')
@@ -32,7 +32,7 @@ def test_flat_catalog_keeps_exact_sources_and_hides_raw_and_files(tmp_path):
     assert [row['id'] for row in rows]==[second['id'],first['id']]
     assert rows[0]['recording_ids']==['a','b'] and rows[1]['recording_ids']==['a']
     assert rows[0]['display_name']=='Shadow · Cube · HPT'
-    assert rows[1]['display_name']=='Shadow · Cube · UniDex'
+    assert rows[1]['display_name']=='Shadow · Cube · HAT'
     assert all(row['category']=='dataset' and 'versions' not in row for row in rows)
     assert db.get_dataset(raw['id']) is None and db.get_dataset(parent['id']) is None
 
@@ -81,7 +81,7 @@ def test_preset_links_identify_exact_result(tmp_path):
 
 def test_migration_backfills_archive_and_names_without_rewriting_versions(tmp_path):
     db=Database(tmp_path/'db');parent=resource(db)
-    first=version(db,parent,metadata={'display_name':'Shadow · Cube','adapter':{'name':'UniDex'}})
+    first=version(db,parent,metadata={'display_name':'Shadow · Cube','adapter':{'name':'HAT'}})
     second=version(db,parent,'two',metadata={'adapter':{'name':'HPT'}})
     before={item['id']:item for item in db.get_data_resource(parent['id'])['versions']}
     migration=Path(__file__).resolve().parents[1]/'skynet_app/migrations/postgresql/016_flat_dataset_catalog.sql'
@@ -94,7 +94,7 @@ def test_migration_backfills_archive_and_names_without_rewriting_versions(tmp_pa
     assert db.get_data_resource(parent['id'])['archived_at'] is None
     assert db.list_datasets()==[]
     rows=db.list_datasets(include_archived=True)
-    assert {row['display_name'] for row in rows}=={'Shadow · Cube · UniDex','Shadow · Cube · HPT'}
+    assert {row['display_name'] for row in rows}=={'Shadow · Cube · HAT','Shadow · Cube · HPT'}
     assert all(row['archived_at']=='2026-09-19' for row in rows)
     assert before=={item['id']:item for item in db.get_data_resource(parent['id'])['versions']}
     third=version(db,parent,'three')

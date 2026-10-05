@@ -23,7 +23,7 @@ def dataset(db):
 def evaluation_run(db, name='Evaluate held-out hand'):
     experiment = db.create_experiment(name=name, requested_spec={})
     variant = db.create_variant(experiment['latest_revision']['id'], name='run', parameters={}, resolved_spec={})
-    run = db.create_run(variant['id'], seed=1, adapter_name='unidex', adapter_version='1', run_directory='/run', status='COMPLETED')
+    run = db.create_run(variant['id'], seed=1, adapter_name='human-policy-hat', adapter_version='1', run_directory='/run', status='COMPLETED')
     return experiment, run
 
 

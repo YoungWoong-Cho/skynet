@@ -9,7 +9,7 @@
 5. GPU producers restore each saved pre-action state without stepping physics. CPU producers unproject verified depth, merge requested camera views, crop, then sample deterministically.
 6. The shared builder publishes a `skynet.recording-dataset/v1` manifest referencing immutable recording and observation streams. The selected adapter reader verifies every reference before publication; resizing and layout transforms happen in memory during training.
 
-UniDex declares one front XYZRGB stream and native FAAS82 state/command streams through the same adapter mechanism. Unsupported hand mappings fail before camera preparation. No separate UniDex renderer is installed.
+HAT declares native FAAS82 state/command streams through the same adapter mechanism. Unsupported hand mappings fail before camera preparation.
 
 ## Storage and identity
 
@@ -41,7 +41,7 @@ The renderer targets the pinned DexVerse v0/v1 sources and fixed asset layouts. 
 
 Real camera RGB/depth generation, point-cloud derivation from those frames, reuse and imported-hand rendering have not completed end-to-end GPU validation. Local geometry, converter, database, process-supervision and browser checks pass. Isaac Sim 5.1's native RTX renderer segfaulted before `SimulationApp` returned on both A40 and healthy L40S nodes with driver 595.84. A minimal script without DexVerse, Pinocchio or physics reproduced the crash, including with isolated user settings and a clean library environment. The renderer now rejects the identified incompatible Isaac Sim 5.1 / driver 595.84 or 595.71.05 combinations before native initialization and explains the required runtime repair. It does not modify shared GPU drivers.
 
-Existing archived RGB reuse has passed production preparation and actual EgoVerse loader validation for the 51-episode Shadow dataset and the single-episode overfit dataset. Real PKL FAAS encoding passes for the four supported UniDex embodiments without clipping recorded controller commands to physical joint limits. These checks do not establish successful new camera rendering. The next required check is a working native camera baseline, followed by one original episode through RGB, missing depth, CPU point clouds and reuse, then an imported-hand episode. Synthetic backend tests do not establish that result.
+Existing archived RGB reuse has passed production preparation and actual EgoVerse loader validation for the 51-episode Shadow dataset and the single-episode overfit dataset. Real PKL FAAS encoding passes for the four originally supported FAAS embodiments without clipping recorded controller commands to physical joint limits. These checks do not establish successful new camera rendering. The next required check is a working native camera baseline, followed by one original episode through RGB, missing depth, CPU point clouds and reuse, then an imported-hand episode. Synthetic backend tests do not establish that result.
 
 ## Rollback
 

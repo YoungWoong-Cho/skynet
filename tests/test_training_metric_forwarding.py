@@ -106,10 +106,10 @@ def expected_metrics(adapter, epoch=0):
 
 
 def test_every_builtin_jsonl_adapter_participates():
-    assert len(JSONL_ADAPTERS) == 8
+    assert len(JSONL_ADAPTERS) == 7
     assert {adapter.slug for adapter in JSONL_ADAPTERS} == {
         "egoverse-act", "egoverse-hpt", "egoverse-pi", "xpolicylab-act",
-        "xpolicylab-act-native", "unidex", "human-policy-hat", "diffusion-policy",
+        "xpolicylab-act-native", "human-policy-hat", "diffusion-policy",
     }
 
 

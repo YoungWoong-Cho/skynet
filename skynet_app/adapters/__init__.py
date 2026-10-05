@@ -2930,14 +2930,12 @@ def builtin_adapter_manifests() -> list[AdapterManifest]:
     from .dp_manifest import manifest as dp_manifest
     from .egoverse_manifest import manifests as egoverse_manifests
     from .xpolicy_native_manifest import manifests as xpolicy_native_manifests
-    from .unidex_manifest import manifest as unidex_manifest
     return [
         act_manifest(),
         hat_manifest(),
         dp_manifest(),
         *xpolicy_native_manifests(),
         *egoverse_manifests(),
-        unidex_manifest(),
         _builtin_manifest(
             "generic", "Custom structured command", None, ["custom"], None,
             input_fields=[

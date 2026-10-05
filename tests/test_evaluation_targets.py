@@ -3,14 +3,16 @@ from copy import deepcopy
 import pytest
 
 from skynet_app.evaluation_contracts import bind_suite_to_dataset
-from skynet_app.evaluation_targets import validate_unidex_target, attach_evaluation_target, UNIDEX_CONTRACT
+from skynet_app.evaluation_targets import validate_evaluation_target, attach_evaluation_target
+
+HAT_CONTRACT = "skynet.hat-rgb-fingertips/v1"
 
 
 def selection(hand, digest="a"):
     capture = dict(robot=hand, hand="right", task="Dexverse-PickCube-v0", source_revision="b"*40,
                    action_joint_names=["joint"], action_scale=[1.], action_offset=[0.])
     return dict(position=0, version_id=hand, path="/datasets/"+hand, manifest_sha256=digest*64,
-                metadata=dict(contract=UNIDEX_CONTRACT, format="skynet.recording-dataset/v1", validation={"status":"PASSED"}, capture=capture,
+                metadata=dict(contract=HAT_CONTRACT, format="skynet.recording-dataset/v1", validation={"status":"PASSED"}, capture=capture,
                               episodes=[dict(hand_id=hand, capture=deepcopy(capture))]))
 
 
@@ -21,7 +23,7 @@ def training(*hands):
         assignments.append(dict(role="training_data", position=i,
             version=dict(format="skynet.recording-dataset/v1", manifest_sha256=item['manifest_sha256'], metadata=item['metadata']),
             config=dict(location=dict(kind="cluster", status="AVAILABLE", path=item['path'], manifest_sha256=item['manifest_sha256']))))
-    return dict(source=dict(adapter="unidex"), data=dict(bundle=dict(assignments=assignments)))
+    return dict(source=dict(adapter="human-policy-hat"), data=dict(bundle=dict(assignments=assignments)))
 
 
 def suite(target=None):
@@ -35,7 +37,7 @@ def suite(target=None):
 def test_unseen_target_is_independent_and_does_not_mutate_training_inputs():
     spec=training('shadow', 'leap'); before=deepcopy(spec)
     target=selection('wuji')
-    assert validate_unidex_target(spec, target, True)=='wuji'
+    assert validate_evaluation_target(spec, target, True)=='wuji'
     bound=bind_suite_to_dataset(suite(target), spec)
     assert bound['config_json']['tasks']==['Dexverse-PickCube-v0']
     assert bound['config_json']['task_source']=='evaluation_dataset'
@@ -46,31 +48,31 @@ def test_unseen_target_is_independent_and_does_not_mutate_training_inputs():
 def test_seen_hand_requires_explicit_seen_evaluation_even_if_another_dataset():
     spec=training('shadow', 'leap')
     with pytest.raises(ValueError, match="training inputs"):
-        validate_unidex_target(spec, selection('leap', 'f'), True)
-    assert validate_unidex_target(spec, selection('leap', 'f'), False)=='leap'
+        validate_evaluation_target(spec, selection('leap', 'f'), True)
+    assert validate_evaluation_target(spec, selection('leap', 'f'), False)=='leap'
     target=selection('wuji'); target['metadata']['episodes'].append(selection('leap')['metadata']['episodes'][0])
     with pytest.raises(ValueError, match="exactly one hand"):
-        validate_unidex_target(spec, target, True)
+        validate_evaluation_target(spec, target, True)
 
 
 def test_target_requires_consistent_task_format_and_fresh_scene_reset():
     spec=training('shadow'); target=selection('wuji')
     target['metadata']['contract']='another'
-    with pytest.raises(ValueError, match="prepared UniDex"):
-        validate_unidex_target(spec, target, True)
+    with pytest.raises(ValueError, match="prepared HAT RGB"):
+        validate_evaluation_target(spec, target, True)
     target=selection('wuji'); target['metadata']['episodes'][0]['capture']['task']='wrong'
     with pytest.raises(ValueError, match="different task"):
-        validate_unidex_target(spec, target, True)
+        validate_evaluation_target(spec, target, True)
     target_suite=suite(selection('wuji')); target_suite['config_json']['initial_state']='single_training_episode'
     with pytest.raises(ValueError, match="fresh simulator reset"):
         bind_suite_to_dataset(target_suite,spec)
     with pytest.raises(ValueError, match="Choose an evaluation dataset"):
-        validate_unidex_target(spec,None,True)
+        validate_evaluation_target(spec,None,True)
 
 
-def test_non_unidex_target_cannot_silently_change_native_policy_hand():
+def test_non_hat_target_cannot_silently_change_native_policy_hand():
     spec=training('shadow'); spec['source']['adapter']='egoverse-hpt'
-    with pytest.raises(ValueError, match="UniDex bridge"):
+    with pytest.raises(ValueError, match="HAT bridge"):
         attach_evaluation_target(None,suite(),spec,'wuji')
 
 
@@ -114,16 +116,7 @@ def test_rollout_viewer_uses_target_hand_and_never_attaches_a_training_demo(monk
     assert pipeline_api.get_evaluation_episode_viewer('evaluation','episode')['state']=='READY'
 
 
-@pytest.mark.parametrize("adapter,contract", [("unidex", UNIDEX_CONTRACT), ("human-policy-hat", "skynet.hat-rgb-fingertips/v1"), ("egoverse-hpt", None)])
+@pytest.mark.parametrize("adapter,contract", [("human-policy-hat", HAT_CONTRACT), ("egoverse-hpt", None)])
 def test_browser_and_validation_share_target_contract(adapter, contract):
     from skynet_app.evaluation_targets import evaluation_target_contract
     assert evaluation_target_contract({"source": {"adapter": adapter}}) == contract
-
-
-def test_hat_rejects_unidex_targets_but_accepts_held_out_rgb_hand():
-    spec=training('shadow');spec['source']['adapter']='human-policy-hat'
-    target=selection('wuji')
-    with pytest.raises(ValueError,match='HAT RGB'):
-        validate_unidex_target(spec,target,True)
-    target['metadata']['contract']='skynet.hat-rgb-fingertips/v1'
-    assert validate_unidex_target(spec,target,True)=='wuji'

@@ -8,7 +8,6 @@ from pydantic import ValidationError
 
 from skynet_app.adapters import builtin_adapter_manifests
 from test_policy_exports import fixture_recording_manifest
-from skynet_app.adapters.unidex_manifest import manifest as unidex_manifest
 from skynet_app.dataset_formats import catalog, resolve_adapter
 from skynet_app.training_contracts import RECORDING_DATASET_FORMAT, RecordingConversion
 
@@ -83,46 +82,7 @@ def test_all_recording_declarations_bind_shared_format_and_freeze_their_loader()
             assert all(RECORDING_DATASET_FORMAT in binding.formats and preset.contract in binding.contracts for binding in bindings)
             assert "adapter-support/" + preset.loader_validation.script in manifest.train.capsule_files
         assert "adapter-support/recording_dataset.py" in manifest.train.capsule_files
-    assert set(convertible) == {"xpolicylab-act", "xpolicylab-act-native", "egoverse-act", "egoverse-hpt", "unidex", "human-policy-hat"}
-
-
-def test_unidex_declares_geometry_temporal_semantics_and_verified_hands():
-    manifest = unidex_manifest()
-    preset, = manifest.train.data_requirements.recording_conversion.presets
-    stream, = preset.observation_requirements["streams"]
-    assert stream["camera_ids"] == ["scene_front"]
-    assert stream["channels"] == "XYZRGB" and stream["num_points"] == 10000
-    assert stream["color_range"] == "0_1" and stream["depth_range"] == [0.01, 5.0]
-    assert stream["camera_convention"] == "ros_optical" and stream["crop"] is None
-    assert preset.preprocessing == {"pointcloud_frame": "camera_ros_optical", "pointcloud_native_frame": "camera_opengl"}
-    assert preset.action_representation == {"id": "skynet.unidex-faas/v1", "frame": "camera_opengl", "action_semantics": "controller_targets"}
-    assert "temporal" not in preset.model_dump()
-    assert not preset.validation_required and preset.minimum_episodes == 1
-    sampling = manifest.train.data_requirements.recording_sampling
-    assert sampling.window_policy == "complete" and sampling.require_validation
-    assert sampling.default_action_steps == 30
-    assert set(preset.supported_robots) == {
-        "floating_shadow_right", "skynet_inspire_rh56_right", "skynet_allegro_v4_right",
-        "skynet_leap_v1_right", "skynet_wuji_2_right", "skynet_wuji_1_right",
-        "skynet_sharpa_right",
-    }
-    assert manifest.evaluations == []
-
-
-def test_unidex_exposes_atomic_multi_dataset_input_mixing_and_step_budget():
-    declaration = unidex_manifest().train
-    fields = {field.path: field for field in declaration.input_fields}
-    datasets = fields["native.config.datasets"]
-    assert datasets.kind == "json" and datasets.data_binding.cardinality == "many"
-    assert datasets.data_binding.value_path == "selection"
-    assert "native.config.dataset_path" not in fields and "native.config.dataset_manifest_sha256" not in fields
-    assert fields["native.config.mixing_policy"].default == "window_proportional"
-    assert fields["native.config.mixing_policy"].choices == ["window_proportional", "hand_balanced"]
-    assert declaration.parameter_flags["train.max_steps"].flag == "--max-steps"
-    assert "--data-spec" in declaration.argv and "--dataset" not in declaration.argv
-    assert "adapter-support/dataset_inputs.py" in declaration.capsule_files
-    assert declaration.progress.total_path == "native.config.epochs"
-    assert declaration.progress.step_source.completed_key == "global_step"
+    assert set(convertible) == {"xpolicylab-act", "xpolicylab-act-native", "egoverse-act", "egoverse-hpt", "human-policy-hat"}
 
 
 def test_duplicate_and_undeclared_default_presets_are_rejected():

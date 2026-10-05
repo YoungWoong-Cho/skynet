@@ -31,7 +31,7 @@ def large_context():
     target = deepcopy(inputs.pop())
     config = dict(initial_state='fresh_simulator_reset', target_dataset=target)
     return dict(
-        compatibility=dict(policy_loader='unidex_faas', io_contract={'robot': 'hand-6', 'step_dt': 1 / 30}),
+        compatibility=dict(policy_loader='hat_cartesian', io_contract={'robot': 'hand-6', 'step_dt': 1 / 30}),
         policy=dict(native_config=dict(datasets=inputs, control_hz=30, action_steps=30)),
         target_dataset=target, unseen_embodiment=True,
         target_simulation_profile={'robot': 'hand-6', 'source_revision': 'a' * 40, 'asset_inventory_sha256': 'b' * 64},
@@ -76,7 +76,7 @@ def test_other_evaluators_and_unknown_dataset_contracts_keep_custom_metadata():
     context = large_context()
     context['compatibility']['policy_loader'] = 'custom'
     assert runtime_evaluation_context(context) == context
-    context['compatibility']['policy_loader'] = 'unidex_faas'
+    context['compatibility']['policy_loader'] = 'hat_cartesian'
     context['target_dataset']['metadata']['contract'] = 'custom/manifest'
     assert runtime_evaluation_context(context)['target_dataset'] == context['target_dataset']
 

@@ -5,6 +5,10 @@ Skynet: verified right-hand assets, fixed scene cameras, camera-OpenGL wrist pos
 the existing verified recording codec. Head, left-hand and H1 joint slots are
 zero; no H1 joint layout or human demonstration timing is assumed.
 """
+from collections import defaultdict
+import math
+import random
+
 import numpy as np
 
 try:
@@ -194,3 +198,162 @@ def prepare_collection(selections, *, control_hz=None, action_steps=30,
         datasets[split] = ConcatDataset(children)
         datasets[split].hands = [hand for child in children for hand in child.hands]
     return datasets, stats, sampling, verified
+
+
+class HandMixtureSampler:
+    """Skynet's deterministic hand mixture around the unchanged native model.
+
+    window_proportional visits every window once, matching plain concatenation.
+    hand_balanced assigns equal hand quotas (within one sample), then draws each
+    hand's windows with replacement. DDP shards one shared epoch sequence and pads
+    its tail like DistributedSampler so every rank performs the same batch count.
+    """
+
+    # Sampler/loader schema ids are recorded in existing training receipts; keep them unchanged.
+    SCHEMA = "skynet.unidex-mixture-sampling/v1"
+    POLICIES = ("window_proportional", "hand_balanced")
+
+    def __init__(self, hands, policy="window_proportional", *, seed=42, shuffle=True, rank=None, replicas=None,
+                 batch_size=1, gradient_accumulation_steps=1):
+        if policy not in self.POLICIES or not hands or any(not isinstance(hand, str) or not hand for hand in hands):
+            raise ValueError("Hand mixture sampling requires a known policy and a hand identity for every window")
+        if type(seed) is not int or seed < 0:
+            raise ValueError("Hand mixture sampling seed must be a nonnegative integer")
+        if type(batch_size) is not int or batch_size < 1:
+            raise ValueError("Sampler batch size must be a positive integer")
+        if type(gradient_accumulation_steps) is not int or gradient_accumulation_steps < 1:
+            raise ValueError("Sampler gradient accumulation must be a positive integer")
+        if (rank is None) != (replicas is None) or (rank is not None and (
+                type(rank) is not int or type(replicas) is not int or replicas < 1 or not 0 <= rank < replicas)):
+            raise ValueError("Invalid distributed sampler rank or replica count")
+        self.hands, self.policy, self.seed, self.shuffle = tuple(hands), policy, seed, shuffle
+        self.rank, self.replicas, self.epoch = rank, replicas, 0
+        self.batch_size = batch_size
+        self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.consumed_samples = 0
+        self.groups = defaultdict(list)
+        for index, hand in enumerate(self.hands):
+            self.groups[hand].append(index)
+
+    def set_epoch(self, epoch):
+        if type(epoch) is not int or epoch < 0:
+            raise ValueError("Sampler epoch must be a nonnegative integer")
+        if self.epoch != epoch:
+            if 0 < self.consumed_samples < len(self):
+                raise ValueError("Checkpoint ended an incomplete data epoch; resume a batch-boundary checkpoint instead")
+            self.consumed_samples = 0
+        self.epoch = epoch
+
+    def mark_consumed(self, count):
+        """Acknowledge completed batches, never DataLoader's prefetched indices."""
+        if type(count) is not int or count < 1 or self.consumed_samples + count > len(self):
+            raise ValueError("Invalid completed training sample count")
+        self.consumed_samples += count
+
+    def state_dict(self):
+        return {"schema": "skynet.unidex-sampler-state/v1", "identity": self.identity(),
+                "shuffle": self.shuffle, "replicas": self._distribution()[1],
+                "epoch": self.epoch, "consumed_samples": self.consumed_samples}
+
+    def load_state_dict(self, state):
+        if (state.get("schema") != "skynet.unidex-sampler-state/v1"
+                or state.get("identity") != self.identity() or state.get("shuffle") != self.shuffle
+                or state.get("replicas") != self._distribution()[1]):
+            raise ValueError("Resume sampler identity or distributed world size changed")
+        epoch, consumed = state.get("epoch"), state.get("consumed_samples")
+        if type(epoch) is not int or epoch < 0 or type(consumed) is not int or not 0 <= consumed <= len(self):
+            raise ValueError("Invalid saved training data position")
+        self.epoch, self.consumed_samples = epoch, consumed
+
+    def _distribution(self):
+        if self.rank is not None:
+            return self.rank, self.replicas
+        try:
+            import torch.distributed as distributed
+            if distributed.is_available() and distributed.is_initialized():
+                return distributed.get_rank(), distributed.get_world_size()
+        except ImportError:
+            pass
+        return 0, 1
+
+    def global_indices(self):
+        rng = random.Random(self.seed + self.epoch * 1_000_003)
+        if self.policy == "window_proportional":
+            indices = list(range(len(self.hands)))
+        else:
+            hands = sorted(self.groups)
+            rng.shuffle(hands)
+            indices = [rng.choice(self.groups[hands[index % len(hands)]]) for index in range(len(self.hands))]
+        if self.shuffle:
+            rng.shuffle(indices)
+        return indices
+
+    def __iter__(self):
+        rank, replicas = self._distribution()
+        indices = self.global_indices()
+        total = len(self) * replicas
+        indices += (indices * math.ceil((total - len(indices)) / len(indices)))[:total - len(indices)]
+        return iter(indices[rank:total:replicas][self.consumed_samples:])
+
+    def __len__(self):
+        _, replicas = self._distribution()
+        return self._rank_samples(replicas)
+
+    def _rank_samples(self, replicas):
+        # Pad the distributed epoch to complete optimizer updates, including its
+        # final accumulated microbatch. Otherwise Lightning flushes a smaller
+        # final update, changing the requested global batch at every epoch end.
+        alignment = self.batch_size * self.gradient_accumulation_steps
+        return math.ceil(len(self.hands) / (replicas * alignment)) * alignment
+
+    def epoch_plan(self, replicas):
+        """Record padding using the planned world size before workers launch."""
+        if type(replicas) is not int or replicas < 1:
+            raise ValueError("Epoch sampling plan requires a positive replica count")
+        rank_samples = self._rank_samples(replicas)
+        total = rank_samples * replicas
+        alignment = self.batch_size * self.gradient_accumulation_steps
+        return {"replicas": replicas, "draws_before_padding": len(self.hands),
+                "draws_after_padding": total, "padding_draws": total - len(self.hands),
+                "samples_per_rank": rank_samples, "microbatches_per_rank": rank_samples // self.batch_size,
+                "optimizer_updates": rank_samples // alignment, "global_batch_size": replicas * alignment}
+
+    def identity(self):
+        result = {"schema": self.SCHEMA, "policy": self.policy, "seed": self.seed,
+                "epoch_windows": len(self.hands), "hand_windows": {hand: len(self.groups[hand]) for hand in sorted(self.groups)},
+                "distributed": "shared_epoch_sequence_strided_by_rank_with_tail_padding"}
+        if self.batch_size > 1:
+            result["complete_batch_size"] = self.batch_size
+        if self.gradient_accumulation_steps > 1:
+            result["gradient_accumulation_steps"] = self.gradient_accumulation_steps
+            result["optimizer_step_sample_alignment_per_rank"] = self.batch_size * self.gradient_accumulation_steps
+        return result
+
+
+def make_training_dataloader(dataset, sampler, *, batch_size, num_workers, seed):
+    """Lightning's public stateful-loader protocol, backed by completed batches.
+
+    The full epoch length stays unchanged because Lightning restores its own
+    completed-batch counters. Only iteration skips the acknowledged rank-local
+    prefix. Worker prefetch therefore cannot advance the checkpoint position.
+    Recorded dataset reads are deterministic and perform no random augmentation.
+    """
+    from torch import Generator
+    from torch.utils.data import DataLoader
+
+    class TrainingDataLoader(DataLoader):
+        def state_dict(self):
+            return {"schema": "skynet.unidex-loader-state/v1", "batch_size": self.batch_size,
+                    "sampler": self.sampler.state_dict()}
+
+        def load_state_dict(self, state):
+            if state.get("schema") != "skynet.unidex-loader-state/v1" or state.get("batch_size") != self.batch_size:
+                raise ValueError("Resume training loader configuration changed")
+            self.sampler.load_state_dict(state["sampler"])
+            consumed = self.sampler.consumed_samples
+            if consumed % self.batch_size and consumed != len(self.sampler):
+                raise ValueError("Saved training position is not a completed batch")
+
+    return TrainingDataLoader(dataset, batch_size=batch_size, sampler=sampler,
+                              num_workers=num_workers, persistent_workers=num_workers > 0,
+                              generator=Generator().manual_seed(seed))

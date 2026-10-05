@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from recording_dataset import verify_dataset
-from policy_contract import recorded_contract, unidex_contract, contract_issues
+from policy_contract import recorded_contract, contract_issues
 from policy_loading import load_policy
 from policy_simulator import run_simulator, validate_simulation
 from xpolicy_runtime import write_json
@@ -22,23 +22,14 @@ def main():
     try:
         config = context["policy"]["native_config"]
         expected = context["compatibility"]["io_contract"]
-        unidex = context["compatibility"]["policy_loader"] == "unidex_faas"
-        hat = context["compatibility"]["policy_loader"] == "hat_cartesian"
-        if unidex or hat:
+        if context["compatibility"]["policy_loader"] == "hat_cartesian":
+            from hat_evaluation import hat_contract
             target = context.get("target_dataset") or {}
             manifest = verify_dataset(target["path"], target["manifest_sha256"])
-            if hat:
-                from hat_evaluation import hat_contract
-                actual = hat_contract(manifest, control_hz=1 / expected["step_dt"])
-            else:
-                actual = unidex_contract(manifest, control_hz=1 / expected["step_dt"])
+            actual = hat_contract(manifest, control_hz=1 / expected["step_dt"])
         else:
             manifest = verify_dataset(config["dataset_path"], config["dataset_manifest_sha256"])
-            if hat:
-                from hat_evaluation import hat_contract
-                actual = hat_contract(manifest, control_hz=config.get("control_hz"))
-            else:
-                actual = recorded_contract(manifest, images=bool(expected["cameras"]), control_hz=config.get("control_hz"))
+            actual = recorded_contract(manifest, images=bool(expected["cameras"]), control_hz=config.get("control_hz"))
         if actual != expected:
             raise ValueError("The dataset I/O contract differs from the submitted compatibility report")
         issues = contract_issues(actual)

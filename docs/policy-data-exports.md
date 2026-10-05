@@ -14,11 +14,10 @@ Each adapter version declares conversion under `train.data_requirements.recordin
 | --- | --- | --- | --- |
 | ACT / ACT Native | Three scene views and joints | RGB front/left/right | 640 × 480, CHW |
 | EgoVerse ACT / HPT | Recorded joints | RGB front/left/right | Native recorded-joint reader |
-| UniDex | Scene-front point cloud and FAAS | 1,024 front-camera XYZRGB points, absolute FAAS82 streams | Camera basis conversion and full-chunk anchoring in memory |
 
-The scene cameras are fixed `third_person_camera`, `third_person_camera_left` and `third_person_camera_right`, named `scene_front`, `scene_left` and `scene_right` in shared observations. They are not head-mounted or wrist-mounted cameras. UniDex uses only the fixed front scene camera. Point colors are floats in [0,1]. Shared point coordinates use ROS optical axes; the UniDex reader changes the Y/Z signs to obtain its OpenGL camera basis. FAAS wrist poses use the declared OpenGL camera frame.
+The scene cameras are fixed `third_person_camera`, `third_person_camera_left` and `third_person_camera_right`, named `scene_front`, `scene_left` and `scene_right` in shared observations. They are not head-mounted or wrist-mounted cameras. Point colors are floats in [0,1]. Shared point coordinates use ROS optical axes. FAAS wrist poses use the declared OpenGL camera frame.
 
-UniDex conversion requires verified exact-asset mappings. Shadow, Inspire RH56, Allegro V4, LEAP V1, WUJI2, WUJI1 and Sharpa are supported. The [WUJI1](wuji1-faas.md) and [Sharpa](sharpa-faas.md) mappings are Skynet extensions for their exact registered assets, retaining the UniDex FAAS82 layout. Verification covers the mapping and reversible coordinate contract; it does not establish pretrained model performance or cross-hand generalization. Separate usable training and validation episodes are required when submitting a UniDex experiment, not when converting recordings. Simulator evaluation is not registered for this adapter.
+FAAS-based conversion, used by HAT, requires verified exact-asset mappings. Shadow, Inspire RH56, Allegro V4, LEAP V1, WUJI2, WUJI1 and Sharpa are supported. The [WUJI1](wuji1-faas.md) and [Sharpa](sharpa-faas.md) mappings are Skynet extensions for their exact registered assets, retaining the original UniDex FAAS82 layout. Verification covers the mapping and reversible coordinate contract; it does not establish pretrained model performance or cross-hand generalization.
 
 ## Storage and work
 
@@ -53,7 +52,6 @@ Frequency selection above is a **Skynet experiment setting**. It does not silent
 | --- | --- | --- |
 | XPolicyLab ACT / ACT Native | Pinned recipe chunk default: 50; padded actions are masked by the ACT loss. | Shared-reader ACT aligns commands to the recorded observation timestep; ACT Native retains its explicit `max(0, observation step - 1)` action start. Both apply that rule on the sampled time axis. |
 | EgoVerse ACT / HPT recorded joints | Pinned ACT `chunk_size`: 100; HPT EVA flow-head `action_horizon` and denoiser `act_seq`: 100. | Recorded-joint reader starts commands at the selected observation timestep and repeats the final command for short tails. One experiment chunk updates all corresponding model output dimensions. HPT's separate trunk token horizon is unchanged. |
-| UniDex | Pinned model `horizon_steps`: 30; public loaders require complete windows instead of temporal padding. | Shared recording reader retains complete chunks of recorded controller commands, anchored to the observation's FAAS state. This command-label convention is a Skynet adaptation; it is not the original loader's future measured-pose sequence. |
 
 Chunk defaults are model/recipe settings, not FAAS constraints. They are defined by the adapter's pinned source and experiment declaration. Conversion manifests carry no training-frequency or action-chunk requirement. Duplicate output-horizon settings in EgoVerse `model_overrides` are rejected in favor of the experiment's Action chunk field.
 

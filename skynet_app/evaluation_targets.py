@@ -5,13 +5,10 @@ from copy import deepcopy
 from . import data_selection
 from .adapters.dataset_inputs import resolve_data_selections
 
-UNIDEX_CONTRACT = "skynet.unidex-pointcloud-faas/v1"
-
 
 def evaluation_target_contract(spec):
     """One contract for browser selection and server-side target validation."""
     return {
-        "unidex": UNIDEX_CONTRACT,
         "human-policy-hat": "skynet.hat-rgb-fingertips/v1",
     }.get((spec.get("source") or {}).get("adapter"))
 
@@ -34,14 +31,12 @@ def embodiment_ids(metadata):
     return identities
 
 
-def validate_unidex_target(spec, target, unseen_embodiment=False):
+def validate_evaluation_target(spec, target, unseen_embodiment=False):
     if not target:
         raise ValueError("Choose an evaluation dataset to fix the target hand, scene and camera")
     metadata = target.get("metadata") or {}
-    hat = (spec.get("source") or {}).get("adapter") == "human-policy-hat"
-    expected_contract = evaluation_target_contract(spec)
-    if metadata.get("contract") != expected_contract:
-        raise ValueError("The evaluation target must be a prepared HAT RGB dataset" if hat else "The evaluation target must be a prepared UniDex point-cloud/FAAS dataset")
+    if metadata.get("contract") != evaluation_target_contract(spec):
+        raise ValueError("The evaluation target must be a prepared HAT RGB dataset")
     if metadata.get("format") != "skynet.recording-dataset/v1" or (metadata.get("validation") or {}).get("status") != "PASSED":
         raise ValueError("The evaluation dataset must pass shared recording-format validation")
     hands = embodiment_ids(metadata)
@@ -85,16 +80,16 @@ def attach_evaluation_target(database, suite, spec, target_dataset_id=None, unse
         selected = resolve_data_selections(spec)
         if len(selected) != 1 or unseen_embodiment:
             raise ValueError("Choose a separate HAT evaluation target hand")
-        validate_unidex_target(spec, selected[0], False)
+        validate_evaluation_target(spec, selected[0], False)
         data_selection.assert_available(database, selected[0])
         result["config_json"].update(target_dataset=selected[0], unseen_embodiment=False)
         return result
     if not target_dataset_id:
-        if unseen_embodiment and (spec.get("source") or {}).get("adapter") != "unidex":
+        if unseen_embodiment:
             raise ValueError("Unseen-hand evaluation requires a registered cross-embodiment policy bridge")
         return result
-    if adapter not in {"unidex", "human-policy-hat"}:
-        raise ValueError("A separate evaluation dataset requires a registered HAT or UniDex bridge")
+    if adapter != "human-policy-hat":
+        raise ValueError("A separate evaluation dataset requires a registered HAT bridge")
     version = database.get_data_resource_version(target_dataset_id)
     if not version:
         raise ValueError("The evaluation dataset is unavailable")
@@ -103,7 +98,7 @@ def attach_evaluation_target(database, suite, spec, target_dataset_id=None, unse
         raise ValueError("Choose a verified cluster copy of the evaluation dataset")
     bundle = data_selection.snapshot(database, [dict(role="evaluation_target", position=0, version_id=target_dataset_id, location_id=location["id"])])
     target = resolve_data_selections({"data": {"bundle": bundle}}, role="evaluation_target")[0]
-    validate_unidex_target(spec, target, unseen_embodiment)
+    validate_evaluation_target(spec, target, unseen_embodiment)
     data_selection.assert_available(database, target)
     result["config_json"].update(target_dataset=target, unseen_embodiment=unseen_embodiment)
     return result

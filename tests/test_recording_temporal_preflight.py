@@ -9,15 +9,13 @@ import pytest
 from ops.datasets.recording_probe import probe, validate_source_split
 from skynet_app.adapters.recording_time import resolve_sampling, source_frequency
 from skynet_app.recording_sampling import experiment_sampling
-from skynet_app.adapters.unidex_manifest import manifest as unidex_manifest
-from skynet_app.adapters.unidex_input import default_pointcloud_recipe
+from skynet_app.adapters.hat_manifest import manifest as hat_manifest
 
 
 def manifest(lengths=(90, 121), rates=(60, 60), split=None):
     return dict(format='skynet.recording-dataset/v1',
-                contract='skynet.unidex-pointcloud-faas/v1', validation={'status': 'PASSED'},
-                episodes=[dict(index=i, id=f'episode-{i}', steps=n, capture={'step_dt':1/rates[i]},
-                               streams={'scene_front_pointcloud': {'recipe': default_pointcloud_recipe()}})
+                contract='skynet.hat-rgb-fingertips/v1', validation={'status': 'PASSED'},
+                episodes=[dict(index=i, id=f'episode-{i}', steps=n, capture={'step_dt':1/rates[i]})
                           for i, n in enumerate(lengths)],
                 split=split or dict(train=[0], validation=[1]))
 
@@ -27,7 +25,7 @@ def test_conversion_accepts_single_short_source_without_training_split(monkeypat
         preflight_source=lambda *a, **kw:dict(capture={'step_dt':1/60}, steps=1, streams={})))
     request=dict(job_id='test', attempt_id='one', sources=[dict(sha256='a'*64)],
                  split=dict(train=[0],validation=[]), requirements=dict(
-                     contract='skynet.unidex-pointcloud-faas/v1', observation_requirements={'streams':[]}))
+                     contract='skynet.hat-rgb-fingertips/v1', observation_requirements={'streams':[]}))
     result=probe(request)
     assert result['verified'] and result['sources'][0]['steps']==1
 
@@ -81,18 +79,18 @@ def test_tiny_source_period_is_validation_error():
 
 
 def test_backend_reuses_worker_eligibility_and_manifest_default():
-    declaration=unidex_manifest()
-    doc=dict(native={'config':{'control_hz':30}},
+    declaration=hat_manifest()
+    doc=dict(native={'config':{'control_hz':30,'window_policy':'complete'}},
              data={'bundle':{'assignments':[dict(role='training_data', position=0,
                  config={'location':dict(kind='cluster',status='AVAILABLE',path='/data',manifest_sha256='b'*64)},
-                 version={'format':'skynet.recording-dataset/v1','manifest_sha256':'b'*64,'metadata':manifest()})]}})
+                 version={'format':'skynet.recording-dataset/v1','manifest_sha256':'b'*64,'metadata':manifest(lengths=(190, 121))})]}})
     plan=experiment_sampling(doc,declaration)
-    assert plan['action_steps']==30 and plan['control_hz']==30
+    assert plan['action_steps']==50 and plan['control_hz']==30
     doc['native']['config']['control_hz']=15
     with pytest.raises(ValueError,match='No usable train'):
         experiment_sampling(doc,declaration)
     doc['native']['config']['action_steps']=20
-    assert experiment_sampling(doc,declaration)['splits']['train']['windows']==4
+    assert experiment_sampling(doc,declaration)['splits']['train']['windows']==29
 
 
 def test_reader_samples_state_action_rgb_and_timestamps_without_changing_files(tmp_path):
@@ -123,8 +121,8 @@ def test_reader_samples_state_action_rgb_and_timestamps_without_changing_files(t
 def test_sweep_validation_checks_each_frequency_before_launch(monkeypatch):
     from test_experiments import make_spec
     from skynet_app.pipeline_api import PipelineService
-    declaration=unidex_manifest()
-    spec=make_spec(native={'config':{'control_hz':30,'action_steps':30}},
+    declaration=hat_manifest()
+    spec=make_spec(native={'config':{'control_hz':30,'action_steps':30,'window_policy':'complete'}},
         data={'bundle':dict(id='bundle',name='data',version='1',manifest_sha256='a'*64,
             assignments=[dict(role='training_data',position=0,
                 config={'location':dict(kind='cluster',status='AVAILABLE',path='/data',manifest_sha256='b'*64)},

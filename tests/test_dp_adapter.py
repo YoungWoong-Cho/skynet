@@ -189,7 +189,6 @@ def test_dp_capsule_restores_assets_without_cartesian_decoder():
     for name in ("dp_simulation.py","observation_render.py","observation_geometry.py"):
         compile(files["adapter-support/"+name],name,"exec")
     assert "adapter-support/hat_evaluation.py" not in files
-    assert "adapter-support/unidex_evaluation.py" not in files
     assert "evaluation.target_dataset.manifest_sha256" in entry.command.required_values
 
 

@@ -11,8 +11,7 @@ from skynet_app.adapters import (
 )
 from skynet_app.adapters.dataset_inputs import resolve_data_selections
 from skynet_app.adapters.recording_time import resolve_collection_sampling
-from skynet_app.adapters.unidex_manifest import manifest as unidex_manifest
-from skynet_app.adapters.unidex_input import default_pointcloud_recipe
+from skynet_app.adapters.hat_manifest import manifest as hat_manifest
 from skynet_app.data_selection import snapshot
 from skynet_app.database import Database
 from skynet_app.model_io import resolve_model_io, adapter_io_contract
@@ -25,12 +24,11 @@ from test_experiments import make_spec
 
 
 def metadata(index=0, hz=60, lengths=(121, 121), validation=True):
-    return dict(format='skynet.recording-dataset/v1', contract='skynet.unidex-pointcloud-faas/v1',
+    return dict(format='skynet.recording-dataset/v1', contract='skynet.hat-rgb-fingertips/v1',
                 validation={'status': 'PASSED'}, registered_version_id=f'version-{index}',
                 capture={'action_joint_names': ['a', 'b', 'c'], 'robot_joint_names': ['a', 'b', 'c'], 'cameras': {key: {'height': 224, 'width': 224} for key in ('scene_front', 'scene_left', 'scene_right')}},
                 episodes=[dict(index=i, id=f'episode-{i}', steps=steps, capture={'step_dt': 1/hz},
-                               source={'sha256': f'{index * 100 + i:064x}'},
-                               streams={'scene_front_pointcloud': {'recipe': default_pointcloud_recipe()}})
+                               source={'sha256': f'{index * 100 + i:064x}'})
                           for i, steps in enumerate(lengths)],
                 split=dict(train=[0] if validation else list(range(len(lengths))),
                            validation=list(range(1, len(lengths))) if validation else []))
@@ -52,7 +50,7 @@ def document(count=2):
 
 
 def test_many_binding_materializes_ordered_composites_and_validates_every_result():
-    declared = unidex_manifest()
+    declared = hat_manifest()
     doc = document(7)
     doc['data']['bundle']['assignments'].reverse()
     PipelineService._apply_manifest_data_bindings(doc, declared)
@@ -115,12 +113,12 @@ def test_runtime_projection_keeps_unknown_contracts_and_full_evaluation_target_r
     doc = document(1)
     assignment = doc['data']['bundle']['assignments'][0]
     assignment['role'] = 'evaluation_target'
-    assignment['version']['metadata']['episodes'][0]['streams'] = {'scene_front_pointcloud': {'recipe': 'frozen geometry'}}
+    assignment['version']['metadata']['episodes'][0]['streams'] = {'scene_front': {'render_receipt': 'frozen geometry'}}
     assert resolve_data_selections(doc, 'evaluation_target')[0]['metadata'] == assignment['version']['metadata']
     assignment['role'] = 'training_data'
     assignment['version']['metadata']['contract'] = 'custom-adapter/needs-complete-metadata'
     assert resolve_data_selections(doc, runtime=True) == resolve_data_selections(doc)
-    assignment['version']['metadata']['contract'] = 'skynet.unidex-pointcloud-faas/v1'
+    assignment['version']['metadata']['contract'] = 'skynet.hat-rgb-fingertips/v1'
     assignment['version']['metadata']['validation']['status'] = 'PENDING'
     assert resolve_data_selections(doc, runtime=True) == resolve_data_selections(doc)
 
@@ -129,7 +127,7 @@ def test_old_full_derived_selection_is_compacted_but_real_overrides_are_rejected
     doc = document(2)
     full = resolve_data_selections(doc)
     doc['native']['config']['datasets'] = deepcopy(full)
-    PipelineService._apply_manifest_data_bindings(doc, unidex_manifest())
+    PipelineService._apply_manifest_data_bindings(doc, hat_manifest())
     assert doc['native']['config']['datasets'] == resolve_data_selections(doc, runtime=True)
     assert resolve_data_selections(doc) == full
     for key, value in [('path', '/changed'), ('manifest_sha256', 'e' * 64)]:
@@ -137,11 +135,11 @@ def test_old_full_derived_selection_is_compacted_but_real_overrides_are_rejected
         broken['native']['config']['datasets'] = resolve_data_selections(broken)
         broken['native']['config']['datasets'][0][key] = value
         with pytest.raises(ValueError, match='conflicts'):
-            PipelineService._apply_manifest_data_bindings(broken, unidex_manifest())
+            PipelineService._apply_manifest_data_bindings(broken, hat_manifest())
 
 
 def test_one_binding_still_rejects_extra_positions_and_many_declaration_is_unambiguous():
-    declared = unidex_manifest().model_copy(deep=True)
+    declared = hat_manifest().model_copy(deep=True)
     declared.train.input_fields = [AdapterInputField(path='native.config.dataset_path', label='Dataset', kind='string',
         data_binding=DataBundleInputBinding(role='training_data', value_path='location.path'))]
     with pytest.raises(ValueError, match='cannot consume training_data at position 1'):
@@ -157,14 +155,14 @@ def test_one_binding_still_rejects_extra_positions_and_many_declaration_is_unamb
     broken = document()
     broken['data']['bundle']['assignments'][1]['position'] = 3
     with pytest.raises(ValueError, match='consecutive'):
-        PipelineService._apply_manifest_data_bindings(broken, unidex_manifest())
+        PipelineService._apply_manifest_data_bindings(broken, hat_manifest())
 
 
 def test_frozen_composites_cannot_be_overridden_or_repeated():
     doc = document()
     doc['native']['config']['datasets'] = [dict(path='/different')]
     with pytest.raises(ValueError, match='conflicts'):
-        PipelineService._apply_manifest_data_bindings(doc, unidex_manifest())
+        PipelineService._apply_manifest_data_bindings(doc, hat_manifest())
     for key in ('manifest_sha256', 'registered_version_id'):
         doc = document()
         first, second = [item['version'] for item in doc['data']['bundle']['assignments']]
@@ -197,22 +195,10 @@ def test_collection_sampling_uses_every_source_rate_and_preserves_episode_bounda
     assert plan['splits']['train']['windows'] == 4
     assert plan['splits']['validation']['windows'] == 4
     assert doc == before
-    assert experiment_sampling(doc, unidex_manifest()) == plan
+    doc['native']['config']['window_policy'] = 'complete'
+    assert experiment_sampling(doc, hat_manifest()) == resolve_collection_sampling(selected, 15, 30, window_policy='complete')
     with pytest.raises(ValueError, match='exactly'):
         resolve_collection_sampling(selected, 24, 30)
-
-
-def test_submission_rejects_mixed_frozen_point_counts_without_rewriting_selected_data():
-    doc = document()
-    for episode in doc['data']['bundle']['assignments'][1]['version']['metadata']['episodes']:
-        episode['streams']['scene_front_pointcloud']['recipe']['num_points'] = 1024
-    before = deepcopy(doc)
-    with pytest.raises(ValueError, match='different point-cloud recipes'):
-        experiment_sampling(doc, unidex_manifest())
-    assert doc == before
-    for episode in doc['data']['bundle']['assignments'][0]['version']['metadata']['episodes']:
-        episode['streams']['scene_front_pointcloud']['recipe']['num_points'] = 1024
-    assert experiment_sampling(doc, unidex_manifest())['splits']['train']['windows'] == 4
 
 
 def test_empty_individual_splits_and_short_datasets_use_collection_eligibility():
@@ -232,7 +218,7 @@ def test_empty_individual_splits_and_short_datasets_use_collection_eligibility()
 def test_sweeps_recheck_all_selected_inputs_and_sampling(monkeypatch):
     doc = document()
     doc['data']['bundle']['assignments'][1] = assignment(1, hz=30, lengths=(61, 61))
-    declared = unidex_manifest()
+    declared = hat_manifest()
     spec = make_spec(**doc, sweep={'strategy': 'grid', 'axes': {'native.config.control_hz': [15, 20]}, 'seeds': [1]})
     monkeypatch.setattr(PipelineService, '_validate_manifest_input_fields', lambda *a: None)
     with pytest.raises(ValueError, match='exactly'):
@@ -275,7 +261,7 @@ def test_multiple_versions_snapshot_without_creating_or_changing_datasets(tmp_pa
 
 
 def test_optional_contract_fields_do_not_change_old_adapter_hashes():
-    declared = unidex_manifest().model_dump(mode='json')
+    declared = hat_manifest().model_dump(mode='json')
     field = declared['train']['input_fields'][0]
     field['kind'] = 'string'
     field['data_binding'].update(cardinality='one', value_path='location.path')

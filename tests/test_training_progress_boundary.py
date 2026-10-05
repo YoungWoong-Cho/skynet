@@ -215,7 +215,7 @@ def test_pinned_plan_precedes_manifest_and_manifest_precedes_builtin():
 
 def test_builtin_fallback_uses_the_selected_step_source():
     spec, plan = spec_and_plan()
-    plan.adapter = "unidex"
+    plan.adapter = "human-policy-hat"
     spec.train.max_steps = 8000
     source = _training_progress_source(spec, plan)
     assert source["path"] == "artifacts/logs.json.txt"
@@ -254,7 +254,7 @@ def test_observer_and_producer_share_the_same_resolver_and_builtin_step_source()
     assert pipeline_api.resolve_training_progress_contract is resolve_training_progress_contract
     assert slurm.resolve_training_progress_contract is resolve_training_progress_contract
     declared, origin = pipeline_api._training_progress_contract({
-        "adapter_name": "unidex", "resolved_spec_json": json.dumps({"train": {"max_steps": 8000}}),
+        "adapter_name": "human-policy-hat", "resolved_spec_json": json.dumps({"train": {"max_steps": 8000}}),
     })
     assert origin == "builtin_compatibility"
     assert declared.unit == "step" and declared.source.completed_key == "global_step"

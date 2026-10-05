@@ -14,25 +14,26 @@ RUNTIME = "human-policy-hat"
 
 
 def support_files():
-    from .unidex_manifest import support_files as existing_files
-    shared = existing_files()
-    files = {name: content for name, content in shared.items()
-             if name.startswith("adapter-support/action_codecs/") or
-             name in {"adapter-support/recording_dataset.py", "adapter-support/recording_time.py", "adapter-support/dataset_inputs.py",
-                      "adapter-support/unidex_subset.py", "adapter-support/unidex_data.py", "adapter-support/unidex_input.py"}}
+    from ops.datasets.action_codecs.hand_contract import DEFAULT_SPEC_ROOT
     root = Path(__file__).parent
-    files.update({"adapter-support/" + name: (root / name).read_text()
-                  for name in ("hat_data.py", "hat_runtime.py", "training_parallel.py")})
+    files = {"adapter-support/" + name: (root / name).read_text() for name in (
+        "hat_data.py", "hat_runtime.py", "training_parallel.py", "unidex_subset.py",
+        "recording_dataset.py", "recording_time.py", "dataset_inputs.py")}
+    codecs = root.parents[1] / "ops/datasets/action_codecs"
+    files.update({"adapter-support/action_codecs/" + name: (codecs / name).read_text() for name in (
+        "__init__.py", "geometry.py", "hand_contract.py", "unidex.py")})
+    files.update({"adapter-support/action_codecs/specs/" + path.relative_to(DEFAULT_SPEC_ROOT).as_posix(): path.read_text()
+                  for path in sorted(DEFAULT_SPEC_ROOT.rglob("*")) if path.is_file()})
     files["adapter-support/observation_geometry.py"] = (root.parents[1] / "ops/datasets/observation_geometry.py").read_text()
     return files
 
 
 def recording_conversion():
-    from .unidex_manifest import verified_robots
+    from ops.datasets.action_codecs.unidex import supported_robots
     return RecordingConversion(default_preset="rgb-fingertips", presets=[RecordingDataPreset(
         id="rgb-fingertips", name="RGB and HAT wrist/fingertips",
         description="Skynet bridge: existing RGB/absolute-wrist preparation and verified hand FK feed official HAT slots.",
-        contract=CONTRACT, observations=["state", "rgb"], supported_robots=verified_robots(),
+        contract=CONTRACT, observations=["state", "rgb"], supported_robots=supported_robots(),
         action_representation=dict(id="skynet.unidex-faas/v1", frame="camera_opengl", action_semantics="controller_targets"),
         observation_requirements=rgb_requirements(),
         preprocessing=dict(hat_state_action_dim=128, hat_frame="camera_opengl", hat_inactive_slots="zero"),

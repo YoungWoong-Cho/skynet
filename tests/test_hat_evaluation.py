@@ -80,9 +80,38 @@ def test_hat_reconstructs_all_three_measured_camera_calibrations(monkeypatch):
     assert len(jobs) == 3
     assert [job['recipe']['camera']['sensor'] for job in jobs] == [pose[0] for pose in poses]
     assert list(sensors.values()) == [pose[0] for pose in poses]
+    for job, (_, pos, quat) in zip(jobs, poses):
+        # The measured intrinsics and pose become the rendered camera, not the pinned defaults.
+        camera = job['recipe']['camera']
+        assert camera['projection']['horizontal_aperture'] * 293.19970703125 == pytest.approx(256 * camera['projection']['focal_length'])
+        assert camera['offset'] == {'pos': pos, 'rot': quat, 'convention': 'ros'}
 
 
-@pytest.mark.parametrize("hand", __import__("skynet_app.adapters.unidex_manifest", fromlist=["verified_robots"]).verified_robots())
+def test_hat_observation_validation_refuses_bad_state_images_and_poses():
+    from skynet_app.adapters.policy_contract import validate_observation
+    contract = hat_contract(metadata())
+    def observation(**changes):
+        value = dict(
+            state=np.zeros(len(contract['joint_names'])),
+            images={name: np.zeros((camera['height'], camera['width'], 3), dtype=np.uint8)
+                    for name, camera in contract['cameras'].items()},
+            world_from_camera=np.eye(4), world_from_root=np.eye(4))
+        value.update(changes)
+        return value
+    validate_observation(contract, observation())
+    bad_state = observation(); bad_state['state'][0] = np.nan
+    with pytest.raises(ValueError, match='non-finite'):
+        validate_observation(contract, bad_state)
+    name = next(iter(contract['cameras']))
+    small = observation(); small['images'][name] = np.zeros((2, 2, 3), dtype=np.uint8)
+    with pytest.raises(ValueError, match=f'Camera {name}'):
+        validate_observation(contract, small)
+    for pose in ('world_from_camera', 'world_from_root'):
+        with pytest.raises(ValueError, match='rigid'):
+            validate_observation(contract, observation(**{pose: np.zeros((4, 4))}))
+
+
+@pytest.mark.parametrize("hand", __import__("ops.datasets.action_codecs.unidex", fromlist=["supported_robots"]).supported_robots())
 def test_hat_uses_each_targets_own_controller_and_asset(hand):
     from skynet_app.adapters.hat_data import encode_human_state, fingertip_slots
     codec = load_codec(hand)
@@ -100,7 +129,7 @@ def test_hat_uses_each_targets_own_controller_and_asset(hand):
 
 def test_hat_zero_shot_excludes_source_hands_and_keeps_checkpoint_inputs():
     from test_evaluation_targets import training, selection
-    from skynet_app.evaluation_targets import validate_unidex_target
+    from skynet_app.evaluation_targets import validate_evaluation_target
     from skynet_app.adapters.hat_evaluation import checkpoint_inputs_match
     spec=training("shadow","leap")
     spec["source"]["adapter"]="human-policy-hat"
@@ -108,13 +137,28 @@ def test_hat_zero_shot_excludes_source_hands_and_keeps_checkpoint_inputs():
         item["version"]["metadata"]["contract"]="skynet.hat-rgb-fingertips/v1"
     target=selection("wuji")
     target["metadata"]["contract"]="skynet.hat-rgb-fingertips/v1"
-    assert validate_unidex_target(spec,target,True)=="wuji"
+    assert validate_evaluation_target(spec,target,True)=="wuji"
     seen=selection("leap");seen["metadata"]["contract"]=target["metadata"]["contract"]
     with pytest.raises(ValueError,match="training inputs"):
-        validate_unidex_target(spec,seen,True)
+        validate_evaluation_target(spec,seen,True)
     source=dict(position=0,version_id="source",manifest_sha256="a"*64)
     saved={"training_inputs":[source]}
     context={"policy":{"native_config":{"datasets":[source]}},"target_dataset":target}
     assert checkpoint_inputs_match(saved,context)
     context["policy"]["native_config"]["datasets"]=[target]
     assert not checkpoint_inputs_match(saved,context)
+
+
+def test_rollout_control_step_keeps_joint_calls_and_holds_cartesian_targets(monkeypatch):
+    from pathlib import Path
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "skynet_app/adapters"))
+    from dexverse_evaluation import policy_control_step
+    obs = dict(state=np.zeros(3), images={"scene_front": np.zeros((2, 2, 3), dtype="u1")})
+    calls = []
+    result = policy_control_step(None, obs, [np.zeros(3)], calls.append, include_images=False)
+    assert len(calls) == 1 and calls[0]["predict"] is False and calls[0]["observation"]["images"] == {}
+    np.testing.assert_array_equal(result, np.zeros(3))
+    calls.clear()
+    held = policy_control_step(None, obs, [np.ones(3)], calls.append, cartesian=True)
+    assert calls == []
+    np.testing.assert_array_equal(held, np.ones(3))

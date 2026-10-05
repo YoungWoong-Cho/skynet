@@ -5,20 +5,17 @@ import hashlib
 import pytest
 
 from skynet_app.adapters.recording_time import resolve_collection_sampling
-from skynet_app.adapters.unidex_data import UniDexMixtureSampler, UniDexDataset
 from skynet_app.adapters.unidex_subset import apply_frame_budget, subset_windows
-from skynet_app.adapters.unidex_input import default_pointcloud_recipe
 
 
 def selections(hands=2, counts=(100, 103, 120, 90)):
     result = []
     for hand in range(hands):
         episodes = [dict(index=i, id=f'{hand}-{i}', steps=count, hand_id=f'hand-{hand}',
-                    streams={'scene_front_pointcloud': {'recipe': default_pointcloud_recipe()}},
                     capture={'step_dt': 1 / 60}, source={'sha256': hashlib.sha256(f'{hand}-{i}'.encode()).hexdigest()})
                     for i, count in enumerate(counts)]
         result.append(dict(position=hand, version_id=str(hand), manifest_sha256=str(hand) * 64,
-                           metadata={'contract': 'skynet.unidex-pointcloud-faas/v1',
+                           metadata={'contract': 'skynet.hat-rgb-fingertips/v1',
                                      'episodes': episodes, 'split': {'train': [0, 1, 2], 'validation': [3]}}))
     return result
 
@@ -93,44 +90,10 @@ def test_frozen_view_rejects_validation_leakage_or_changed_source(change):
         subset_windows(rows[0]['metadata'], sampled)
 
 
-def test_distributed_fixed_budget_updates_always_consume_a_full_effective_batch():
-    hands = ['a'] * 23 + ['b'] * 24
-    samplers = [UniDexMixtureSampler(hands, 'hand_balanced', seed=1701, rank=rank, replicas=4, batch_size=4)
-                for rank in range(4)]
-    assert {len(sampler) for sampler in samplers} == {12}
-    rows = [list(sampler) for sampler in samplers]
-    assert all(len(row) % 4 == 0 for row in rows)
-    assert sum(len(row) for row in rows) == 48
-    assert all(0 <= index < len(hands) for row in rows for index in row)
-    for sampler in samplers:
-        for _ in range(3): sampler.mark_consumed(4)
-        state = sampler.state_dict()
-        sampler.set_epoch(1)
-        sampler.load_state_dict(state)
-        assert list(sampler) == []
-    assert samplers[0].identity()['complete_batch_size'] == 4
-
-
-def test_subset_reader_uses_the_existing_physical_streams(tmp_path):
-    from test_unidex_runtime import recording_fixture, normalizer
-    from skynet_app.adapters.recording_dataset import close_handles, digest
-    root, metadata = recording_fixture(tmp_path, count=128)
-    rows = [dict(position=0, version_id='original', path=str(root),
-                 manifest_sha256=digest(root / 'manifest.json'), metadata=metadata)]
-    plan = apply_frame_budget(rows, resolve_collection_sampling(rows, 30, 30), 40)
-    original = {str(path): path.read_bytes() for path in tmp_path.rglob('*') if path.is_file()}
-    dataset = UniDexDataset(root, metadata, 'train', normalizer(), sampling=plan['datasets'][0]['sampling'])
-    valid = UniDexDataset(root, metadata, 'validation', normalizer(), sampling=plan['datasets'][0]['sampling'])
-    assert len(dataset) == 11 and len(valid) == 35
-    assert dataset[0]['action'].shape == (30, 82)
-    assert {str(path): path.read_bytes() for path in tmp_path.rglob('*') if path.is_file()} == original
-    close_handles()
-
-
 def test_submission_and_worker_resolve_the_identical_fixed_data_view():
     from skynet_app.recording_sampling import experiment_sampling
     from skynet_app.adapters.dataset_inputs import resolve_data_selections
-    from skynet_app.adapters.unidex_manifest import manifest
+    from skynet_app.adapters.hat_manifest import manifest
     rows = selections()
     assignments = []
     for row in rows:
@@ -141,10 +104,10 @@ def test_submission_and_worker_resolve_the_identical_fixed_data_view():
             config=dict(location=dict(path='/original/'+row['version_id'],kind='cluster',status='AVAILABLE',
                                       manifest_sha256=row['manifest_sha256']))))
     document = dict(data=dict(bundle=dict(assignments=assignments)),
-        native=dict(config=dict(control_hz=30,action_steps=30,unique_source_frames=180,data_selection_seed=123)))
+        native=dict(config=dict(control_hz=30,action_steps=30,window_policy='complete',unique_source_frames=180,data_selection_seed=123)))
     planned = experiment_sampling(document, manifest())
     resolved = resolve_data_selections(document)
-    actual = apply_frame_budget(resolved,resolve_collection_sampling(resolved,30,30,require_validation=True),180,selection_seed=123)
+    actual = apply_frame_budget(resolved,resolve_collection_sampling(resolved,30,30,window_policy='complete'),180,selection_seed=123)
     assert planned == actual
     document['native']['config']['unique_source_frames'] = 181
     with pytest.raises(ValueError,match='divide equally'):

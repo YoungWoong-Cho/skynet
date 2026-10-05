@@ -45,10 +45,10 @@ longer emitted. The adapter plan and manifest remain in the immutable attempt
 snapshot instead of additional duplicate files. Runtime JSON is serialized
 compactly. These are Skynet transport changes, not upstream model changes.
 
-For validated UniDex recording datasets, the derived native dataset selections
+For validated HAT recording datasets, the derived native dataset selections
 keep identities, manifest hashes, episode source hashes, hand IDs, timing and
 split membership. Full render receipts and geometry remain in the authoritative
-frozen dataset bundle and pinned dataset manifest. The UniDex loader verifies and
+frozen dataset bundle and pinned dataset manifest. The HAT loader verifies and
 loads that manifest; evaluation still receives the complete frozen geometry.
 Other/custom contracts retain their existing metadata.
 
@@ -77,13 +77,9 @@ visibility change flushes pending changes while the stream is connected; it does
 not invalidate every catalog. Disconnected streams still refresh on focus and
 resynchronize on reconnect.
 
-## UniDex co-training and held-out hands
+## Multi-hand co-training and held-out hands
 
-**Original UniDex:** the pinned native model, FAAS82 representation, flow-matching
-loss, fixed normalization and point-cloud input stay unchanged. Its mixture is
-proportional to each dataset's number of windows.
-
-**Skynet integration:** UniDex accepts multiple prepared datasets through the
+**Skynet integration (HAT):** HAT accepts multiple prepared datasets through the
 shared binding. Conversion retains the original recording frequency; experiment
 frequency and chunk length determine windows within each episode. Mixed source
 frequencies need an explicit common frequency that divides every source rate.
@@ -93,26 +89,21 @@ excluded short episodes. `window_proportional` visits all windows; the optional
 that hand's windows with replacement. Sampling is deterministic by seed and epoch,
 with one global sequence sharded across distributed workers. Distributed tail
 padding may repeat samples to keep rank lengths equal.
+`train.max_steps` fixes the optimizer-update budget.
 
-`train.max_steps` fixes the optimizer-update budget and overrides the epoch limit.
-Common progress reporting switches to optimizer steps for that budget. Checkpoints
-pin all dataset identities, their order, sampling, mixture, native source/config,
-normalization, initialization provenance, seed and training budget; changing these
-is weights-only initialization, not full-state resume.
-The training loader checkpoints completed batches separately from worker prefetch,
-so a batch-boundary resume continues from the next window on every distributed
-rank. An incompatible saved epoch or sampler position is rejected explicitly.
-
-Evaluations select a separate prepared UniDex target dataset. It fixes one hand,
+A HAT evaluation runs on a prepared HAT target dataset. Without a selected target,
+a single-input run is evaluated on its own training dataset; multi-input runs and
+the Unseen hand option need a separate target. A separate target fixes one hand,
 task and camera, without adding its demonstrations to training. The Unseen hand
 option rejects any target hand present anywhere in the run's input datasets. This
 means unseen in this run's training inputs; it does not assert that pretrained
 weights have never seen that hand. Compare checkpoints with the same initialization
 provenance, optimizer steps, frequency, chunk length and held-out evaluation seeds.
 
-The Skynet FAAS bridge reuses conversion's camera/point-cloud geometry and verified
-hand bundles, encodes the simulator state into FAAS82, and decodes predictions into
-the target hand's native commands. Target data and simulation assets are frozen in
+The Skynet HAT bridge reuses the three measured RGB scene-camera calibrations from
+conversion and the verified hand bundles, encodes the simulator state into HAT128
+slots through the FAAS codec, and decodes predictions through HAT's
+position-optimizer retargeting into the target hand's native commands. Target data and simulation assets are frozen in
 the evaluation stage, included in retry identity, and protected from deletion or
 retirement while referenced. Each new simulator worker must pass the existing
 unscored reset/observe/predict/advance/reset probe before scoring episodes.
@@ -263,7 +254,7 @@ reader. The existing source-frame selector and hand-balanced sampler are reused.
 The seven-hand main recipe fixes 1,800 actually consumed original source frames,
 30 Hz/chunk30, batch16, LR1e-4 and 8,000 optimizer updates. Normalization uses only
 those selected source frames; validation and target hands do not enter statistics.
-The native HAT AdamW optimizer has no imported UniDex warmup/decay schedule.
+The native HAT AdamW optimizer has no added warmup/decay schedule.
 Validation is disabled in the main recipe and the final step-00008000 checkpoint
 is retained. The historical 3,000-step WUJI2 fit uses its own immutable version,
 60Hz/chunk50 and validation-selected checkpoint; it is separate from the study.

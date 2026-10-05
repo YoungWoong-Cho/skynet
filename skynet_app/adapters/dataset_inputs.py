@@ -50,14 +50,14 @@ def validate_selection_sources(selections):
 def _runtime_metadata(metadata):
     """Keep worker identity checks without copying a prepared dataset manifest.
 
-    UniDex verifies and loads the actual manifest using its frozen SHA256 before
+    HAT verifies and loads the actual manifest using its frozen SHA256 before
     reading data. Its native configuration only needs episode provenance for
     leakage/held-out-hand checks and timing for the shared sampling resolver.
     Other contracts keep their metadata until their loaders declare the same
     behavior; custom adapter metadata must not be silently discarded.
     """
     if (metadata.get("format") != "skynet.recording-dataset/v1"
-            or metadata.get("contract") not in {"skynet.unidex-pointcloud-faas/v1", "skynet.hat-rgb-fingertips/v1"}
+            or metadata.get("contract") != "skynet.hat-rgb-fingertips/v1"
             or (metadata.get("validation") or {}).get("status") != "PASSED"):
         return deepcopy(metadata)
 
@@ -93,14 +93,14 @@ def runtime_data_selection(selection):
 def runtime_evaluation_context(context):
     """Keep evaluation capsules small without changing immutable planning data.
 
-    The UniDex, HAT and DP bridges verify and reopen target/training manifests on compute
+    The HAT and DP bridges verify and reopen target/training manifests on compute
     nodes. Full camera, geometry and rendering receipts remain in the saved stage
     and those checksum-pinned files. Workers retain hand/source identities for
     leakage checks and the independently planned I/O and simulation contracts.
     Other evaluators keep their full context until they declare this behavior.
     """
     result = deepcopy(context)
-    if (result.get("compatibility") or {}).get("policy_loader") not in {"unidex_faas", "hat_cartesian", "diffusion_policy_joints"}:
+    if (result.get("compatibility") or {}).get("policy_loader") not in {"hat_cartesian", "diffusion_policy_joints"}:
         return result
     native = (result.get("policy") or {}).get("native_config") or {}
     if isinstance(native.get("datasets"), list):
