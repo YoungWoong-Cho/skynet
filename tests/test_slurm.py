@@ -16,6 +16,7 @@ from skynet_app.adapters import PreparationStep, resolve_adapter_plan
 from skynet_app.experiments import ExperimentSpec
 from skynet_app.slurm import (
     GITHUB_SSH_TO_HTTPS,
+    GPU_COUNT_VARIABLE,
     RUNNER_SOURCE,
     SlurmCompileError,
     compile_sbatch,
@@ -27,14 +28,14 @@ from skynet_app.slurm import (
 COMMIT = "c" * 40
 
 
-def make_spec(*, account="rl2-lab", node=None, runtime=None):
+def make_spec(*, account="rl2-lab", node=None, runtime=None, adapter="generic"):
     return ExperimentSpec.model_validate(
         {
             "identity": {"project": "tests", "experiment": "canonical"},
             "source": {
                 "repository": "https://github.com/example/smoke.git",
                 "revision": COMMIT,
-                "adapter": "generic",
+                "adapter": adapter,
             },
             "runtime": runtime or {"backend": "existing", "bootstrap_uv": False},
             "resources": {
@@ -134,6 +135,51 @@ def test_compiler_exports_and_creates_shared_xdg_cache_root():
     script = compile_sbatch(spec, resolve_adapter_plan(spec), run_id="cache-001").script
     assert "export XDG_CACHE_HOME=/coc/flash7/ycho420/.cache" in script
     assert 'mkdir -p "$XDG_CACHE_HOME" "$WORK_ROOT"/.cache/{uv,huggingface,torch}' in script
+
+
+def _exports(script: str, key: str) -> list[str]:
+    return [line for line in script.splitlines() if line.startswith(f"export {key}=")]
+
+
+# EgoVerse never set the variable in its plan; generic used to carry its own copy.
+@pytest.mark.parametrize("adapter", ["generic", "egoverse"])
+def test_every_script_exports_the_compiled_gpu_count_exactly_once(adapter):
+    spec = make_spec(adapter=adapter)
+    plan = resolve_adapter_plan(spec)
+    assert GPU_COUNT_VARIABLE not in plan.environment
+    for stage in ("train", "eval"):
+        compiled = compile_sbatch(spec, plan, run_id=f"gpu-count-{adapter}", stage=stage)
+        assert compiled.gpu_count == spec.resources.gpu.count
+        assert compiled.script.count(GPU_COUNT_VARIABLE) == 1
+        assert _exports(compiled.script, GPU_COUNT_VARIABLE) == [
+            f"export {GPU_COUNT_VARIABLE}={compiled.gpu_count}"
+        ]
+
+
+def test_gpu_count_export_accepts_agreeing_plans_and_rejects_contradictions():
+    spec = make_spec()
+    plan = resolve_adapter_plan(spec)
+    compiled = compile_sbatch(spec, plan, run_id="gpu-count-pinned")
+    expected = _exports(compiled.script, GPU_COUNT_VARIABLE)
+    # Plans stored before the compiler owned the export still carry the same value.
+    agreeing = plan.model_copy(
+        update={"environment": {GPU_COUNT_VARIABLE: str(compiled.gpu_count)}}
+    )
+    agreed = compile_sbatch(spec, agreeing, run_id="gpu-count-pinned").script
+    assert _exports(agreed, GPU_COUNT_VARIABLE) == expected
+    assert agreed.count(GPU_COUNT_VARIABLE) == 1
+    contradicting = plan.model_copy(
+        update={"environment": {GPU_COUNT_VARIABLE: str(compiled.gpu_count + 1)}}
+    )
+    with pytest.raises(SlurmCompileError, match=f"{GPU_COUNT_VARIABLE} conflicts"):
+        compile_sbatch(spec, contradicting, run_id="gpu-count-pinned")
+    with pytest.raises(SlurmCompileError, match="conflicts with the pinned execution"):
+        compile_sbatch(
+            spec,
+            plan,
+            run_id="gpu-count-pinned",
+            runtime_environment={GPU_COUNT_VARIABLE: str(compiled.gpu_count + 1)},
+        )
 
 
 def test_submodules_are_fetched_over_the_https_transport_of_the_main_clone():

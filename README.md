@@ -104,8 +104,9 @@ by the GPU count before accumulation. Losses and gradients are weighted by the
 actual sample count, including uneven final batches. Only the main worker
 writes logs and checkpoints, which remain compatible with single-GPU evaluation.
 DexMimicGen uses the native robomimic BC family and keeps its configured global
-batch size. Other adapters retain their native launchers; custom commands must
-use the allocation exposed through `SKYNET_ASSIGNED_GPU_COUNT`.
+batch size. Other adapters retain their native launchers. Every generated training
+and evaluation script exports `SKYNET_ASSIGNED_GPU_COUNT`, the GPU count the job
+requests from Slurm, so custom commands size their workers from that allocation.
 
 The Skynet cluster profile pins `NCCL_P2P_DISABLE=1` into new experiment runtimes
 to avoid unreliable direct peer transfers on this cluster. NCCL uses host-memory

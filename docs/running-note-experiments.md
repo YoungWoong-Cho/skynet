@@ -429,7 +429,7 @@ manifest 검증 규칙(`adapters/__init__.py:2055-2093`):
   - **6. Checkpoint and variants**의 "Auto-resume train/eval as a new attempt…"(`#checkpoint-auto-resume`)를 끄거나 **Resume arguments**를 채운다.
   - Auto-resume가 켜졌는데 비어 있으면 plan이 막힌다: "generic auto-resume requires native.resume_argv"(`adapters/__init__.py:493`)
 - 그 밖의 동작:
-  - GPU는 1~16개, backend는 모두 된다. `SKYNET_ASSIGNED_GPU_COUNT`가 설정된다.
+  - GPU는 1~16개, backend는 모두 된다. `SKYNET_ASSIGNED_GPU_COUNT`는 generic 전용이 아니다. 모든 train/eval script가 compile된 GPU 수를 내보낸다(`slurm.py`의 `compile_sbatch`, `GPU_COUNT_VARIABLE`).
   - data binding, progress, evaluation contract가 없다. 화면에는 "This adapter does not require a registered dataset."가 뜬다.
 - 올바른 형태:
   - 코드는 cwd(고정 commit checkout의 project dir) 기준 상대 경로나 `{{SKYNET_SOURCE_DIR}}`로 가리킨다.
@@ -740,7 +740,7 @@ sbatch directive(`slurm.py:1520-1544`):
 - 자동 재개가 켜진 학습에는 `--signal=B:USR1@<warning>`과 `--requeue`가 붙는다.
 - 본문은 EXIT trap(final.json 기록) 설치 직후, capsule 검증이나 소스 준비보다 먼저 GPU preflight를 실행한다(`gpu_preflight.py`, 6장 참고).
 
-job 환경변수: `SKYNET_RUN_ID`, `SKYNET_RUN_DIR`, `SKYNET_SOURCE_DIR`, `SKYNET_PROJECT_DIR`, `SKYNET_CHECKPOINT_DIR`, `SKYNET_CHECKPOINT_SAVE_STEPS`, `SKYNET_CHECKPOINT_KEEP_LAST`, `SKYNET_EVAL_PROGRESS_PATH`, `SKYNET_EVALUATION_RESUME`, `HF_HOME`, `TORCH_HOME`, `UV_CACHE_DIR`(`slurm.py:1545-1567`)
+job 환경변수: `SKYNET_RUN_ID`, `SKYNET_RUN_DIR`, `SKYNET_SOURCE_DIR`, `SKYNET_PROJECT_DIR`, `SKYNET_CHECKPOINT_DIR`, `SKYNET_CHECKPOINT_SAVE_STEPS`, `SKYNET_CHECKPOINT_KEEP_LAST`, `SKYNET_EVAL_PROGRESS_PATH`, `SKYNET_EVALUATION_RESUME`, `SKYNET_ASSIGNED_GPU_COUNT`(compile된 GPU 수, 어댑터와 무관하게 모든 script), `HF_HOME`, `TORCH_HOME`, `UV_CACHE_DIR`(`slurm.py:1545-1567`)
 
 ### 5-6. HAT는 브라우저로
 

@@ -31,6 +31,10 @@ GITHUB_SSH_TO_HTTPS = (
     "-c url.https://github.com/.insteadOf=ssh://git@github.com/"
 )
 
+# Every generated job script pins the GPU count it requests from Slurm so
+# repository-native launchers size their workers from one canonical value.
+GPU_COUNT_VARIABLE = "SKYNET_ASSIGNED_GPU_COUNT"
+
 
 RUNNER_SOURCE = r'''#!/usr/bin/env python3
 from __future__ import annotations
@@ -1566,6 +1570,12 @@ def compile_sbatch(
         **spec.runtime.environment,
         **plan.environment,
     }
+    assigned_gpu_count = str(gpu_count)
+    if exports.get(GPU_COUNT_VARIABLE, assigned_gpu_count) != assigned_gpu_count:
+        raise SlurmCompileError(
+            f"{GPU_COUNT_VARIABLE} conflicts with the compiled GPU count: {gpu_count}"
+        )
+    exports[GPU_COUNT_VARIABLE] = assigned_gpu_count
     for key, value in injected_environment.items():
         if key in exports and exports[key] != value:
             raise SlurmCompileError(
