@@ -6,6 +6,7 @@ import shlex
 
 from .isaac_job import compile_isaac_job
 from .cluster_runtime import WORK_ROOT, ClusterError, SubmissionOutcomeUnknown
+from .cluster_config import CLUSTER
 from .gpu_preflight import GPU_MISSING_MESSAGE, gpu_missing_exit
 from .preparation_states import TERMINAL_FAILURE_STATES
 
@@ -33,7 +34,7 @@ def control_cluster(transport, job, generation, root, operation, **value):
                               + " " + shlex.quote(root + "/" + name) + " | sha256sum --check --status")
             script = compile_isaac_job(profile, root, "review-video-" + generation.token[:8],
                                        [profile["runtime"] + "/bin/python", root + "/render_recording.py", root + "/request.json"],
-                                       checks=checks).replace("#SBATCH --time=00:30:00", "#SBATCH --time=00:10:00")
+                                       checks=checks, resources=CLUSTER.defaults.background_jobs.review_video)
             if generation.cancel.is_set():
                 return {"state": "CANCELLED"}
             generation.cluster_submission_started = True

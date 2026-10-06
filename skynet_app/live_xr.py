@@ -19,13 +19,14 @@ from .cluster_runtime import (
     WORK_ROOT,
 )
 from .database import canonical_json, utc_now
-from .cluster_config import CLUSTER
+from .cluster_config import CLUSTER, format_slurm_duration
 from .dexverse_release import TASK, ROBOT, REVISION
 from .live_xr_catalog import selection
 from .dexverse_versions import environment_profile
 from .simulation_hands import build as build_hand, upload as upload_hand
 from .live_xr_workstation import LaunchRejected, WorkstationClient, validate_profile
 from .gpu_preflight import GPU_MISSING_MESSAGE, gpu_missing_exit, gpu_preflight_lines
+from .sbatch import SHEBANG, sbatch_header, shell_prelude
 
 ROOT = Path(__file__).resolve().parents[1]
 EULA = "https://developer.download.nvidia.com/cloudxr/EULA/NVIDIA_CloudXR_GA_License_without_Data_Collection_25Feb2025.pdf"
@@ -165,11 +166,12 @@ class LiveXRService:
                     raise ValueError(f"Invalid live profile {key}")
         else:
             raise ValueError("Unsupported live execution backend")
+        live = CLUSTER.defaults.background_jobs.live_session
         if (
             type(profile["duration_minutes"]) is not int
-            or not 5 <= profile["duration_minutes"] <= 60
+            or not live.min_duration_minutes <= profile["duration_minutes"] <= live.max_duration_minutes
         ):
-            raise ValueError("Live session duration must be 5–60 minutes")
+            raise ValueError(f"Live session duration must be {live.min_duration_minutes}–{live.max_duration_minutes} minutes")
         profile.update(
             provider="dexverse-cloudxr",
             display_name="Live DexVerse · Shadow right hand · Pick up stick",
@@ -435,27 +437,22 @@ class LiveXRService:
     @staticmethod
     def compile(job):
         p, root = job["profile"], job["root"]
-        minutes = p["duration_minutes"] + 5
+        live = CLUSTER.defaults.background_jobs.live_session
+        minutes = p["duration_minutes"] + live.startup_margin_minutes
         directives = (
             []
             if p.get("execution") == "workstation"
-            else [
-                f"#SBATCH --job-name=live-xr-{job['id'][:8]}",
-                *CLUSTER.queue_for_partition(p["partition"]).sbatch_directives(),
-                f"#SBATCH --gres={CLUSTER.gres(p['gpu_type'], 1)}",
-                f"#SBATCH --cpus-per-task={CLUSTER.defaults.cpus_per_gpu}",
-                "#SBATCH --mem=48G",
-                f"#SBATCH --time={minutes // 60:02}:{minutes % 60:02}:00",
-                f"#SBATCH --output={root}/stdout.log",
-                f"#SBATCH --error={root}/stderr.log",
-            ]
+            else sbatch_header(
+                job_name=f"live-xr-{job['id'][:8]}", queue=CLUSTER.queue_for_partition(p["partition"]),
+                cpus=CLUSTER.defaults.cpus_per_gpu, memory_gb=live.memory_gb, time_limit=format_slurm_duration(minutes * 60),
+                output=f"{root}/stdout.log", error=f"{root}/stderr.log", gres=CLUSTER.gres(p["gpu_type"], 1),
+            )
         )
         return "\n".join(
             [
-                "#!/bin/bash",
+                SHEBANG,
                 *directives,
-                "set -euo pipefail",
-                "umask 077",
+                *shell_prelude(umask="077"),
                 *([] if p.get("execution") == "workstation" else gpu_preflight_lines(1)),
                 f"printf '%s  %s\\n' {job['worker_sha256']} {shlex.quote(root + '/runner.py')} | sha256sum --check --status",
                 "exec "

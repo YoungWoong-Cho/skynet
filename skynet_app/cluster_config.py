@@ -81,6 +81,13 @@ class RuntimeExecutableProvider(ProfileModel):
     resolver: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+def _single_line_time_limit(value: str) -> str:
+    value = value.strip()
+    if any(character in value for character in ("\x00", "\n", "\r")):
+        raise ValueError("time limit must be a single-line value")
+    return value
+
+
 class RuntimeComputeSmokeResources(ProfileModel):
     """Per-profile defaults and minimums for its compute readiness probe."""
 
@@ -91,13 +98,58 @@ class RuntimeComputeSmokeResources(ProfileModel):
     memory_gb: int = Field(ge=1)
     time_limit: str = Field(min_length=1)
 
-    @field_validator("time_limit")
-    @classmethod
-    def single_line_time_limit(cls, value: str) -> str:
-        value = value.strip()
-        if any(character in value for character in ("\x00", "\n", "\r")):
-            raise ValueError("readiness time limit must be a single-line value")
-        return value
+    single_line_time_limit = field_validator("time_limit")(staticmethod(_single_line_time_limit))
+
+
+class CpuJobResources(ProfileModel):
+    """Shape of one CPU-only background job."""
+
+    cpus_per_task: int = Field(ge=1)
+    memory_gb: int = Field(ge=1)
+    time_limit: str = Field(min_length=1)
+
+    single_line_time_limit = field_validator("time_limit")(staticmethod(_single_line_time_limit))
+
+
+class GpuJobResources(ProfileModel):
+    """Shape of one single-GPU background job; its CPUs follow cpus_per_gpu."""
+
+    memory_gb: int = Field(ge=1)
+    time_limit: str = Field(min_length=1)
+
+    single_line_time_limit = field_validator("time_limit")(staticmethod(_single_line_time_limit))
+
+
+class LiveSessionResources(ProfileModel):
+    memory_gb: int = Field(ge=1)
+    startup_margin_minutes: int = Field(ge=0)  # Allocation time beyond the requested session.
+    min_duration_minutes: int = Field(ge=1)
+    max_duration_minutes: int = Field(ge=1)
+
+
+class CollectionJobPolicy(ProfileModel):
+    grace_seconds: int = Field(ge=1)  # TERM warning before the allocation ends.
+
+
+class DataImportResources(ProfileModel):
+    cpus_per_task: int = Field(ge=1)
+    memory_gb: int = Field(ge=1)
+    max_cpus_per_task: int = Field(ge=1)
+    max_memory_gb: int = Field(ge=1)
+
+
+class BackgroundJobs(ProfileModel):
+    """Resource shapes of the jobs Skynet submits on its own behalf."""
+
+    recording_preflight: CpuJobResources
+    recording_preparation: CpuJobResources
+    observation_derive: CpuJobResources
+    observation_render: GpuJobResources
+    isaac_replay: GpuJobResources
+    review_video: GpuJobResources
+    live_session: LiveSessionResources
+    collection: CollectionJobPolicy
+    data_import: DataImportResources
 
 
 class RuntimeComputeSmoke(ProfileModel):
@@ -253,6 +305,7 @@ class DashboardProfile(ProfileModel):
 
 class ClusterDefaults(ProfileModel):
     cpus_per_gpu: int = Field(default=8, ge=1)
+    background_jobs: BackgroundJobs
     queue_policy: str
     import_queue_policy: str  # Dataset imports: CPU-only background work.
     background_queue_policy: str  # Preflight, preparation and observation jobs.
@@ -354,6 +407,18 @@ class ClusterProfile(ProfileModel):
                 raise ValueError(f"default {field} is not configured")
         if parse_slurm_duration(self.defaults.time_limit) > self.queue(self.defaults.queue_policy).max_time_seconds:
             raise ValueError("default time limit exceeds the default queue's maximum")
+        background = self.queue(self.defaults.background_queue_policy)
+        jobs = self.defaults.background_jobs
+        for name in ("recording_preflight", "recording_preparation", "observation_derive", "observation_render"):
+            job = getattr(jobs, name)
+            if parse_slurm_duration(job.time_limit) > background.max_time_seconds:
+                raise ValueError(f"background job {name} exceeds the background queue's maximum time")
+            if job.memory_gb > self.limits.max_memory_gb or getattr(job, "cpus_per_task", 1) > self.limits.max_cpus_per_task:
+                raise ValueError(f"background job {name} exceeds the cluster limits")
+        if jobs.live_session.min_duration_minutes > jobs.live_session.max_duration_minutes:
+            raise ValueError("live session duration bounds are inverted")
+        if jobs.data_import.cpus_per_task > jobs.data_import.max_cpus_per_task or jobs.data_import.memory_gb > jobs.data_import.max_memory_gb:
+            raise ValueError("data import defaults exceed their maxima")
         for profile_id, profile in self.runtime_profiles.items():
             smoke = profile.verification.compute_smoke
             if smoke is None:

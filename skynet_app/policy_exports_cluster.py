@@ -8,6 +8,7 @@ import shlex
 from uuid import uuid4
 
 from .cluster_config import CLUSTER
+from .sbatch import SHEBANG, cpu_thread_exports, sbatch_header, shell_prelude
 from .cluster_runtime import DEFAULT_GATEWAY, ClusterError, SubmissionOutcomeUnknown, WORK_ROOT
 from .database import canonical_json
 from .training_contracts import RECORDING_DATASET_FORMAT as DATASET_FORMAT
@@ -71,8 +72,9 @@ class ClusterPolicyPreparation(RecordingPreflight):
         sources = self._preflight_sources(job, self._archived_sources(job))
         sources = self.observations.ensure(job, sources)
         queue = CLUSTER.queue(CLUSTER.defaults.background_queue_policy)
+        shape = CLUSTER.defaults.background_jobs.recording_preparation
         self.update(job["id"], state="STAGING", stage="STAGING", error=None,
-                    cluster_partition=queue.partition, cluster_account=queue.account, cluster_cpus=4,
+                    cluster_partition=queue.partition, cluster_account=queue.account, cluster_cpus=shape.cpus_per_task,
                     detail="Preparing shared recording data on the training cluster")
         attempt_id = str(uuid4())
         relative = f"preparation/{attempt_id}"
@@ -112,12 +114,11 @@ class ClusterPolicyPreparation(RecordingPreflight):
                 interpreter.extend(["--with", package])
             interpreter.append("python")
         script = "\n".join([
-            "#!/bin/bash", f"#SBATCH --job-name=prepare-{job['id'][:8]}",
-            *queue.sbatch_directives(),
-            "#SBATCH --cpus-per-task=4", "#SBATCH --mem=32G", "#SBATCH --time=01:00:00",
-            f"#SBATCH --output={root}/export.log", f"#SBATCH --error={root}/export.log",
-            "set -euo pipefail", "umask 077", "export CUDA_VISIBLE_DEVICES=",
-            "export OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 MKL_NUM_THREADS=4",
+            SHEBANG,
+            *sbatch_header(job_name=f"prepare-{job['id'][:8]}", queue=queue, cpus=shape.cpus_per_task,
+                           memory_gb=shape.memory_gb, time_limit=shape.time_limit, output=f"{root}/export.log"),
+            *shell_prelude(umask="077"), "export CUDA_VISIBLE_DEVICES=",
+            cpu_thread_exports(shape.cpus_per_task),
             "export PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1",
             f"export TMPDIR={shlex.quote(root + '/tmp')}", 'mkdir -p "$TMPDIR"',
             f"export UV_CACHE_DIR={shlex.quote(CLUSTER.paths.uv_cache)}", *setup,
@@ -137,7 +138,7 @@ class ClusterPolicyPreparation(RecordingPreflight):
                     submission_key=f"{identifier}-preparation-{job['attempt_id']}")
                 job = self.update(identifier, cluster_job_id=submission.job_id, gateway=submission.gateway,
                                   state="PENDING", stage="QUEUED",
-                                  detail="Waiting for 4 CPU slots on the training cluster", error=None)
+                                  detail=f"Waiting for {CLUSTER.defaults.background_jobs.recording_preparation.cpus_per_task} CPU slots on the training cluster", error=None)
             _, statuses = self.cluster.job_statuses([job["cluster_job_id"]], DEFAULT_GATEWAY)
             status = statuses.get(job["cluster_job_id"])
             if not status:

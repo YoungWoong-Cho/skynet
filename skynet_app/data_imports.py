@@ -13,6 +13,7 @@ from pathlib import PurePosixPath
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .cluster_config import CLUSTER, format_slurm_duration, parse_slurm_duration
+from .sbatch import SHEBANG, sbatch_header, shell_prelude
 
 
 UV_VERSION = "0.12.8"
@@ -28,8 +29,10 @@ class HuggingFaceImportRequest(BaseModel):
     gateway: str = Field(default_factory=lambda: CLUSTER.defaults.gateway)
     queue: str = Field(default_factory=lambda: CLUSTER.defaults.import_queue_policy)
     # Import workers download in parallel threads; these caps bound one CPU-only job.
-    cpus: int = Field(default=8, ge=1, le=64)
-    memory_gb: int = Field(default=32, ge=1, le=512)
+    cpus: int = Field(default_factory=lambda: CLUSTER.defaults.background_jobs.data_import.cpus_per_task,
+                      ge=1, le=CLUSTER.defaults.background_jobs.data_import.max_cpus_per_task)
+    memory_gb: int = Field(default_factory=lambda: CLUSTER.defaults.background_jobs.data_import.memory_gb,
+                           ge=1, le=CLUSTER.defaults.background_jobs.data_import.max_memory_gb)
     time_limit: str = Field(default_factory=lambda: CLUSTER.defaults.time_limit)
 
     @field_validator("revision")
@@ -402,25 +405,18 @@ def build_huggingface_import_job(
     time_limit, cpus, memory_gb = str(request["time_limit"]), int(request["cpus"]), int(request["memory_gb"])
     if CLUSTER.commands.host_python is None:
         raise ValueError("Dataset imports need commands.host_python in the cluster configuration")
-    # Each directive keeps the template's indentation so dedent still strips it.
-    queue_directives = "\n        ".join(queue.sbatch_directives())
+    # Each header line keeps the template's indentation so dedent still strips it.
+    header = "\n        ".join([SHEBANG, *sbatch_header(
+        job_name=job_name, queue=queue, cpus=cpus, memory_gb=memory_gb, time_limit=time_limit,
+        output=f"{CLUSTER.paths.logs}/%x-%j.out", error=f"{CLUSTER.paths.logs}/%x-%j.err",
+        single_task=True, chdir=CLUSTER.paths.workspace, extra=["#SBATCH --requeue"],
+    )])
+    prelude = "\n        ".join(shell_prelude(umask="0027"))
     script = dedent(
         f"""\
-        #!/usr/bin/env bash
-        #SBATCH --job-name={job_name}
-        {queue_directives}
-        #SBATCH --nodes=1
-        #SBATCH --ntasks=1
-        #SBATCH --cpus-per-task={cpus}
-        #SBATCH --mem={memory_gb}G
-        #SBATCH --time={time_limit}
-        #SBATCH --requeue
-        #SBATCH --chdir={CLUSTER.paths.workspace}
-        #SBATCH --output={CLUSTER.paths.logs}/%x-%j.out
-        #SBATCH --error={CLUSTER.paths.logs}/%x-%j.err
+        {header}
 
-        set -euo pipefail
-        umask 0027
+        {prelude}
         export HOME={shlex.quote(CLUSTER.paths.home_root)}
         export WORK_ROOT={shlex.quote(CLUSTER.paths.work_root)}
         export UV_CACHE_DIR={shlex.quote(CLUSTER.paths.uv_cache)}

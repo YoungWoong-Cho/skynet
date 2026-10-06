@@ -6,6 +6,7 @@ import pytest
 from skynet_app.cluster_runtime import DEFAULT_GATEWAY, WORK_ROOT, ClusterError, SubmissionOutcomeUnknown
 from skynet_app.live_xr_video import VideoGeneration
 from skynet_app.live_xr_video_cluster import control_cluster
+from skynet_app.cluster_config import CLUSTER
 
 
 @pytest.fixture
@@ -47,7 +48,7 @@ def test_replay_submits_once_and_waits_for_confirmed_render_and_shutdown(cluster
     submissions=[v for v in calls if v[0]=='submit']
     assert len(submissions)==1
     script=submissions[0][1][0]
-    assert '#SBATCH --time=00:10:00' in script and '#SBATCH --gres=gpu:1' in script
+    assert f'#SBATCH --time={CLUSTER.defaults.background_jobs.review_video.time_limit}' in script and '#SBATCH --gres=gpu:1' in script
     assert submissions[0][2]['submission_key']==generation.token
 
 

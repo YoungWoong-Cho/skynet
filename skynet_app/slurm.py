@@ -20,6 +20,7 @@ from skynet_app.cluster_config import CLUSTER
 from skynet_app.cluster_runtime import HOME_ROOT, SLURM_BIN
 from skynet_app.experiments import CanonicalModel, ExperimentSpec, canonical_sha256
 from skynet_app.gpu_preflight import gpu_preflight_lines
+from skynet_app.sbatch import SHEBANG, sbatch_header, shell_prelude
 from skynet_app.evaluation_placement import resolve_evaluation_resources
 from skynet_app.workspace_storage import paths_for_root, evaluation_execution_directory
 
@@ -1522,21 +1523,13 @@ def compile_sbatch(
         gres = CLUSTER.gres(gpu_type, gpu_count)
     except ValueError as error:
         raise SlurmCompileError(str(error)) from error
-    directives = [
-        f"#SBATCH --job-name={job_name}",
-        *CLUSTER.queue_for_partition(spec.resources.partition).sbatch_directives(),
-        "#SBATCH --nodes=1",
-        "#SBATCH --ntasks=1",
-        f"#SBATCH --gres={gres}",
-        f"#SBATCH --cpus-per-task={spec.resources.cpus_per_task}",
-        f"#SBATCH --mem={spec.resources.memory_gb}G",
-        f"#SBATCH --time={spec.resources.time_limit}",
-        f"#SBATCH --chdir={paths.workspace}",
-        f"#SBATCH --output={paths.logs}/%x-%j.out",
-        f"#SBATCH --error={paths.logs}/%x-%j.err",
-        "#SBATCH --export=NIL",
-    ]
-    directives.extend(compile_slurm_placement_directives(spec.resources))
+    directives = sbatch_header(
+        job_name=job_name, queue=CLUSTER.queue_for_partition(spec.resources.partition),
+        cpus=spec.resources.cpus_per_task, memory_gb=spec.resources.memory_gb, time_limit=spec.resources.time_limit,
+        output=f"{paths.logs}/%x-%j.out", error=f"{paths.logs}/%x-%j.err", gres=gres,
+        single_task=True, chdir=paths.workspace,
+        extra=["#SBATCH --export=NIL", *compile_slurm_placement_directives(spec.resources)],
+    )
     if stage == "train" and effective_auto_resume:
         directives.extend(
             [
@@ -1818,15 +1811,14 @@ def compile_sbatch(
             '*) echo "preflight: allocation is outside verified evaluation nodes" >&2; exit 78 ;; esac',
         ]
     script_parts = [
-        "#!/usr/bin/env bash",
+        SHEBANG,
         f"# skynet-spec-sha256: {spec_sha}",
         f"# skynet-argv-sha256: {argv_sha}",
         f"# skynet-adapter: {plan.adapter}@{plan.adapter_version}",
         f"# skynet-source-revision: {spec.source.revision}",
         *directives,
         "",
-        "set -Eeuo pipefail",
-        "umask 077",
+        *shell_prelude(umask="077", errtrace=True),
         *export_lines,
         f"export SKYNET_DIRTY_POLICY={_shell(spec.source.dirty_policy)}",
         f"export PATH={SLURM_BIN}:/usr/local/bin:/usr/bin:/bin",

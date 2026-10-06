@@ -6,6 +6,7 @@ import re
 import shlex
 from types import SimpleNamespace
 
+from .cluster_config import CLUSTER
 from .cluster_runtime import ClusterClient, ClusterError, SubmissionOutcomeUnknown
 
 
@@ -84,7 +85,7 @@ else:
             "--service-type=exec",
             "--remain-after-exit",
             "--property=RuntimeMaxSec="
-            + str((self.profile["duration_minutes"] + 5) * 60),
+            + str((self.profile["duration_minutes"] + CLUSTER.defaults.background_jobs.live_session.startup_margin_minutes) * 60),
             "--property=TimeoutStopSec=35",
             "--property=KillMode=mixed",
             "--property=Restart=no",

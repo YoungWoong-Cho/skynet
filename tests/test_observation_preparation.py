@@ -21,6 +21,7 @@ from skynet_app.live_xr_review import LiveReviewService
 from skynet_app.observation_contracts import ARTIFACT_SCHEMA, PREPARE_SCHEMA, rgb_requirements
 from skynet_app.policy_exports import PolicyExportService
 from test_policy_exports_cluster import receipt as conversion_receipt
+from skynet_app.cluster_config import CLUSTER
 
 ROOT = Path(__file__).resolve().parents[1]
 REVISION = '30cc673e27684b9f10186fa6bea731aed246bc9f'
@@ -222,7 +223,7 @@ def test_plan_claim_render_derive_then_cpu_and_version_refs(context, monkeypatch
     assert pending['state'] == 'PENDING', pending
     assert len(cluster.submissions) == 3
     assert pending['gateway'] == cluster.host, 'The job records the login host that accepted it'
-    assert '#SBATCH --cpus-per-task=4' in pending['cluster_script'] and '#SBATCH --gres' not in pending['cluster_script']
+    assert f"#SBATCH --cpus-per-task={CLUSTER.defaults.background_jobs.recording_preparation.cpus_per_task}" in pending['cluster_script'] and '#SBATCH --gres' not in pending['cluster_script']
     cpu_request = json.loads(cluster.files[pending['cluster_root'] + '/request.json'])
     source = cpu_request['sources'][0]
     assert source['images'] is None

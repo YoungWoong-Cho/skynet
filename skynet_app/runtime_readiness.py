@@ -275,6 +275,7 @@ def render_readiness_sbatch(
     from .slurm import compile_slurm_placement_directives
     from .evaluation_placement import resolve_evaluation_resources
     from .gpu_preflight import gpu_preflight_lines
+    from .sbatch import SHEBANG, sbatch_header, shell_prelude
 
     contract, capsule_source = build_readiness_contract(profile_id, suite_id)
     profile = CLUSTER.runtime_profile(profile_id)
@@ -337,22 +338,17 @@ def render_readiness_sbatch(
     attestation_path = contract["verification"]["compute_attestation_path"]
     job_name = f"skynet-ready-{re.sub(r'[^a-z0-9-]+', '-', profile_id.lower())[:80]}"
     lines = [
-        "#!/bin/bash",
-        f"#SBATCH --job-name={job_name}",
-        *CLUSTER.queue_for_partition(resources.partition).sbatch_directives(),
-        "#SBATCH --nodes=1",
-        "#SBATCH --ntasks=1",
-        f"#SBATCH --cpus-per-task={resources.cpus_per_task}",
-        f"#SBATCH --mem={resources.memory_gb}G",
-        f"#SBATCH --gres={CLUSTER.gres(resources.gpu.gpu_type, resources.gpu.count)}",
-        f"#SBATCH --time={resources.time_limit}",
-        f"#SBATCH --output={CLUSTER.paths.logs}/%x-%j.out",
-        f"#SBATCH --error={CLUSTER.paths.logs}/%x-%j.err",
-        # Preserve Slurm/SPANK-provided CUDA visibility. The Python producer
-        # explicitly filters the environment passed to the evaluator hook.
-        "#SBATCH --export=ALL",
-        *compile_slurm_placement_directives(resources),
-        "set -euo pipefail",
+        SHEBANG,
+        *sbatch_header(
+            job_name=job_name, queue=CLUSTER.queue_for_partition(resources.partition),
+            cpus=resources.cpus_per_task, memory_gb=resources.memory_gb, time_limit=resources.time_limit,
+            output=f"{CLUSTER.paths.logs}/%x-%j.out", error=f"{CLUSTER.paths.logs}/%x-%j.err",
+            gres=CLUSTER.gres(resources.gpu.gpu_type, resources.gpu.count), single_task=True,
+            # Preserve Slurm/SPANK-provided CUDA visibility. The Python producer
+            # explicitly filters the environment passed to the evaluator hook.
+            extra=["#SBATCH --export=ALL", *compile_slurm_placement_directives(resources)],
+        ),
+        *shell_prelude(umask=None),
         *gpu_preflight_lines(resources.gpu.count),
         *(['if test "${OMNI_KIT_ACCEPT_EULA:-}" != "YES"; then',
         "  printf '%s\n' 'Read and accept the NVIDIA Isaac Sim EULA, then explicitly export OMNI_KIT_ACCEPT_EULA=YES for this sbatch submission.' >&2",

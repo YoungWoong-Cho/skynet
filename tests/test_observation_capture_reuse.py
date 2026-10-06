@@ -11,6 +11,7 @@ from skynet_app.observation_contracts import (
 from test_observation_contracts import cloud, identity
 from test_observation_preparation import context, cloud_contract
 from test_policy_exports import create, set_requirements
+from skynet_app.cluster_config import CLUSTER
 
 
 def capture_identity(revision='1' * 64):
@@ -155,7 +156,8 @@ def test_new_conversion_uses_cpu_derive_with_preserved_old_renderer(context, mon
     assert derived[0]['sources'][0]['profile'] == producer['request']['sources'][0]['profile']
     script = cluster.submissions[-1]['script']
     assert '#SBATCH --gres' not in script
-    assert '#SBATCH --cpus-per-task=8' in script and '#SBATCH --time=04:00:00' in script
+    derive = CLUSTER.defaults.background_jobs.observation_derive
+    assert f'#SBATCH --cpus-per-task={derive.cpus_per_task}' in script and f'#SBATCH --time={derive.time_limit}' in script
     raw = (service.root / converted['id'] / 'observation-plan.json').read_text()
     assert hashlib.sha256(raw.encode()).hexdigest() == current['observation_plan_sha256']
     assert {node['artifact_key'] for node in json.loads(raw)['nodes'] if node['modality'] != 'point_cloud'} == capture_keys

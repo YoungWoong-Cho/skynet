@@ -17,6 +17,7 @@ from .cluster_runtime import ClusterClient, ClusterError, HOME_ROOT, WORK_ROOT
 from .database import Database, canonical_json, content_sha256, new_id, utc_now
 from .experiments import format_slurm_duration, parse_slurm_duration
 from .gpu_preflight import GPU_MISSING_MESSAGE, gpu_missing_exit, gpu_preflight_lines
+from .sbatch import SHEBANG, sbatch_header, shell_prelude
 
 
 COLLECTION_SCHEMA_VERSION = "skynet.collection/v1"
@@ -1328,23 +1329,13 @@ def compile_collection_sbatch(session: Mapping[str, Any]) -> CompiledCollectionJ
     stdout_path = f"{CLUSTER.paths.logs}/collection-{session['id']}-%j.out"
     stderr_path = f"{CLUSTER.paths.logs}/collection-{session['id']}-%j.err"
     gpu = CLUSTER.gres(resources.gpu_type, resources.gpu_count) if resources.gpu_type else f"gpu:{resources.gpu_count}"
-    directives = [
-        "#!/usr/bin/env bash",
-        f"#SBATCH --job-name={job_name}",
-        *CLUSTER.queue_for_partition(resources.partition).sbatch_directives(),
-        "#SBATCH --nodes=1",
-        "#SBATCH --ntasks=1",
-        f"#SBATCH --cpus-per-task={resources.cpu_count}",
-        f"#SBATCH --mem={resources.memory_gb}G",
-        f"#SBATCH --gres={gpu}",
-        f"#SBATCH --time={resources.time_limit}",
-        f"#SBATCH --chdir={CLUSTER.paths.workspace}",
-        f"#SBATCH --output={stdout_path}",
-        f"#SBATCH --error={stderr_path}",
-        "#SBATCH --signal=B:TERM@60",
-    ]
-    if resources.node:
-        directives.append(f"#SBATCH --nodelist={resources.node}")
+    directives = [SHEBANG, *sbatch_header(
+        job_name=job_name, queue=CLUSTER.queue_for_partition(resources.partition),
+        cpus=resources.cpu_count, memory_gb=resources.memory_gb, time_limit=resources.time_limit,
+        output=stdout_path, error=stderr_path, gres=gpu, single_task=True, chdir=CLUSTER.paths.workspace,
+        extra=[f"#SBATCH --signal=B:TERM@{CLUSTER.defaults.background_jobs.collection.grace_seconds}",
+               *([f"#SBATCH --nodelist={resources.node}"] if resources.node else [])],
+    )]
 
     output_path = str(session["storage_snapshot"]["output_path"])
     control_path = f"{WORK_ROOT}/jobs/runs/{session['id']}"
@@ -1354,8 +1345,7 @@ def compile_collection_sbatch(session: Mapping[str, Any]) -> CompiledCollectionJ
     lines = [
         *directives,
         "",
-        "set -euo pipefail",
-        "umask 027",
+        *shell_prelude(umask="027"),
         *gpu_preflight_lines(resources.gpu_count),
         f"export HOME={shlex.quote(HOME_ROOT)}",
         f"export WORK_ROOT={shlex.quote(WORK_ROOT)}",

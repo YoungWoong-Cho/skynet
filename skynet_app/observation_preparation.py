@@ -15,6 +15,7 @@ from .observation_contracts import plan_artifacts, reuse_recorded_captures, PREP
 from .observation_store import ObservationStore
 from .preparation_states import TERMINAL_FAILURE_STATES, observed_state
 from .gpu_preflight import GPU_MISSING_MESSAGE, gpu_missing_exit, gpu_preflight_lines
+from .sbatch import SHEBANG, sbatch_header, shell_prelude
 
 
 # Leave space below the worker's 4 MB JSON limit for producer IDs, paths and
@@ -244,13 +245,14 @@ class ObservationPreparation:
             node = placement.default_node
             gpu = [f'#SBATCH --nodelist={node}', f'#SBATCH --gres={CLUSTER.gres(placement.nodes[node].gpu_type, 1)}']
         # Rendering holds one GPU; point-cloud derivation is a CPU-only job.
-        cpus = cpus_for_gpus(1) if rendering else 8
+        jobs = CLUSTER.defaults.background_jobs
+        shape = jobs.observation_render if rendering else jobs.observation_derive
+        cpus = cpus_for_gpus(1) if rendering else shape.cpus_per_task
         script = '\n'.join([
-            '#!/bin/bash', f'#SBATCH --job-name=observe-{identifier[:8]}',
-            *queue.sbatch_directives(),
-            f'#SBATCH --cpus-per-task={cpus}', '#SBATCH --mem=48G', '#SBATCH --time=04:00:00', *gpu,
-            f'#SBATCH --output={root}/observations.log', f'#SBATCH --error={root}/observations.log',
-            'set -euo pipefail', 'umask 077',
+            SHEBANG,
+            *sbatch_header(job_name=f'observe-{identifier[:8]}', queue=queue, cpus=cpus, memory_gb=shape.memory_gb,
+                           time_limit=shape.time_limit, output=f'{root}/observations.log', extra=gpu),
+            *shell_prelude(umask='077'),
             *(gpu_preflight_lines(1) if rendering else []),
             'export PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1',
             f'export OMP_NUM_THREADS={cpus} OPENBLAS_NUM_THREADS={cpus} MKL_NUM_THREADS={cpus}',

@@ -6,6 +6,7 @@ import shlex
 from uuid import uuid4
 
 from .cluster_config import CLUSTER
+from .sbatch import SHEBANG, cpu_thread_exports, sbatch_header, shell_prelude
 from .cluster_runtime import DEFAULT_GATEWAY, WORK_ROOT, ClusterError
 from .database import canonical_json
 from .observation_preparation import ObservationsPending
@@ -33,14 +34,14 @@ class RecordingPreflight:
                 files[relative + "/request.json"] = canonical_json(request)
                 self.cluster.write_capsule_files(job["id"], files, DEFAULT_GATEWAY)
                 queue = CLUSTER.queue(CLUSTER.defaults.background_queue_policy)
+                shape = CLUSTER.defaults.background_jobs.recording_preflight
                 python = str(CLUSTER.runtime_profile(CLUSTER.defaults.background_runtime_profile).environment_path) + "/bin/python"
                 script = "\n".join([
-                    "#!/bin/bash", f"#SBATCH --job-name=inspect-{job['id'][:8]}",
-                    *queue.sbatch_directives(),
-                    "#SBATCH --cpus-per-task=2", "#SBATCH --mem=8G", "#SBATCH --time=00:30:00",
-                    f"#SBATCH --output={root}/preflight.log", f"#SBATCH --error={root}/preflight.log",
-                    "set -euo pipefail", "umask 077", "export CUDA_VISIBLE_DEVICES=",
-                    "export OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 MKL_NUM_THREADS=2",
+                    SHEBANG,
+                    *sbatch_header(job_name=f"inspect-{job['id'][:8]}", queue=queue, cpus=shape.cpus_per_task,
+                                   memory_gb=shape.memory_gb, time_limit=shape.time_limit, output=f"{root}/preflight.log"),
+                    *shell_prelude(umask="077"), "export CUDA_VISIBLE_DEVICES=",
+                    cpu_thread_exports(shape.cpus_per_task),
                     "export PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1",
                     shlex.join([python, root + "/worker/recording_probe.py", root + "/request.json"]), ""])
                 job = self.update(job["id"], preflight_token=token, preflight_root=root,

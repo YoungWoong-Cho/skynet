@@ -124,13 +124,13 @@ def test_all_formats_use_resumable_cpu_job_and_only_remote_payloads(setup, forma
     assert pending["gateway"] == service.cluster.host
     assert pending["cluster_partition"] == "rl2-lab"
     assert pending["cluster_account"] == "rl2-lab"
-    assert pending["cluster_cpus"] == 4
+    assert pending["cluster_cpus"] == CLUSTER.defaults.background_jobs.recording_preparation.cpus_per_task
     assert len(service.cluster.submissions) == 1
     assert len(service.cluster.uploads) == 1
     assert any(path.endswith("/request.json") for path in service.cluster.uploads[0])
     assert any(path.endswith("/worker/cluster_worker.py") for path in service.cluster.uploads[0])
     script = pending["cluster_script"]
-    assert "#SBATCH --cpus-per-task=4" in script
+    assert f"#SBATCH --cpus-per-task={CLUSTER.defaults.background_jobs.recording_preparation.cpus_per_task}" in script
     assert "#SBATCH --gres" not in script and "export CUDA_VISIBLE_DEVICES=" in script
     assert "#SBATCH --account=rl2-lab" in script
     request = json.loads(service.cluster.files[pending["cluster_root"] + "/request.json"])
