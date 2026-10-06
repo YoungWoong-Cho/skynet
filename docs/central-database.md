@@ -53,7 +53,7 @@ attachment or note is deleted.
 Large stored documents are never parsed on request or reconcile paths. Experiment
 revisions, variants, evaluation stages, live sessions, policy exports and data
 bundles each keep a small projection in `document_projections` (retained paths,
-dataset assignments, the run list's display spec, tracking providers, frozen
+dataset assignments, the run list's spec fields, tracking providers, frozen
 evaluation targets), computed by `skynet_project_document` in PostgreSQL. A
 trigger maintains it for documents stored inline; for documents offloaded to the
 object store the uploader writes it in the same transaction, and

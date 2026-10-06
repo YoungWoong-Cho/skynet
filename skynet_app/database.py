@@ -1135,11 +1135,30 @@ class Database:
                 """, batch).fetchall())
                 for row in metrics:
                     evidence[row["run_id"]]["metrics"].append(row)
+                # The summary (pipeline_api.training_progress_summary) observes, per
+                # (attempt, restart, unit) segment, one value per timestamp (the highest
+                # completed), its ETA anchor candidates (the prefix minima) and the last
+                # row. No other row can change its result; fetching them moved about
+                # 12 MB per list request through the tunnel.
                 progress_samples = self._decode_many(connection.execute(f"""
+                    WITH observed AS (
+                        SELECT DISTINCT ON (attempt_id, restart_count, unit, recorded_at::timestamptz)
+                               run_id, attempt_id, restart_count, completed, total, unit, recorded_at
+                        FROM training_progress_samples
+                        WHERE run_id IN ({placeholders})
+                        ORDER BY attempt_id, restart_count, unit, recorded_at::timestamptz, completed DESC
+                    ), ranked AS (
+                        SELECT observed.*,
+                               min(completed) OVER (PARTITION BY attempt_id, restart_count, unit
+                                                    ORDER BY recorded_at::timestamptz
+                                                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS floor,
+                               row_number() OVER (PARTITION BY attempt_id, restart_count, unit
+                                                  ORDER BY recorded_at::timestamptz DESC) AS from_end
+                        FROM observed
+                    )
                     SELECT run_id, attempt_id, restart_count, completed, total, unit, recorded_at
-                    FROM training_progress_samples
-                    WHERE run_id IN ({placeholders})
-                    ORDER BY run_id, recorded_at, completed
+                    FROM ranked WHERE floor IS NULL OR completed <= floor OR from_end = 1
+                    ORDER BY run_id, recorded_at::timestamptz, completed
                 """, batch).fetchall())
                 for row in progress_samples:
                     evidence[row["run_id"]]["progress_samples"].append(row)

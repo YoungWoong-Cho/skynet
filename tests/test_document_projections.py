@@ -82,7 +82,7 @@ def test_migration_backfills_existing_documents_and_rollback_keeps_paths(tmp_pat
         c.execute('DROP FUNCTION skynet_project_document(TEXT,TEXT)')
         c.execute('DROP TABLE document_projections')
         c.execute("INSERT INTO policy_exports(id,payload_json) VALUES ('old-record',?)",(json.dumps({'path':'/old/path'}),))
-        for version in ('018','020'):
+        for version in ('018','020','021'):
             c.executescript(next((Path(__file__).parents[1]/'skynet_app/migrations/postgresql').glob(f'{version}_*.sql')).read_text())
         assert c.execute("SELECT projection_json->'paths' FROM document_projections WHERE record_id='old-record'").fetchone()[0]==['/old/path']
     with pytest.raises(RuntimeError):
@@ -138,23 +138,75 @@ def test_020_keeps_earlier_projections_byte_identical_and_extends_variants(tmp_p
             assert after[key]==before[key], key
     assert json.loads(display)['data']['bundle']['assignments'][0]['version']['metadata']=={'registered_version_id':'version','episodes':3}
     assert 'capsule_files' not in json.dumps(json.loads(display)['source'])
+
+
+LIST_SPEC = {'train':{'max_steps':8000,'other':1},'resources':{'gpu':{'count':2,'type':'any'},'partition':'p','account':'a'},
+    'native':{'config':{'epochs':3,'datasets':[{'path':'/d'}]*200,'initial_checkpoint':'/saved.ckpt'}},
+    'tracking':{'providers':[{'provider':'wandb','enabled':True}]},
+    'source':{'revision':'abc','adapter_manifest':{'slug':'hat','train':{'capsule_files':{'big.py':'c'*500_000},'argv':['x']*500,'input_fields':[{'name':'f'}]*200,
+        'progress':{'unit':'step','total_path':'train.max_steps','starts_at_zero':True,'source':{'kind':'jsonl','path':'progress.jsonl','completed_key':'step'}}}}},
+    'data':{'bundle':{'name':'cube','assignments':[
+        {'role':'training_data','resource':{'id':'r1','name':'Cube','provider':'p'},'version':{'format':'f','manifest_sha256':'d'*64,
+         'metadata':{'display_name':'Cube','registered_version_id':'v1','episodes':list(range(50_000)),'shared_artifacts':['/a']*1000,'capture':{'x':'y'*5000}}}},
+        {'role':'training_data','resource':{'id':'r2'},'version':{'metadata':{'num_episodes':None,'registered_version_id':'v2'}}},
+        {'role':'training_data','resource':{'id':'r3'},'version':{'metadata':{'num_episodes':7,'episodes':[1,2]}}},
+        {'role':'evaluation_target','version':{'metadata':{'episodes':[1]}}}]}}}
+
+
+def list_views(spec):
+    """Every value the run list derives from a spec; equal for the stored spec and its projection."""
+    from skynet_app import data_selection
+    from skynet_app.pipeline_api import _mapping_path, _resolved_training_total, _training_progress_contract, training_progress_summary
+    run={'status':'RUNNING','resolved_spec_json':spec}
+    attempts=[{'id':'a1','attempt_number':1,'status':'RUNNING','started_at':'2026-09-20T10:00:00Z'}]
+    return dict(
+        resources=spec.get('resources') or {},
+        training_data=data_selection.describe(spec),
+        contract=_training_progress_contract(run),
+        totals={path:_resolved_training_total(spec,path) for path in ('train.max_steps','native.config.epochs')},
+        pinned=bool(_mapping_path(spec,'native.config.initial_checkpoint')[1]),
+        summary=training_progress_summary(run,attempts=attempts,checkpoints=[],metrics=[],
+            progress_samples=[{'attempt_id':'a1','restart_count':0,'completed':100,'unit':'step','recorded_at':'2026-09-20T10:05:00Z'}],
+            resolved_spec=spec,now='2026-09-20T10:10:00Z'))
+
+
+def test_021_narrows_the_run_list_spec_and_keeps_other_projections_byte_identical(tmp_path):
+    db=Database(tmp_path/'projection.db')
+    project=db.create_project('project')
+    experiment=db.create_experiment(project_id=project['id'],name='test',requested_spec=LIST_SPEC)
+    variant=db.create_variant(experiment['latest_revision']['id'],name='one',parameters={},resolved_spec=LIST_SPEC)
+    with db.transaction() as c:
+        c.execute("INSERT INTO policy_exports(id,payload_json) VALUES ('export',?)",(json.dumps({'path':'/exported'}),))
+        reapply(c, ['018','020'])
+        before={row[0]:row[1] for row in c.execute("SELECT table_name||':'||record_id, projection_json::text FROM document_projections").fetchall()}
+        c.executescript(next(MIGRATIONS.glob('021_*.sql')).read_text())
+        after={row[0]:row[1] for row in c.execute("SELECT table_name||':'||record_id, projection_json::text FROM document_projections").fetchall()}
+    for key in before:
+        if key.startswith('variants:'):
+            wide,narrow=json.loads(before[key]),json.loads(after[key])
+            assert {k:v for k,v in narrow.items() if k!='display'}=={k:v for k,v in wide.items() if k!='display'}
+            display=narrow['display']
+        else:
+            assert after[key]==before[key], key
+    text=json.dumps(display)
+    assert len(text)<3000 and not any(word in text for word in ('capsule_files','datasets','capture','shared_artifacts','argv'))
+    assert list_views(display)==list_views(LIST_SPEC)
+    metadata=[item['version']['metadata'] for item in display['data']['bundle']['assignments']]
+    assert metadata[0]=={'display_name':'Cube','registered_version_id':'v1','episodes':50_000}
+    assert metadata[1]=={'registered_version_id':'v2','num_episodes':None}, 'an explicit null num_episodes keeps its presence'
+    assert metadata[2]=={'episodes':2,'num_episodes':7}
     # The run list reads that projection, not the stored specification.
     run=db.create_run(variant['id'],seed=1,adapter_name='x',adapter_version='1',run_directory='/run',status='SUCCEEDED')
-    assert db.run_progress_evidence([run['id']])[run['id']]['resolved_spec_json']==json.loads(display)
+    assert db.run_progress_evidence([run['id']])[run['id']]['resolved_spec_json']==display
 
 
-def test_display_projection_matches_the_run_list_expression_on_large_specs(tmp_path):
+def test_display_projection_keeps_every_run_list_view_on_large_and_empty_specs(tmp_path):
     db=Database(tmp_path/'projection.db')
-    specs=[{'train':{'max_steps':1},'source':{'adapter_manifest':{'train':{'capsule_files':{'big.py':'c'*500_000}}}},
-            'data':{'bundle':{'assignments':[{'version':{'metadata':{'episodes':list(range(50_000)),'shared_artifacts':['/a']*1000,'display_name':'d'}}},
-                                             {'version':{'metadata':{'episodes':12}}},{'version':{}}]}}},
-           {'train':{'max_steps':2}},{}]
     with db.connection() as c:
-        for spec in specs:
+        for spec in (LIST_SPEC,{'train':{'max_steps':2}},{}):
             projected=c.execute("SELECT skynet_project_document(?, 'variants') -> 'display'",(json.dumps(spec),)).fetchone()[0]
-            expected=json.loads(c.execute(OLD_DISPLAY_EXPRESSION,(json.dumps(spec),)).fetchone()[0])
-            assert projected==expected
-            assert len(json.dumps(projected))<10_000
+            assert list_views(projected)==list_views(spec)
+            assert len(json.dumps(projected))<3000
 
 
 def test_offloaded_bodies_are_skipped_by_the_trigger_and_projected_by_their_writer(tmp_path):
