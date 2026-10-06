@@ -95,18 +95,34 @@
 
 ### 2-2. 클러스터 준비 (owner, 클러스터 쓰기)
 
-repo와 docs에는 checkout과 환경을 만드는 절차가 없다. `ops/runtimes/`와 `bootstrap_*.py`도 없다. 아래 명령은 기존 레이아웃과 `pyvenv.cfg`를 보고 재구성한 것이다(추정).
+현재 repo와 docs에는 checkout과 환경을 만드는 절차가 없다. git 이력의 `ops/runtimes/`는 UniDex 전용이었다. 들어 있던 것은 `bootstrap_unidex.py`(`uv venv --python <기존 python3.11> <새 prefix>` 뒤 `uv pip install --require-hashes -r <lock>`), `unidex.md`, lock 파일뿐이었고, `12234f0`에서 UniDex와 함께 지워졌다. 공유 checkout을 만드는 절차는 이력에도 없다(`git log --all -S 'repos/shared'`는 이 문서 커밋만 찾는다). 아래 명령은 sky1의 기존 checkout(`.git/logs/HEAD`, shallow 여부, `remote.origin.partialclonefilter`)과 환경(`conda-meta/history`, `pyvenv.cfg`, `*.dist-info/INSTALLER`, `direct_url.json`)을 읽기 전용으로 확인해 맞춘 것이다(2026-10-06).
 
 ```bash
-# 1) 공유 checkout: commit 하나에 디렉터리 하나. profile 검증, Convert loader 검증, evaluator source_dir에 쓸 때만 필요하다(학습 job은 쓰지 않는다)
-git clone --no-checkout <url> /coc/flash7/ycho420/repos/shared/<Name>/<sha>
-git -C /coc/flash7/ycho420/repos/shared/<Name>/<sha> checkout --detach <sha>
-git -C /coc/flash7/ycho420/repos/shared/<Name>/<sha> submodule update --init --recursive   # 필요할 때
-git -C /coc/flash7/ycho420/repos/shared/<Name>/<sha> rev-parse HEAD                         # <sha>와 같아야 한다
+# 1) 공유 checkout: 디렉터리 하나에 commit(또는 tag) 하나. profile 검증, Convert loader 검증, evaluator source_dir, readiness CLI가 쓴다
+#    IsaacLab, IsaacLabEvalTasks checkout은 conda 환경의 editable 설치 원본이기도 하다(2-a). 지우면 그 환경과 그 위 overlay(skynet-dp-py311)에서 import isaaclab이 깨진다
+# 1-a) commit 고정: diffusion_policy, human-policy, IsaacLabEvalTasks, XPolicyLab. reflog는 "clone: from <url>" → "checkout: moving from main to <sha>"다(--no-checkout을 썼어도 reflog는 같다)
+git clone <url> /coc/flash7/ycho420/repos/shared/<Name>/<sha>        # XPolicyLab만 --filter=blob:none(partial clone)
+git -C /coc/flash7/ycho420/repos/shared/<Name>/<sha> checkout <sha>    # detached HEAD
+# 1-b) tag 고정: IsaacLab/v2.2.0, IsaacLab/v2.3.2. reflog에는 clone 한 줄뿐이고 HEAD는 tag에 detached다. profile revision도 tag다(skynet.json:62, 160)
+git clone --branch v2.3.2 https://github.com/isaac-sim/IsaacLab.git /coc/flash7/ycho420/repos/shared/IsaacLab/v2.3.2   # v2.2.0은 --depth 1(shallow)
+# submodule: 기존 human-policy(human_data/opentv)와 IsaacLabEvalTasks(submodules/Isaac-GR00T)는 초기화하지 않았다. 필요할 때만
+git -C <checkout> submodule update --init --recursive
+# 확인: profile 검증은 rev-parse HEAD와 rev-parse <revision>^{commit}이 같은지만 본다(pipeline_api.py:3090-3100, 3180-3189). 작업 트리 변경은 보지 않는다(XPolicyLab에는 수정된 파일이 1개 있다)
+git -C <checkout> rev-parse HEAD
+git -C <checkout> rev-parse '<revision>^{commit}'
 
-# 2) 환경: 기존 환경 위에 venv를 올린 방식(skynet-dp-py311과 같음)
+# 2-a) conda prefix 환경: isaacsim-5.1.0_isaaclab-2.3.2_py311, groot-isaacsim-5.0.0_isaaclab-2.2.0_py311(dexverse는 conda create -n dexverse python=3.11)
+#      bin/activate가 없으므로 profile backend는 conda다(conda run -p, slurm.py:1358)
+/nethome/ycho420/miniconda3/bin/conda create -y -p /coc/flash7/ycho420/envs/<name> python=3.11 pip    # groot는 python=3.11만
+/nethome/ycho420/miniconda3/bin/conda install --prefix /coc/flash7/ycho420/envs/<name> --yes cmake                          # isaacsim-5.1.0만
+/nethome/ycho420/miniconda3/bin/conda install --prefix /coc/flash7/ycho420/envs/<name> --yes --channel conda-forge libglu    # isaacsim-5.1.0만
+/coc/flash7/ycho420/envs/<name>/bin/python -m pip install <버전을 고정한 패키지>                 # isaacsim 5.1.0.0/5.0.0.0 wheel 등. INSTALLER=pip
+/coc/flash7/ycho420/envs/<name>/bin/python -m pip install -e <공유 IsaacLab>/source/<패키지>    # direct_url.json이 editable이다. isaaclab.sh --install을 썼는지는 구별할 수 없다
+# 2-b) venv overlay: skynet-dp-py311, skynet-egoverse-pi-981483dc. profile backend는 existing이다(bin/activate 필요, slurm.py:1370)
 <base>/bin/python -m venv --system-site-packages /coc/flash7/ycho420/envs/<name>
 /coc/flash7/ycho420/envs/<name>/bin/python -m pip install <버전을 고정한 패키지>
+#      skynet-egoverse-pi는 base가 uv venv라서 --system-site-packages로는 uv cpython 3.11.13만 보인다. EgoVerse 패키지는
+#      site-packages/egoverse-native.pth(EgoVerse .venv site-packages, checkout, external/openpi/src, openpi-client/src 네 줄)로 붙였다
 ```
 
 - 기존 환경이 실제로 만들어진 방식(`pyvenv.cfg`, 읽기 전용 확인):
@@ -241,7 +257,10 @@ profile이 실험에 들어가는 방식(`pipeline_api.py:2648-2800`):
   | `egoverse-native` | `/coc/flash7/ycho420/jobs/runtime-readiness/egoverse-native.json` | stale(현재 `c8afcf28…`, 기록 `98dde0c1…`) |
   | `egoverse-pi` | `/coc/flash7/ycho420/jobs/runtime-readiness/egoverse-pi.json` | stale(현재 `ff8c1d87…`, 기록 `45f7c4b8…`) |
 
-  - stale인 셋은 **Named runtime profile**에 `configured`로 보일 것이다(추정). GR00T IsaacLab 평가와 EgoVerse 평가를 하려면 smoke를 다시 돌려야 한다.
+  - stale인 셋은 **Named runtime profile**에 `"<label> / configured"`로 보인다(probe를 돈 응답이든 아니든 같다). probe는 기록값이 현재 snapshot hash와 다르면 "compute readiness attestation is stale for the configured runtime profile; rerun the one-GPU evaluator readiness smoke" 오류를 넣는다(`pipeline_api.py:2827-2833`). 오류가 하나라도 있으면 `status`는 `configured`, `runtime_verified`는 `false`가 된다(3192-3205). UI는 `runtime_verified`만 보고 상태를 정한다(`app.js:6234`, 옵션 문구 6424, 도움말 6491, 상태 줄 6531).
+    - stale을 따로 표시하지 않는다. attestation 파일이 없을 때, `compute_attestation_path`가 없을 때(`xpolicylab-act`, `human-policy-hat`, `diffusion-policy`, 3054-3063), SSH probe가 실패할 때(3207-3212)도 똑같이 `configured`다. 옵션은 막히지 않고, 학습 제출도 `runtime_verified`를 보지 않는다.
+    - 반대로 `runtime verified`는 probe를 돈 응답에서만 나온다. `/api/source/inspect`가 DB cache를 쓰면 `runtime_profiles(gateway)`를 verify 없이 붙이므로(`pipeline_api.py:10948-10950`, `cluster_config.py:336-345`) 유효한 `isaacsim-5.1.0_isaaclab-2.3.2_py311`도 `configured`로 보인다. 그 commit을 처음 검사할 때와 **Refresh refs**(→ `refresh=true`, `app.js:20363-20368, 1397-1399`)를 눌렀을 때만 probe한다(`pipeline_api.py:10971`).
+    - 평가 생성은 suite 계약까지 넣어 `refresh`로 다시 probe한다. `runtime_verified`가 아니면 "evaluation runtime profile X is not ready: …"로 막는다(`pipeline_api.py:9617-9676, 10316-10318`). 따라서 GR00T IsaacLab 평가와 EgoVerse 평가를 하려면 smoke를 다시 돌려야 한다. 2026-10-06에 sky1 기록값을 다시 읽었을 때도 세 profile은 stale이었다.
 
 확인하는 곳:
 
@@ -357,11 +376,14 @@ manifest 검증 규칙(`adapters/__init__.py:2055-2093`):
 
 - `cardinality: "many"`는 `value_path: "selection"`, position 0에서만 된다(`adapters/__init__.py:1530-1534`). 따라서 여러 데이터셋을 받는 binding은 Convert로 만든 데이터셋만 받는다.
 
-- data_binding 없이 string 입력으로 경로를 받으면 등록·검증 없이 경로만 넘어간다(추정).
+- `data_binding` 없는 string 입력으로 경로를 받으면 등록·검증 없이 문자열이 그대로 넘어간다. 제출 때 공통 검사는 required, kind(`str`인지), `minimum`/`maximum`, `choices`(`pipeline_api.py:2414-2441`), `choice_source` 목록(`pipeline_api.py:2518-2549`)뿐이다. 값은 command template에 `str(value)`로 그대로 치환된다(`adapters/__init__.py:2154-2163, 403-410`). 경로가 실제로 있는지, 절대경로인지, 등록된 데이터인지, SHA가 맞는지는 아무도 보지 않는다. 생성된 argv에 줄바꿈이나 NUL이 들어 있을 때만 막힌다(`source_validation.py:77-82`). 예외는 built-in handler가 따로 검사하는 경우다. 예를 들어 OpenPI는 dataset/normalization 경로가 절대경로인지만 확인한다(`adapters/__init__.py:1107-1109`).
 
 주의:
 
-- **Validate**는 `resolve_runtime(backend="auto")`도 돌린다. repo에 `uv.lock`, `conda-lock.yml`, `.skynet.json/.toml`이 없으면 오류가 날 수 있다. 그래도 학습에서 backend나 profile을 명시하면 된다(추정).
+- **Validate**는 repository가 정해지면 `resolve_runtime(inspection, {"backend": "auto"}, manifest.runtime)`을 돌린다(저장된 어댑터 `pipeline_api.py:3274-3286`, 저장 전 3323-3335). auto가 고르는 strong 후보는 세 가지뿐이다. 유효한 `.skynet.json/.toml`의 `runtime`, `uv.lock`과 `pyproject.toml`이 함께 있을 때의 uv, `conda-lock.yml/.yaml`이다(`source_control.py:1698-1773`). `uv.lock`만, `pyproject.toml`만, `environment.yml`, `requirements*.txt`, `Dockerfile`은 weak다(1751-1798). strong 후보가 없거나 어댑터 `allowed_backends`에 걸러지면 반드시 실패한다. 예를 들어 위 틀처럼 `["existing", "conda"]`인데 repo에 `uv.lock`만 있는 경우다. 오류는 "runtime auto-detection found no single strong runnable candidate: … Select a runtime explicitly and provide its lock/environment/image."다(`source_control.py:1850-1879`). strong backend가 둘 이상이면 "runtime auto-detection is ambiguous" 오류다.
+  - Validate 요청에는 backend나 profile 칸이 없다(`pipeline_api.py:1364-1378`). 그래서 Validate 결과는 `INVALID`로 남는다(저장된 어댑터는 `FAILED`로 기록된다).
+  - 학습 제출은 막히지 않는다. 이 기록을 읽는 제출 코드는 없다(`record_adapter_validation`은 저장만 한다, `database.py:3409-3457`). 제출에 `profile_id`나 auto가 아닌 backend가 있으면 `resolve_runtime`을 부르지 않고 inspection을 `skipped`로 남긴다(`pipeline_api.py:2679-2785`). 브라우저는 늘 backend(`type`)를 명시하고, profile을 고르면 `profile_id`도 보낸다(`app.js:7162-7166`).
+  - 코드 결함: **New**/**Edit** 상태의 Validate는 `/api/adapters/validate`에 `repository`, `revision`을 보낸다(`app.js:5684-5689`). 서버 모델은 `repository_url`, `source_revision`만 받고 나머지를 버린다(`pipeline_api.py:1373-1378`). 그래서 입력한 URL과 revision 대신 manifest의 `default_repository`와 `main`을 검사한다. `default_repository`가 없으면 검사 없이 `VALID`다(3319-3323). 또 이 route는 결과를 `{"report": …}`로 감싸는데(10713-10716), UI는 최상위 `status`/`errors`만 본다(`app.js:5698-5703`). 그래서 `INVALID`도 성공 색으로 칠한다. 결과 JSON의 `report.status`를 직접 읽는다. 입력한 URL과 revision으로 검사하려면 저장한 뒤 ADAPTER DETAIL 화면에서 Validate한다(`/api/adapters/{id}/validate`, `app.js:5667-5683`).
 - built-in을 브라우저에서 **Edit**하면 그 slug에는 코드 쪽 갱신이 더 이상 seed되지 않는다(`database.py:3366-3368`).
   - 실험용 변형은 **Duplicate**를 쓴다. Duplicate는 고른 버전의 manifest를 slug까지 그대로 복사해 새 어댑터 v1을 만든다(`database.py:3243-3282`). slug로 묶인 hook은 그대로 동작한다.
 - 편집 권한: installation owner는 built-in을 편집할 수 있다. 다른 email workspace는 Duplicate만 된다(`docs/email-workspaces.md:11`).
@@ -558,7 +580,8 @@ API: `POST /api/data/exports` `{session_id, adapter_id, adapter_version_id, adap
 3. Data → Datasets(또는 Files) 패널 머리의 **Import history**를 연다. 이 버튼은 import job이 하나라도 생긴 뒤에야 보인다(`app.js:14691`).
    - 열: Dataset directory, Revision, State, Slurm, Dataset, Updated, Actions. 행 동작은 **Detail**(로그)과 **Cancel import**다(`app.js:14692-14706`).
    - 성공 상태는 `SUCCEEDED`다(DB `data_imports.state`).
-   - CPU job이다. token을 넘기지 않으므로 공개 repo만 된다(추정).
+   - CPU job이다. sbatch에 `--gres`가 없고 `--cpus-per-task`(**CPUs**)와 `--mem`(**Memory / GB**)만 잡는다(`data_imports.py:349-360`). **CPUs**는 병렬 다운로드 thread 수로도 쓰인다(`data_imports.py:127`).
+   - Skynet은 Hugging Face token을 넘기지 않는다. Import 요청에 token 칸이 없고(`pipeline_api.py:1582-1593`), 제출할 때 환경변수도 전달하지 않는다(`pipeline_api.py:6689`). `huggingface_hub`는 `HF_TOKEN` 환경변수나 `$HF_HOME/token` 파일을 저절로 읽는다. 그런데 job은 `HF_HOME`을 cluster 설정 `paths.huggingface_cache`(`/coc/flash7/ycho420/.cache/huggingface`)로 바꾸고(`data_imports.py:367`), 그 자리에는 token 파일이 없다. job 스크립트에 `--export`가 없어 sbatch를 부른 login 환경을 물려받지만, sky1/sky2에서 `HF_TOKEN`은 비어 있다. `~/.cache/huggingface/token`은 있지만 이 경로 밖이라 읽히지 않는다(2026-10-06 확인). 그래서 지금은 익명으로 받는다. 공개이면서 gated가 아닌 dataset repo만 import되고, private·gated repo는 job이 실패한다.
    - 버전 revision은 `<rev>#subset=<dir>`, 상태는 `READY`다.
 4. 같은 source에서 나중에 다시 import하려면 Datasets → **New**를 같은 Provider/Namespace/Source key/Type으로 다시 한다. "Using the existing source registration." toast가 뜨고 Import 창이 다시 열린다(`app.js:15177-15198`). Datasets 행에는 **Import** 버튼이 없다.
 
@@ -681,7 +704,11 @@ HAT의 `train.presets`(`adapters/hat_manifest.py:77-95`):
   - wall time이 normal 한도를 넘으면 overcap을 쓴다.
   - 아니면 `gpu_usage -l`로 `rl2-lab` 할당량을 읽고, 넘치면 overcap을 쓴다.
   - 확인할 수 없으면 실패한다: "auto queue selection could not verify live GPU quota"
-- GPU alias는 `any`, `a40`, `l40s`, `rtx_6000`이다. 새 alias나 queue를 추가하려면 `skynet.json`과 정적 `<select>`(`index.html:1247-1251`, `1273-1278`)를 함께 고쳐야 한다(추정).
+- GPU alias는 `any`, `a40`, `l40s`, `rtx_6000`이다(`skynet.json:504-509`). 새 alias나 queue를 추가하려면 `skynet.json`과 정적 `<select>`(`index.html:1247-1251`, `1273-1278`)를 함께 고쳐야 한다.
+  - 서버는 config를 따른다. gpu_type·queue_policy 검증(`experiments.py:449-454, 529-534`)과 queue별 account/partition 결정(`pipeline_api.py:3488-3490, 3641-3643`)이 `CLUSTER.gpu_aliases`와 `CLUSTER.queues`를 읽는다.
+  - 하지만 폼의 **Queue policy**와 **GPU type** 옵션은 `index.html`에 고정되어 있다. `app.js`는 이 옵션을 config에서 채우지 않는다. `/api/cluster`는 대시보드 스냅샷이고(`main.py:453-465`), `/api/settings`는 `CLUSTER.public_dict()`를 돌려주지만(`pipeline_api.py:12496-12518`) Settings 표로만 보여 준다(`app.js:19996-20018`). 서버가 config로 채우는 `<select>`는 gateway뿐이다(`main.py:26, 476-479`).
+  - 평가 폼은 이 두 필드를 복제한다(`app.js:12204-12239`). 평가의 GPU 옵션도 학습 폼 옵션을 suite의 `allowed_gpu_types`로 걸러 만든다(`app.js:12185-12202`). 그래서 `index.html`에 없는 alias는 평가 폼에도 나오지 않는다. Isaac suite에서는 그 alias가 `isaac_evaluation_placement` node의 `gpu_type`이어야 보인다(`pipeline_api.py:11058, 11066`).
+  - 따로 고정된 곳도 있다. 데이터 import의 **Slurm queue**(`index.html:4294-4296`), 대시보드 계정 사용량 열(`index.html:286-289`, `app.js:1963-1965`)이다. 대시보드 열은 서버에서는 `dashboard.gpu_usage_columns`(`skynet.json:510-515`, `main.py:33`)를 따른다.
 
 ### 5-5. 제출
 
@@ -808,7 +835,10 @@ job 환경변수: `SKYNET_RUN_ID`, `SKYNET_RUN_DIR`, `SKYNET_SOURCE_DIR`, `SKYNE
 - episode ledger 크기 = tasks × seeds × episodes_per_task다. 완료된 `(checkpoint, suite, version, task, seed, episode_index)`는 재개 때 건너뛴다.
 - Unseen hand(`evaluation_targets.py:34-103`):
   - run의 학습 입력에 있는 손은 거부한다: "The evaluation hand occurs in this run's training inputs; choose a held-out hand or disable Unseen hand"
-  - 손 하나로 학습한 HAT run을 같은 손에서 평가하려면 그 데이터셋을 고르고 Unseen hand를 끈다(추정).
+  - 손 하나로 학습한 HAT run을 같은 손에서 평가하려면 **Evaluation dataset**에서 학습에 쓴 그 데이터셋을 고르고 **Unseen hand**를 끈다. Unseen hand가 꺼져 있으면 서버는 학습 입력과 손이 겹치는지 검사하지 않는다(`evaluation_targets.py:54-58, 91-103`). 켜 두면 위 거부 메시지가 나온다.
+    - 목록에는 `GET /api/data/selections`의 데이터셋 가운데 assignment가 하나이고 contract가 `skynet.hat-rgb-fingertips/v1`인 것만 나온다(`app.js:5800-5816`, `data_selection.py:101-125`, `evaluation_targets.py:9-13`). 보관(archived)되지 않은 학습 데이터셋이면 여기에 나온다. 그 데이터셋에는 손이 정확히 하나 있어야 하고(`evaluation_targets.py:42-44`), 검증된 cluster 사본이 있어야 한다(`evaluation_targets.py:96-98`).
+    - 서버에는 대상 없이 보내는 경로도 있다. `target_dataset_id`가 비어 있고 Unseen hand가 꺼져 있으며 학습 데이터셋이 정확히 하나면, 그 학습 데이터셋을 대상으로 쓴다(`evaluation_targets.py:79-86`). 학습 데이터셋이 둘 이상이거나 Unseen hand가 켜져 있으면 "Choose a separate HAT evaluation target hand"로 거부한다.
+    - 하지만 브라우저 폼에서는 이 경로를 쓸 수 없다. HAT run이면 **Evaluation dataset**이 `required`가 된다(`app.js:5818-5825`, `requires_target_dataset`는 `pipeline_api.py:11069`). 폼이 유효하지 않으면 **Submit evaluation**은 꺼져 있다(`app.js:12331-12342, 13421`). 그러니 빈칸으로 두지 말고 같은 데이터셋을 고른다.
   - `diffusion-policy`는 학습한 손 하나에서만 평가하고, Unseen hand는 거부한다.
 
 ### 6-6. 결과
