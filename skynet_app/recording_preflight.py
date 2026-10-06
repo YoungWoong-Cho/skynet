@@ -36,7 +36,7 @@ class RecordingPreflight:
                 python = str(CLUSTER.runtime_profile(CLUSTER.defaults.background_runtime_profile).environment_path) + "/bin/python"
                 script = "\n".join([
                     "#!/bin/bash", f"#SBATCH --job-name=inspect-{job['id'][:8]}",
-                    f"#SBATCH --account={queue.account}", f"#SBATCH --partition={queue.partition}",
+                    *queue.sbatch_directives(),
                     "#SBATCH --cpus-per-task=2", "#SBATCH --mem=8G", "#SBATCH --time=00:30:00",
                     f"#SBATCH --output={root}/preflight.log", f"#SBATCH --error={root}/preflight.log",
                     "set -euo pipefail", "umask 077", "export CUDA_VISIBLE_DEVICES=",

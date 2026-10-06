@@ -1519,8 +1519,7 @@ def compile_sbatch(
         raise SlurmCompileError(str(error)) from error
     directives = [
         f"#SBATCH --job-name={job_name}",
-        f"#SBATCH --account={spec.resources.account}",
-        f"#SBATCH --partition={spec.resources.partition}",
+        *CLUSTER.queue_for_partition(spec.resources.partition).sbatch_directives(),
         "#SBATCH --nodes=1",
         "#SBATCH --ntasks=1",
         f"#SBATCH --gres={gres}",

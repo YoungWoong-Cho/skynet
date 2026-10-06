@@ -352,7 +352,8 @@ There is one Slurm cluster behind two interchangeable login gateways:
 
 Account and partition are never chosen separately: each key of `queues` in
 `config/clusters/skynet.json` names one partition/account pair with its
-`max_time_seconds` and whether it is `preemptible`. The experiment form offers
+`max_time_seconds`, whether it is `preemptible`, and an optional `qos` that every
+generated job header names when set. The experiment form offers
 exactly those keys, and `GET /api/settings` shows the active values. **Auto**
 uses the first non-preemptible queue when the requested wall time fits its
 limit and the lab allocation has room, otherwise the preemptible queue. Jobs on

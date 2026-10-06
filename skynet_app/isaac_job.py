@@ -26,8 +26,7 @@ def compile_isaac_job(profile, root, name, argv, checks=(), after=()):
         [
             "#!/bin/bash",
             f"#SBATCH --job-name={name}",
-            f"#SBATCH --account={profile['account']}",
-            f"#SBATCH --partition={profile['partition']}",
+            *CLUSTER.queue_for_partition(profile["partition"]).sbatch_directives(),
             f"#SBATCH --gres={gres}",
             f"#SBATCH --cpus-per-task={CLUSTER.defaults.cpus_per_gpu}",
             "#SBATCH --mem=48G",

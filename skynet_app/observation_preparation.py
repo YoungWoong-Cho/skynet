@@ -246,7 +246,7 @@ class ObservationPreparation:
         cpus = cpus_for_gpus(1) if rendering else 8
         script = '\n'.join([
             '#!/bin/bash', f'#SBATCH --job-name=observe-{identifier[:8]}',
-            f'#SBATCH --account={queue.account}', f'#SBATCH --partition={queue.partition}',
+            *queue.sbatch_directives(),
             f'#SBATCH --cpus-per-task={cpus}', '#SBATCH --mem=48G', '#SBATCH --time=04:00:00', *gpu,
             f'#SBATCH --output={root}/observations.log', f'#SBATCH --error={root}/observations.log',
             'set -euo pipefail', 'umask 077',

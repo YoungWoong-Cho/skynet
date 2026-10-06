@@ -232,8 +232,16 @@ def format_slurm_duration(total_seconds: int) -> str:
 class QueueProfile(ProfileModel):
     partition: str
     account: str
+    qos: str | None = None  # Explicit Slurm QOS when the partition default does not carry the lab's GPU limits.
     max_time_seconds: int = Field(ge=60)
     preemptible: bool = False
+
+    def sbatch_directives(self) -> list[str]:
+        """The scheduling header every Skynet job uses for this queue."""
+        lines = [f"#SBATCH --account={self.account}", f"#SBATCH --partition={self.partition}"]
+        if self.qos:
+            lines.append(f"#SBATCH --qos={self.qos}")
+        return lines
 
 
 class DashboardProfile(ProfileModel):

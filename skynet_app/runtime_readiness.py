@@ -339,8 +339,7 @@ def render_readiness_sbatch(
     lines = [
         "#!/bin/bash",
         f"#SBATCH --job-name={job_name}",
-        f"#SBATCH --partition={resources.partition}",
-        f"#SBATCH --account={resources.account}",
+        *CLUSTER.queue_for_partition(resources.partition).sbatch_directives(),
         "#SBATCH --nodes=1",
         "#SBATCH --ntasks=1",
         f"#SBATCH --cpus-per-task={resources.cpus_per_task}",

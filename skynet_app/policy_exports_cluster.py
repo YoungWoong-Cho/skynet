@@ -113,7 +113,7 @@ class ClusterPolicyPreparation(RecordingPreflight):
             interpreter.append("python")
         script = "\n".join([
             "#!/bin/bash", f"#SBATCH --job-name=prepare-{job['id'][:8]}",
-            f"#SBATCH --account={queue.account}", f"#SBATCH --partition={queue.partition}",
+            *queue.sbatch_directives(),
             "#SBATCH --cpus-per-task=4", "#SBATCH --mem=32G", "#SBATCH --time=01:00:00",
             f"#SBATCH --output={root}/export.log", f"#SBATCH --error={root}/export.log",
             "set -euo pipefail", "umask 077", "export CUDA_VISIBLE_DEVICES=",

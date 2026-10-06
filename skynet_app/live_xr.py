@@ -440,8 +440,7 @@ class LiveXRService:
             if p.get("execution") == "workstation"
             else [
                 f"#SBATCH --job-name=live-xr-{job['id'][:8]}",
-                f"#SBATCH --account={p['account']}",
-                f"#SBATCH --partition={p['partition']}",
+                *CLUSTER.queue_for_partition(p["partition"]).sbatch_directives(),
                 f"#SBATCH --gres={CLUSTER.gres(p['gpu_type'], 1)}",
                 f"#SBATCH --cpus-per-task={CLUSTER.defaults.cpus_per_gpu}",
                 "#SBATCH --mem=48G",

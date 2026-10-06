@@ -402,12 +402,13 @@ def build_huggingface_import_job(
     time_limit, cpus, memory_gb = str(request["time_limit"]), int(request["cpus"]), int(request["memory_gb"])
     if CLUSTER.commands.host_python is None:
         raise ValueError("Dataset imports need commands.host_python in the cluster configuration")
+    # Each directive keeps the template's indentation so dedent still strips it.
+    queue_directives = "\n        ".join(queue.sbatch_directives())
     script = dedent(
         f"""\
         #!/usr/bin/env bash
         #SBATCH --job-name={job_name}
-        #SBATCH --partition={queue.partition}
-        #SBATCH --account={queue.account}
+        {queue_directives}
         #SBATCH --nodes=1
         #SBATCH --ntasks=1
         #SBATCH --cpus-per-task={cpus}

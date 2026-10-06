@@ -1330,8 +1330,7 @@ def compile_collection_sbatch(session: Mapping[str, Any]) -> CompiledCollectionJ
     directives = [
         "#!/usr/bin/env bash",
         f"#SBATCH --job-name={job_name}",
-        f"#SBATCH --account={resources.account}",
-        f"#SBATCH --partition={resources.partition}",
+        *CLUSTER.queue_for_partition(resources.partition).sbatch_directives(),
         "#SBATCH --nodes=1",
         "#SBATCH --ntasks=1",
         f"#SBATCH --cpus-per-task={resources.cpu_count}",
