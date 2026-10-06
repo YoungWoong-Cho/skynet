@@ -3683,13 +3683,7 @@ class PipelineService:
             if plan.blockers:
                 continue
             requested_gateway = gateway if gateway is not None else spec.resources.gateway
-            gpu_count = resolve_gpu_count(spec, plan)
-            signature = (
-                requested_gateway,
-                spec.resources.gpu.gpu_type,
-                gpu_count,
-                spec.resources.time_limit,
-            )
+            signature = self._auto_queue_signature(spec, plan, requested_gateway)
             if signature in checked:
                 continue
             self._auto_queue(
@@ -3699,6 +3693,11 @@ class PipelineService:
                 record_snapshot=False,
             )
             checked.add(signature)
+
+    @staticmethod
+    def _auto_queue_signature(spec: ExperimentSpec, plan: Any, gateway: str) -> tuple[str, str, int, str]:
+        """What the live quota probe depends on; equal signatures resolve to the same queue."""
+        return (gateway, spec.resources.gpu.gpu_type, resolve_gpu_count(spec, plan), spec.resources.time_limit)
 
     def _repository_argument_validation(
         self,
@@ -3970,6 +3969,7 @@ class PipelineService:
         blockers: list[dict[str, Any]] = []
         argument_validations: list[dict[str, Any]] = []
         sampling_summaries = []
+        queue_choices: dict[tuple[str, str, int, str], tuple[str, str]] = {}
         for variant in variants:
             resolved = variant.resolved_spec
             sampling = experiment_sampling(resolved.model_dump(mode="python"))
@@ -3980,7 +3980,16 @@ class PipelineService:
                     warnings.append(f"{variant.name}: {excluded} recording(s) are too short for the selected frequency and action chunk and will be excluded.")
             plan = resolve_adapter_plan(resolved)
             if not plan.blockers:
-                resolved, _ = self._auto_queue(resolved, plan, resolved.resources.gateway, record_snapshot=False)
+                # One live quota probe per distinct queue signature across the sweep.
+                signature = self._auto_queue_signature(resolved, plan, resolved.resources.gateway)
+                if resolved.resources.queue_policy == "auto" and signature in queue_choices:
+                    payload = resolved.model_dump(mode="json", by_alias=True)
+                    payload["resources"]["account"], payload["resources"]["partition"] = queue_choices[signature]
+                    resolved = ExperimentSpec.model_validate(payload)
+                else:
+                    resolved, _ = self._auto_queue(resolved, plan, resolved.resources.gateway, record_snapshot=False)
+                    if resolved.resources.queue_policy == "auto":
+                        queue_choices[signature] = (resolved.resources.account, resolved.resources.partition)
             warnings.extend(plan.warnings)
             warnings.extend(plan.todos)
             if plan.blockers:
@@ -11787,19 +11796,22 @@ def _attempt_common_hyperparameter_contract(
     )
 
 
+ENRICHMENT_EVENT_TYPE = "COMMON_HYPERPARAMETERS_ENRICHED_V1"
+
+
+def _attempt_enrichment_events(
+    database: Database, attempt_ids: Sequence[str]
+) -> dict[str, dict[str, Any]]:
+    """Each attempt's latest enrichment receipt, in one query."""
+    return database.latest_events(
+        entity_type="job_attempt", entity_ids=attempt_ids, event_type=ENRICHMENT_EVENT_TYPE
+    )
+
+
 def _attempt_enrichment_event(
     database: Database, attempt_id: str
 ) -> dict[str, Any] | None:
-    return next(
-        (
-            event
-            for event in database.list_events(
-                entity_type="job_attempt", entity_id=attempt_id, limit=5
-            )
-            if event.get("event_type") == "COMMON_HYPERPARAMETERS_ENRICHED_V1"
-        ),
-        None,
-    )
+    return _attempt_enrichment_events(database, [attempt_id]).get(attempt_id)
 
 
 def _attempt_common_hyperparameter_resolution(
@@ -11997,10 +12009,11 @@ def get_run(run_id: str, include_payloads: bool = True) -> dict[str, Any]:
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     service._queue_list_progress_refresh("training", [run])
+    receipt_events = _attempt_enrichment_events(
+        service.database, [str(attempt["id"]) for attempt in run.get("attempts") or []]
+    )
     for attempt in run.get("attempts") or []:
-        receipt_event = _attempt_enrichment_event(
-            service.database, str(attempt["id"])
-        )
+        receipt_event = receipt_events.get(str(attempt["id"]))
         common = _attempt_common_hyperparameter_contract(
             run, attempt, receipt_event
         )

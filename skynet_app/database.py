@@ -2888,6 +2888,21 @@ class Database:
                 f"SELECT * FROM events {where} ORDER BY created_at DESC LIMIT ?", parameters
             ).fetchall())
 
+    def latest_events(
+        self, *, entity_type: str, entity_ids: Sequence[str], event_type: str
+    ) -> dict[str, dict[str, Any]]:
+        """The most recent event of one type for each of several entities."""
+        if not entity_ids:
+            return {}
+        with self.connection() as connection:
+            rows = connection.execute(
+                f"""SELECT DISTINCT ON (entity_id) * FROM events
+                    WHERE {visible_sql("events", "")} AND entity_type = ? AND entity_id = ANY(?) AND event_type = ?
+                    ORDER BY entity_id, created_at DESC""",
+                (entity_type, list(entity_ids), event_type),
+            ).fetchall()
+        return {row["entity_id"]: row for row in self._decode_many(rows)}
+
     def register_runtime_profile(
         self, *, name: str, backend: str, config: Mapping[str, Any], version: int = 1, enabled: bool = True
     ) -> dict[str, Any]:
