@@ -16,6 +16,7 @@ from .cluster_config import CLUSTER
 from .cluster_runtime import ClusterClient, ClusterError, HOME_ROOT, WORK_ROOT
 from .database import Database, canonical_json, content_sha256, new_id, utc_now
 from .experiments import format_slurm_duration, parse_slurm_duration
+from .gpu_preflight import GPU_MISSING_MESSAGE, gpu_missing_exit, gpu_preflight_lines
 
 
 COLLECTION_SCHEMA_VERSION = "skynet.collection/v1"
@@ -1355,6 +1356,7 @@ def compile_collection_sbatch(session: Mapping[str, Any]) -> CompiledCollectionJ
         "",
         "set -euo pipefail",
         "umask 027",
+        *gpu_preflight_lines(resources.gpu_count),
         f"export HOME={shlex.quote(HOME_ROOT)}",
         f"export WORK_ROOT={shlex.quote(WORK_ROOT)}",
         'export UV_CACHE_DIR="$WORK_ROOT/.cache/uv"',
@@ -1542,10 +1544,11 @@ class CollectionService:
             return session
         error = None
         if mapped == "FAILED":
+            missing_gpu = gpu_missing_exit(status)
             error = {
-                "code": "SLURM_JOB_FAILED",
+                "code": "GPU_NOT_ALLOCATED" if missing_gpu else "SLURM_JOB_FAILED",
                 "state": slurm_state,
-                "reason": status.get("Reason"),
+                "reason": GPU_MISSING_MESSAGE if missing_gpu else status.get("Reason"),
                 "exit_code": status.get("ExitCode"),
             }
         return self.store.update_runtime_status(

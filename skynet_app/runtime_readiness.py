@@ -274,6 +274,7 @@ def render_readiness_sbatch(
     from .experiments import ResourceSpec, parse_slurm_duration
     from .slurm import compile_slurm_placement_directives
     from .evaluation_placement import resolve_evaluation_resources
+    from .gpu_preflight import gpu_preflight_lines
 
     contract, capsule_source = build_readiness_contract(profile_id, suite_id)
     profile = CLUSTER.runtime_profile(profile_id)
@@ -323,8 +324,7 @@ def render_readiness_sbatch(
         }
     )
     resources = resolve_evaluation_resources(resources, {}, runtime_profile_id=profile_id)
-    gpu_alias = CLUSTER.gpu_aliases.get(resources.gpu.gpu_type)
-    if not gpu_alias:
+    if not CLUSTER.gpu_aliases.get(resources.gpu.gpu_type):
         raise ValueError(f"runtime readiness requires a concrete configured GPU type: {gpu_type}")
 
     driver_source = Path(__file__).read_text(encoding="utf-8")
@@ -344,7 +344,7 @@ def render_readiness_sbatch(
         "#SBATCH --ntasks=1",
         f"#SBATCH --cpus-per-task={resources.cpus_per_task}",
         f"#SBATCH --mem={resources.memory_gb}G",
-        f"#SBATCH --gres=gpu:{gpu_alias}:{resources.gpu.count}",
+        f"#SBATCH --gres={CLUSTER.gres(resources.gpu.gpu_type, resources.gpu.count)}",
         f"#SBATCH --time={resources.time_limit}",
         f"#SBATCH --output={CLUSTER.paths.logs}/%x-%j.out",
         f"#SBATCH --error={CLUSTER.paths.logs}/%x-%j.err",
@@ -353,6 +353,7 @@ def render_readiness_sbatch(
         "#SBATCH --export=ALL",
         *compile_slurm_placement_directives(resources),
         "set -euo pipefail",
+        *gpu_preflight_lines(resources.gpu.count),
         *(['if test "${OMNI_KIT_ACCEPT_EULA:-}" != "YES"; then',
         "  printf '%s\n' 'Read and accept the NVIDIA Isaac Sim EULA, then explicitly export OMNI_KIT_ACCEPT_EULA=YES for this sbatch submission.' >&2",
         "  exit 2",

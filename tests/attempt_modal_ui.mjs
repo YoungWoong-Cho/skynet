@@ -38,6 +38,7 @@ try{
  assert.equal(w.queueReasonLabel({status:'RUNNING',slurm_reason:'Priority'}),'-');
  assert.match(w.queueReasonLabel({status:'PENDING',slurm_reason:'QOSGrpGRES'}),/Waiting/);
  assert.equal(w.queueReasonLabel({status:'FAILED',slurm_reason:'OutOfMemory'}),'OutOfMemory');
+ assert.equal(w.attemptHasSlurmSubmission({status:'BOOT_FAIL'}),true);
  const completed=structuredClone(payload);
  completed.run.status='SUCCEEDED';
  completed.run.attempts[0].status='SUCCEEDED';

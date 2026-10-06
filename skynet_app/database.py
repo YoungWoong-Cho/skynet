@@ -17,6 +17,7 @@ from .db_backend import PostgresBackend, PostgresConnection, Record, Distributed
 from .data_paths import validate_mount_path
 from .data_resource_policy import validate_resource_metadata, validate_resource_type, resource_recording_ids
 from .workspace_schema import PRIVATE_TABLES, LEGACY_WORKSPACE, visible_sql
+from .preparation_states import TRANSIENT_STATES
 from .training_metrics import is_scalar
 
 
@@ -1856,11 +1857,10 @@ class Database:
         active_stage_states = (
             "SUBMITTING", "SUBMITTED", "PENDING_SLURM", "RUNNING", "CANCELLING",
         )
-        terminal_attempt_states = (
-            "SUBMISSION_FAILED", "FAILED", "OUT_OF_MEMORY", "TIMEOUT", "NODE_FAIL",
-            "BOOT_FAIL", "CANCELLED", "PREEMPTED", "DEADLINE", "SPECIAL_EXIT",
-        )
-        transient_states = {"PREEMPTED", "TIMEOUT", "NODE_FAIL", "BOOT_FAIL"}
+        terminal_attempt_states = tuple(sorted(
+            {"SUBMISSION_FAILED", "FAILED", "OUT_OF_MEMORY", "CANCELLED", "DEADLINE", "SPECIAL_EXIT"}
+            | TRANSIENT_STATES
+        ))
         now = utc_now()
         repaired = 0
         run_ids: set[str] = set()
@@ -1908,7 +1908,7 @@ class Database:
                 can_retry = (
                     not cancellation_requested
                     and
-                    row["attempt_status"] in transient_states
+                    row["attempt_status"] in TRANSIENT_STATES
                     and bool(row["auto_resume"])
                     and int(row["budget_attempt_count"]) < int(row["max_attempts"])
                 )

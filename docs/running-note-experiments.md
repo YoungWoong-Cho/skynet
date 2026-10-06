@@ -738,6 +738,7 @@ sbatch directive(`slurm.py:1520-1544`):
 - `paths.*`는 `compile_sbatch`가 workspace base path로 rebase한 값이다(`slurm.py:1406-1407`, `workspace_storage.py:17-48`). 지금 legacy root면 `/coc/flash7/ycho420/workspace`, `/coc/flash7/ycho420/logs`이고, HAT 본 실험 run은 `/coc/flash2/ycho420/skynet/...` 아래였다.
 - `--export=NIL`
 - 자동 재개가 켜진 학습에는 `--signal=B:USR1@<warning>`과 `--requeue`가 붙는다.
+- 본문은 EXIT trap(final.json 기록) 설치 직후, capsule 검증이나 소스 준비보다 먼저 GPU preflight를 실행한다(`gpu_preflight.py`, 6장 참고).
 
 job 환경변수: `SKYNET_RUN_ID`, `SKYNET_RUN_DIR`, `SKYNET_SOURCE_DIR`, `SKYNET_PROJECT_DIR`, `SKYNET_CHECKPOINT_DIR`, `SKYNET_CHECKPOINT_SAVE_STEPS`, `SKYNET_CHECKPOINT_KEEP_LAST`, `SKYNET_EVAL_PROGRESS_PATH`, `SKYNET_EVALUATION_RESUME`, `HF_HOME`, `TORCH_HOME`, `UV_CACHE_DIR`(`slurm.py:1545-1567`)
 
@@ -769,7 +770,7 @@ job 환경변수: `SKYNET_RUN_ID`, `SKYNET_RUN_DIR`, `SKYNET_SOURCE_DIR`, `SKYNE
 
 ## 6. 모니터링, 평가, checkpoint
 
-- 알려진 제약(2026-10-06): 제출 양식에는 노드 제외 옵션이 없고, **Node**는 특정 노드를 고정할 때만 쓴다. GPU 종류를 `any`로 두면 어느 노드에든 배치되는데, A40 노드 megabot에서 job에 GPU가 바인딩되지 않은 사례가 있었다(`SLURM_JOB_GPUS`·`CUDA_VISIBLE_DEVICES` 비어 있음). 같은 증상이 보이면 GPU 종류를 L40S 같은 구체적 종류로 다시 제출한다. accounting(`sacct`)이 꺼져 있는 동안은 job이 slurmctld 메모리에 있을 때 `scontrol show job <id>`로만 `AllocTRES`를 확인할 수 있다.
+- GPU 미할당 시작(2026-10-06 확인): 컨트롤러가 `--gres`를 받고도 GPU 없이 job을 시작하는 일이 간헐적으로 있다(같은 날 다른 사용자 잡 103개 중 3개). 헤더나 GPU 종류와 무관한 클러스터 결함이므로 제출 양식을 바꿀 필요는 없다. 모든 GPU job 스크립트는 workload 전에 GPU preflight(`skynet_app/gpu_preflight.py`)를 실행해 `CUDA_VISIBLE_DEVICES`/`SLURM_JOB_GPUS`에 보이는 GPU가 요청 수보다 적으면 exit 97과 receipt(`gpu_not_allocated`)로 즉시 끝낸다. 학습·평가 attempt는 reconcile이 `BOOT_FAIL`(사유 "The cluster started the job without the requested GPU")로 분류해 `max_attempts` 안에서 자동 재제출하고, Runs의 attempt 표 Error 칸과 attempt 상세의 Scheduler reason에 그 사유가 보인다. 제출 양식에는 노드 제외 옵션이 없고 **Node**는 특정 노드를 고정할 때만 쓴다. accounting(`sacct`)이 꺼져 있는 동안은 job이 slurmctld 메모리에 있을 때 `scontrol show job <id>`로만 `AllocTRES`를 확인할 수 있다.
 
 ### 6-1. Runs
 
@@ -795,10 +796,11 @@ job 환경변수: `SKYNET_RUN_ID`, `SKYNET_RUN_DIR`, `SKYNET_SOURCE_DIR`, `SKYNE
 
 ### 6-3. 자동 재개와 상태 불명
 
-- 자동 재개 대상: `PREEMPTED`, `TIMEOUT`, `NODE_FAIL`, `BOOT_FAIL`, `REVOKED`(`pipeline_api.py:121`)
+- 자동 재개 대상: `PREEMPTED`, `TIMEOUT`, `NODE_FAIL`, `BOOT_FAIL`, `REVOKED`(`preparation_states.py`의 `TRANSIENT_STATES`; reconcile과 invariant repair가 같이 쓴다)
   - 조건: auto_resume 켜짐, attempt 수 < `max_attempts`, 취소 요청 없음
   - 그러면 `RETRY_PENDING`이 된다.
 - 시간 제한 종료는 exit `124:0`과 wrapper receipt가 맞을 때만 TIMEOUT으로 본다(`docs/time-limit-recovery.md`).
+- 클러스터가 GPU 없이 잡을 시작하면 스크립트 맨 앞의 GPU preflight가 workload 전에 종료하고 receipt(`gpu_not_allocated`)를 남긴다(`skynet_app/gpu_preflight.py`). reconcile은 이를 `BOOT_FAIL`(사유: "The cluster started the job without the requested GPU")로 분류해 같은 조건으로 자동 재제출한다.
 - Slurm 두 출처가 모두 job을 잊으면 `attempts/<job>/final.json`으로 정리한다.
   - exit 기록이 없으면 "Slurm no longer lists this job and it left no exit record. Its outcome is unknown: cancel it, or wait for Slurm accounting."로 멈추고 600 s마다 다시 본다.
 

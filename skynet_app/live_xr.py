@@ -25,6 +25,7 @@ from .live_xr_catalog import selection
 from .dexverse_versions import environment_profile
 from .simulation_hands import build as build_hand, upload as upload_hand
 from .live_xr_workstation import LaunchRejected, WorkstationClient, validate_profile
+from .gpu_preflight import GPU_MISSING_MESSAGE, gpu_missing_exit, gpu_preflight_lines
 
 ROOT = Path(__file__).resolve().parents[1]
 EULA = "https://developer.download.nvidia.com/cloudxr/EULA/NVIDIA_CloudXR_GA_License_without_Data_Collection_25Feb2025.pdf"
@@ -455,6 +456,7 @@ class LiveXRService:
                 *directives,
                 "set -euo pipefail",
                 "umask 077",
+                *([] if p.get("execution") == "workstation" else gpu_preflight_lines(1)),
                 f"printf '%s  %s\\n' {job['worker_sha256']} {shlex.quote(root + '/runner.py')} | sha256sum --check --status",
                 "exec "
                 + shlex.join(
@@ -626,7 +628,9 @@ print(json.dumps(value))
                         if scheduler["State"] == "CANCELLED"
                         else "FAILED",
                         error=changes.get("error")
-                        or f"Live process ended ({scheduler['State']}, {scheduler.get('Result', 'see logs')}) without a completed capture status. Inspect logs.",
+                        or f"Live process ended ({scheduler['State']}, "
+                        f"{GPU_MISSING_MESSAGE if gpu_missing_exit(scheduler) else scheduler.get('ExitCode') or 'see logs'}) "
+                        "without a completed capture status. Inspect logs.",
                     )
             elif changes.get("state") in TERMINAL:
                 changes.update(

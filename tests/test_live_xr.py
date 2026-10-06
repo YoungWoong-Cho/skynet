@@ -84,7 +84,16 @@ def test_requires_license_and_deduplicates_live_start(service):
     assert service.cluster.calls == 1
     assert service.get(job["id"])["state"] == "PENDING"
     assert "runner.py" in service.cluster.writes[0]
-    assert "--gres=gpu:rtx_6000:1" in service.get(job["id"])["script"]
+    script = service.get(job["id"])["script"]
+    assert "--gres=gpu:rtx_6000:1" in script
+    from skynet_app.gpu_preflight import gpu_preflight_lines
+    from skynet_app.live_xr import LiveXRService
+    preflight = "\n".join(gpu_preflight_lines(1))
+    assert script.count(preflight) == 1 and script.index("umask 077") < script.index(preflight) < script.index("exec python3")
+    # A workstation session runs under systemd, outside Slurm: no GPU preflight.
+    workstation = LiveXRService.compile({"profile": {"execution": "workstation", "duration_minutes": 1},
+                                         "root": "/sessions/x", "id": "abcdefgh-1", "worker_sha256": "0" * 64})
+    assert "GPU preflight" not in workstation and "#SBATCH" not in workstation
 
 
 def test_frozen_session_extracts_the_complete_collection_runtime(service, tmp_path):

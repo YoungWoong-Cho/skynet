@@ -309,6 +309,9 @@ def test_prepare_submit_refresh_register_native_and_restart():
         assert prepared["session"]["status"] == "READY"
         assert "#SBATCH --account=rl2-lab" in script
         assert "#SBATCH --gres=gpu:l40s:1" in script
+        from skynet_app.gpu_preflight import gpu_preflight_lines
+        preflight = "\n".join(gpu_preflight_lines(1))
+        assert script.count(preflight) == 1 and script.index("umask 027") < script.index(preflight) < script.index("export HOME=")
         assert "export LD_LIBRARY_PATH=/coc/flash7/ycho420/envs/isaacsim-5.1.0_isaaclab-2.3.2_py311/lib\"${LD_LIBRARY_PATH:+:}${LD_LIBRARY_PATH:-}\"" in script
         assert "Raw capture stays in its adapter-native format" in script
         assert "trajectory/action" in prepared["session"]["adapter_snapshot"]["manifest"]["streams"][0]["native_key"]

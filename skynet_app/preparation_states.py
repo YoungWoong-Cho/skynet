@@ -9,6 +9,8 @@ TERMINAL_FAILURE_STATES = frozenset({
     'BOOT_FAIL', 'CANCELLED', 'DEADLINE', 'FAILED', 'NODE_FAIL',
     'OUT_OF_MEMORY', 'TIMEOUT',
 })
+# After these an attempt with automatic resume and remaining budget is resubmitted.
+TRANSIENT_STATES = frozenset({'PREEMPTED', 'TIMEOUT', 'NODE_FAIL', 'BOOT_FAIL', 'REVOKED'})
 RUNNING_STATES = frozenset({'RUNNING', 'COMPLETING', 'RESIZING', 'STAGE_OUT'})
 WAITING_STATES = frozenset({
     'PENDING', 'CONFIGURING', 'SUSPENDED', 'STOPPED', 'POWER_UP_NODE',

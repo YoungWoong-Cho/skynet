@@ -68,6 +68,7 @@ def test_rendered_readiness_job_requests_one_l40s_without_accepting_eula() -> No
     assert "#SBATCH --partition=rl2-lab" in script
     assert "#SBATCH --account=rl2-lab" in script
     assert "#SBATCH --gres=gpu:l40s:1" in script
+    assert script.count("# GPU preflight") == 1
     assert "#SBATCH --cpus-per-task=8" in script
     assert "#SBATCH --mem=64G" in script
     assert "#SBATCH --time=02:00:00" in script

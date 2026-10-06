@@ -46,7 +46,9 @@ from .adapters import (
     resolve_training_progress_contract,
 )
 from .adapters.dataset_inputs import evaluation_context_json
+from .gpu_preflight import GPU_MISSING_EXIT_CODE, GPU_MISSING_MESSAGE, GPU_MISSING_STATE, gpu_missing_receipt
 from .gpu_quota import account_gpu_quota, idle_partition_quota
+from .preparation_states import TRANSIENT_STATES
 from .cluster_config import CLUSTER
 from .evaluation_placement import resolve_evaluation_resources, uses_isaac_sim
 from .evaluation_compatibility import inspect_compatibility, compose_evaluator, declaration_matches, policy_loader, dataset_metadata
@@ -118,7 +120,6 @@ from .tracking import (
 from pydantic import ConfigDict, SecretStr
 
 
-TRANSIENT_STATES = {"PREEMPTED", "TIMEOUT", "NODE_FAIL", "BOOT_FAIL", "REVOKED"}
 TERMINAL_FAILURE_STATES = {"FAILED", "OUT_OF_MEMORY", "DEADLINE", "SPECIAL_EXIT"}
 # The job holds its allocation: executing, or in the epilog the controller reports.
 EXECUTING_STATES = frozenset({"RUNNING", "COMPLETING"})
@@ -7070,8 +7071,13 @@ class PipelineService:
         elif transition.get("applied") and not is_evaluation:
             self._repair_recovered_submission_tracking({**unknown, "slurm_job_id": recovered.job_id})
 
-    def _stopped_for_time_limit(self, attempt: Mapping[str, Any]) -> bool:
-        """Distinguish our graceful warning exit from an arbitrary trainer failure."""
+    def _interruption_receipt(self, attempt: Mapping[str, Any]) -> dict[str, Any] | None:
+        """The receipt our batch script left for this attempt's deliberate exit, if any.
+
+        It distinguishes the time-limit warning exit and the GPU preflight exit
+        from an arbitrary trainer failure; a receipt bound to another job or run
+        does not count.
+        """
         path = (
             f"{self._run_directory(attempt['run_id'])}/attempts/"
             f"{attempt['slurm_job_id']}/state/interruption.json"
@@ -7081,16 +7087,12 @@ class PipelineService:
         try:
             receipt = json.loads(content or "")
         except ValueError:
-            return False
-        return isinstance(receipt, dict) and all(
-            receipt.get(key) == value for key, value in {
-                "schema_version": 1,
-                "job_id": str(attempt["slurm_job_id"]),
-                "run_id": attempt["run_id"],
-                "reason": "time_limit_warning",
-                "exit_code": 124,
-            }.items()
-        )
+            return None
+        if not isinstance(receipt, dict) or receipt.get("schema_version") != 1:
+            return None
+        if receipt.get("job_id") != str(attempt["slurm_job_id"]) or receipt.get("run_id") != attempt["run_id"]:
+            return None
+        return receipt
 
     @staticmethod
     def _accounting_state_and_reason(record: Mapping[str, Any]) -> tuple[str, str | None]:
@@ -7275,21 +7277,26 @@ class PipelineService:
                         "exit_code": record.get("ExitCode"),
                         "node_list": record.get("NodeList"),
                     }
-                    stopped_for_time_limit = False
-                    if (
-                        state == "FAILED"
-                        and record.get("ExitCode") == "124:0"
+                    receipt: dict[str, Any] | None = None
+                    exit_code = record.get("ExitCode")
+                    time_limit_exit = exit_code == "124:0"
+                    if state == "FAILED" and (
                         # An exit record cannot tell a time limit from a cancellation
-                        # that followed its warning, so it never queues a new attempt.
-                        and record.get("Source") != EXIT_RECORD_SOURCE
+                        # that followed its warning, so it never queues a new attempt;
+                        # the GPU preflight's receipt is unambiguous.
+                        (time_limit_exit and record.get("Source") != EXIT_RECORD_SOURCE)
+                        or exit_code == f"{GPU_MISSING_EXIT_CODE}:0"
                     ):
                         try:
-                            stopped_for_time_limit = self._stopped_for_time_limit(row)
+                            receipt = self._interruption_receipt(row)
                         except ClusterError:
                             continue  # The gateway failed, not the receipt.
-                    if stopped_for_time_limit:
+                    if time_limit_exit and receipt and receipt.get("reason") == "time_limit_warning" and receipt.get("exit_code") == 124:
                         state = "TIMEOUT"
                         common["slurm_reason"] = "Stopped at the Slurm time-limit warning; checkpoint preserved if available"
+                    elif gpu_missing_receipt(receipt):
+                        state = GPU_MISSING_STATE
+                        common["slurm_reason"] = GPU_MISSING_MESSAGE
                     cancellation_requested = (
                         str(row.get("stage_status") or "").upper() == "CANCELLING"
                         or str(row.get("status") or "").upper() == "CANCELLING"
@@ -7475,7 +7482,8 @@ class PipelineService:
                                 "event_type": "AUTO_RESUME_QUEUED",
                                 "old_status": state,
                                 "new_status": "RETRY_PENDING",
-                                "details": {"attempt": row["attempt_number"], "job_id": row["slurm_job_id"]},
+                                "details": {"attempt": row["attempt_number"], "job_id": row["slurm_job_id"],
+                                            "reason": common["slurm_reason"]},
                             },
                         )
                         updated += 1

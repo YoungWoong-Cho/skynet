@@ -158,19 +158,27 @@ test('a disconnected read expires with a useful error, while submission requests
 
 
 test('Slurm placeholder exit codes are not reported as final while an attempt runs', () => {
-  const c = load(['runAttemptValue', 'attemptExitCodeLabel']);
+  const c = load(['normalizedRunState', 'attemptEnded', 'runAttemptValue', 'attemptExitCodeLabel']);
   assert.equal(c.attemptExitCodeLabel({status: 'RUNNING', exit_code: '0:0'}), 'Available when the attempt ends');
   assert.equal(c.attemptExitCodeLabel({status: 'SUCCEEDED', exit_code: '0:0'}), '0:0');
   assert.equal(c.attemptExitCodeLabel({state: 'FAILED', exit_code: '1:0'}), '1:0');
+  // The transient classifications reconcile resubmits are ended attempts too.
+  assert.equal(c.attemptExitCodeLabel({status: 'TIMEOUT', exit_code: '124:0'}), '124:0');
+  assert.equal(c.attemptExitCodeLabel({status: 'BOOT_FAIL', exit_code: '97:0'}), '97:0');
+  assert.equal(c.attemptExitCodeLabel({status: 'NODE_FAIL', exit_code: '0:0'}), '0:0');
 });
 
 
 test('queue waits are explained separately from failed attempts', () => {
-  const c = load(['runAttemptValue', 'queueReasonLabel', 'attemptFailureDetail']);
+  const c = load(['normalizedRunState', 'attemptEnded', 'attemptSucceeded', 'runAttemptValue', 'queueReasonLabel', 'attemptFailureDetail']);
   const pending = {status: 'PENDING', slurm_reason: 'QOSGrpGRES'};
   assert.match(c.queueReasonLabel(pending), /GPU quota/);
   assert.equal(c.attemptFailureDetail(pending), null);
   assert.equal(c.attemptFailureDetail({status: 'FAILED', slurm_reason: 'OutOfMemory'}), 'OutOfMemory');
+  const gpuReason = 'The cluster started the job without the requested GPU';
+  assert.equal(c.attemptFailureDetail({status: 'BOOT_FAIL', slurm_reason: gpuReason}), gpuReason);
+  assert.equal(c.attemptFailureDetail({status: 'TIMEOUT', slurm_reason: 'Stopped at the warning'}), 'Stopped at the warning');
+  assert.equal(c.attemptFailureDetail({status: 'SUCCEEDED', slurm_reason: 'ignored'}), null);
   assert.equal(c.attemptFailureDetail({status: 'PENDING', error: 'Submission acknowledgement lost'}), 'Submission acknowledgement lost');
 });
 

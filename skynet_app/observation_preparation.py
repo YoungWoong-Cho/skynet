@@ -14,6 +14,7 @@ from .isaac_job import isaac_environment
 from .observation_contracts import plan_artifacts, reuse_recorded_captures, PREPARE_SCHEMA
 from .observation_store import ObservationStore
 from .preparation_states import TERMINAL_FAILURE_STATES, observed_state
+from .gpu_preflight import GPU_MISSING_MESSAGE, gpu_missing_exit, gpu_preflight_lines
 
 
 # Leave space below the worker's 4 MB JSON limit for producer IDs, paths and
@@ -250,6 +251,7 @@ class ObservationPreparation:
             f'#SBATCH --cpus-per-task={cpus}', '#SBATCH --mem=48G', '#SBATCH --time=04:00:00', *gpu,
             f'#SBATCH --output={root}/observations.log', f'#SBATCH --error={root}/observations.log',
             'set -euo pipefail', 'umask 077',
+            *(gpu_preflight_lines(1) if rendering else []),
             'export PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1',
             f'export OMP_NUM_THREADS={cpus} OPENBLAS_NUM_THREADS={cpus} MKL_NUM_THREADS={cpus}',
             f'export LD_LIBRARY_PATH={shlex.quote(environment + "/lib")}:"${{LD_LIBRARY_PATH:-}}"',
@@ -305,6 +307,8 @@ class ObservationPreparation:
                     # failure may never write a result, so missing/unreadable
                     # diagnostics must not leave its artifacts queued forever.
                     message = f'Observation job ended as {state}'
+                    if gpu_missing_exit(status):
+                        message += f' ({GPU_MISSING_MESSAGE})'
                     try:
                         _, raw = self.cluster.read_file(producer['root'] + '/result.json', DEFAULT_GATEWAY, max_bytes=10_000_000)
                         result = json.loads(raw)

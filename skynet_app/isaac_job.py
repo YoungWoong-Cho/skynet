@@ -8,6 +8,7 @@ import shlex
 
 from skynet_app.cluster_runtime import validate_remote_path
 from skynet_app.cluster_config import CLUSTER
+from .gpu_preflight import gpu_preflight_lines
 
 
 def compile_isaac_job(profile, root, name, argv, checks=(), after=()):
@@ -35,6 +36,7 @@ def compile_isaac_job(profile, root, name, argv, checks=(), after=()):
             f"#SBATCH --error={root}/stderr.log",
             "set -euo pipefail",
             "umask 077",
+            *gpu_preflight_lines(1),
             *isaac_environment(profile, root),
             *checks,
             shlex.join(argv),

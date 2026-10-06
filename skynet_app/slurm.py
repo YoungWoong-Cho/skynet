@@ -19,6 +19,7 @@ from skynet_app.adapters import (
 from skynet_app.cluster_config import CLUSTER
 from skynet_app.cluster_runtime import HOME_ROOT, SLURM_BIN
 from skynet_app.experiments import CanonicalModel, ExperimentSpec, canonical_sha256
+from skynet_app.gpu_preflight import gpu_preflight_lines
 from skynet_app.evaluation_placement import resolve_evaluation_resources
 from skynet_app.workspace_storage import paths_for_root, evaluation_execution_directory
 
@@ -1825,6 +1826,7 @@ def compile_sbatch(
         status_trap,
         *placement_guard,
         BATCH_WARNING_HANDLER,
+        *gpu_preflight_lines(gpu_count, receipt_dir='"$SKYNET_CAPSULE_DIR/state"'),
         "",
         *materializers,
         *attempt_archivers,

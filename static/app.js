@@ -8215,6 +8215,30 @@ function normalizedRunState(value) {
     .replace(/[\s-]+/g, "_");
 }
 
+// Attempt states with a final scheduler result (exit code, reason), including
+// the transient classifications reconcile may resubmit automatically.
+function attemptEnded(attempt) {
+  return [
+    "COMPLETED",
+    "SUCCEEDED",
+    "FAILED",
+    "CANCELLED",
+    "TIMEOUT",
+    "PREEMPTED",
+    "NODE_FAIL",
+    "BOOT_FAIL",
+    "REVOKED",
+    "OUT_OF_MEMORY",
+    "DEADLINE",
+  ].includes(normalizedRunState(attempt?.status || attempt?.state));
+}
+
+function attemptSucceeded(attempt) {
+  return ["COMPLETED", "SUCCEEDED"].includes(
+    normalizedRunState(attempt?.status || attempt?.state),
+  );
+}
+
 function runAttemptCount(run) {
   const declared = run?.attempt_count ?? run?.attempts_count;
   if (declared !== null && declared !== undefined && declared !== "") {
@@ -8264,18 +8288,12 @@ function attemptHasSlurmSubmission(attempt) {
     attempt.submitted_at
   )
     return true;
-  return [
-    "SUBMITTED",
-    "PENDING",
-    "RUNNING",
-    "REQUEUED",
-    "COMPLETED",
-    "SUCCEEDED",
-    "FAILED",
-    "CANCELLED",
-    "TIMEOUT",
-    "PREEMPTED",
-  ].includes(normalizedRunState(attempt.status || attempt.state));
+  // States Slurm reports while it still holds the job, or after it ended.
+  return (
+    ["SUBMITTED", "PENDING", "RUNNING", "REQUEUED"].includes(
+      normalizedRunState(attempt.status || attempt.state),
+    ) || attemptEnded(attempt)
+  );
 }
 
 function runHasExplicitPreflightFailure(run, attempts) {
@@ -10296,16 +10314,7 @@ function queueReasonLabel(attempt) {
 }
 
 function attemptExitCodeLabel(attempt) {
-  const status = String(attempt?.status || attempt?.state || "").toUpperCase();
-  const terminal = [
-    "SUCCEEDED",
-    "COMPLETED",
-    "FAILED",
-    "CANCELLED",
-    "TIMED_OUT",
-    "PREEMPTED",
-  ];
-  return terminal.includes(status)
+  return attemptEnded(attempt)
     ? runAttemptValue(attempt, "exit_code")
     : "Available when the attempt ends";
 }
@@ -13525,10 +13534,7 @@ function latestEvaluationAttempt(evaluation) {
 }
 
 function attemptFailureDetail(attempt) {
-  const status = String(attempt?.status || attempt?.state || "").toUpperCase();
-  const failed = ["FAILED", "TIMED_OUT", "PREEMPTED", "CANCELLED"].includes(
-    status,
-  );
+  const failed = attemptEnded(attempt) && !attemptSucceeded(attempt);
   const value =
     runAttemptValue(attempt, "error", "failure_reason", "error_json") ??
     (failed ? runAttemptValue(attempt, "slurm_reason") : null);

@@ -187,6 +187,10 @@ def test_plan_claim_render_derive_then_cpu_and_version_refs(context, monkeypatch
     assert render['request']['mode'] == 'render'
     assert {node['modality'] for node in render['request']['requests']} == {'rgb', 'depth'}
     assert len(cluster.submissions) == 1 and '#SBATCH --gres=gpu:' in render['script']
+    from skynet_app.gpu_preflight import gpu_preflight_lines
+    preflight = '\n'.join(gpu_preflight_lines(1))
+    assert render['script'].count(preflight) == 1
+    assert render['script'].index('umask 077') < render['script'].index(preflight) < render['script'].index('export PYTHONUNBUFFERED')
     assert not cluster.requests('derive')
     submitted = cluster.requests('render')[0]
     assert {source['sha256'] for source in submitted['sources']} == {'a' * 64}
@@ -202,6 +206,7 @@ def test_plan_claim_render_derive_then_cpu_and_version_refs(context, monkeypatch
     derive = service.observations.store.producers()[0]
     assert derive['request']['mode'] == 'derive'
     assert '#SBATCH --gres' not in derive['script'] and 'export CUDA_VISIBLE_DEVICES=' in derive['script']
+    assert 'GPU preflight' not in derive['script']
     derive_request = cluster.requests('derive')[0]
     assert derive_request['staging_root'] == derive['root'] + '/staging'
     assert 'export OMNI_KIT_ACCEPT_EULA' not in derive['script']

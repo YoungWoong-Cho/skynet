@@ -6,8 +6,10 @@ import shlex
 
 from .isaac_job import compile_isaac_job
 from .cluster_runtime import WORK_ROOT, ClusterError, SubmissionOutcomeUnknown
+from .gpu_preflight import GPU_MISSING_MESSAGE, gpu_missing_exit
+from .preparation_states import TERMINAL_FAILURE_STATES
 
-TERMINAL = {"COMPLETED", "CANCELLED", "FAILED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE"}
+TERMINAL = TERMINAL_FAILURE_STATES | {"COMPLETED", "PREEMPTED"}
 
 
 def control_cluster(transport, job, generation, root, operation, **value):
@@ -89,7 +91,8 @@ def control_cluster(transport, job, generation, root, operation, **value):
                 if metadata.get("path") != root + "/video.mp4":
                     raise ValueError("Video artifact does not match its generation")
                 return metadata
-            return {"state": "FAILED", "error": metadata.get("error") or f"Video job {identifier} ended with {state}"}
+            return {"state": "FAILED", "error": metadata.get("error") or (
+                GPU_MISSING_MESSAGE if gpu_missing_exit(scheduler) else f"Video job {identifier} ended with {state}")}
         if metadata.get("state") in {"RENDERING", "READY", "FAILED"}:
             return {"state": "PREPARING", "phase": "rendering" if metadata["state"] == "RENDERING" else "finalizing"}
         if state in {"RUNNING", "COMPLETING", "CONFIGURING", "SUSPENDED"}:
