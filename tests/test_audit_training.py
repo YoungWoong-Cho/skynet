@@ -138,12 +138,12 @@ def test_terminal_evaluation_finalizes_only_unfinished_episodes_and_can_resume(t
     assert "before this episode completed" in episodes[1]["failure_reason"]
     db.update_evaluation(evaluation["id"], status="PENDING")
     assert [e["status"] for e in db.get_evaluation(evaluation["id"])["episodes"]] == ["SUCCEEDED", "PENDING"]
-    # A historical terminal parent stored by older builds is normalized on read.
+    # A terminal parent stored by older builds is settled by workflow repair.
     with db.transaction() as connection:
         connection.execute("UPDATE evaluations SET status = 'FAILED' WHERE id = ?", (evaluation["id"],))
+    assert [e["status"] for e in db.get_evaluation(evaluation["id"])["episodes"]] == ["SUCCEEDED", "PENDING"]
+    assert db.repair_workflow_state_invariants()["evaluation_episodes_settled"] == 1
     assert [e["status"] for e in db.get_evaluation(evaluation["id"])["episodes"]] == ["SUCCEEDED", "NOT_COMPLETED"]
-    with db.connection() as connection:
-        assert connection.execute("SELECT status FROM evaluation_episodes WHERE id = ?", (episodes[1]["id"],)).fetchone()["status"] == "PENDING"
 
 
 def test_preview_validation_response_excludes_library_dump_and_input(monkeypatch):

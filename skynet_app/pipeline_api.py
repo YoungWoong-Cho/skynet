@@ -8444,22 +8444,6 @@ class PipelineService:
                     raise
         return published
 
-    def _set_evaluation_status(
-        self, run_id: str, stage_id: str, status: str, *, completed: bool = False
-    ) -> None:
-        evaluation = self._evaluation_for_stage(run_id, stage_id)
-        if evaluation:
-            now = utc_now()
-            started_at = evaluation.get("started_at")
-            if status == "RUNNING" and not started_at:
-                started_at = now
-            self.database.update_evaluation(
-                evaluation["id"],
-                status=status,
-                started_at=started_at,
-                completed_at=now if completed else evaluation.get("completed_at"),
-            )
-
     def _ingest_evaluation_progress(self, evaluation: Mapping[str, Any]) -> None:
         """Import changed canonical episode records while an evaluation is running."""
         if evaluation.get("status") != "RUNNING":

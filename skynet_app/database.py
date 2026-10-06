@@ -53,6 +53,17 @@ JSON_COLUMNS = frozenset(
     }
 )
 
+# An ended evaluation runs none of its unfinished episodes again. In an execution
+# state its accepted work is queued, being submitted, or running its ledger.
+EVALUATION_ENDED_STATES = ("SUCCEEDED", "FAILED", "CANCELLED", "BLOCKED", "TIMEOUT", "SUBMISSION_FAILED")
+EVALUATION_EXECUTION_STATES = (
+    "SUBMITTING", "SUBMITTED", "PENDING", "PENDING_SLURM", "RUNNING", "REQUEUED", "RETRY_PENDING",
+)
+# Evaluations whose episodes one workflow repair pass settles after older builds
+# or direct SQL changed their status. Every repository writer waits for that
+# pass, so a bounded batch keeps the write lock short; later passes continue.
+EPISODE_CATCH_UP_EVALUATIONS = 50
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -1535,6 +1546,8 @@ class Database:
                 f"UPDATE {entity_table} SET status = ?, completed_at = ?, updated_at = ? WHERE id = ?",
                 (target_status, completed_at, now, entity_id),
             )
+            if entity_type == "evaluation":
+                self._settle_evaluation_episodes(connection, now, [entity_id])
             if target_status == "CANCELLING":
                 for attempt in active_attempts:
                     connection.execute(
@@ -1693,6 +1706,8 @@ class Database:
                     result["evaluation"] = self._update(
                         connection, "evaluations", evaluation_id, encoded_evaluation
                     )
+                    if "status" in encoded_evaluation:
+                        self._settle_evaluation_episodes(connection, now, [evaluation_id])
                 if event is not None:
                     event_values = {
                         "id": new_id(),
@@ -1862,6 +1877,7 @@ class Database:
         repaired = 0
         run_ids: set[str] = set()
         experiment_ids: set[str] = set(draft_repairs["experiment_ids"])
+        settled_evaluation_ids: list[str] = []
         with self.transaction() as connection:
             placeholders_stage = ",".join("?" for _ in active_stage_states)
             placeholders_attempt = ",".join("?" for _ in terminal_attempt_states)
@@ -1939,6 +1955,7 @@ class Database:
                         """,
                         (target, completed_at, now, row["evaluation_id"]),
                     )
+                    settled_evaluation_ids.append(row["evaluation_id"])
                 event_values = {
                     "id": new_id(),
                     "entity_type": "evaluation" if row["evaluation_id"] else "run",
@@ -1958,10 +1975,33 @@ class Database:
                 repaired += 1
                 run_ids.add(row["run_id"])
                 experiment_ids.add(row["experiment_id"])
+            # Evaluations ended above settle with their new status. Older builds
+            # and direct SQL changed statuses without episodes; that catch-up
+            # waits while a deletion is pending, because the deletion guard
+            # trigger checks each changed row against every pending plan, which
+            # makes it slow and rejects rows of the item being deleted.
+            ended = ",".join("?" for _ in EVALUATION_ENDED_STATES)
+            executing = ",".join("?" for _ in EVALUATION_EXECUTION_STATES)
+            settled_evaluation_ids.extend(row["id"] for row in connection.execute(
+                f"""
+                SELECT e.id FROM evaluations e
+                WHERE {visible_sql("evaluations", "e")} AND NOT EXISTS(SELECT 1 FROM maintenance_operations)
+                  AND (e.status IN ({ended}) AND EXISTS(
+                          SELECT 1 FROM evaluation_episodes p
+                          WHERE p.evaluation_id = e.id AND p.status IN ('PENDING', 'RUNNING'))
+                    OR e.status IN ({executing}) AND EXISTS(
+                          SELECT 1 FROM evaluation_episodes p
+                          WHERE p.evaluation_id = e.id AND p.status IN ('CANCELLED', 'NOT_COMPLETED')))
+                ORDER BY e.id LIMIT ?
+                """,
+                (*EVALUATION_ENDED_STATES, *EVALUATION_EXECUTION_STATES, EPISODE_CATCH_UP_EVALUATIONS),
+            ).fetchall())
+            settled_episodes = self._settle_evaluation_episodes(connection, now, settled_evaluation_ids)
         return {
             "repaired": repaired,
             "draft_graphs_repaired": draft_repairs["repaired"],
             "evaluation_ledgers_repaired": ledger_repairs,
+            "evaluation_episodes_settled": settled_episodes,
             "revision_ids": draft_repairs["revision_ids"],
             "run_ids": sorted(run_ids),
             "experiment_ids": sorted(experiment_ids),
@@ -2273,14 +2313,44 @@ class Database:
                 by_id[row["id"]].update(row)
 
     @staticmethod
-    def _unfinished_evaluation_episode_state(status: str) -> tuple[str, str] | None:
-        status = str(status).upper()
-        if status not in {"SUCCEEDED", "FAILED", "CANCELLED", "BLOCKED", "TIMEOUT", "SUBMISSION_FAILED"}:
-            return None
-        return (
-            "CANCELLED" if status == "CANCELLED" else "NOT_COMPLETED",
-            f"Evaluation ended ({status.lower()}) before this episode completed.",
+    def _settle_evaluation_episodes(
+        connection: PostgresConnection, now: str, evaluation_ids: Sequence[str]
+    ) -> int:
+        """Align unfinished episodes with each evaluation's stored status.
+
+        An ended evaluation finalizes its PENDING/RUNNING episodes, and one that
+        executes again reopens the episodes it ended. Recorded outcomes never
+        change.
+        """
+        scope = (
+            f"p.evaluation_id = e.id AND e.id = ANY(?) AND {visible_sql('evaluations', 'e')}"
+            f" AND {visible_sql('evaluation_episodes', 'p')}"
         )
+        selected = list(evaluation_ids)
+        ended = ",".join("?" for _ in EVALUATION_ENDED_STATES)
+        executing = ",".join("?" for _ in EVALUATION_EXECUTION_STATES)
+        finalized = connection.execute(
+            f"""
+            UPDATE evaluation_episodes p
+            SET status = CASE WHEN e.status = 'CANCELLED' THEN 'CANCELLED' ELSE 'NOT_COMPLETED' END,
+                failure_reason = COALESCE(p.failure_reason,
+                    'Evaluation ended (' || lower(e.status) || ') before this episode completed.'),
+                completed_at = COALESCE(p.completed_at, ?), updated_at = ?
+            FROM evaluations e
+            WHERE {scope} AND e.status IN ({ended}) AND p.status IN ('PENDING', 'RUNNING')
+            """,
+            (now, now, selected, *EVALUATION_ENDED_STATES),
+        ).rowcount
+        reopened = connection.execute(
+            f"""
+            UPDATE evaluation_episodes p
+            SET status = 'PENDING', failure_reason = NULL, completed_at = NULL, updated_at = ?
+            FROM evaluations e
+            WHERE {scope} AND e.status IN ({executing}) AND p.status IN ('CANCELLED', 'NOT_COMPLETED')
+            """,
+            (now, selected, *EVALUATION_EXECUTION_STATES),
+        ).rowcount
+        return finalized + reopened
 
     def get_evaluation(self, evaluation_id: str) -> dict[str, Any] | None:
         if self.workspace_id is not None and evaluation_id is not None and not self.owns("evaluations", evaluation_id):
@@ -2294,14 +2364,6 @@ class Database:
                 "SELECT * FROM evaluation_episodes WHERE evaluation_id = ? ORDER BY task, seed, episode_index",
                 (evaluation_id,),
             ).fetchall())
-            # Lifecycle transitions and workflow repair end an evaluation without
-            # finalizing its episode rows. Present their effective state.
-            terminal = self._unfinished_evaluation_episode_state(evaluation["status"])
-            if terminal:
-                for episode in evaluation["episodes"]:
-                    if episode["status"] in {"PENDING", "RUNNING"}:
-                        episode["status"] = terminal[0]
-                        episode["failure_reason"] = episode.get("failure_reason") or terminal[1]
             return evaluation
 
     def evaluation_progress_evidence(
@@ -2350,45 +2412,28 @@ class Database:
         encoded["updated_at"] = utc_now()
         with self.transaction() as connection:
             result = self._update(connection, "evaluations", evaluation_id, encoded)
-            status = str(fields.get("status", "")).upper()
-            terminal = self._unfinished_evaluation_episode_state(status)
-            if terminal:
-                connection.execute(
-                    """UPDATE evaluation_episodes
-                       SET status = ?, failure_reason = COALESCE(failure_reason, ?),
-                           completed_at = COALESCE(completed_at, ?), updated_at = ?
-                       WHERE evaluation_id = ? AND status IN ('PENDING', 'RUNNING')""",
-                    (*terminal,
-                     encoded["updated_at"], encoded["updated_at"], evaluation_id),
-                )
-            elif status in {"PENDING", "SUBMITTED"}:
-                connection.execute(
-                    """UPDATE evaluation_episodes SET status = 'PENDING',
-                       failure_reason = NULL, completed_at = NULL, updated_at = ?
-                       WHERE evaluation_id = ? AND status IN ('CANCELLED', 'NOT_COMPLETED')""",
-                    (encoded["updated_at"], evaluation_id),
-                )
+            if "status" in encoded:
+                self._settle_evaluation_episodes(connection, encoded["updated_at"], [evaluation_id])
             return result
 
     def repair_incomplete_evaluation_ledgers(self) -> int:
         """Fill ledgers left incomplete when creation stopped between the evaluation row and its episodes."""
+        executing = ",".join("?" for _ in EVALUATION_EXECUTION_STATES)
         with self.connection() as connection:
             rows = connection.execute(f"""
                 SELECT e.id FROM evaluations e
                 WHERE {visible_sql("evaluations", "e")}
-                  AND e.status IN ('SUBMITTING','SUBMITTED','PENDING','PENDING_SLURM',
-                                   'RUNNING','REQUEUED','RETRY_PENDING')
+                  AND e.status IN ({executing})
                   AND (SELECT COUNT(*) FROM evaluation_episodes p WHERE p.evaluation_id=e.id)
                       < jsonb_array_length(e.task_selection_json::jsonb)
                         * jsonb_array_length(e.seeds_json::jsonb) * e.episodes_per_task
-            """).fetchall()
+            """, EVALUATION_EXECUTION_STATES).fetchall()
         repaired = 0
         for row in rows:
             # ON CONFLICT in the atomic initializer preserves every existing
             # result/ID and tolerates collection completing another row first.
             if self.initialize_evaluation_episodes(
-                row["id"], expected_parent_states=("SUBMITTING", "SUBMITTED", "PENDING",
-                    "PENDING_SLURM", "RUNNING", "REQUEUED", "RETRY_PENDING"),
+                row["id"], expected_parent_states=EVALUATION_EXECUTION_STATES,
             ):
                 repaired += 1
         return repaired
@@ -2424,6 +2469,9 @@ class Database:
                    ON CONFLICT (evaluation_id, task, seed, episode_index) DO NOTHING""",
                 rows,
             )
+            # A parent that already ended, such as one created BLOCKED, settles
+            # the rows it just received.
+            self._settle_evaluation_episodes(connection, now, [evaluation_id])
             return cursor.rowcount
 
     def upsert_evaluation_episode(

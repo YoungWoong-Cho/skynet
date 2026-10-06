@@ -3446,6 +3446,7 @@ def test_evaluation_retry_reuses_existing_slurm_receipt(tmp_path, monkeypatch):
     db.update_job_attempt(attempt['id'], status='SUBMISSION_FAILED', slurm_job_id=None)
     db.update_stage(stage_id, status='FAILED')
     db.update_evaluation(evaluation['id'], status='FAILED')
+    assert [e['status'] for e in db.get_evaluation(evaluation['id'])['episodes']] == ['NOT_COMPLETED']
     receipt = Submission('99123', '99123', 'sky2', '/tmp/job.sbatch', '/tmp/run', recovered=True)
     monkeypatch.setattr(cluster, 'recover_submission', lambda *args: receipt, raising=False)
     service.retry_evaluation_submission(evaluation['id'], 'sky2')
@@ -3453,7 +3454,9 @@ def test_evaluation_retry_reuses_existing_slurm_receipt(tmp_path, monkeypatch):
     attempts = [a for a in after['attempts'] if a['stage_id'] == stage_id]
     assert len(attempts) == 1 and attempts[0]['slurm_job_id'] == '99123'
     assert after['status'] == 'SUCCEEDED'
-    assert db.get_evaluation(evaluation['id'])['status'] == 'SUBMITTED'
+    retried = db.get_evaluation(evaluation['id'])
+    assert retried['status'] == 'SUBMITTED'
+    assert [e['status'] for e in retried['episodes']] == ['PENDING']
 
 
 @pytest.mark.parametrize("scheduler_state", ["FAILED", "OUT_OF_MEMORY", "TIMEOUT"])

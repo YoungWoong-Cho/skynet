@@ -81,6 +81,18 @@ def test_completed_plan_is_saved_once_with_its_original_execution_key(tmp_path, 
     assert db.data_version_usage(target["manifest_sha256"])
 
 
+def test_blocked_evaluation_is_created_with_settled_episodes(tmp_path):
+    db = Database(tmp_path / "blocked-ledger")
+    _, target = dataset(db)
+    case = evaluation_case(db, target)
+    case.service._resolve_evaluation_implementation = resolve_plan(case)
+    evaluation = case.service.create_evaluation(case.request)
+    assert evaluation["status"] == "BLOCKED"
+    assert [(episode["status"], episode["failure_reason"]) for episode in evaluation["episodes"]] == [
+        ("NOT_COMPLETED", "Evaluation ended (blocked) before this episode completed.")
+    ]
+
+
 def test_target_retired_during_planning_cannot_create_an_evaluation(migration):
     m = migration
     case = evaluation_case(m.db, m.old)
