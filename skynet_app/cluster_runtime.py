@@ -28,6 +28,11 @@ SLURM_BIN = CLUSTER.commands.slurm_bin
 DEFAULT_GATEWAY = CLUSTER.defaults.gateway
 
 
+def ssh_argv(host: str, command: str, *options: str) -> list[str]:
+    """argv for one non-interactive SSH command with the configured connection policy."""
+    return ["ssh", "-T", *CLUSTER.ssh.command.options(), *options, host, command]
+
+
 # Slurm states in which a job still occupies the scheduler; every other state is final.
 ACTIVE_STATES = frozenset({
     "PENDING",
@@ -268,20 +273,7 @@ class ClusterClient:
     ) -> str:
         try:
             process = subprocess.run(
-                [
-                    "ssh",
-                    "-T",
-                    "-o",
-                    "BatchMode=yes",
-                    "-o",
-                    "ConnectTimeout=6",
-                    "-o",
-                    "ServerAliveInterval=5",
-                    "-o",
-                    "ServerAliveCountMax=1",
-                    host,
-                    command,
-                ],
+                ssh_argv(host, command),
                 input=stdin,
                 capture_output=True,
                 text=True,
@@ -1059,20 +1051,7 @@ printf '%s %s\\n%s\\n' {_ACCOUNTING_MARKER} "$accounting_rc" "$accounting" {_CON
             f"skip={start} count={count} status=none"
         )
         process = subprocess.Popen(
-            [
-                "ssh",
-                "-T",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=6",
-                "-o",
-                "ServerAliveInterval=5",
-                "-o",
-                "ServerAliveCountMax=1",
-                host,
-                command,
-            ],
+            ssh_argv(host, command),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )

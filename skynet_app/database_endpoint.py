@@ -16,6 +16,8 @@ from pathlib import Path
 
 from psycopg.conninfo import make_conninfo
 
+from .cluster_config import CLUSTER
+
 
 class DatabaseUnreachable(ConnectionError):
     """The SSH host that fronts the central database refused or dropped the tunnel."""
@@ -67,6 +69,23 @@ class SSHEndpoint:
         self._pid = os.getpid()
         atexit.register(self.close)
 
+    def tunnel_argv(self, local):
+        """ssh argv forwarding the local socket to the database with the configured tunnel policy."""
+        return [
+            "ssh",
+            "-C",  # Compress repeated JSON in the PostgreSQL wire stream.
+            "-T",
+            *CLUSTER.ssh.tunnel.options(),
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-o",
+            "StreamLocalBindUnlink=no",
+            "-L",
+            str(local) + ":" + self.forward_target,
+            self.config["ssh_host"],
+            "cat >/dev/null",
+        ]
+
     def connection_string(self):
         with self._lock:
             if self._process is None or self._process.poll() is not None:
@@ -80,31 +99,10 @@ class SSHEndpoint:
                 )
                 self._directory.chmod(0o700)
                 local = self._directory / ".s.PGSQL.55432"
-                args = [
-                    "ssh",
-                    "-C",  # Compress repeated JSON in the PostgreSQL wire stream.
-                    "-T",
-                    "-o",
-                    "BatchMode=yes",
-                    "-o",
-                    "ConnectTimeout=8",
-                    "-o",
-                    "ExitOnForwardFailure=yes",
-                    "-o",
-                    "StreamLocalBindUnlink=no",
-                    "-o",
-                    "ServerAliveInterval=10",
-                    "-o",
-                    "ServerAliveCountMax=2",
-                    "-L",
-                    str(local) + ":" + self.forward_target,
-                    self.config["ssh_host"],
-                    "cat >/dev/null",
-                ]
                 # The pipe's EOF ends the remote command if this app exits,
                 # including abnormal termination. No background tunnel is left.
                 self._process = subprocess.Popen(
-                    args,
+                    self.tunnel_argv(local),
                     stdin=subprocess.PIPE,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -112,7 +110,9 @@ class SSHEndpoint:
                     # rollback/unlock before closing its private DB tunnel.
                     start_new_session=True,
                 )
-                deadline = time.monotonic() + 10
+                # The forward appears once the connection is up; allow the
+                # configured handshake time plus the forward itself.
+                deadline = time.monotonic() + CLUSTER.ssh.tunnel.connect_timeout_seconds + 5
                 while not local.exists():
                     if self._process.poll() is not None or time.monotonic() >= deadline:
                         self._close()

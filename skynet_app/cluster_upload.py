@@ -5,7 +5,7 @@ import re
 import shlex
 import subprocess
 
-from .cluster_runtime import ClusterError, WORK_ROOT
+from .cluster_runtime import ClusterError, WORK_ROOT, ssh_argv
 
 
 def upload_capture(
@@ -36,20 +36,7 @@ def upload_capture(
     with path.open("rb") as stream:
         try:
             result = subprocess.run(
-                [
-                    "ssh",
-                    "-T",
-                    "-o",
-                    "BatchMode=yes",
-                    "-o",
-                    "ConnectTimeout=6",
-                    "-o",
-                    "ServerAliveInterval=5",
-                    "-o",
-                    "ServerAliveCountMax=1",
-                    gateway,
-                    command,
-                ],
+                ssh_argv(gateway, command),
                 stdin=stream,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

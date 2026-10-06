@@ -13,6 +13,7 @@ import zlib
 from pathlib import PurePosixPath
 
 from . import registry_reference_match as registry_reference_module
+from .cluster_runtime import ssh_argv
 
 MAX_BYTES = 16 * 1024 * 1024
 _REMOTE = inspect.getsource(registry_reference_module) + r"""
@@ -125,18 +126,7 @@ class MetadataObjects:
 
     def _exchange(self, request):
         result = subprocess.run(
-            [
-                "ssh",
-                "-T",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=8",
-                "-o",
-                "LogLevel=ERROR",
-                self.host,
-                shlex.join(["python3", "-c", _REMOTE]),
-            ],
+            ssh_argv(self.host, shlex.join(["python3", "-c", _REMOTE]), "-o", "LogLevel=ERROR"),
             input=json.dumps(request),
             text=True,
             capture_output=True,

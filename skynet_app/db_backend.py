@@ -12,6 +12,7 @@ import threading
 from pathlib import Path
 
 import psycopg
+from .cluster_config import CLUSTER
 
 INTEGRITY_ERRORS = (psycopg.IntegrityError,)
 DATABASE_ERRORS = (psycopg.Error,)
@@ -146,7 +147,7 @@ class PostgresBackend:
             url,
             autocommit=True,
             row_factory=record_factory,
-            connect_timeout=10,
+            connect_timeout=CLUSTER.ssh.tunnel.connect_timeout_seconds,
             application_name="skynet",
             # A disconnected SSH client can leave the server transaction open.
             # Bound that idle lifetime so its repository write lock cannot

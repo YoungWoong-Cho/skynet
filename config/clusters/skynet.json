@@ -19,6 +19,10 @@
     "sky1",
     "sky2"
   ],
+  "ssh": {
+    "command": {"connect_timeout_seconds": 20, "server_alive_interval_seconds": 5, "server_alive_count_max": 1},
+    "tunnel": {"connect_timeout_seconds": 30, "server_alive_interval_seconds": 10, "server_alive_count_max": 2}
+  },
   "paths": {
     "home_root": "/nethome/ycho420",
     "work_root": "/coc/flash7/ycho420",

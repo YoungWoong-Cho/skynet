@@ -185,7 +185,7 @@ This example is illustrative. Adapter capability schemas determine which fields 
 
 Cluster topology and policy are data, not adapter behavior. The default operator-managed profile is [`config/clusters/skynet.json`](config/clusters/skynet.json). Set `SKYNET_CLUSTER_CONFIG=/absolute/path/to/profile.json` to load another profile, then restart the server. There is deliberately no API that edits this file.
 
-The profile defines gateways, filesystem roots, Slurm and `gpu_usage` command paths, an optional deterministic `gpu_usage_interpreter`, atomic partition/account queue pairs, time and preemption policy, GPU aliases, dashboard columns, application defaults, and hard resource limits. It is schema-validated at startup; unknown fields, duplicate gateways, invalid default references, and duplicate partition/account pairs fail closed.
+The profile defines gateways, SSH connection timeouts and keepalives (`ssh.command` for commands and transfers, `ssh.tunnel` for the database tunnel), filesystem roots, Slurm and `gpu_usage` command paths, an optional deterministic `gpu_usage_interpreter`, atomic partition/account queue pairs, time and preemption policy, GPU aliases, dashboard columns, application defaults, and hard resource limits. It is schema-validated at startup; unknown fields, duplicate gateways, invalid default references, and duplicate partition/account pairs fail closed.
 
 The following environment variables can override deployment-specific values without changing application code:
 

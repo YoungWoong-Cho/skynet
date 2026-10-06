@@ -18,6 +18,8 @@ def local_upload(tmp_path, monkeypatch):
 
     def local_ssh(argv, **kwargs):
         assert argv[0] == "ssh" and argv[-2] == "sky2"
+        from skynet_app.cluster_config import CLUSTER
+        assert argv[2:2 + len(CLUSTER.ssh.command.options())] == CLUSTER.ssh.command.options()
         assert "stdin" in kwargs and "input" not in kwargs and "text" not in kwargs
         transfers.append(argv)
         command = argv[-1]

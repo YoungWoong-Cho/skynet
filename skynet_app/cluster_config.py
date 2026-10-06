@@ -297,11 +297,34 @@ class IsaacEvaluationPlacement(ProfileModel):
         return self
 
 
+class SshProfile(ProfileModel):
+    """Connection timeouts and keepalives for one kind of SSH connection."""
+
+    connect_timeout_seconds: int = Field(ge=1, le=600)
+    server_alive_interval_seconds: int = Field(ge=1, le=600)
+    server_alive_count_max: int = Field(ge=1, le=20)
+
+    def options(self) -> list[str]:
+        """The ssh arguments every connection of this kind passes."""
+        return [
+            "-o", "BatchMode=yes",
+            "-o", f"ConnectTimeout={self.connect_timeout_seconds}",
+            "-o", f"ServerAliveInterval={self.server_alive_interval_seconds}",
+            "-o", f"ServerAliveCountMax={self.server_alive_count_max}",
+        ]
+
+
+class ClusterSsh(ProfileModel):
+    command: SshProfile  # One-shot commands, uploads and object transfers.
+    tunnel: SshProfile  # The long-lived central database tunnel.
+
+
 class ClusterProfile(ProfileModel):
     schema_version: int = 1
     id: str
     label: str
     gateways: list[str] = Field(min_length=1)
+    ssh: ClusterSsh
     paths: ClusterPaths
     commands: ClusterCommands
     training_environment: dict[str, str] = Field(default_factory=dict)

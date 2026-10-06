@@ -23,7 +23,7 @@ create `config/database.json` (ignored by Git):
 The host needs working SSH access to the selected cluster user. The database listens only on the cluster host’s loopback interface. No database
 port is exposed to the network. Put the DB connection password in
 `config/database-password` with permission `0600`; this file is ignored by Git. Each app creates a private Unix-socket SSH tunnel and closes it
-on exit. The original `ssh-unix` transport remains available for SSH servers that
+on exit; its connect timeout and keepalives come from the cluster profile's `ssh.tunnel` section, sized to ride out a slow login node. The original `ssh-unix` transport remains available for SSH servers that
 support forwarding to the private PostgreSQL Unix socket. A direct PostgreSQL connection can instead be provided using
 `SKYNET_DATABASE_URL`; supporting file storage still requires the SSH endpoint
 configuration. The obsolete `SKYNET_DATABASE_PATH` setting is no longer used.

@@ -14,7 +14,7 @@ from uuid import UUID
 
 from .cluster_config import CLUSTER
 from .recording_guard import guarded_recording
-from .cluster_runtime import DEFAULT_GATEWAY, ClusterClient, ClusterError
+from .cluster_runtime import DEFAULT_GATEWAY, ClusterClient, ClusterError, ssh_argv
 from .database import canonical_json, utc_now
 from .live_xr_archive_remote import archive_control
 
@@ -118,9 +118,7 @@ class LiveArchiveService:
 
     @staticmethod
     def _ssh_args(gateway, program):
-        return ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6",
-                "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=1",
-                gateway, "python3 -c " + shlex.quote(program)]
+        return ssh_argv(gateway, "python3 -c " + shlex.quote(program))
 
     def _call(self, transport, gateway, operation, **request):
         self._check()
