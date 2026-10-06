@@ -6,7 +6,6 @@ import inspect
 import shlex
 from collections import defaultdict
 from contextlib import asynccontextmanager
-from html import escape
 from pathlib import Path
 
 import anyio
@@ -19,11 +18,11 @@ from .availability import ClusterApplication, unavailable_response
 from .cluster_config import CLUSTER
 from .cluster_runtime import ClusterClient, ClusterError
 from .gpu_quota import idle_partition_quota, idle_quota_usage, missing_idle_account_quotas
+from .page_markup import cluster_markup
 
 
 APP_ROOT = Path(__file__).resolve().parent.parent
 STATIC_ROOT = APP_ROOT / "static"
-GATEWAY_OPTIONS_PLACEHOLDER = "<!-- gateway-options -->"  # Filled by index() in every gateway <select>.
 
 SLURM_BIN = CLUSTER.commands.slurm_bin
 GPU_USAGE_LONG_COMMAND = CLUSTER.commands.gpu_usage_shell_command("-l")
@@ -424,6 +423,9 @@ def _parse_snapshot(output: str, gateway: str) -> dict[str, object]:
         except (ValueError, TypeError) as error:
             quota_errors.append({"message": f"Could not verify idle account quotas: {error}"})
     _attach_account_users(account_usage, jobs, _parse_user_usage(user_usage_output))
+    own_accounts = {account for account, _ in NORMAL_ACCOUNT_QUEUES}
+    for row in account_usage:
+        row["own"] = row["account"] in own_accounts
     total_gpu_limit = 0
     total_gpu_allocated = 0
     for row in account_usage:
@@ -473,10 +475,8 @@ def index() -> HTMLResponse:
         version = f"{stat.st_mtime_ns:x}-{stat.st_size:x}"
         html = re.sub(rf'/static/{re.escape(name)}(?:\?[^"\s]*)?',
                       f"/static/{name}?v={version}", html)
-    hosts = [escape(host) for host in SSH_HOSTS]
-    options = f'<option value="auto">Auto: {", then ".join(hosts)}</option>' + "".join(
-        f'<option value="{host}">Prefer {host}</option>' for host in hosts)
-    html = html.replace(GATEWAY_OPTIONS_PLACEHOLDER, options)
+    for placeholder, markup in cluster_markup().items():
+        html = html.replace(placeholder, markup)
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 

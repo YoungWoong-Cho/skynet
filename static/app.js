@@ -1951,18 +1951,21 @@ function gpuAllocationCell(metric) {
 }
 
 function renderAccountUsage(rows) {
+  // The server renders one header per configured GPU column and marks the lab's own accounts.
+  const columns = Array.from(
+    elements.usageBody.closest("table").querySelectorAll("th[data-gpu-column]"),
+    (header) => header.dataset.gpuColumn,
+  );
   if (!rows.length) {
-    elements.usageBody.innerHTML = emptyRow(4, "Account usage is unavailable.");
+    elements.usageBody.innerHTML = emptyRow(columns.length + 1, "Account usage is unavailable.");
     return;
   }
   elements.usageBody.innerHTML = rows
     .map(
       (row) => `
-    <tr class="${row.account === "rl2-lab" ? "is-own-account" : ""}">
+    <tr class="${row.own ? "is-own-account" : ""}">
       <td><span class="node-name">${escapeHtml(row.account)}</span></td>
-      <td>${gpuAllocationCell(row.l40s)}</td>
-      <td>${gpuAllocationCell(row.a40)}</td>
-      <td>${gpuAllocationCell(row.rtx_6000)}</td>
+      ${columns.map((column) => `<td>${gpuAllocationCell(row[column])}</td>`).join("")}
     </tr>`,
     )
     .join("");
@@ -2501,10 +2504,7 @@ function currentAdapterConditionValue(path) {
       elements.gpuMode.value === "manual"
         ? numberOrNull(elements.experimentGpuCount)
         : null,
-    "resources.gpu.gpu_type":
-      elements.experimentGpuType.value === "auto"
-        ? "any"
-        : elements.experimentGpuType.value,
+    "resources.gpu.gpu_type": elements.experimentGpuType.value,
   };
   return commonValues[path];
 }
@@ -7265,7 +7265,9 @@ function experimentPayload() {
     native_overrides: overrides,
     resources: {
       gateway: elements.gateway.value,
-      account: preservedResources.account || "rl2-lab",
+      ...(preservedResources.account
+        ? { account: preservedResources.account }
+        : {}),
       ...(preservedResources.partition
         ? { partition: preservedResources.partition }
         : {}),
@@ -9059,11 +9061,7 @@ async function hydrateExperimentConfiguration(spec, request) {
   setLoadedSelectValue(elements.gpuMode, gpuMode, "GPU allocation");
   setLoadedControlValue(elements.experimentGpuCount, gpu.count);
   const gpuType = firstValue(gpu.gpu_type, gpu.type, gpu.profile);
-  setLoadedSelectValue(
-    elements.experimentGpuType,
-    gpuType === "any" ? "auto" : gpuType,
-    "GPU type",
-  );
+  setLoadedSelectValue(elements.experimentGpuType, gpuType, "GPU type");
   setLoadedControlValue(elements.resourceNodes, resources.nodes);
   setLoadedControlValue(elements.resourceCpus, resources.cpus_per_task);
   setLoadedControlValue(elements.resourceMemory, resources.memory_gb);
@@ -12188,9 +12186,10 @@ function updateEvaluationGpuOptions(suite) {
   const allowed = Array.isArray(suite?.allowed_gpu_types)
     ? new Set(suite.allowed_gpu_types)
     : null;
+  // Evaluations run on a named GPU type, never "any compatible".
   const options = Array.from(elements.experimentGpuType.options).filter(
     (option) =>
-      option.value !== "auto" && (!allowed || allowed.has(option.value)),
+      !option.dataset.anyGpu && (!allowed || allowed.has(option.value)),
   );
   select.replaceChildren(...options.map((option) => option.cloneNode(true)));
   if (options.some((option) => option.value === previous))
@@ -12221,10 +12220,7 @@ function initializeEvaluationResources() {
     const title = field.querySelector("label");
     title.htmlFor = input.id;
     title.textContent = label;
-    if (name === "gpu") {
-      input.querySelector('option[value="auto"]')?.remove();
-      input.value = "a40";
-    }
+    if (name === "gpu") input.querySelector("option[data-any-gpu]")?.remove();
     if (name === "cpus") {
       input.value = String(CPUS_PER_GPU);
       input.readOnly = true;
@@ -16551,7 +16547,7 @@ const tutorialTours = {
         selector: "#collection-account",
         title: "Review Slurm allocation",
         instruction:
-          "Auto gateway with rl2-lab account and partition is the normal default. Do not pin a node unless there is a specific reason.",
+          "Auto gateway with the default queue's account and partition is the normal default. Do not pin a node unless there is a specific reason.",
       },
       {
         selector: "#create-collection-session",

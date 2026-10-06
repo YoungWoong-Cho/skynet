@@ -123,27 +123,44 @@ def test_homepage_revalidates_and_versions_changed_assets(tmp_path, monkeypatch)
         first = second
 
 
-def test_homepage_offers_the_configured_gateways(monkeypatch):
+def test_homepage_offers_the_configured_gateways_queues_gpus_and_defaults(monkeypatch):
     import re
     from skynet_app import main
     from skynet_app.cluster_config import CLUSTER
-    selects = ('gateway', 'collection-gateway', 'data-import-gateway')
+    from skynet_app import page_markup
+    from skynet_app.page_markup import cluster_markup
     def options(page, select):
         body = re.search(rf'<select id="{select}"[^>]*>(.*?)</select>', page, re.S).group(1)
-        return re.findall(r'<option value="([^"]*)">([^<]*)</option>', body)
+        return re.findall(r'<option value="([^"]*)"[^>]*>([^<]*)</option>', body)
     source = (main.STATIC_ROOT / 'index.html').read_text(encoding='utf-8')
-    assert source.count(main.GATEWAY_OPTIONS_PLACEHOLDER) == len(selects)
-    assert all(options(source, select) == [] for select in selects)
     page = main.index().body.decode()
-    assert main.GATEWAY_OPTIONS_PLACEHOLDER not in page
+    for placeholder in cluster_markup():
+        assert placeholder in source, placeholder
+        assert placeholder not in page, placeholder
     hosts = list(CLUSTER.gateways)
     expected = [('auto', 'Auto: ' + ', then '.join(hosts)), *((host, f'Prefer {host}') for host in hosts)]
-    for select in selects:
+    for select in ('gateway', 'collection-gateway', 'data-import-gateway'):
+        assert options(source, select) == []
         assert options(page, select) == expected
-    # The list follows the configuration, and host names are escaped.
-    monkeypatch.setattr(main, 'SSH_HOSTS', ('login-a', 'login<b>&"c"'))
+    # Queue and GPU choices are exactly the configured ones; the forms carry no copies.
+    assert [value for value, _ in options(page, 'resource-policy')] == ['auto', *CLUSTER.queues]
+    assert [value for value, _ in options(page, 'data-import-queue')] == list(CLUSTER.queues)
+    assert [value for value, _ in options(page, 'experiment-gpu-type')] == list(CLUSTER.gpu_aliases)
+    for name, queue in CLUSTER.queues.items():
+        assert queue.partition in dict(options(page, 'resource-policy'))[name]
+    default = CLUSTER.queue(CLUSTER.defaults.queue_policy)
+    assert re.search(r'<option value="%s" selected' % CLUSTER.defaults.gpu_type, page)
+    assert re.search(r'id="collection-account"\s+value="%s"' % re.escape(default.account), page)
+    assert re.search(r'id="collection-partition"\s+value="%s"' % re.escape(default.partition), page)
+    headers = re.findall(r'<th data-gpu-column="([^"]+)">', page)
+    assert headers == list(CLUSTER.dashboard.gpu_usage_columns)
+    # The list follows the configuration, and configured names are escaped.
+    def configured(**changes):
+        monkeypatch.setattr(page_markup, 'CLUSTER', CLUSTER.model_copy(update=changes))
+        return main.index().body.decode()
     escaped = 'login&lt;b&gt;&amp;&quot;c&quot;'
-    assert options(main.index().body.decode(), 'gateway') == [
+    assert options(configured(gateways=['login-a', 'login<b>&"c"']), 'gateway') == [
         ('auto', f'Auto: login-a, then {escaped}'), ('login-a', 'Prefer login-a'), (escaped, f'Prefer {escaped}')]
-    monkeypatch.setattr(main, 'SSH_HOSTS', ('login-a',))
-    assert options(main.index().body.decode(), 'gateway') == [('auto', 'Auto: login-a'), ('login-a', 'Prefer login-a')]
+    assert options(configured(gateways=['login-a']), 'gateway') == [('auto', 'Auto: login-a'), ('login-a', 'Prefer login-a')]
+    one_gpu = configured(gpu_aliases={'any': None, 'h100': 'h100'})
+    assert options(one_gpu, 'experiment-gpu-type') == [('any', 'Any compatible'), ('h100', 'H100')]

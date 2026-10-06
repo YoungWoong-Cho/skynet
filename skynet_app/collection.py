@@ -304,8 +304,8 @@ class CollectionResources(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     gateway: str = "auto"
-    account: str = "rl2-lab"
-    partition: str = "rl2-lab"
+    account: str = Field(default_factory=lambda: CLUSTER.queue(CLUSTER.defaults.queue_policy).account)
+    partition: str = Field(default_factory=lambda: CLUSTER.queue(CLUSTER.defaults.queue_policy).partition)
     gpu_count: int = Field(default=1, ge=1, le=16)
     gpu_type: str | None = Field(default="l40s", pattern=r"^[A-Za-z0-9_.-]+$")
     cpu_count: int = Field(default=8, ge=1, le=256)

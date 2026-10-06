@@ -284,9 +284,7 @@
                     <thead>
                       <tr>
                         <th>Account</th>
-                        <th>L40S</th>
-                        <th>A40</th>
-                        <th>RTX 6000</th>
+                        <!-- gpu-usage-headers -->
                       </tr>
                     </thead>
                     <tbody id="usage-body">
@@ -1244,9 +1242,7 @@ trainer.deterministic=true"
                       <div class="field">
                         <label for="resource-policy">Queue policy</label>
                         <select id="resource-policy">
-                          <option value="auto">Auto</option>
-                          <option value="normal">Normal / rl2-lab</option>
-                          <option value="overcap">Preemptible / overcap</option>
+                          <!-- queue-policy-options -->
                         </select>
                       </div>
                       <div class="field">
@@ -1270,10 +1266,7 @@ trainer.deterministic=true"
                       <div class="field">
                         <label for="experiment-gpu-type">GPU type</label>
                         <select id="experiment-gpu-type">
-                          <option value="auto">Any compatible</option>
-                          <option value="a40">A40</option>
-                          <option value="l40s">L40S</option>
-                          <option value="rtx_6000">RTX 6000</option>
+                          <!-- gpu-type-options -->
                         </select>
                       </div>
                       <div class="field">
@@ -3399,7 +3392,7 @@ trainer.deterministic=true"
                                       >Account</label
                                     ><input
                                       id="collection-account"
-                                      value="rl2-lab"
+                                      value="<!-- collection-account -->"
                                       required=""
                                     />
                                   </div>
@@ -3408,7 +3401,7 @@ trainer.deterministic=true"
                                       >Partition</label
                                     ><input
                                       id="collection-partition"
-                                      value="rl2-lab"
+                                      value="<!-- collection-partition -->"
                                       required=""
                                     />
                                   </div>
@@ -3439,7 +3432,7 @@ trainer.deterministic=true"
                                       >GPU type</label
                                     ><input
                                       id="collection-gpu-type"
-                                      value="l40s"
+                                      value="<!-- collection-gpu-type -->"
                                       required=""
                                     />
                                   </div>
@@ -4291,8 +4284,7 @@ Select a session.</pre
                       <div class="field">
                         <label for="data-import-queue">Slurm queue</label
                         ><select id="data-import-queue">
-                          <option value="overcap">overcap (preemptible)</option>
-                          <option value="normal">rl2-lab</option>
+                          <!-- import-queue-options -->
                         </select>
                       </div>
                     </div>

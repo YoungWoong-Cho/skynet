@@ -644,7 +644,7 @@ API: `POST /api/data/exports` `{session_id, adapter_id, adapter_version_id, adap
 | **2. Training datasets** | §4-5 |
 | **3. Runtime** | **Runtime**, **Named runtime profile**, custom 경로, **Runtime details** |
 | **4. Training settings** | **Learning rate**, **Batch size**, **Batch semantics**, **Gradient accumulation**, **Data workers**, **Precision**, **Max steps / iterations**, "Adapter-declared inputs", "Training preset", **Inputs and outputs**, **Advanced model settings → Advanced native values** |
-| **5. Resources** | **Queue policy**(세 가지: **Auto**, **Normal / rl2-lab**, **Preemptible / overcap**. `index.html:1247-1251`), **GPU allocation**(Auto / Manual), **GPUs / node**(Manual일 때만), **GPU type**(Any compatible / A40 / L40S / RTX 6000), **Nodes**(1 고정), **CPUs / task**(읽기 전용), **Memory / GB**(기본 64), **Wall time**(기본 `04:00:00`) |
+| **5. Resources** | **Queue policy**(**Auto**와 `skynet.json` `queues`의 각 항목. 지금은 **Normal / rl2-lab**, **Preemptible / overcap**), **GPU allocation**(Auto / Manual), **GPUs / node**(Manual일 때만), **GPU type**(`gpu_aliases`의 각 항목. 지금은 Any compatible / A40 / L40S / RTX 6000), **Nodes**(1 고정), **CPUs / task**(읽기 전용), **Memory / GB**(기본 64), **Wall time**(기본 `04:00:00`) |
 | **6. Checkpoint and variants** | **Checkpoint**(Start fresh / Resume full state / Initialize weights), **Checkpoint path or run ID**, **Save every optimizer steps**, **Checkpoint warning / seconds before timeout**(기본 300), **Maximum automatic attempts**(기본 5), Auto-resume 체크박스, **Sweep / variant matrix** |
 | **7. Tracking and evaluation** | **Weights & Biases**(기본 켜짐), **MLflow**, **W&B project**(기본은 실험 이름), **W&B run name template**(기본 `{experiment}/{variant}/run-{run_number}`), "Record downstream evaluation suites in experiment metadata" |
 
@@ -704,11 +704,9 @@ HAT의 `train.presets`(`adapters/hat_manifest.py:77-95`):
   - wall time이 normal 한도를 넘으면 overcap을 쓴다.
   - 아니면 `gpu_usage -l`로 `rl2-lab` 할당량을 읽고, 넘치면 overcap을 쓴다.
   - 확인할 수 없으면 실패한다: "auto queue selection could not verify live GPU quota"
-- GPU alias는 `any`, `a40`, `l40s`, `rtx_6000`이다(`skynet.json:504-509`). 새 alias나 queue를 추가하려면 `skynet.json`과 정적 `<select>`(`index.html:1247-1251`, `1273-1278`)를 함께 고쳐야 한다.
+- GPU alias는 `any`, `a40`, `l40s`, `rtx_6000`이다(`skynet.json` `gpu_aliases`). 새 alias나 queue는 `skynet.json`에만 추가하면 된다.
   - 서버는 config를 따른다. gpu_type·queue_policy 검증(`experiments.py:449-454, 529-534`)과 queue별 account/partition 결정(`pipeline_api.py:3488-3490, 3641-3643`)이 `CLUSTER.gpu_aliases`와 `CLUSTER.queues`를 읽는다.
-  - 하지만 폼의 **Queue policy**와 **GPU type** 옵션은 `index.html`에 고정되어 있다. `app.js`는 이 옵션을 config에서 채우지 않는다. `/api/cluster`는 대시보드 스냅샷이고(`main.py:453-465`), `/api/settings`는 `CLUSTER.public_dict()`를 돌려주지만(`pipeline_api.py:12496-12518`) Settings 표로만 보여 준다(`app.js:19996-20018`). 서버가 config로 채우는 `<select>`는 gateway뿐이다(`main.py:26, 476-479`).
-  - 평가 폼은 이 두 필드를 복제한다(`app.js:12204-12239`). 평가의 GPU 옵션도 학습 폼 옵션을 suite의 `allowed_gpu_types`로 걸러 만든다(`app.js:12185-12202`). 그래서 `index.html`에 없는 alias는 평가 폼에도 나오지 않는다. Isaac suite에서는 그 alias가 `isaac_evaluation_placement` node의 `gpu_type`이어야 보인다(`pipeline_api.py:11058, 11066`).
-  - 따로 고정된 곳도 있다. 데이터 import의 **Slurm queue**(`index.html:4294-4296`), 대시보드 계정 사용량 열(`index.html:286-289`, `app.js:1963-1965`)이다. 대시보드 열은 서버에서는 `dashboard.gpu_usage_columns`(`skynet.json:510-515`, `main.py:33`)를 따른다.
+  - 폼의 **Queue policy**, **GPU type**, 데이터 import의 **Slurm queue**, 수집 양식의 account/partition/GPU 기본값, 대시보드 계정 사용량 열은 모두 서버가 페이지를 내보낼 때 config로 채운다(`skynet_app/page_markup.py`, `main.py` `index()`). gateway 선택지와 같은 방식이다. 평가 폼은 학습 폼의 GPU 옵션을 복제하고 suite의 `allowed_gpu_types`로 거른다(`app.js` `updateEvaluationGpuOptions`). Isaac suite에서는 그 alias가 `isaac_evaluation_placement` node의 `gpu_type`이어야 보인다.
 
 ### 5-5. 제출
 
