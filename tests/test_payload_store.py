@@ -490,6 +490,20 @@ def test_offloaded_evaluation_targets_are_found_and_repaired_without_body_reads(
     assert projected_paths == [PROJECTED_PATHS['workflow_stages']] and reads == []
     assert db.repair_document_projections() == 0
     assert db.data_version_usage(target['manifest_sha256'])[0]['experiment_id'] == experiment['id']
+    # An offloaded execution snapshot projects its resume pin; the run list never inspects the body.
+    train = db.create_stage(run['id'], stage_type='TRAIN', name='train')
+    attempt = db.create_job_attempt(train['id'], status='RUNNING',
+                                    execution_snapshot_json={'plan': {'native_config': {'initial_checkpoint': '/saved.ckpt'}}, 'code': 'x' * 200000})
+    monkeypatch.setattr(db.payload_store.objects, 'truthy_paths', lambda *_: pytest.fail('the list must not inspect snapshots'))
+    assert db.run_progress_evidence([run['id']])[run['id']]['attempts'][0]['has_initial_checkpoint'] is True
+    with db.transaction() as c:
+        c.execute("DELETE FROM document_projections WHERE table_name='job_attempts' AND record_id=?", (attempt['id'],))
+    with pytest.raises(ValueError, match='incomplete'):
+        db.run_progress_evidence([run['id']])
+    projected_paths.clear()
+    assert db.repair_document_projections() == 1
+    assert projected_paths == [PROJECTED_PATHS['job_attempts']] and reads == []
+    assert db.run_progress_evidence([run['id']])[run['id']]['attempts'][0]['has_initial_checkpoint'] is True
     with db.transaction() as c:
         c.execute('DELETE FROM workflow_stages WHERE id=?', (stage['id'],))
     assert db.data_version_usage(target['manifest_sha256']) == []

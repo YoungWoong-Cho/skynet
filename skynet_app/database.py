@@ -1086,38 +1086,24 @@ class Database:
                     while len(self._progress_spec_cache) > 512:
                         self._progress_spec_cache.pop(next(iter(self._progress_spec_cache)))
 
+                # The resume flag comes from the attempt's projection (migration 022), never
+                # from the offloaded execution snapshot itself. An attempt without a snapshot
+                # has nothing to pin; one with a snapshot but no projection fails the list closed.
                 attempts = self._decode_many(connection.execute(f"""
                     SELECT s.run_id, to_jsonb(a) - 'execution_snapshot_json' AS summary,
-                      CASE WHEN jsonb_exists(a.execution_snapshot_json::jsonb, '$skynet_object_v1')
-                        THEN a.execution_snapshot_json::jsonb
-                        ELSE jsonb_build_object(
-                          'plan', jsonb_build_object('native_config', jsonb_build_object('initial_checkpoint',
-                            a.execution_snapshot_json::jsonb #> '{{plan,native_config,initial_checkpoint}}')),
-                          'migration_provenance', jsonb_build_object('checkpoint',
-                            a.execution_snapshot_json::jsonb #> '{{migration_provenance,checkpoint}}'),
-                          'resolved_spec', jsonb_build_object('native', jsonb_build_object('config',
-                            jsonb_build_object('initial_checkpoint',
-                              a.execution_snapshot_json::jsonb #> '{{resolved_spec,native,config,initial_checkpoint}}'))))
-                      END AS resume_evidence
+                           COALESCE(p.projection_json ->> 'has_initial_checkpoint',
+                                    CASE WHEN a.execution_snapshot_json IS NULL THEN 'false' END) AS has_initial_checkpoint
                     FROM job_attempts a
                     JOIN workflow_stages s ON s.id = a.stage_id
+                    LEFT JOIN document_projections p ON p.table_name = 'job_attempts' AND p.record_id = a.id
                     WHERE s.stage_type = 'TRAIN' AND s.run_id IN ({placeholders})
                     ORDER BY s.run_id, a.attempt_number, a.created_at
                 """, batch).fetchall())
-                resume_paths = (
-                    'plan.native_config.initial_checkpoint', 'migration_provenance.checkpoint',
-                    'resolved_spec.native.config.initial_checkpoint',
-                )
-                documents = [row['resume_evidence'] for row in attempts]
-                if self.payload_store:
-                    resume_flags = self.payload_store.truthy_paths(documents, resume_paths)
-                else:
-                    from .payload_store import _path_value
-                    resume_flags = [any(_path_value(document, path) for path in resume_paths)
-                                    for document in documents]
-                for row, pinned_resume in zip(attempts, resume_flags):
-                    attempt = {**row['summary'], 'run_id': row['run_id'],
-                               'has_initial_checkpoint': pinned_resume}
+                if any(row["has_initial_checkpoint"] is None for row in attempts):
+                    raise ValueError("Stored attempt projections are incomplete; the run list is unavailable until the projection repair finishes")
+                for row in attempts:
+                    attempt = {**row["summary"], "run_id": row["run_id"],
+                               "has_initial_checkpoint": row["has_initial_checkpoint"] == "true"}
                     evidence[row["run_id"]]["attempts"].append(attempt)
 
                 checkpoints = self._decode_many(connection.execute(f"""
@@ -4202,50 +4188,55 @@ class Database:
         """, (needles, needles, needles, prefixes)).fetchone() is not None
 
     def repair_document_projections(self, limit: int = 128) -> int:
-        """Project stages written before migration 020 from their offloaded bodies.
+        """Project offloaded documents written before their projection existed.
 
-        Only the target subtrees cross the wire; the projection itself stays in SQL.
+        Only each document's projected subtrees cross the wire; the projection
+        itself stays in SQL. Evaluation stages come first: deletion checks wait
+        on them.
         """
-        from .payload_store import MARKER, PROJECTED_PATHS
-        paths = PROJECTED_PATHS["workflow_stages"]
-        with self.connection() as connection:
-            # to_jsonb keeps the offloaded column as its reference instead of hydrating the body.
-            rows = connection.execute(f"""
-                SELECT to_jsonb(s) AS document FROM workflow_stages s
-                LEFT JOIN document_projections p ON p.table_name='workflow_stages' AND p.record_id=s.id
-                WHERE p.record_id IS NULL AND {visible_sql('workflow_stages', 's')}
-                ORDER BY (s.stage_type <> 'EVALUATE'), s.created_at LIMIT ?
-            """, (limit,)).fetchall()
-        documents = []
-        markers = []
-        for row in rows:
-            body = row["document"]["resolved_config_json"] or "{}"
-            parsed = json.loads(body)
-            if isinstance(parsed, dict) and MARKER in parsed:
-                markers.append((row["document"]["id"], parsed))
-            else:
-                documents.append((row["document"]["id"], body))
-        if markers:
-            if self.payload_store is None:
-                raise ValueError("Offloaded stage bodies need the object store to rebuild their projections")
-            for (stage_id, _), values in zip(markers, self.payload_store.project([marker for _, marker in markers], paths)):
-                rebuilt: dict[str, Any] = {}
-                for path, value in values.items():
-                    cursor = rebuilt
-                    *parents, leaf = path.split(".")
-                    for key in parents:
-                        cursor = cursor.setdefault(key, {})
-                    cursor[leaf] = value
-                documents.append((stage_id, json.dumps(rebuilt)))
-        if not documents:
-            return 0
-        with self.transaction() as connection:
-            connection.executemany(
-                """INSERT INTO document_projections VALUES ('workflow_stages', ?, skynet_project_document(?, 'workflow_stages'))
-                   ON CONFLICT (table_name, record_id) DO UPDATE SET projection_json=excluded.projection_json""",
-                documents,
-            )
-        return len(documents)
+        from .payload_store import FIELDS, MARKER, PROJECTED_PATHS
+        repaired = 0
+        for table, paths in PROJECTED_PATHS.items():
+            column = FIELDS[table]
+            order = "(s.stage_type <> 'EVALUATE'), s.created_at" if table == "workflow_stages" else "s.created_at"
+            with self.connection() as connection:
+                # to_jsonb keeps the offloaded column as its reference instead of hydrating the body.
+                rows = connection.execute(f"""
+                    SELECT to_jsonb(s) AS document FROM {table} s
+                    LEFT JOIN document_projections p ON p.table_name=? AND p.record_id=s.id
+                    WHERE p.record_id IS NULL AND s.{column} IS NOT NULL AND {visible_sql(table, 's')}
+                    ORDER BY {order} LIMIT ?
+                """, (table, limit)).fetchall()
+            documents, markers = [], []
+            for row in rows:
+                body = row["document"][column]
+                parsed = json.loads(body)
+                if isinstance(parsed, dict) and MARKER in parsed:
+                    markers.append((row["document"]["id"], parsed))
+                else:
+                    documents.append((row["document"]["id"], body))
+            if markers:
+                if self.payload_store is None:
+                    raise ValueError(f"Offloaded {table} bodies need the object store to rebuild their projections")
+                for (record_id, _), values in zip(markers, self.payload_store.project([marker for _, marker in markers], paths)):
+                    rebuilt: dict[str, Any] = {}
+                    for path, value in values.items():
+                        cursor = rebuilt
+                        *parents, leaf = path.split(".")
+                        for key in parents:
+                            cursor = cursor.setdefault(key, {})
+                        cursor[leaf] = value
+                    documents.append((record_id, json.dumps(rebuilt)))
+            if not documents:
+                continue
+            with self.transaction() as connection:
+                connection.executemany(
+                    f"""INSERT INTO document_projections VALUES ('{table}', ?, skynet_project_document(?, '{table}'))
+                        ON CONFLICT (table_name, record_id) DO UPDATE SET projection_json=excluded.projection_json""",
+                    documents,
+                )
+            repaired += len(documents)
+        return repaired
 
     def data_version_usage(self, manifest_sha256):
         return self.data_version_usage_many([manifest_sha256])[manifest_sha256]

@@ -82,7 +82,7 @@ def test_migration_backfills_existing_documents_and_rollback_keeps_paths(tmp_pat
         c.execute('DROP FUNCTION skynet_project_document(TEXT,TEXT)')
         c.execute('DROP TABLE document_projections')
         c.execute("INSERT INTO policy_exports(id,payload_json) VALUES ('old-record',?)",(json.dumps({'path':'/old/path'}),))
-        for version in ('018','020','021'):
+        for version in ('018','020','021','022'):
             c.executescript(next((Path(__file__).parents[1]/'skynet_app/migrations/postgresql').glob(f'{version}_*.sql')).read_text())
         assert c.execute("SELECT projection_json->'paths' FROM document_projections WHERE record_id='old-record'").fetchone()[0]==['/old/path']
     with pytest.raises(RuntimeError):
@@ -230,3 +230,43 @@ def test_offloaded_bodies_are_skipped_by_the_trigger_and_projected_by_their_writ
         assert c.execute("SELECT count(*) FROM document_projections WHERE record_id='inline'").fetchone()[0]==0
     with db.connection() as c, pytest.raises(ValueError,match='incomplete'):
         db._evaluation_target_references(c,['v'])
+
+
+def test_022_projects_attempt_resume_pins_and_keeps_other_kinds_byte_identical(tmp_path):
+    db=Database(tmp_path/'projection.db')
+    experiment=db.create_experiment(name='pins',requested_spec=LIST_SPEC)
+    variant=db.create_variant(experiment['latest_revision']['id'],name='run',parameters={},resolved_spec=LIST_SPEC)
+    run=db.create_run(variant['id'],seed=1,adapter_name='x',adapter_version='1',run_directory='/run',status='RUNNING')
+    stage=db.create_stage(run['id'],stage_type='TRAIN',name='train')
+    snapshots={'pinned':{'plan':{'native_config':{'initial_checkpoint':'/saved.ckpt'}}},
+               'provenance':{'migration_provenance':{'checkpoint':{'path':'/old.ckpt'}}},
+               'spec':{'resolved_spec':{'native':{'config':{'initial_checkpoint':'/x'}}}},
+               'empty':{'plan':{'native_config':{'initial_checkpoint':''}}},
+               'null':{'plan':{'native_config':{'initial_checkpoint':None}}},
+               'false':{'migration_provenance':{'checkpoint':False}},
+               'missing':{'plan':{}}}
+    attempts={name:db.create_job_attempt(stage['id'],status='FAILED',execution_snapshot_json=snapshot) for name,snapshot in snapshots.items()}
+    with db.transaction() as c:
+        c.execute("INSERT INTO policy_exports(id,payload_json) VALUES ('export',?)",(json.dumps({'path':'/exported'}),))
+        reapply(c, ['018','020','021'])
+        before={row[0]:row[1] for row in c.execute("SELECT table_name||':'||record_id, projection_json::text FROM document_projections").fetchall()}
+        assert not any(key.startswith('job_attempts:') for key in before)
+        c.executescript(next(MIGRATIONS.glob('022_*.sql')).read_text())
+        after={row[0]:row[1] for row in c.execute("SELECT table_name||':'||record_id, projection_json::text FROM document_projections").fetchall()}
+    for key,value in before.items():
+        assert after[key]==value, key
+    flags={name:json.loads(after['job_attempts:'+attempt['id']])['has_initial_checkpoint'] for name,attempt in attempts.items()}
+    assert flags=={'pinned':True,'provenance':True,'spec':True,'empty':False,'null':False,'false':False,'missing':False}
+    # An attempt without a snapshot has nothing to pin and needs no projection.
+    attempts['bare']=db.create_job_attempt(stage['id'],status='PENDING'); flags['bare']=False
+    evidence=db.run_progress_evidence([run['id']])[run['id']]
+    assert {row['id']:row['has_initial_checkpoint'] for row in evidence['attempts']}=={attempts[name]['id']:flag for name,flag in flags.items()}
+    # A new attempt projects through the trigger; a missing projection fails the list closed.
+    later=db.create_job_attempt(stage['id'],status='RUNNING',execution_snapshot_json={'plan':{'native_config':{'initial_checkpoint':'/again'}}})
+    assert db.run_progress_evidence([run['id']])[run['id']]['attempts'][-1]['has_initial_checkpoint'] is True
+    with db.transaction() as c:
+        c.execute("DELETE FROM document_projections WHERE table_name='job_attempts' AND record_id=?",(later['id'],))
+    with pytest.raises(ValueError,match='incomplete'):
+        db.run_progress_evidence([run['id']])
+    assert db.repair_document_projections()==1
+    assert db.run_progress_evidence([run['id']])[run['id']]['attempts'][-1]['has_initial_checkpoint'] is True

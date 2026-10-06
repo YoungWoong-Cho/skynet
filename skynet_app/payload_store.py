@@ -21,6 +21,8 @@ FIELDS = {
 # are the subtrees that projection reads, so a repair can rebuild it remotely.
 PROJECTED_PATHS = {
     "workflow_stages": ("context.target_dataset", "plan.native_config.canonical_evaluation.target_dataset"),
+    "job_attempts": ("plan.native_config.initial_checkpoint", "migration_provenance.checkpoint",
+                     "resolved_spec.native.config.initial_checkpoint"),
 }
 MARKER = "$skynet_object_v1"
 _CACHE = OrderedDict()

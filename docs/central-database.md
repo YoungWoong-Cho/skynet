@@ -51,14 +51,14 @@ keeps a reference to its body, so Storage cleanup removes a body only after its
 attachment or note is deleted.
 
 Large stored documents are never parsed on request or reconcile paths. Experiment
-revisions, variants, evaluation stages, live sessions, policy exports and data
-bundles each keep a small projection in `document_projections` (retained paths,
-dataset assignments, the run list's spec fields, tracking providers, frozen
-evaluation targets), computed by `skynet_project_document` in PostgreSQL. A
+revisions, variants, evaluation stages, job attempts, live sessions, policy exports
+and data bundles each keep a small projection in `document_projections` (retained
+paths, dataset assignments, the run list's spec fields, tracking providers, frozen
+evaluation targets, attempt resume pins), computed by `skynet_project_document` in PostgreSQL. A
 trigger maintains it for documents stored inline; for documents offloaded to the
 object store the uploader writes it in the same transaction, and
-`repair_document_projections` backfills stages written before migration 020 from
-their bodies' target subtrees during reconcile. Usage, deletion and retirement
+`repair_document_projections` backfills stages and attempts written before their
+projection existed from the bodies' projected subtrees during reconcile. Usage, deletion and retirement
 checks for evaluation targets read these projections and fail closed while any
 stage still lacks one.
 
