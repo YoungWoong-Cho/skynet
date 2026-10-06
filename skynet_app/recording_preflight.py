@@ -32,8 +32,8 @@ class RecordingPreflight:
                                requirements=job["requirements"], split=job["split"], receipt_path=root + "/result.json")
                 files[relative + "/request.json"] = canonical_json(request)
                 self.cluster.write_capsule_files(job["id"], files, DEFAULT_GATEWAY)
-                queue = CLUSTER.queues["normal"]
-                python = str(CLUSTER.runtime_profiles["xpolicylab-act"].environment_path) + "/bin/python"
+                queue = CLUSTER.queue(CLUSTER.defaults.background_queue_policy)
+                python = str(CLUSTER.runtime_profile(CLUSTER.defaults.background_runtime_profile).environment_path) + "/bin/python"
                 script = "\n".join([
                     "#!/bin/bash", f"#SBATCH --job-name=inspect-{job['id'][:8]}",
                     f"#SBATCH --account={queue.account}", f"#SBATCH --partition={queue.partition}",

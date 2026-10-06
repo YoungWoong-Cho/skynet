@@ -575,7 +575,7 @@ API: `POST /api/data/exports` `{session_id, adapter_id, adapter_version_id, adap
    - **Dataset directory**: repo 안의 디렉터리. glob과 `..`은 안 된다. repo 전체는 import할 수 없다.
    - **Format**: "Must exactly match the format declared by the consuming adapter."
    - **Bundle role**(필수): 학습 입력이면 `training_data`. 제안값은 `training_data`, `evaluation_data`, `simulation_assets`다(`index.html:4277-4283, 4893-4897`. `role`로 전송, `app.js:14807`).
-   - **SSH gateway**, **Slurm queue**(**overcap (preemptible)** 기본 / **rl2-lab**), **CPUs**(기본 8), **Memory / GB**(기본 32), **Time limit**(기본 `04:00:00`, "Slurm duration, from 1 minute to 24 hours.")
+   - **SSH gateway**, **Slurm queue**(`skynet.json` `queues`의 각 항목. 기본은 `defaults.import_queue_policy`, 지금은 **Preemptible / overcap**), **CPUs**(기본 8), **Memory / GB**(기본 32), **Time limit**(기본 `04:00:00`, "Slurm duration, from 1 minute to 24 hours.")
    - **Submit import job**을 누른다.
 3. Data → Datasets(또는 Files) 패널 머리의 **Import history**를 연다. 이 버튼은 import job이 하나라도 생긴 뒤에야 보인다(`app.js:14691`).
    - 열: Dataset directory, Revision, State, Slurm, Dataset, Updated, Actions. 행 동작은 **Detail**(로그)과 **Cancel import**다(`app.js:14692-14706`).
@@ -693,7 +693,7 @@ HAT의 `train.presets`(`adapters/hat_manifest.py:77-95`):
   - 바뀌면 `execution_provenance`에 `cluster_cpu_per_gpu_policy` 변환으로 남는다.
   - 예전 spec에도 적용된다. HAT 본 실험 spec은 `cpus_per_task: 2`로 저장되어 있다.
 - UI의 **CPUs / task**는 읽기 전용이고 `const CPUS_PER_GPU = 8`(`app.js:2562-2575`)로 계산한다. 이 값은 config를 따르지 않는 중복 상수다.
-- queue(`skynet.json:490-502`):
+- queue는 `skynet.json` `queues`가 정한다. 코드와 화면은 이 표를 복사하지 않고 설정을 읽는다(가드 테스트 `tests/test_no_hardcoded_cluster_facts.py`). 2026-10-06 기준 값:
 
   | queue | account/partition | 최대 시간 | 선점 |
   |---|---|---|---|
@@ -768,6 +768,8 @@ job 환경변수: `SKYNET_RUN_ID`, `SKYNET_RUN_DIR`, `SKYNET_SOURCE_DIR`, `SKYNE
 ---
 
 ## 6. 모니터링, 평가, checkpoint
+
+- 알려진 제약(2026-10-06): 제출 양식에는 노드 제외 옵션이 없고, **Node**는 특정 노드를 고정할 때만 쓴다. GPU 종류를 `any`로 두면 어느 노드에든 배치되는데, A40 노드 megabot에서 job에 GPU가 바인딩되지 않은 사례가 있었다(`SLURM_JOB_GPUS`·`CUDA_VISIBLE_DEVICES` 비어 있음). 같은 증상이 보이면 GPU 종류를 L40S 같은 구체적 종류로 다시 제출한다. accounting(`sacct`)이 꺼져 있는 동안은 job이 slurmctld 메모리에 있을 때 `scontrol show job <id>`로만 `AllocTRES`를 확인할 수 있다.
 
 ### 6-1. Runs
 

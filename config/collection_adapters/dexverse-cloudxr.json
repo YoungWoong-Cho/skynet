@@ -818,13 +818,10 @@
     },
     "resources": {
       "gateway": "auto",
-      "account": "rl2-lab",
-      "partition": "rl2-lab",
       "gpu_count": 1,
       "gpu_type": "l40s",
       "cpu_count": 16,
       "memory_gb": 64,
-      "time_limit": "04:00:00",
       "node": null
     }
   },

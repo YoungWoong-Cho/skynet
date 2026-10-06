@@ -70,7 +70,7 @@ class ClusterPolicyPreparation(RecordingPreflight):
     def _stage_cluster_attempt(self, job):
         sources = self._preflight_sources(job, self._archived_sources(job))
         sources = self.observations.ensure(job, sources)
-        queue = CLUSTER.queues["normal"]
+        queue = CLUSTER.queue(CLUSTER.defaults.background_queue_policy)
         self.update(job["id"], state="STAGING", stage="STAGING", error=None,
                     cluster_partition=queue.partition, cluster_account=queue.account, cluster_cpus=4,
                     detail="Preparing shared recording data on the training cluster")
@@ -96,7 +96,7 @@ class ClusterPolicyPreparation(RecordingPreflight):
                        receipt_path=root + "/result.json", loader=self._loader_request(job, worker, root))
         files[relative + "/request.json"] = canonical_json(request)
         self.cluster.write_capsule_files(job["id"], files, DEFAULT_GATEWAY)
-        profile = CLUSTER.runtime_profiles["xpolicylab-act"]
+        profile = CLUSTER.runtime_profile(CLUSTER.defaults.background_runtime_profile)
         interpreter = [str(profile.environment_path) + "/bin/python"]
         dependencies = job.get("conversion_dependencies") or []
         setup = []

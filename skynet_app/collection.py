@@ -306,12 +306,20 @@ class CollectionResources(BaseModel):
     gateway: str = "auto"
     account: str = Field(default_factory=lambda: CLUSTER.queue(CLUSTER.defaults.queue_policy).account)
     partition: str = Field(default_factory=lambda: CLUSTER.queue(CLUSTER.defaults.queue_policy).partition)
-    gpu_count: int = Field(default=1, ge=1, le=16)
-    gpu_type: str | None = Field(default="l40s", pattern=r"^[A-Za-z0-9_.-]+$")
-    cpu_count: int = Field(default=8, ge=1, le=256)
-    memory_gb: int = Field(default=64, ge=1, le=2048)
-    time_limit: str = "04:00:00"
+    gpu_count: int = Field(default=1, ge=1, le=CLUSTER.limits.max_gpus_per_node)
+    gpu_type: str | None = Field(default_factory=lambda: CLUSTER.defaults.gpu_type)
+    cpu_count: int = Field(default_factory=lambda: CLUSTER.defaults.cpus_per_gpu, ge=1, le=CLUSTER.limits.max_cpus_per_task)
+    memory_gb: int = Field(default_factory=lambda: CLUSTER.defaults.memory_gb, ge=1, le=CLUSTER.limits.max_memory_gb)
+    time_limit: str = Field(default_factory=lambda: CLUSTER.defaults.time_limit)
     node: str | None = None
+
+    @field_validator("gpu_type")
+    @classmethod
+    def validate_gpu_type(cls, value: str | None) -> str | None:
+        # Older snapshots recorded no type; that means any GPU, like the alias without a target.
+        if value is not None and value not in CLUSTER.gpu_aliases:
+            raise ValueError(f"GPU type is not configured: {value}")
+        return value
 
     @field_validator("gateway")
     @classmethod
@@ -1318,11 +1326,7 @@ def compile_collection_sbatch(session: Mapping[str, Any]) -> CompiledCollectionJ
     job_name = f"collect-{safe_name[:36]}-{session['id'][:8]}"
     stdout_path = f"{CLUSTER.paths.logs}/collection-{session['id']}-%j.out"
     stderr_path = f"{CLUSTER.paths.logs}/collection-{session['id']}-%j.err"
-    gpu = (
-        f"gpu:{resources.gpu_type}:{resources.gpu_count}"
-        if resources.gpu_type
-        else f"gpu:{resources.gpu_count}"
-    )
+    gpu = CLUSTER.gres(resources.gpu_type, resources.gpu_count) if resources.gpu_type else f"gpu:{resources.gpu_count}"
     directives = [
         "#!/usr/bin/env bash",
         f"#SBATCH --job-name={job_name}",

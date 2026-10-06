@@ -230,10 +230,10 @@ class ObservationPreparation:
             raise ValueError('Observation request exceeds the worker JSON size limit')
         capsule[relative + '/request.json'] = raw_request
         self.cluster.write_capsule_files(identifier, capsule, DEFAULT_GATEWAY)
-        queue = CLUSTER.queues['normal']
+        queue = CLUSTER.queue(CLUSTER.defaults.background_queue_policy)
         rendering = request['mode'] == 'render'
-        runtime_id = 'isaacsim-5.1.0_isaaclab-2.3.2_py311' if rendering else 'xpolicylab-act'
-        runtime = CLUSTER.runtime_profiles[runtime_id]
+        runtime = CLUSTER.runtime_profile(
+            CLUSTER.defaults.rendering_runtime_profile if rendering else CLUSTER.defaults.background_runtime_profile)
         environment = str(runtime.environment_path)
         gpu = []
         if rendering:
@@ -241,7 +241,7 @@ class ObservationPreparation:
             if placement is None:
                 raise ValueError('Observation rendering requires a configured Isaac-compatible cluster node')
             node = placement.default_node
-            gpu = [f'#SBATCH --nodelist={node}', f'#SBATCH --gres=gpu:{placement.nodes[node].gpu_type}:1']
+            gpu = [f'#SBATCH --nodelist={node}', f'#SBATCH --gres={CLUSTER.gres(placement.nodes[node].gpu_type, 1)}']
         # Rendering holds one GPU; point-cloud derivation is a CPU-only job.
         cpus = cpus_for_gpus(1) if rendering else 8
         script = '\n'.join([

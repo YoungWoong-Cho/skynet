@@ -15,7 +15,7 @@ from typing import Any, Iterable, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer
 
-from .cluster_config import CLUSTER
+from .cluster_config import CLUSTER, format_slurm_duration, parse_slurm_duration
 
 
 WORK_ROOT = CLUSTER.paths.work_root
@@ -462,25 +462,6 @@ class GPUResourceSpec(CanonicalModel):
         return self
 
 
-def parse_slurm_duration(value: str) -> int:
-    match = re.fullmatch(r"(?:(\d+)-)?(\d{1,3}):(\d{2}):(\d{2})", value.strip())
-    if not match:
-        raise ValueError("time limit must use HH:MM:SS or D-HH:MM:SS")
-    days, hours, minutes, seconds = (int(item or 0) for item in match.groups())
-    if minutes > 59 or seconds > 59 or (days and hours > 23):
-        raise ValueError("invalid Slurm time limit")
-    return days * 86400 + hours * 3600 + minutes * 60 + seconds
-
-
-def format_slurm_duration(total_seconds: int) -> str:
-    days, remainder = divmod(total_seconds, 86400)
-    hours, remainder = divmod(remainder, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    if days:
-        return f"{days}-{hours:02d}:{minutes:02d}:{seconds:02d}"
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-
 class ResourceSpec(CanonicalModel):
     def with_gpu_cpu_policy(self, gpu_count: int) -> "ResourceSpec":
         from .cluster_config import cpus_for_gpus
@@ -491,7 +472,7 @@ class ResourceSpec(CanonicalModel):
     queue_policy: str = Field(default_factory=lambda: CLUSTER.defaults.queue_policy)
     account: str = Field(default_factory=lambda: CLUSTER.queue(CLUSTER.defaults.queue_policy).account)
     partition: str = Field(default_factory=lambda: CLUSTER.queue(CLUSTER.defaults.queue_policy).partition)
-    nodes: int = Field(default=1, ge=1, le=1)
+    nodes: int = Field(default=1, ge=1, le=CLUSTER.limits.max_nodes)
     node: NodeSpec = Field(default_factory=NodeSpec)
     gpu: GPUResourceSpec = Field(default_factory=GPUResourceSpec)
     cpus_per_task: int = Field(default_factory=lambda: CLUSTER.defaults.cpus_per_task, ge=1, le=CLUSTER.limits.max_cpus_per_task)
@@ -682,7 +663,7 @@ class EvaluationSpec(CanonicalModel):
     checkpoint_selector: Literal["best", "latest", "explicit"] = "best"
     checkpoint_path: str | None = None
     auto_resume: bool = True
-    max_attempts: int = Field(default=5, ge=1, le=100)
+    max_attempts: int = Field(default_factory=lambda: CLUSTER.defaults.max_attempts, ge=1, le=100)
     data_root: str = EVAL_ROOT
     native: dict[str, Any] = Field(default_factory=dict)
 

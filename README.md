@@ -165,9 +165,7 @@ train:
     max_attempts: 5
 resources:
   gateway: auto
-  queue_policy: normal
-  account: rl2-lab
-  partition: rl2-lab
+  queue_policy: normal   # a key of `queues` in config/clusters/skynet.json; account and partition follow from it
   nodes: 1
   node:
     mode: auto
@@ -352,14 +350,13 @@ There is one Slurm cluster behind two interchangeable login gateways:
 - Mixed allocations such as A40 GPUs plus L40S GPUs and multi-node distributed jobs are intentionally disabled.
 - Slurm remains the source of truth for scheduling, placement, preemption, exit state, and pending reasons.
 
-Account and partition must be selected as an atomic pair:
-
-| Scheduling mode | `--partition` | `--account` | Behavior |
-| --- | --- | --- | --- |
-| Normal | `rl2-lab` | `rl2-lab` | Uses the lab allocation |
-| Preemptible | `overcap` | `overcap` | May run above the lab cap and may be preempted |
-
-`rl2-lab` requests are limited to `04:00:00`; `overcap` requests may run for up to `2-00:00:00` and remain preemptible. Long-running workloads should checkpoint and resume across attempts.
+Account and partition are never chosen separately: each key of `queues` in
+`config/clusters/skynet.json` names one partition/account pair with its
+`max_time_seconds` and whether it is `preemptible`. The experiment form offers
+exactly those keys, and `GET /api/settings` shows the active values. **Auto**
+uses the first non-preemptible queue when the requested wall time fits its
+limit and the lab allocation has room, otherwise the preemptible queue. Jobs on
+the preemptible queue should checkpoint and resume across attempts.
 
 Generated jobs use separate output files:
 

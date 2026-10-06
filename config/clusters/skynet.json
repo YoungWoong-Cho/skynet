@@ -38,7 +38,8 @@
   "commands": {
     "slurm_bin": "/opt/slurm/Ubuntu-20.04/current/bin",
     "gpu_usage": "/coc/testnvme/admin/tools/skynet-utilities/gpu_usage",
-    "gpu_usage_interpreter": "/coc/flash7/ycho420/envs/skynet-gpu-usage/bin/python"
+    "gpu_usage_interpreter": "/coc/flash7/ycho420/envs/skynet-gpu-usage/bin/python",
+    "host_python": "/nethome/ycho420/miniconda3/bin/python"
   },
   "runtime_profiles": {
     "isaacsim-5.1.0_isaaclab-2.3.2_py311": {
@@ -521,6 +522,10 @@
   },
   "defaults": {
     "queue_policy": "normal",
+    "import_queue_policy": "overcap",
+    "background_queue_policy": "normal",
+    "background_runtime_profile": "xpolicylab-act",
+    "rendering_runtime_profile": "isaacsim-5.1.0_isaaclab-2.3.2_py311",
     "gateway": "auto",
     "runtime_backend": "uv",
     "gpu_type": "any",

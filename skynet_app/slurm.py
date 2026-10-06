@@ -1513,10 +1513,10 @@ def compile_sbatch(
     job_name = _safe_identifier(f"{spec.identity.experiment}-{stage}", maximum=64)
     stdout_path_template = f"{paths.logs}/{job_name}-%j.out"
     stderr_path_template = f"{paths.logs}/{job_name}-%j.err"
-    if gpu_type not in CLUSTER.gpu_aliases:
-        raise SlurmCompileError(f"GPU type is not configured: {gpu_type}")
-    gpu_alias = CLUSTER.gpu_aliases[gpu_type]
-    gres = f"gpu:{gpu_count}" if gpu_alias is None else f"gpu:{gpu_alias}:{gpu_count}"
+    try:
+        gres = CLUSTER.gres(gpu_type, gpu_count)
+    except ValueError as error:
+        raise SlurmCompileError(str(error)) from error
     directives = [
         f"#SBATCH --job-name={job_name}",
         f"#SBATCH --account={spec.resources.account}",

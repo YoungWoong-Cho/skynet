@@ -8,11 +8,70 @@ from dataclasses import dataclass
 from textwrap import dedent
 from typing import Any, Mapping
 
-from .cluster_config import CLUSTER
+from pathlib import PurePosixPath
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from .cluster_config import CLUSTER, format_slurm_duration, parse_slurm_duration
 
 
 UV_VERSION = "0.12.8"
 UV_ARCHIVE_SHA256 = "2e2b37e9811e17675a9e70bed5e1a58fc8c0388be63d751d72cc735188c149ff"
+
+class HuggingFaceImportRequest(BaseModel):
+    revision: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
+    subset: str = Field(min_length=1, max_length=512)
+    format: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    role: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    bundle_name: str = Field(default="imported-data", min_length=1, max_length=255)
+    bundle_version: str = Field(default="import", min_length=1, max_length=255)
+    gateway: str = Field(default_factory=lambda: CLUSTER.defaults.gateway)
+    queue: str = Field(default_factory=lambda: CLUSTER.defaults.import_queue_policy)
+    # Import workers download in parallel threads; these caps bound one CPU-only job.
+    cpus: int = Field(default=8, ge=1, le=64)
+    memory_gb: int = Field(default=32, ge=1, le=512)
+    time_limit: str = Field(default_factory=lambda: CLUSTER.defaults.time_limit)
+
+    @field_validator("revision")
+    @classmethod
+    def normalize_revision(cls, value: str) -> str:
+        return value.strip().lower()
+
+    @field_validator("subset")
+    @classmethod
+    def validate_subset(cls, value: str) -> str:
+        value = value.strip().strip("/")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", value):
+            raise ValueError("subset must be a repository-relative directory without globs")
+        if any(part in {"", ".", ".."} for part in PurePosixPath(value).parts):
+            raise ValueError("subset contains an unsafe path component")
+        return value
+
+    @field_validator("gateway")
+    @classmethod
+    def validate_gateway(cls, value: str) -> str:
+        if value != "auto" and value not in CLUSTER.gateways:
+            raise ValueError(f"gateway must be auto or one of: {', '.join(CLUSTER.gateways)}")
+        return value
+
+    @field_validator("queue")
+    @classmethod
+    def validate_queue(cls, value: str) -> str:
+        if value not in CLUSTER.queues:
+            raise ValueError(f"queue must be one of: {', '.join(CLUSTER.queues)}")
+        return value
+
+    @model_validator(mode="after")
+    def validate_import_time(self) -> "HuggingFaceImportRequest":
+        seconds = parse_slurm_duration(self.time_limit)
+        limit = CLUSTER.queue(self.queue).max_time_seconds
+        if not 60 <= seconds <= limit:
+            raise ValueError(
+                f"Import time limit must be between 00:01:00 and {format_slurm_duration(limit)} on the {self.queue} queue"
+            )
+        self.time_limit = format_slurm_duration(seconds)
+        return self
+
 HUGGINGFACE_HUB_VERSION = "1.29.0"
 
 
@@ -334,15 +393,15 @@ def build_huggingface_import_job(
         "bundle_version": str(request["bundle_version"]),
         "work_root": CLUSTER.paths.work_root,
         "huggingface_hub_version": HUGGINGFACE_HUB_VERSION,
-        "cpus": int(request.get("cpus", 8)),
+        "cpus": int(request["cpus"]),
     }
     request_b64 = base64.b64encode(
         (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
     ).decode("ascii")
     program_b64 = base64.b64encode(_IMPORT_PROGRAM.encode("utf-8")).decode("ascii")
-    time_limit = str(request.get("time_limit") or ("04:00:00" if not queue.preemptible else "24:00:00"))
-    cpus = int(request.get("cpus", 8))
-    memory_gb = int(request.get("memory_gb", 32))
+    time_limit, cpus, memory_gb = str(request["time_limit"]), int(request["cpus"]), int(request["memory_gb"])
+    if CLUSTER.commands.host_python is None:
+        raise ValueError("Dataset imports need commands.host_python in the cluster configuration")
     script = dedent(
         f"""\
         #!/usr/bin/env bash
@@ -372,7 +431,7 @@ def build_huggingface_import_job(
         UV_ROOT="$WORK_ROOT/tools/uv/$UV_VERSION"
         UV="$UV_ROOT/uv"
         UV_ARCHIVE="$UV_ROOT/uv-x86_64-unknown-linux-gnu.tar.gz"
-        PYTHON={shlex.quote(CLUSTER.paths.home_root + '/miniconda3/bin/python')}
+        PYTHON={shlex.quote(CLUSTER.commands.host_python)}
         mkdir -p "$RUN_DIR" "$WORK_ROOT/logs" "$WORK_ROOT/tmp/$SLURM_JOB_ID" \
           "$WORK_ROOT/.cache/uv" "$WORK_ROOT/.cache/huggingface" "$UV_ROOT"
         export TMPDIR="$WORK_ROOT/tmp/$SLURM_JOB_ID"

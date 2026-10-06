@@ -21,11 +21,7 @@ def compile_isaac_job(profile, root, name, argv, checks=(), after=()):
         if any(c.isspace() for c in path):
             raise ValueError("Isaac job paths cannot contain whitespace")
     runtime, repo = profile["runtime"], profile["repository"]
-    gpu_type = profile.get("gpu_type", "any")
-    if gpu_type not in CLUSTER.gpu_aliases:
-        raise ValueError(f"GPU type is not configured: {gpu_type}")
-    gpu_alias = CLUSTER.gpu_aliases[gpu_type]
-    gres = "gpu:1" if gpu_alias is None else f"gpu:{gpu_alias}:1"
+    gres = CLUSTER.gres(profile.get("gpu_type", CLUSTER.defaults.gpu_type), 1)
     return "\n".join(
         [
             "#!/bin/bash",

@@ -13,7 +13,9 @@ from pydantic import ValidationError
 from skynet_app.cluster_runtime import ClusterError, Submission
 from skynet_app.data_imports import _IMPORT_PROGRAM, build_huggingface_import_job
 from skynet_app.database import Database
-from skynet_app.pipeline_api import HuggingFaceImportRequest, PipelineService
+from skynet_app.cluster_config import CLUSTER, format_slurm_duration
+from skynet_app.data_imports import HuggingFaceImportRequest
+from skynet_app.pipeline_api import PipelineService
 
 
 RESOURCE = {
@@ -34,7 +36,6 @@ def import_request() -> HuggingFaceImportRequest:
         bundle_name="groot-gr1-cansort",
         bundle_version="n16-test",
         gateway="auto",
-        queue="overcap",
     )
 
 
@@ -85,15 +86,18 @@ class ImportCluster:
         return "sky2", json.dumps(self.result)
 
 
-def test_generated_import_is_pinned_and_uses_overcap():
+def test_generated_import_is_pinned_and_uses_the_import_queue():
+    queue = CLUSTER.queue(CLUSTER.defaults.import_queue_policy)
+    assert import_request().queue == CLUSTER.defaults.import_queue_policy
     job = build_huggingface_import_job("a" * 36, RESOURCE, import_request().model_dump())
     assert job.script.startswith("#!/usr/bin/env bash\n")
     assert "list_repo_tree(" in _IMPORT_PROGRAM
     assert "hf_hub_download(" in _IMPORT_PROGRAM
     assert "snapshot_download(" not in _IMPORT_PROGRAM
     assert "SKYNET_DATA_IMPORT_PROGRESS=" in _IMPORT_PROGRAM
-    assert "#SBATCH --partition=overcap" in job.script
-    assert "#SBATCH --account=overcap" in job.script
+    assert f"#SBATCH --partition={queue.partition}" in job.script
+    assert f"#SBATCH --account={queue.account}" in job.script
+    assert f"PYTHON={CLUSTER.commands.host_python}" in job.script
     assert "huggingface-hub==1.29.0" in job.script
     assert "refs/heads/main" not in job.script
 
@@ -320,13 +324,23 @@ def test_concurrent_import_identity_claim_is_atomic(tmp_path):
 @pytest.mark.parametrize(("field", "value"), [
     ("cpus", 0), ("cpus", 65), ("cpus", 1.5),
     ("memory_gb", 0), ("memory_gb", 513),
-    ("time_limit", "00:00:59"), ("time_limit", "24:00:01"),
-    ("time_limit", "00:60:00"), ("time_limit", "04:00:00\n#SBATCH --mem=999G"),
+    ("time_limit", "00:00:59"), ("time_limit", "00:60:00"), ("time_limit", "04:00:00\n#SBATCH --mem=999G"),
 ])
 def test_import_resource_budget_rejects_invalid_limits(field, value):
     payload = {**import_request().model_dump(), field: value}
     with pytest.raises(ValidationError):
         HuggingFaceImportRequest.model_validate(payload)
+
+
+@pytest.mark.parametrize("policy", list(CLUSTER.queues))
+def test_import_time_limit_is_bounded_by_the_chosen_queue(policy):
+    # Each queue allows up to its own maximum, which replaces the old fixed 24-hour cap.
+    maximum = CLUSTER.queue(policy).max_time_seconds
+    payload = {**import_request().model_dump(), "queue": policy}
+    accepted = HuggingFaceImportRequest.model_validate({**payload, "time_limit": format_slurm_duration(maximum)})
+    assert accepted.time_limit == format_slurm_duration(maximum)
+    with pytest.raises(ValidationError, match=policy):
+        HuggingFaceImportRequest.model_validate({**payload, "time_limit": format_slurm_duration(maximum + 1)})
 
 
 def test_import_time_limit_normalizes_surrounding_whitespace_before_compilation():

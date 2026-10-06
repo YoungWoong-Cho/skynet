@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
+# Queue, account and paths come from the cluster configuration, passed by the caller:
+#   sbatch --partition=<queues.<policy>.partition> --account=<queues.<policy>.account> \
+#     --chdir="$WORK_ROOT" --output="$WORK_ROOT/logs/%x-%j.out" --error="$WORK_ROOT/logs/%x-%j.err" \
+#     --export=ALL,SKYNET_WORK_ROOT="$WORK_ROOT",SKYNET_HOST_PYTHON=<commands.host_python> \
+#     ops/datasets/download_dexverse_assets.sbatch
 #SBATCH --job-name=sync-dexverse-assets
-#SBATCH --partition=rl2-lab
-#SBATCH --account=rl2-lab
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=24G
 #SBATCH --time=04:00:00
-#SBATCH --chdir=/coc/flash7/ycho420
-#SBATCH --output=/coc/flash7/ycho420/logs/%x-%j.out
-#SBATCH --error=/coc/flash7/ycho420/logs/%x-%j.err
 
 set -euo pipefail
 umask 0027
 
-ROOT=/coc/flash7/ycho420
+ROOT="${SKYNET_WORK_ROOT:?set SKYNET_WORK_ROOT to the cluster work root (paths.work_root)}"
 DATASETS_ROOT="$ROOT/datasets"
 DEXVERSE_COMMIT=30cc673e27684b9f10186fa6bea731aed246bc9f
 RELEASE_REVISION=d4cc36e10e27e481f31ebb7bf5111d37c7b51e51
@@ -36,7 +36,7 @@ TOOLING="$STAGING/tooling"
 STATE="$STAGING/.state"
 UV_ROOT="$ROOT/tools/uv/$UV_VERSION"
 UV="$UV_ROOT/uv"
-PYTHON=/nethome/ycho420/miniconda3/bin/python
+PYTHON="${SKYNET_HOST_PYTHON:?set SKYNET_HOST_PYTHON to the host interpreter (commands.host_python)}"
 
 mkdir -p "$DATASETS_ROOT/resources" "$DATASETS_ROOT/derivatives" \
   "$DATASETS_ROOT/bundles" "$DATASETS_ROOT/.staging" "$STATE" "$TOOLING" \

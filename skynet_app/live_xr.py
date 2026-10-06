@@ -442,7 +442,7 @@ class LiveXRService:
                 f"#SBATCH --job-name=live-xr-{job['id'][:8]}",
                 f"#SBATCH --account={p['account']}",
                 f"#SBATCH --partition={p['partition']}",
-                f"#SBATCH --gres=gpu:{p['gpu_type']}:1",
+                f"#SBATCH --gres={CLUSTER.gres(p['gpu_type'], 1)}",
                 f"#SBATCH --cpus-per-task={CLUSTER.defaults.cpus_per_gpu}",
                 "#SBATCH --mem=48G",
                 f"#SBATCH --time={minutes // 60:02}:{minutes % 60:02}:00",

@@ -289,7 +289,7 @@
                     </thead>
                     <tbody id="usage-body">
                       <tr class="empty-row">
-                        <td colspan="4">Loading account usage...</td>
+                        <td colspan="<!-- gpu-usage-colspan -->">Loading account usage...</td>
                       </tr>
                     </tbody>
                   </table>
@@ -1259,7 +1259,7 @@ trainer.deterministic=true"
                           type="number"
                           value="1"
                           min="1"
-                          max="16"
+                          max="<!-- max-gpus-per-node -->"
                           disabled=""
                         />
                       </div>
@@ -1276,7 +1276,7 @@ trainer.deterministic=true"
                           type="number"
                           value="1"
                           min="1"
-                          max="1"
+                          max="<!-- max-nodes -->"
                           readonly=""
                         />
                       </div>
@@ -1284,11 +1284,12 @@ trainer.deterministic=true"
                         <label for="resource-cpus">CPUs / task</label>
                         <input
                           id="resource-cpus"
+                          data-cpus-per-gpu="<!-- cpus-per-gpu -->"
                           type="number"
-                          value="8"
+                          value="<!-- cpus-per-gpu -->"
                           readonly
                           min="1"
-                          max="128"
+                          max="<!-- max-cpus-per-task -->"
                         />
                       </div>
                       <div class="field">
@@ -1296,16 +1297,16 @@ trainer.deterministic=true"
                         <input
                           id="resource-memory"
                           type="number"
-                          value="64"
+                          value="<!-- default-memory-gb -->"
                           min="1"
-                          max="2048"
+                          max="<!-- max-memory-gb -->"
                         />
                       </div>
                       <div class="field">
                         <label for="resource-time">Wall time</label>
                         <input
                           id="resource-time"
-                          value="04:00:00"
+                          value="<!-- default-time-limit -->"
                           pattern="(?:\d+-)?\d{1,3}:\d{2}:\d{2}"
                         />
                       </div>
@@ -1333,7 +1334,7 @@ trainer.deterministic=true"
                         >
                         <input
                           id="checkpoint-path"
-                          placeholder="/coc/flash7/ycho420/artifacts/.../last.ckpt"
+                          placeholder="<!-- artifacts-path-example -->"
                         />
                       </div>
                       <div class="field">
@@ -1376,7 +1377,7 @@ trainer.deterministic=true"
                         <input
                           id="checkpoint-max-attempts"
                           type="number"
-                          value="5"
+                          value="<!-- default-max-attempts -->"
                           min="1"
                           max="100"
                           required=""
@@ -2203,7 +2204,7 @@ trainer.deterministic=true"
                       <input
                         id="evaluation-max-attempts"
                         type="number"
-                        value="5"
+                        value="<!-- default-max-attempts -->"
                         min="1"
                         max="100"
                       />
@@ -3120,7 +3121,7 @@ trainer.deterministic=true"
                                       >Output path</label
                                     ><input
                                       id="collection-output-path"
-                                      placeholder="/coc/flash7/ycho420/datasets/.staging/collection/..."
+                                      placeholder="<!-- collection-output-example -->"
                                       required=""
                                     />
                                   </div>
@@ -3420,7 +3421,7 @@ trainer.deterministic=true"
                                       type="number"
                                       value="1"
                                       min="1"
-                                      max="16"
+                                      max="<!-- max-gpus-per-node -->"
                                       required=""
                                     /><small
                                       >Collection requires at least one
@@ -3442,9 +3443,9 @@ trainer.deterministic=true"
                                     ><input
                                       id="collection-cpu-count"
                                       type="number"
-                                      value="16"
+                                      value="<!-- cpus-per-gpu -->"
                                       min="1"
-                                      max="256"
+                                      max="<!-- max-cpus-per-task -->"
                                       required=""
                                     />
                                   </div>
@@ -3454,9 +3455,9 @@ trainer.deterministic=true"
                                     ><input
                                       id="collection-memory-gb"
                                       type="number"
-                                      value="64"
+                                      value="<!-- collection-memory-gb -->"
                                       min="1"
-                                      max="2048"
+                                      max="<!-- max-memory-gb -->"
                                       required=""
                                     />
                                   </div>
@@ -3465,7 +3466,7 @@ trainer.deterministic=true"
                                       >Time limit</label
                                     ><input
                                       id="collection-time-limit"
-                                      value="04:00:00"
+                                      value="<!-- collection-time-limit -->"
                                       required=""
                                     />
                                   </div>
@@ -4154,7 +4155,7 @@ Select a session.</pre
                         <label for="data-version-path">Cluster path</label
                         ><input
                           id="data-version-path"
-                          placeholder="/coc/flash7/ycho420/datasets/resources/..."
+                          placeholder="<!-- data-version-path-example -->"
                           required=""
                         />
                       </div>
@@ -4295,8 +4296,8 @@ Select a session.</pre
                           id="data-import-cpus"
                           type="number"
                           min="1"
-                          max="64"
-                          value="8"
+                          max="<!-- import-max-cpus -->"
+                          value="<!-- import-cpus -->"
                           required=""
                         />
                       </div>
@@ -4306,8 +4307,8 @@ Select a session.</pre
                           id="data-import-memory"
                           type="number"
                           min="1"
-                          max="512"
-                          value="32"
+                          max="<!-- import-max-memory-gb -->"
+                          value="<!-- import-memory-gb -->"
                           required=""
                         />
                       </div>
@@ -4315,10 +4316,10 @@ Select a session.</pre
                         <label for="data-import-time">Time limit</label
                         ><input
                           id="data-import-time"
-                          value="04:00:00"
+                          value="<!-- import-time-limit -->"
                           required=""
                         /><small
-                          >Slurm duration, from 1 minute to 24 hours.</small
+                          >Slurm duration, from 1 minute up to the queue limit (<span id="data-import-time-max"></span>).</small
                         >
                       </div>
                     </div>
@@ -4590,7 +4591,7 @@ Select a session.</pre
                     <input
                       id="workspace-base-path"
                       name="work_root"
-                      placeholder="/coc/flash7/yourname"
+                      placeholder="<!-- work-root-example -->"
                       spellcheck="false"
                       maxlength="512"
                       required=""

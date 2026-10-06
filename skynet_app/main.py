@@ -33,8 +33,9 @@ GPU_USAGE_COLUMNS = tuple(CLUSTER.dashboard.gpu_usage_columns)
 OVERFLOW_PARTITIONS = frozenset(CLUSTER.dashboard.overflow_partitions)
 OVERFLOW_ACCOUNT = CLUSTER.dashboard.overflow_account_label
 NORMAL_ACCOUNT_QUEUES = tuple(dict.fromkeys(
-    (queue.account, queue.partition) for queue in CLUSTER.queues.values() if not queue.preemptible
+    (queue.account, queue.partition) for _, queue in CLUSTER.guaranteed_queues()
 ))
+OVERFLOW_PARTITION_ORDER = tuple(CLUSTER.dashboard.overflow_partitions)
 IDLE_QUOTA_PROGRAM = "\n".join((
     inspect.getsource(idle_partition_quota),
     inspect.getsource(missing_idle_account_quotas),
@@ -256,7 +257,8 @@ def _parse_account_usage(output: str) -> list[dict[str, object]]:
 
 def _parse_user_usage(output: str) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
-    metric_pattern = re.compile(r"(\d+)\s*/\s*(\d+)\s*/\s*(\d+)\s*\((\d+)\)")
+    # One slot for the lab, one per configured overflow partition, then the total in parentheses.
+    metric_pattern = re.compile(r"(\d+)" + r"\s*/\s*(\d+)" * len(OVERFLOW_PARTITION_ORDER) + r"\s*\((\d+)\)")
     for line in output.splitlines():
         if not line.lstrip().startswith("|"):
             continue
@@ -268,13 +270,8 @@ def _parse_user_usage(output: str) -> list[dict[str, object]]:
             match = metric_pattern.fullmatch(value)
             if not match:
                 break
-            lab, overcap, scavenger, total = (int(part) for part in match.groups())
-            metrics[key] = {
-                "lab": lab,
-                "overcap": overcap,
-                "scavenger": scavenger,
-                "total": total,
-            }
+            lab, *overflow, total = (int(part) for part in match.groups())
+            metrics[key] = {"lab": lab, "overflow": dict(zip(OVERFLOW_PARTITION_ORDER, overflow)), "total": total}
         if len(metrics) == len(GPU_USAGE_COLUMNS):
             rows.append({"user": cells[0], "metrics": metrics})
     return rows
@@ -348,9 +345,9 @@ def _attach_account_users(
             if existing_total is None or elapsed_seconds > existing_total.get("elapsed_seconds", -1):
                 max_elapsed[account]["total_gpus"][user] = {"elapsed_seconds": elapsed_seconds, "runtime": runtime}
 
-    overcap_account = allocations[OVERFLOW_ACCOUNT]
+    overflow_account = allocations[OVERFLOW_ACCOUNT]
     for column in (*sorted(gpu_columns), "total_gpus"):
-        overcap_account[column].clear()
+        overflow_account[column].clear()
     for user_row in user_usage:
         username = str(user_row["user"])
         user_total = 0
@@ -361,12 +358,12 @@ def _attach_account_users(
             metric = metrics.get(column)
             if not isinstance(metric, dict):
                 continue
-            count = int(metric["overcap"]) + int(metric["scavenger"])
+            count = sum(int(value) for value in metric["overflow"].values())
             if count:
-                overcap_account[column][username] = count
+                overflow_account[column][username] = count
                 user_total += count
         if user_total:
-            overcap_account["total_gpus"][username] = user_total
+            overflow_account["total_gpus"][username] = user_total
 
     for row in rows:
         account = str(row["account"])

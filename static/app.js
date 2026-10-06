@@ -2559,8 +2559,10 @@ function resolvedExperimentGpuCount() {
   return Number.isInteger(count) && count > 0 ? count : null;
 }
 
-// Skynet workspace scheduling policy; model defaults do not override it.
-const CPUS_PER_GPU = 8;
+// Skynet workspace scheduling policy, rendered by the server from the cluster configuration.
+const CPUS_PER_GPU = Number(elements.resourceCpus.dataset.cpusPerGpu);
+if (!Number.isInteger(CPUS_PER_GPU) || CPUS_PER_GPU < 1)
+  throw new Error("The page carries no CPUs-per-GPU policy");
 
 function updateCpuResources() {
   for (const [control, count] of [
@@ -14720,7 +14722,7 @@ function renderDataImportDetail() {
   document.getElementById("data-import-detail-content").innerHTML = `
       ${error}
       <p>${statusPill(item.state)} ${dataImportCancelButton(item)}</p>
-      <p>Allocation: ${escapeHtml(item.request?.cpus ?? 8)} CPUs · ${escapeHtml(item.request?.memory_gb ?? 32)} GB · ${escapeHtml(item.request?.time_limit || "legacy queue default")} · no GPUs</p>
+      <p>Allocation: ${escapeHtml(item.request?.cpus ?? "-")} CPUs · ${escapeHtml(item.request?.memory_gb ?? "-")} GB · ${escapeHtml(item.request?.time_limit || "-")} · no GPUs</p>
       <p>Logs are read through the import job’s recorded gateway (${escapeHtml(item.gateway || "auto")}). <button type="button" class="button button-outline" data-import-action="logs" data-id="${escapeHtml(item.id)}"${cached.loading ? " disabled" : ""}>${cached.loading ? "Loading logs..." : "Refresh logs"}</button></p>
       <div class="key-value-grid"><div class="key-value"><span>Result path</span><strong>${escapeHtml(item.result_path || "-")}</strong></div><div class="key-value"><span>Published version</span><strong>${escapeHtml(item.version_id || "-")}</strong></div></div>
       <div class="attempt-log-grid"><section><div class="panel-heading"><h3>stdout</h3></div><pre class="log-view">${escapeHtml(cached.loading ? "Loading stdout..." : (cached.stdout ?? "Click Refresh logs to load stdout."))}</pre></section><section><div class="panel-heading"><h3>stderr</h3></div><pre class="log-view">${escapeHtml(cached.loading ? "Loading stderr..." : (cached.stderr ?? "Click Refresh logs to load stderr."))}</pre></section></div>
@@ -14728,6 +14730,8 @@ function renderDataImportDetail() {
 }
 
 function renderDataImportBudget() {
+  const queue = elements.dataImportQueue.selectedOptions[0];
+  document.querySelector("#data-import-time-max").textContent = queue?.dataset.maxTime || "";
   document.querySelector("#data-import-budget").textContent =
     `Allocation: 1 node, ${document.querySelector("#data-import-cpus").value} CPUs, ${document.querySelector("#data-import-memory").value} GB memory, no GPUs; time limit ${document.querySelector("#data-import-time").value}. Queue: ${elements.dataImportQueue.value}. Cancel is available while the import is active.`;
 }

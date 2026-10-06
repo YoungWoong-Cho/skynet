@@ -37,6 +37,7 @@ class ClusterCommands(ProfileModel):
     slurm_bin: str
     gpu_usage: str
     gpu_usage_interpreter: str | None = None
+    host_python: str | None = None  # Interpreter for CPU-only helper jobs that bootstrap their own tools.
 
     def gpu_usage_shell_command(self, option: Literal["-l", "-u"]) -> str:
         argv = [self.gpu_usage, option]
@@ -209,6 +210,25 @@ class RuntimeProfileConfig(ProfileModel):
         return self.environment_path or self.container_image or self.lock_file or self.uv_executable
 
 
+def parse_slurm_duration(value: str) -> int:
+    match = re.fullmatch(r"(?:(\d+)-)?(\d{1,3}):(\d{2}):(\d{2})", value.strip())
+    if not match:
+        raise ValueError("time limit must use HH:MM:SS or D-HH:MM:SS")
+    days, hours, minutes, seconds = (int(item or 0) for item in match.groups())
+    if minutes > 59 or seconds > 59 or (days and hours > 23):
+        raise ValueError("invalid Slurm time limit")
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds
+
+
+def format_slurm_duration(total_seconds: int) -> str:
+    days, remainder = divmod(total_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if days:
+        return f"{days}-{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
 class QueueProfile(ProfileModel):
     partition: str
     account: str
@@ -218,13 +238,18 @@ class QueueProfile(ProfileModel):
 
 class DashboardProfile(ProfileModel):
     gpu_usage_columns: list[str] = Field(min_length=1)
+    # In gpu_usage -u output each user cell lists the lab count, one count per overflow partition in this order, and the total.
     overflow_partitions: list[str] = Field(default_factory=list)
-    overflow_account_label: str = "overcap/scavenger"
+    overflow_account_label: str
 
 
 class ClusterDefaults(ProfileModel):
     cpus_per_gpu: int = Field(default=8, ge=1)
     queue_policy: str
+    import_queue_policy: str  # Dataset imports: CPU-only background work.
+    background_queue_policy: str  # Preflight, preparation and observation jobs.
+    background_runtime_profile: str  # Python environment those CPU jobs run in.
+    rendering_runtime_profile: str  # Simulator environment for observation rendering.
     gateway: str = "auto"
     runtime_backend: str = "auto"
     gpu_type: str = "any"
@@ -290,8 +315,24 @@ class ClusterProfile(ProfileModel):
 
     @model_validator(mode="after")
     def validate_references(self) -> "ClusterProfile":
-        if self.defaults.queue_policy not in self.queues:
-            raise ValueError("default queue policy is not configured")
+        for field in ("queue_policy", "import_queue_policy", "background_queue_policy"):
+            if getattr(self.defaults, field) not in self.queues:
+                raise ValueError(f"default {field} is not configured")
+        for field in ("background_runtime_profile", "rendering_runtime_profile"):
+            if getattr(self.defaults, field) not in self.runtime_profiles:
+                raise ValueError(f"default {field} is not configured")
+        if parse_slurm_duration(self.defaults.time_limit) > self.queue(self.defaults.queue_policy).max_time_seconds:
+            raise ValueError("default time limit exceeds the default queue's maximum")
+        for profile_id, profile in self.runtime_profiles.items():
+            smoke = profile.verification.compute_smoke
+            if smoke is None:
+                continue
+            if smoke.resources.queue_policy not in self.queues:
+                raise ValueError(f"runtime profile {profile_id} smoke queue policy is not configured")
+            if not self.gpu_aliases.get(smoke.resources.gpu_type):
+                raise ValueError(f"runtime profile {profile_id} smoke GPU type is not a concrete configured type")
+            if parse_slurm_duration(smoke.resources.time_limit) > self.queues[smoke.resources.queue_policy].max_time_seconds:
+                raise ValueError(f"runtime profile {profile_id} smoke time limit exceeds its queue's maximum")
         if self.defaults.gpu_type not in self.gpu_aliases:
             raise ValueError("default GPU type is not configured")
         if self.defaults.gateway not in ("auto", *self.gateways):
@@ -313,6 +354,24 @@ class ClusterProfile(ProfileModel):
             return self.queues[policy]
         except KeyError as error:
             raise ValueError(f"unknown queue policy: {policy}") from error
+
+    @property
+    def default_queue(self) -> QueueProfile:
+        return self.queue(self.defaults.queue_policy)
+
+    def guaranteed_queues(self) -> list[tuple[str, QueueProfile]]:
+        """Non-preemptible queues in configuration order: the lab's own allocation."""
+        return [(name, queue) for name, queue in self.queues.items() if not queue.preemptible]
+
+    def preemptible_queue(self) -> tuple[str, QueueProfile] | None:
+        return next(((name, queue) for name, queue in self.queues.items() if queue.preemptible), None)
+
+    def gres(self, alias: str, count: int) -> str:
+        """Slurm --gres value for a configured GPU alias; the alias without a target means any GPU."""
+        if alias not in self.gpu_aliases:
+            raise ValueError(f"GPU type is not configured: {alias}")
+        target = self.gpu_aliases[alias]
+        return f"gpu:{count}" if target is None else f"gpu:{target}:{count}"
 
     def queue_for_partition(self, partition: str) -> QueueProfile:
         for queue in self.queues.values():

@@ -55,7 +55,7 @@ def idle_partition_quota(account, partition):
                     raise ValueError("Slurm returned an invalid GPU limit")
                 key = resource.removeprefix("gres/")
                 limits[key] = min(limits.get(key, int(value)), int(value))
-    # gpu_usage excludes overcap/scavenger from the normal account's usage.
+    # gpu_usage excludes the overflow partitions (dashboard.overflow_partitions) from the normal account's usage.
     # Require the entire normal partition to be idle, including transitional
     # allocations, so another account cannot consume its partition QOS budget.
     allocations = read(["squeue", "--noheader", "--partition=" + partition,

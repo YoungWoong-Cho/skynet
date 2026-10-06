@@ -59,7 +59,7 @@ from .cluster_runtime import (
     approved_operator_environment,
 )
 from .data_resource_policy import RESOURCE_TYPES, validate_resource_type, validate_resource_metadata
-from .data_imports import build_huggingface_import_job
+from .data_imports import HuggingFaceImportRequest, build_huggingface_import_job
 from .data_paths import validate_mount_path
 from .credential_store import (
     CredentialStore,
@@ -1287,7 +1287,7 @@ class EvaluationRequest(BaseModel):
     )
     headless: bool = True
     auto_resume: bool = True
-    max_attempts: int = Field(default=5, ge=1, le=100)
+    max_attempts: int = Field(default_factory=lambda: CLUSTER.defaults.max_attempts, ge=1, le=100)
     gateway: str = "auto"
     resources: ResourceSpec | None = None
     argv: list[str] = Field(default_factory=list)
@@ -1577,58 +1577,6 @@ class DataVersionCreateRequest(BaseModel):
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", normalized):
             raise ValueError("status must be an uppercase identifier")
         return normalized
-
-
-class HuggingFaceImportRequest(BaseModel):
-    revision: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
-    subset: str = Field(min_length=1, max_length=512)
-    format: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-    role: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-    bundle_name: str = Field(default="imported-data", min_length=1, max_length=255)
-    bundle_version: str = Field(default="import", min_length=1, max_length=255)
-    gateway: str = "auto"
-    queue: str = "overcap"
-    cpus: int = Field(default=8, ge=1, le=64)
-    memory_gb: int = Field(default=32, ge=1, le=512)
-    time_limit: str = "04:00:00"
-
-    @field_validator("time_limit")
-    @classmethod
-    def validate_import_time(cls, value: str) -> str:
-        value = value.strip()
-        seconds = parse_slurm_duration(value)
-        if not 60 <= seconds <= 24 * 60 * 60:
-            raise ValueError("Import time limit must be between 1 minute and 24 hours")
-        return value
-
-    @field_validator("revision")
-    @classmethod
-    def normalize_revision(cls, value: str) -> str:
-        return value.strip().lower()
-
-    @field_validator("subset")
-    @classmethod
-    def validate_subset(cls, value: str) -> str:
-        value = value.strip().strip("/")
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", value):
-            raise ValueError("subset must be a repository-relative directory without globs")
-        if any(part in {"", ".", ".."} for part in PurePosixPath(value).parts):
-            raise ValueError("subset contains an unsafe path component")
-        return value
-
-    @field_validator("gateway")
-    @classmethod
-    def validate_gateway(cls, value: str) -> str:
-        if value != "auto" and value not in CLUSTER.gateways:
-            raise ValueError(f"gateway must be auto or one of: {', '.join(CLUSTER.gateways)}")
-        return value
-
-    @field_validator("queue")
-    @classmethod
-    def validate_queue(cls, value: str) -> str:
-        if value not in CLUSTER.queues:
-            raise ValueError(f"queue must be one of: {', '.join(CLUSTER.queues)}")
-        return value
 
 
 class DataDerivationInputRequest(BaseModel):
@@ -4285,17 +4233,11 @@ class PipelineService:
         if spec.resources.queue_policy != "auto":
             return spec, None
         gpu_count = resolve_gpu_count(spec, plan)
-        normal_selection = next(
-            ((name, queue) for name, queue in CLUSTER.queues.items() if not queue.preemptible),
-            None,
-        )
-        if normal_selection is None:
+        guaranteed = CLUSTER.guaranteed_queues()
+        if not guaranteed:
             raise ValueError("auto queue selection requires a configured non-preemptible queue")
-        normal_name, normal = normal_selection
-        overflow_selection = next(
-            ((name, queue) for name, queue in CLUSTER.queues.items() if queue.preemptible),
-            None,
-        )
+        normal_name, normal = guaranteed[0]
+        overflow_selection = CLUSTER.preemptible_queue()
         exceeds_normal_limit = parse_slurm_duration(spec.resources.time_limit) > normal.max_time_seconds
         if exceeds_normal_limit and overflow_selection is None:
             raise ValueError("requested duration exceeds the normal queue limit and no preemptible queue is configured")
@@ -12513,8 +12455,8 @@ def settings() -> dict[str, Any]:
         "cluster": {
             **CLUSTER.public_dict(),
             "paths": paths,
-            "multi_node": False,
-            "multi_gpu_single_node": True,
+            "multi_node": CLUSTER.limits.max_nodes > 1,
+            "multi_gpu_single_node": CLUSTER.limits.max_gpus_per_node > 1,
         },
         "storage": storage["settings"],
         "runtime_profiles": CLUSTER.public_runtime_profiles(),

@@ -27,7 +27,7 @@ def validate_work_root(value: str) -> str:
         or any(part in {".", ".."} for part in value.split("/"))
     ):
         raise ValueError(
-            "Use an absolute cluster directory, such as /coc/flash7/yourname. "
+            f"Use an absolute cluster directory, such as {PurePosixPath(CLUSTER.paths.work_root).parent / 'yourname'}. "
             "Use letters, numbers, slashes, dots, underscores or hyphens; no spaces or '..'."
         )
     return str(PurePosixPath("/" + value.lstrip("/")))
