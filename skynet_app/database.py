@@ -181,6 +181,8 @@ class Database:
                     # A broken transport can also prevent rollback. Preserve
                     # the operation failure instead of replacing it.
                     error.add_note(f"Database rollback also failed: {cleanup_error}")
+                # A session that failed mid-transaction is not handed to the next caller.
+                connection.discard()
                 raise
             finally:
                 connection.close()

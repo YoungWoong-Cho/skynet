@@ -6,9 +6,11 @@ explicit. The application requires PostgreSQL and never creates a host-local dat
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import re
 import threading
+import time
 from pathlib import Path
 
 import psycopg
@@ -69,6 +71,8 @@ class PostgresConnection:
     def __init__(self, connection):
         self.raw = connection
         self.payload_store = None
+        self.pool = None
+        self._released = False
 
     def execute(self, statement, parameters=None):
         parameters = (
@@ -99,6 +103,20 @@ class PostgresConnection:
         self.raw.rollback()
 
     def close(self):
+        """Return the session to its pool (or close an unpooled one); later calls do nothing."""
+        if self._released:
+            return
+        self._released = True
+        pool, self.pool = self.pool, None
+        if pool is not None:
+            pool.give(self.raw)
+        else:
+            self.raw.close()
+
+    def discard(self):
+        """Close the session for good: after an interrupted transaction it is not reused."""
+        self._released = True
+        self.pool = None
         self.raw.close()
 
 
@@ -133,17 +151,99 @@ def lock_key(name: str) -> int:
     )
 
 
+# Opening a connection through the tunnel costs a few hundred milliseconds and
+# a query a few, so closed connections return to a per-database pool. A returned
+# connection is reset to its startup state (RESET ALL restores the -c options
+# below); one kept idle longer than this is closed instead of reused.
+POOL_IDLE_SECONDS = 60
+POOL_IDLE_CONNECTIONS = 8
+_POOLS: dict = {}
+_POOLS_LOCK = threading.Lock()
+
+
+def _close_quietly(raw):
+    try:
+        raw.close()
+    except Exception:
+        pass
+
+
+class _ConnectionPool:
+    def __init__(self):
+        self.idle = []  # (connection, returned_at), most recently returned last
+        self.lock = threading.Lock()
+
+    def take(self):
+        with self.lock:
+            while self.idle:
+                raw, returned_at = self.idle.pop()
+                if raw.closed or raw.broken:
+                    continue
+                if time.monotonic() - returned_at > POOL_IDLE_SECONDS:
+                    _close_quietly(raw)
+                    continue
+                return raw
+        return None
+
+    def give(self, raw):
+        if raw.closed or raw.broken:
+            _close_quietly(raw)
+            return
+        try:
+            if raw.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+                raw.rollback()
+            # Session locks, listeners and settings must not outlive the caller.
+            raw.execute("UNLISTEN *; RESET ALL", prepare=False)
+            raw.execute("SELECT pg_advisory_unlock_all()")
+        except Exception:
+            _close_quietly(raw)
+            return
+        with self.lock:
+            if len(self.idle) >= POOL_IDLE_CONNECTIONS:
+                _close_quietly(raw)
+                return
+            self.idle.append((raw, time.monotonic()))
+
+    def close(self):
+        with self.lock:
+            idle, self.idle = self.idle, []
+        for raw, _ in idle:
+            _close_quietly(raw)
+
+
+def close_pools():
+    """Close every idle pooled connection (process exit, test database teardown)."""
+    with _POOLS_LOCK:
+        pools = list(_POOLS.values())
+        _POOLS.clear()
+    for pool in pools:
+        pool.close()
+
+
+atexit.register(close_pools)
+
+
 class PostgresBackend:
     def __init__(self, url: str, workspace_id=None):
         self.url, self.workspace_id = url, workspace_id
 
-    def connect(self):
+    @property
+    def pool(self):
+        # One pool per database; workspace-scoped backends share their database's.
+        key = self.url if isinstance(self.url, str) else id(self.url)
+        with _POOLS_LOCK:
+            pool = _POOLS.get(key)
+            if pool is None:
+                pool = _POOLS[key] = _ConnectionPool()
+        return pool
+
+    def _open(self):
         url = (
             self.url.connection_string()
             if hasattr(self.url, "connection_string")
             else self.url
         )
-        raw = psycopg.connect(
+        return psycopg.connect(
             url,
             autocommit=True,
             row_factory=record_factory,
@@ -157,15 +257,23 @@ class PostgresBackend:
                 "-c idle_in_transaction_session_timeout=120000"
             ),
         )
+
+    def connect(self):
+        pool = self.pool
+        raw = pool.take()
+        if raw is None:
+            raw = self._open()
         try:
             raw.execute(
                 "SELECT set_config('skynet.workspace_id', %s, false)",
                 (self.workspace_id or "",),
             )
         except BaseException:
-            raw.close()
+            _close_quietly(raw)
             raise
-        return PostgresConnection(raw)
+        connection = PostgresConnection(raw)
+        connection.pool = pool
+        return connection
 
     def initialize(self):
         connection = self.connect()

@@ -18,6 +18,7 @@ from psycopg.conninfo import make_conninfo
 
 from skynet_app import database as database_module
 from skynet_app.database import Database
+from skynet_app.db_backend import close_pools
 
 
 def pytest_configure(config):
@@ -43,6 +44,7 @@ def pytest_unconfigure(config):
         return
     admin, name, previous, app_root, test_root = bootstrap
     try:
+        close_pools()
         with psycopg.connect(admin, autocommit=True) as c:
             c.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
     finally:
@@ -118,6 +120,7 @@ def postgres_repository_contract(monkeypatch, request, tmp_path):
     try:
         yield
     finally:
+        close_pools()
         with psycopg.connect(admin, autocommit=True) as c:
             for name in names.values():
                 c.execute(

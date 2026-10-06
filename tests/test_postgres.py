@@ -14,7 +14,7 @@ from psycopg.conninfo import make_conninfo
 
 from skynet_app.background_owner import BackgroundOwner
 from skynet_app.database import Database
-from skynet_app.db_backend import INTEGRITY_ERRORS, lock_key
+from skynet_app.db_backend import close_pools, INTEGRITY_ERRORS, lock_key
 
 
 @pytest.fixture
@@ -29,6 +29,7 @@ def pg(tmp_path):
     try:
         yield Database(url=url, data_root=tmp_path), url
     finally:
+        close_pools()
         with psycopg.connect(admin, autocommit=True) as c:
             c.execute(
                 sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name))
