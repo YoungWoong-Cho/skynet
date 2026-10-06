@@ -102,22 +102,3 @@ def test_only_one_tracking_delivery_owner(tmp_path, monkeypatch):
         finally:
             release.set()
         delivery.result(timeout=8)
-
-
-def test_legacy_summary_recovery_preserves_remote_values_and_history_cursor(tmp_path):
-    from test_tracking import FakeWandBBridge
-    from skynet_app.tracking import WandBSettings
-    bridge = FakeWandBBridge(tmp_path, WandBSettings(api_key='test-key', entity='team', auto_flush=True))
-    bridge.ensure_run(entity='team', project='p', local_run_id='legacy', run_name='legacy', group='legacy')
-    bridge.remote_runs['legacy']['summary'] = {'existing_metric': 17}
-    with bridge._locked():
-        state = bridge._load_state_unlocked()
-        state['runs']['legacy'].pop('summary')
-        state['runs']['legacy']['history_offset'] = 20
-        bridge._write_state_unlocked(state)
-    bridge.log_metrics('legacy', {'loss': 0.2}, step=21)
-    assert bridge.pending_count() == 0
-    assert bridge.remote_runs['legacy']['summary'] == {'existing_metric':17, 'loss':0.2}
-    assert bridge.binding('legacy')['history_offset'] == 21
-    assert len(bridge.remote_runs) == 1
-    assert len(bridge.history_rows) == 1

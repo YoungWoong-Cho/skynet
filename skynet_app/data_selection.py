@@ -144,7 +144,7 @@ def describe(spec):
 
 
 def attach_links(database, runs):
-    """Resolve legacy snapshots by content identity without changing their receipts."""
+    """Link each run input to its registered dataset by content identity, without changing receipts."""
     inputs = [item for run in runs for item in run.get("training_data", [])]
     digests = list({item["manifest_sha256"] for item in inputs if item.get("manifest_sha256")})
     found = {}

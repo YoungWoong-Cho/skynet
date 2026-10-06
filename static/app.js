@@ -7184,14 +7184,12 @@ function experimentPayload() {
   const preservedWandb =
     preservedProviders.find(
       (provider) =>
-        String(provider?.provider || provider?.type || "").toLowerCase() ===
-        "wandb",
+        String(provider?.provider || "").toLowerCase() === "wandb",
     ) || {};
   const preservedMlflow =
     preservedProviders.find(
       (provider) =>
-        String(provider?.provider || provider?.type || "").toLowerCase() ===
-        "mlflow",
+        String(provider?.provider || "").toLowerCase() === "mlflow",
     ) || {};
   const trackingProviders = [];
   if (elements.wandbEnabled.checked) {
@@ -7312,19 +7310,6 @@ function experimentPayload() {
       native_tracking: preservedTracking.native_tracking ?? "preserve",
       tags: preservedTracking.tags ?? {},
       offline_spool: preservedTracking.offline_spool ?? true,
-      provider:
-        trackingProviders.length === 1 ? trackingProviders[0].provider : null,
-      enabled: trackingProviders.length > 0,
-      uri: elements.mlflowEnabled.checked
-        ? mlflowConnection.tracking_uri || mlflowConnection.base_url || null
-        : null,
-      experiment: elements.mlflowEnabled.checked
-        ? elements.mlflowExperiment.value.trim() || experimentName
-        : null,
-      run_name_template:
-        trackingProviders.length === 1
-          ? trackingProviders[0].run_name_template
-          : null,
     },
     evaluation: {
       enabled: elements.evaluationEnabled.checked,
@@ -9111,34 +9096,28 @@ async function hydrateExperimentConfiguration(spec, request) {
   );
   setLoadedControlValue(elements.checkpointPath, initialCheckpoint);
 
-  const providers = Array.isArray(tracking.providers)
-    ? tracking.providers
-    : tracking.provider
-      ? [{ ...tracking, provider: tracking.provider }]
-      : [];
+  const providers = Array.isArray(tracking.providers) ? tracking.providers : [];
   const enabledProviders = providers.filter(
     (provider) => provider?.enabled !== false,
   );
   const unsupportedProviders = enabledProviders.filter(
     (provider) =>
       !["wandb", "mlflow"].includes(
-        String(provider?.provider || provider?.type || "").toLowerCase(),
+        String(provider?.provider || "").toLowerCase(),
       ),
   );
   if (unsupportedProviders.length) {
     throw new Error(
-      `Tracking provider “${unsupportedProviders[0].provider || unsupportedProviders[0].type}” cannot be represented by this form.`,
+      `Tracking provider “${unsupportedProviders[0].provider}” cannot be represented by this form.`,
     );
   }
   const wandbProviders = enabledProviders.filter(
     (provider) =>
-      String(provider?.provider || provider?.type || "").toLowerCase() ===
-      "wandb",
+      String(provider?.provider || "").toLowerCase() === "wandb",
   );
   const mlflowProviders = enabledProviders.filter(
     (provider) =>
-      String(provider?.provider || provider?.type || "").toLowerCase() ===
-      "mlflow",
+      String(provider?.provider || "").toLowerCase() === "mlflow",
   );
   if (wandbProviders.length > 1 || mlflowProviders.length > 1)
     throw new Error(
@@ -10433,7 +10412,6 @@ const commonHyperparameterSourceLabels = {
   user_override: "user override",
   adapter_default: "adapter default",
   repository_config: "repository config",
-  legacy_derived: "legacy-derived",
   unresolved: "unresolved",
   not_applicable: "not applicable",
 };
@@ -10454,9 +10432,9 @@ function commonHyperparameterEntries(payload) {
   return payload;
 }
 
-function commonHyperparameterSourceLabel(source, legacyValue) {
+function commonHyperparameterSourceLabel(source) {
   if (source === undefined || source === null || source === "") {
-    return legacyValue ? "legacy-derived" : "unresolved";
+    return "unresolved";
   }
   const sourceValue =
     source && typeof source === "object"
@@ -10477,7 +10455,6 @@ function commonHyperparameterSourceLabel(source, legacyValue) {
     repository: "repository_config",
     repository_inspection: "repository_config",
     repo_config: "repository_config",
-    legacy: "legacy_derived",
   };
   const canonical = aliases[normalized] || normalized;
   return (
@@ -10518,10 +10495,7 @@ function commonHyperparameter(payload, provenancePayload, ...keys) {
     if (!structured) {
       return {
         value: raw,
-        source: commonHyperparameterSourceLabel(
-          provenanceSource,
-          raw !== undefined && raw !== null && raw !== "",
-        ),
+        source: commonHyperparameterSourceLabel(provenanceSource),
       };
     }
     const value = Object.prototype.hasOwnProperty.call(raw, "value")
@@ -10533,7 +10507,6 @@ function commonHyperparameter(payload, provenancePayload, ...keys) {
       value,
       source: commonHyperparameterSourceLabel(
         raw.source ?? raw.provenance ?? raw.origin ?? provenanceSource,
-        false,
       ),
     };
   }
@@ -17619,20 +17592,6 @@ function loadTutorialSession(page) {
       ) || "null",
     );
     if (!saved || saved.page !== page || !saved.token) return null;
-    if (saved.definitionVersion === 2) {
-      saved.definitionVersion = 3;
-      saved.sessionGeneration = tutorialUniqueId("migrated-session");
-      saved.ownedRecords = (saved.ownedRecords || []).map((record) => ({
-        ...record,
-        ownerToken: record.ownerToken || record.token || saved.token,
-        expectedIdentity: record.expectedIdentity || [],
-        createdGeneration: record.createdGeneration || saved.sessionGeneration,
-        cleanupState:
-          record.cleanupState === "cleanup pending"
-            ? "manual identity verification required"
-            : record.cleanupState,
-      }));
-    }
     return saved.definitionVersion === 3 ? saved : null;
   } catch {
     return null;
@@ -19698,23 +19657,6 @@ function normalizedTrackingItems(entity) {
   const items = [...rawLinks, ...rawStatuses].filter(
     (item) => item && typeof item === "object",
   );
-  const legacy = [
-    ["wandb", entity.wandb_url || entity.wandb_run_url, entity.wandb_run_id],
-    [
-      "mlflow",
-      entity.mlflow_url || entity.mlflow_run_url,
-      entity.mlflow_run_id,
-    ],
-  ];
-  legacy.forEach(([provider, url, remoteId]) => {
-    if (url || remoteId)
-      items.push({
-        provider,
-        url,
-        remote_id: remoteId,
-        status: url ? "connected" : "queued",
-      });
-  });
   const deduped = new Map();
   items.forEach((item) => {
     const provider = String(item.provider || "").toLowerCase();

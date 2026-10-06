@@ -222,13 +222,6 @@ class TrainingProgressContract(CanonicalModel):
     source: TrainingProgressLogSource | TrainingProgressJsonlSource = Field(discriminator="kind")
     step_source: TrainingProgressJsonlSource | None = None
 
-    @field_validator("source", mode="before")
-    @classmethod
-    def legacy_log_source(cls, value: Any) -> Any:
-        if isinstance(value, dict) and "kind" not in value:
-            return {"kind": "log_regex", **value}
-        return value
-
     @model_serializer(mode="wrap")
     def serialize_contract(self, handler):
         document = handler(self)
@@ -567,40 +560,6 @@ class EgoVerseAdapter(RepositoryAdapter):
             blockers=blockers,
             todos=["Confirm the EgoVerse config-specific batch-size override path before exposing it canonically."],
             warnings=["EgoVerse validation is repository-native rather than an environment rollout suite."],
-        )
-
-
-class DexVerseAdapter(RepositoryAdapter):
-    # Retained for saved experiment manifests; no longer seeded for new training.
-    capabilities = AdapterCapabilities(
-        name=AdapterName.DEXVERSE,
-        runtime_backends={"conda", "apptainer", "existing"},
-        supports_multi_gpu_single_node=False,
-        supports_resume=True,
-        minimum_gpus=1,
-        recommended_gpus=1,
-        maximum_gpus=1,
-        evaluation_adapters=["isaac_lab", "isaac_sim"],
-    )
-
-    def _resolve(self, spec: ExperimentSpec, gpu_count: int) -> AdapterPlan:
-        blockers: list[str] = []
-        if not spec.native.argv:
-            blockers.append(
-                "TODO: DexVerse defines Isaac Lab environments but no canonical trainer; "
-                "select and pin an external Isaac Lab runner in native.argv"
-            )
-        if spec.train.checkpoint.auto_resume and not spec.native.resume_argv:
-            blockers.append("DexVerse auto-resume requires the selected external runner's native.resume_argv")
-        return self._base_plan(
-            argv=list(spec.native.argv),
-            resume_argv=list(spec.native.resume_argv),
-            native_config=spec.native.config,
-            environment={"SKYNET_ASSIGNED_GPU_COUNT": str(gpu_count)},
-            checkpoint_globs=list(spec.native.config.get("checkpoint_globs", ["**/*.pt"])),
-            blockers=blockers,
-            todos=["Pin the external Isaac Lab trainer commit independently in the source manifest."],
-            warnings=[],
         )
 
 
@@ -1185,7 +1144,6 @@ def register_adapter(adapter: RepositoryAdapter) -> None:
 for _adapter in (
     GenericAdapter(),
     EgoVerseAdapter(),
-    DexVerseAdapter(),
     DexMimicGenAdapter(),
     GetZeroAdapter(),
     GrootAdapter(),
@@ -1998,6 +1956,7 @@ class AdapterCheckpointDefaults(CanonicalModel):
 
 class AdapterTrackingDefaults(CanonicalModel):
     enabled: bool | None = None
+    # Not read for tracking: stored manifest versions still carry these keys.
     mlflow_tracking_uri: str | None = None
     mlflow_experiment: str | None = None
     native_tracking: Literal["preserve", "disable"] | None = None
@@ -2314,7 +2273,6 @@ def _resolve_native_tracking(
         elif integration.provider == "mlflow":
             values["experiment"] = (
                 (provider.experiment if provider else None)
-                or spec.tracking.mlflow_experiment
                 or spec.identity.experiment
             )
         for field, path in integration.parameter_paths.items():

@@ -43,9 +43,9 @@ def resource_recording_ids(resource, versions):
         return []
     metadata = resource.get("metadata") or {}
     owner = metadata.get("recording_session_id")
-    legacy = metadata.get("session_id")
+    session = metadata.get("session_id")
     identifiers = set()
-    primary = owner or (legacy if resource.get("provider") == "collection" or metadata.get("managed_dataset") else None)
+    primary = owner or (session if resource.get("provider") == "collection" or metadata.get("managed_dataset") else None)
     if isinstance(primary, str) and primary:
         identifiers.add(primary)
     for version in versions:
@@ -53,10 +53,6 @@ def resource_recording_ids(resource, versions):
             if not isinstance(source, dict):
                 continue
             identifier = source.get("session_id")
-            # A copied one-episode recording owns its own conversion. Older
-            # conversion receipts may still name its parent session.
-            if owner and identifier == legacy:
-                identifier = owner
             if isinstance(identifier, str) and identifier:
                 identifiers.add(identifier)
     return sorted(identifiers)

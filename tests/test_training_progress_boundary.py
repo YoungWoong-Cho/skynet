@@ -204,7 +204,7 @@ def test_pinned_plan_selects_same_reader_for_epoch_and_step_budgets(max_steps, e
     assert json.loads(evaluation["execution.json"])["training_progress_source"] is None
 
 
-def test_pinned_plan_precedes_manifest_and_manifest_precedes_builtin():
+def test_pinned_plan_precedes_manifest():
     spec, plan = spec_and_plan()
     spec.train.max_steps = None
     spec.source.adapter_manifest = {"train": {"progress": progress("artifacts/pinned.jsonl").model_dump()}}
@@ -213,9 +213,11 @@ def test_pinned_plan_precedes_manifest_and_manifest_precedes_builtin():
     assert _training_progress_source(spec, plan)["path"] == "artifacts/plan.jsonl"
 
 
-def test_builtin_fallback_uses_the_selected_step_source():
+def test_pinned_manifest_uses_the_selected_step_source():
+    from skynet_app.adapters import builtin_adapter_manifests, canonical_adapter_manifest
     spec, plan = spec_and_plan()
-    plan.adapter = "human-policy-hat"
+    manifest = next(item for item in builtin_adapter_manifests() if item.slug == "human-policy-hat")
+    spec.source.adapter_manifest = canonical_adapter_manifest(manifest)
     spec.train.max_steps = 8000
     source = _training_progress_source(spec, plan)
     assert source["path"] == "artifacts/logs.json.txt"
@@ -253,8 +255,13 @@ def test_observer_and_producer_share_the_same_resolver_and_builtin_step_source()
     from skynet_app import pipeline_api, slurm
     assert pipeline_api.resolve_training_progress_contract is resolve_training_progress_contract
     assert slurm.resolve_training_progress_contract is resolve_training_progress_contract
+    from skynet_app.adapters import builtin_adapter_manifests, canonical_adapter_manifest
+    manifest = next(item for item in builtin_adapter_manifests() if item.slug == "human-policy-hat")
     declared, origin = pipeline_api._training_progress_contract({
-        "adapter_name": "human-policy-hat", "resolved_spec_json": json.dumps({"train": {"max_steps": 8000}}),
+        "adapter_name": "human-policy-hat", "resolved_spec_json": json.dumps({
+            "source": {"adapter_manifest": canonical_adapter_manifest(manifest)},
+            "train": {"max_steps": 8000},
+        }),
     })
-    assert origin == "builtin_compatibility"
+    assert origin == "pinned_manifest"
     assert declared.unit == "step" and declared.source.completed_key == "global_step"

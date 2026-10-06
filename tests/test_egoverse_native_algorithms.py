@@ -22,7 +22,6 @@ from skynet_app.model_io import preview_spec, resolve_model_io
 from skynet_app.pipeline_api import PipelineService
 from skynet_app.training_contracts import data_contract_error
 from test_experiments import make_spec
-from test_pipeline import FakeCluster
 
 
 def native_spec(manifest, model=None):
@@ -190,27 +189,6 @@ def test_native_numeric_and_nested_settings_remain_supported():
     override = {"robomimic_model.head_specs.skynet_joints.action_horizon": 50,
                 "optimizer.lr": 1e-4, "scheduler.config": {"milestones": [5, 10]}}
     assert model_settings(json.dumps(override)) == override
-
-
-def test_seeding_retires_per_config_choices_without_changing_history(tmp_path):
-    database = Database(tmp_path / "registry.store")
-    manifest = next(m for m in manifests() if m.slug == "egoverse-hpt")
-    saved = []
-    for slug in ("egoverse-hpt-joints", "egoverse-dp-joints", "egoverse-pi05-bc-aria"):
-        legacy = canonical_adapter_manifest(manifest)
-        legacy["slug"] = slug
-        record = database.upsert_seed_adapter(seed_key=slug, name=slug, manifest=legacy)
-        saved.append(copy.deepcopy(record))
-    service = PipelineService(database, FakeCluster())
-    visible = {r["seed_key"] for r in database.list_adapter_registry() if str(r.get("seed_key", "")).startswith("egoverse-")}
-    assert visible == {"egoverse-act", "egoverse-hpt", "egoverse-pi"}
-    archived = {r["id"]: r for r in database.list_adapter_registry(include_archived=True)}
-    for old in saved:
-        record = archived[old["id"]]
-        assert record["archived_at"]
-        assert record["latest_version"] == old["latest_version"]
-    service._seed_registries()
-    assert len([r for r in database.list_adapter_registry() if str(r.get("seed_key", "")).startswith("egoverse-")]) == 3
 
 
 def test_recorded_action_chunk_updates_all_native_output_dimensions():

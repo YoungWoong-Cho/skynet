@@ -45,5 +45,3 @@ def test_dataset_sources_are_distinct_and_exposed_in_list_and_detail(tmp_path):
     db.create_data_resource_version(resource['id'], revision='one', format='skynet.episodes/v1', path='/test/source', manifest_sha256='a'*64, metadata={'sources': [{'session_id':'a'}, {'session_id':'b'}, {'session_id':'b'}]})
     assert db.get_data_resource(resource['id'])['recording_ids'] == ['a', 'b']
     assert db.list_data_resources()[0]['recording_ids'] == ['a', 'b']
-    db.update_data_resource(resource['id'], metadata={'session_id':'a', 'recording_session_id':'copy'})
-    assert db.get_data_resource(resource['id'])['recording_ids'] == ['b', 'copy']

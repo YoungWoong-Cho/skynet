@@ -1689,28 +1689,6 @@ class WandBBridge:
             return
         if not isinstance(run, dict):
             raise TrackingRequestError(f"No remote W&B run exists for local run {local_run_id}")
-        # Historical/adopted bindings may predate cached summaries. Recover the
-        # existing remote value before any append/update, never replace it with
-        # an empty summary or reset the durable history cursor.
-        if not isinstance(run.get("summary"), dict):
-            result = self._graphql(
-                """query SkynetExistingSummary($entity: String!, $project: String!, $name: String!) {
-                    project(name: $project, entityName: $entity) {
-                        run(name: $name) { id name summaryMetrics }
-                    }
-                }""",
-                {"entity": run["entity"], "project": run["project"], "name": run["name"]},
-            )
-            remote = (result.get("project") or {}).get("run")
-            if not remote or str(remote.get("id")) != str(run["storage_id"]):
-                raise TrackingRequestError("Cannot recover the pinned W&B run summary")
-            summary = remote.get("summaryMetrics") or {}
-            if isinstance(summary, str):
-                summary = json.loads(summary)
-            if not isinstance(summary, dict):
-                raise TrackingRequestError("W&B returned an invalid existing summary")
-            run["summary"] = summary
-
         if operation == "log_params":
             run["config"].update(dict(payload.get("params") or {}))
         elif operation in {"log_metrics", "log_metrics_batch"}:

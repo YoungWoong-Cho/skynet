@@ -11,33 +11,34 @@ from skynet_app.maintenance import Maintenance
 from skynet_app.metadata_objects import MetadataObjects
 from skynet_app.payload_store import PayloadStore, _CACHE, _REGISTRY_FLAGS
 from skynet_app.registry_reference_match import registry_reference_match
-from skynet_app.registry_dependencies import inline_consumers
+from skynet_app.registry_dependencies import consumer_ids, inline_consumers
 
 
 @pytest.mark.parametrize('value,expected', [
     ('wanted-id', False), (['wanted-id'], False),
     ([{'value': 'wanted-id'}], True), ({'values': ['wanted-id']}, True),
     ({'values': [{'no': 'prefix wanted-id suffix'}]}, False),
-    ({'deep': [[{'source': {'adapter': 'old-slug'}}]]}, True),
+    ({'deep': [[{'source': {'adapter_id': 'wanted-id'}}]]}, True),
+    ({'deep': [[{'source': {'adapter': 'slug-only'}}]]}, False),
 ])
 def test_single_pass_matcher_preserves_container_semantics(value, expected):
-    assert registry_reference_match(value, 'adapter', ['wanted-id'], ['old-slug']) is expected
+    assert registry_reference_match(value, ['wanted-id']) is expected
 
 
 @pytest.mark.parametrize("kind", ["adapter", "suite"])
 def test_inline_specifications_return_only_exact_dependency_flags(pg, kind):
     db, _ = pg
-    target = {"id": "wanted-id", "adapter_key": "wanted-key", "name": "cube",
-              "seed_key": "old-slug", "manifest_json": "{}"}
+    target = {"id": "wanted-id", "adapter_key": "wanted-key", "name": "cube", "evaluator_adapter": "isaac_lab",
+              "suite_version": "1", "seed_key": "old-slug", "manifest_json": "{}"}
     documents = [
         {}, {"nested": [{"arbitrary": "wanted-id"}]},
         {"source": {"adapter": "old-slug"}},
-        {"source": {"adapter": "old-slug", "adapter_version_id": "other"}},
-        *[{"source": {"adapter": "old-slug", "adapter_id": v}} for v in (None, False, 0, "", [], {}, True, [0], {"x": 0})],
-        {"nested": {"evaluation": {"suites": ["cube"]}}},
-        {"evaluation": [{"suites": ["cube"]}]},
-        {"evaluation": {"suites": {"nested": "cube"}}},
-        {"code": "prefix wanted-id suffix", "evaluation": {"suites": "not-cube"}},
+        {"source": {"adapter": "old-slug", "adapter_id": "wanted-key"}},
+        {"evaluation": [{"adapter": "isaac_lab", "suite": "cube", "suite_version": "1"}]},
+        {"evaluation": [{"adapter": "isaac_lab", "suite": "cube", "suite_version": "2"}]},
+        {"evaluation": [{"adapter": "other", "suite": "cube", "suite_version": "1"}]},
+        {"evaluation": [{"suite": "cube", "suite_version": "1"}]},
+        {"code": "prefix wanted-id suffix"},
     ]
     project = db.create_project("Inline references")
     expected = {}
@@ -45,8 +46,11 @@ def test_inline_specifications_return_only_exact_dependency_flags(pg, kind):
         body = {**body, "code": "large capsule without references\n" * 10000}
         e = db.create_experiment(project_id=project["id"], name=str(i), requested_spec=body)
         v = db.create_variant(e["latest_revision"]["id"], name="one", parameters={}, resolved_spec=body)
-        match = registry_reference_match(body, kind, ["wanted-id", "wanted-key"] if kind == "adapter" else ["wanted-id"], ["old-slug"] if kind == "adapter" else ["cube"])
+        match = registry_reference_match(body, consumer_ids(kind, [target]))
         expected[e["latest_revision"]["id"]] = expected[v["id"]] = match
+    # Only the canonical reference to this suite version counts, and only for suites.
+    named = [registry_reference_match(body, consumer_ids(kind, [target])) for body in documents[4:8]]
+    assert named == ([True, False, False, False] if kind == "suite" else [False] * 4)
     with db.connection() as c:
         original_execute = c.execute
         scans = []
@@ -109,8 +113,8 @@ def test_registry_dependency_preserved_without_downloading_execution_body(object
 
 
 @pytest.mark.parametrize("document,expected", [
-    ({"nested": [{"source": {"adapter": "old-slug"}}]}, True),
-    ({"source": {"adapter": "old-slug", "adapter_version_id": "other"}}, False),
+    ({"nested": [{"source": {"adapter_id": "wanted-id"}}]}, True),
+    ({"source": {"adapter": "slug-only", "adapter_version_id": "other"}}, False),
     ({"nested": {"anything": "wanted-id"}}, True),
     ({"code": "prefix wanted-id suffix", "source": {"adapter": "other"}}, False),
 ])
@@ -120,8 +124,8 @@ def test_remote_matching_has_identical_semantics_and_integrity_checks(object_db,
     content = json.dumps(document).encode(); digest = hashlib.sha256(content).hexdigest()
     path = objects.put_many([content])[digest]
     ref = {"sha256": digest, "path": path, "size": len(content)}
-    assert registry_reference_match(document, "adapter", ["wanted-id"], ["old-slug"]) is expected
-    assert objects.registry_matches([ref], "adapter", ["wanted-id"], ["old-slug"]) == [expected]
+    assert registry_reference_match(document, ["wanted-id"]) is expected
+    assert objects.registry_matches([ref], ["wanted-id"]) == [expected]
     Path(path).write_text("tampered")
     with pytest.raises(OSError, match="checksum"):
-        objects.registry_matches([ref], "adapter", ["wanted-id"], ["old-slug"])
+        objects.registry_matches([ref], ["wanted-id"])

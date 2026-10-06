@@ -200,8 +200,8 @@ class PayloadStore:
                 results.append(any(_path_value(document, path) for path in paths))
         return results
 
-    def registry_matches(self, documents, kind, identifiers, aliases):
-        signature = (kind, tuple(sorted(identifiers)), tuple(sorted(aliases)))
+    def registry_matches(self, documents, identifiers):
+        signature = tuple(sorted(identifiers))
         references = {}
         def key(ref):
             return (*self._key(ref["sha256"]), ref["size"], signature)
@@ -211,9 +211,9 @@ class PayloadStore:
                 if ref["path"] != self.objects.path(ref["sha256"], "body"):
                     raise ValueError("Invalid metadata object path")
                 references[key(ref)] = ref
-        flags = _REGISTRY_FLAGS.load(references, lambda refs: self.objects.registry_matches(refs, *signature))
+        flags = _REGISTRY_FLAGS.load(references, lambda refs: self.objects.registry_matches(refs, signature))
         return [flags[key(document[MARKER])] if isinstance(document, dict) and MARKER in document
-                else registry_reference_match(document, *signature) for document in documents]
+                else registry_reference_match(document, signature) for document in documents]
 
     def prepare(self, bodies):
         """Upload immutable bodies before taking the repository SQL write lock."""

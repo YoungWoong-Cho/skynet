@@ -36,8 +36,7 @@ function createWorkspaceNavigation({
   views,
   initial,
   aliases = {},
-  legacyParameters = [],
-  legacyView = () => null,
+  pageView = () => null,
   renderView,
 }) {
   const buttons = [...document.querySelectorAll(selector)];
@@ -48,12 +47,11 @@ function createWorkspaceNavigation({
   function viewForTab(tab) {
     const params = new URLSearchParams(location.search);
     return normalize(
-      legacyView(tab, current, params) || params.get(parameter) || current,
+      pageView(tab, current) || params.get(parameter) || current,
     );
   }
   function url(view) {
     const next = new URL(location.href);
-    legacyParameters.forEach((key) => next.searchParams.delete(key));
     next.searchParams.set(parameter, normalize(view));
     next.hash = page;
     return next;
@@ -94,18 +92,11 @@ window.dataNavigation = createWorkspaceNavigation({
     live: "collect",
     recordings: "recording",
     setup: "collect",
-    cycles: "collect",
-    datasets: "registry",
   },
-  legacyParameters: ["collection_view"],
-  legacyView(tab, current, params) {
+  pageView(tab, current) {
     if (tab === "datasets") return "registry";
-    if (tab === "collection")
-      return (
-        params.get("collection_view") ||
-        (current === "registry" ? "collect" : current)
-      );
-    return params.get("data_view") || params.get("collection_view");
+    if (tab === "collection") return current === "registry" ? "collect" : current;
+    return null;
   },
   renderView(view) {
     if (typeof selectDataCatalog === "function") selectDataCatalog(view);
@@ -137,7 +128,7 @@ window.experimentNavigation = createWorkspaceNavigation({
   selector: "[data-experiment-tab]",
   views: ["presets", "submit", "adapters", "runs", "notes"],
   initial: "submit",
-  legacyView: (tab) => (["adapters", "runs", "notes"].includes(tab) ? tab : null),
+  pageView: (tab) => (["adapters", "runs", "notes"].includes(tab) ? tab : null),
   renderView(view) {
     for (const [page, selected] of [
       ["experiments", "submit"],
@@ -158,8 +149,7 @@ window.evaluationNavigation = createWorkspaceNavigation({
   selector: "[data-evaluation-tab]",
   views: ["submit", "suites", "runs"],
   initial: "submit",
-  aliases: { suits: "suites" },
-  legacyView: (tab) =>
+  pageView: (tab) =>
     ({ "evaluation-suites": "suites", "evaluation-runs": "runs" })[tab],
   renderView(view) {
     const tutorial = document.getElementById("evaluations-tutorial-button");

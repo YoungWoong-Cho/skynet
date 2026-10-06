@@ -5,9 +5,9 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { JSDOM } = require('jsdom');
 const { indexHtml } = require('./index_page.cjs');
-function page(view = 'live') {
+function page(view = 'collect') {
   const dom = new JSDOM(indexHtml(), {
-    url: `http://localhost:8080/?collection_view=${view}#collection`, runScripts: 'outside-only', pretendToBeVisual: true,
+    url: `http://localhost:8080/?data_view=${view}#data`, runScripts: 'outside-only', pretendToBeVisual: true,
   });
   const w = dom.window, el = id => w.document.getElementById(id);
   let loads = [];
@@ -42,12 +42,11 @@ test('the four data tabs share one row and keyboard focus', () => {
   assert.equal(el('refresh-data-registry').hidden, true);
   w.close();
 });
-test('help and legacy links resolve to a single canonical Data URL', () => {
-  const {w, el} = page('cycles');
+test('help links resolve to a single canonical Data URL', () => {
+  const {w, el} = page();
   assert.equal(el('collection-view-live').hidden, false);
   assert.equal(w.location.hash, '#data');
   assert.equal(new URLSearchParams(w.location.search).get('data_view'), 'collect');
-  assert.ok(!w.location.search.includes('collection_view'));
   w.activateTab('datasets');
   assert.equal(el('datasets').hidden, false);
   w.document.querySelector('[data-collection-guide="record"]').click();
@@ -55,7 +54,7 @@ test('help and legacy links resolve to a single canonical Data URL', () => {
   assert.equal(el('collection').hidden, false);
   assert.equal(el('collection-setup-details').open, true);
   assert.equal(w.document.activeElement.id, 'vision-pro-guide-title');
-  w.history.pushState(null, '', '?collection_view=recordings#collection');
+  w.history.pushState(null, '', '?data_view=recording#data');
   w.dispatchEvent(new w.PopStateEvent('popstate'));
   assert.equal(el('collection-view-recordings').hidden, false);
   w.close();

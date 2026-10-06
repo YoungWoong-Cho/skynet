@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import skynet_app.pipeline_api as pipeline
-from skynet_app.adapters import TrainingProgressContract, TrainingProgressJsonlSource
+from skynet_app.adapters import TrainingProgressContract, TrainingProgressJsonlSource, canonical_adapter_manifest
 from skynet_app.adapters.act_manifest import manifest
 from skynet_app.cluster_runtime import ClusterClient
 from skynet_app.database import Database
@@ -22,6 +22,7 @@ def spec():
                 "repository": "https://github.com/XPolicyLab/XPolicyLab",
                 "revision": "a" * 40,
                 "adapter": "xpolicylab-act",
+                "adapter_manifest": canonical_adapter_manifest(manifest()),
             },
             "native": {"config": {"epochs": 100}},
             "train": {"max_steps": 1000},
@@ -50,7 +51,7 @@ def epoch(index):
 
 
 def test_existing_log_contracts_keep_their_snapshot_shape():
-    legacy = {
+    stored = {
         "schema_version": "skynet.training-progress-source/v1",
         "unit": "step",
         "total_path": "train.max_steps",
@@ -61,9 +62,7 @@ def test_existing_log_contracts_keep_their_snapshot_shape():
             "tail_lines": 500, "poll_seconds": 5,
         },
     }
-    assert TrainingProgressContract.model_validate(legacy).model_dump(mode="json") == legacy
-    del legacy["source"]["kind"]
-    assert TrainingProgressContract.model_validate(legacy).source.kind == "log_regex"
+    assert TrainingProgressContract.model_validate(stored).model_dump(mode="json") == stored
 
 
 def test_recorded_parser_accepts_training_only_observations_and_ignores_incomplete_json():

@@ -71,11 +71,11 @@ def test_delete_adapter_versions_validations_events_and_preserve_user_edits(regi
     assert service.delete('adapter', original['id'], '0'*64)['already_deleted']
 
 
-@pytest.mark.parametrize('pinned', [True, False])
-def test_adapter_consumers_block_removal(registry, pinned):
+@pytest.mark.parametrize('pinned_version', [True, False])
+def test_adapter_consumers_block_removal(registry, pinned_version):
     db, root, service = registry
     a = adapter(root)
-    source = {'adapter_version_id': a['selected_version']['id']} if pinned else {'adapter': 'example'}
+    source = {'adapter_version_id': a['selected_version']['id']} if pinned_version else {'adapter_id': a['id']}
     e = experiment(db, {'source': source})
     plan = service.preview('adapter', a['id'])
     assert any(b['kind'] == 'experiment' and b['id'] == e['id'] for b in plan['blockers'])
@@ -87,9 +87,13 @@ def test_adapter_consumers_block_removal(registry, pinned):
 def test_suite_removes_all_versions_and_blocks_selected_experiment(registry):
     db, root, service = registry
     first, latest = suite(root), suite(root, '2')
-    e = experiment(db, {'evaluation': {'suites': ['cube']}})
+    # Canonical experiment specs name the suite version, never its ID.
+    e = experiment(db, {'evaluation': [{'adapter': 'isaac_lab', 'suite': 'cube', 'suite_version': '1', 'tasks': ['cube']}]})
+    other = db.create_experiment(project_id=e['project_id'], name='Other', requested_spec={
+        'evaluation': [{'adapter': 'isaac_lab', 'suite': 'drawer', 'suite_version': '1'}]})
     plan = service.preview('suite', latest['id'])
     assert any(b['id'] == e['id'] for b in plan['blockers'])
+    assert not any(b['id'] == other['id'] for b in plan['blockers'])
     erase(service, 'experiment', e['id'])
     assert erase(service, 'suite', latest['id'])['counts'] == {'evaluation_suites': 2}
     assert root.list_evaluation_suites(enabled_only=False) == []
@@ -119,7 +123,7 @@ def test_stale_plan_and_pending_references_are_rejected(registry):
     with pytest.raises(ValueError, match='being deleted'):
         db.edit_adapter(a['id'], manifest={})
     with pytest.raises(ValueError, match='being deleted'):
-        experiment(db, {'source': {'adapter': 'example'}})
+        experiment(db, {'source': {'adapter_id': a['id']}})
     with pytest.raises(ValueError, match='being deleted'):
         db.clone_adapter(a['id'], name='Clone')
     s = suite(root)
@@ -163,7 +167,8 @@ def test_other_workspace_cannot_edit_delete_or_leak_dependency(registry):
 def test_suite_adapter_defaults_and_clone_dependencies(registry):
     db, root, service = registry
     s = suite(root)
-    a = db.create_adapter(name='Consumer', manifest={'defaults': {'evaluation': {'suites': ['cube']}}})
+    a = db.create_adapter(name='Consumer', manifest={'defaults': {'evaluation': [
+        {'adapter': 'isaac_lab', 'suite': 'cube', 'suite_version': '1'}]}})
     assert any(b['kind'] == 'adapter' and b['id'] == a['id'] for b in service.preview('suite', s['id'])['blockers'])
     clone = db.clone_adapter(a['id'], name='Derived')
     assert any(b['kind'] == 'adapter' and b['id'] == clone['id'] for b in service.preview('adapter', a['id'])['blockers'])

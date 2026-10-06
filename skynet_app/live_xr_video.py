@@ -1,4 +1,4 @@
-"""Cache capture videos and render legacy scene-state recordings on their workstation."""
+"""Cache capture videos and render scene-state recordings into replay videos."""
 
 from concurrent.futures import ThreadPoolExecutor
 from functools import cached_property
@@ -156,21 +156,6 @@ class LiveVideoService:
             if result.get("generation"):
                 return dict(result, state="INTERRUPTED", can_cancel=True,
                             detail="Preparation was interrupted. Cancel it to clean up before preparing again.")
-            return {"state": "NOT_PREPARED"}
-        # Old releases persisted temporary lock conflicts as permanent failures.
-        # New failures carry a code and remain visible until explicitly retried.
-        if (
-            result["state"] == "FAILED"
-            and not result.get("code")
-            and any(
-                message in result.get("error", "")
-                for message in (
-                    "End the live session before preparing video",
-                    "The GPU is busy with another session or video job",
-                    "Video preparation was interrupted",
-                )
-            )
-        ):
             return {"state": "NOT_PREPARED"}
         if result["state"] == "QUEUED":
             with self.lock:

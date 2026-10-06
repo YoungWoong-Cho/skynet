@@ -54,14 +54,14 @@ def test_native_heads_are_not_assumed_to_match_state_size(manifests):
             assert manifest["train"]["model_io"], slug
 
 
-def test_legacy_receipt_is_derived_only_from_saved_settings(manifests, bundle):
+def test_undeclared_contract_is_never_inferred_from_the_adapter_slug(manifests, bundle):
     manifest = deepcopy(manifests["egoverse-act"])
     manifest["train"].pop("model_io")
     assert canonical_adapter_manifest(AdapterManifest.model_validate(manifest)) == manifest
     spec = preview_spec({"native.config.model_overrides": {"robomimic_model.chunk_size": 17}}, bundle)
-    summary = resolve_model_io(manifest, spec, legacy=True)
-    assert "17 × 28" in dict(summary["entries"])["Output · Joint commands"]
-    assert "model_io" not in manifest["train"]
+    summary = resolve_model_io(manifest, spec)
+    assert summary["source"] == "requirements" and not summary["resolved"]
+    assert "Output · Joint commands" not in dict(summary["entries"])
 
 
 def test_new_attempt_snapshot_freezes_resolved_io(manifests):

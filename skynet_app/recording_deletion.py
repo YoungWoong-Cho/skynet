@@ -137,7 +137,7 @@ class RecordingMaintenance(Maintenance):
                     child.get("profile", {}).get("task_name") or record["id"],
                     "Delete this dependent recording first",
                 )
-        # Legacy/manual configuration snapshots may reference a recording directly.
+        # Experiment and evaluation snapshots embed dataset sources that name recordings.
         for table, kind, parent in (
             ("experiment_revisions", "experiment", "experiment_id"),
             ("variants", "experiment", "experiment_id"),

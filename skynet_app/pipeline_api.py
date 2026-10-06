@@ -425,16 +425,6 @@ def _training_progress_contract(
             return resolve_training_progress_contract(progress, spec), "pinned_manifest"
         except ValueError:
             return None
-
-    # Compatibility observer for active jobs created before the optional
-    # progress field existed. Adapter-specific grammar remains in the
-    # adapter declaration; the pipeline core still consumes one contract.
-    adapter_name = str(run.get("adapter_name") or "")
-    if not adapter_name:
-        return None
-    for manifest in builtin_adapter_manifests():
-        if manifest.slug == adapter_name and manifest.train.progress is not None:
-            return resolve_training_progress_contract(manifest.train.progress, spec), "builtin_compatibility"
     return None
 
 
@@ -1742,25 +1732,10 @@ class PipelineService:
                 repository_url=manifest.default_repository,
                 materialize_result=False,
             )
-        # Old database migrations created builtin:* compatibility records whose
-        # payload predates AdapterManifest. Preserve them for history, but never
-        # expose an invalid manifest as a runnable choice for a new experiment.
+        # The plain EgoVerse launcher is retired in favour of the native EgoVerse
+        # manifests. Keep its seed archived; saved versions remain resolvable.
         for record in self.database.list_adapter_registry(include_archived=False):
-            # Retire only the seeded experiment adapter. Collection adapters use
-            # a separate registry; saved experiment versions remain resolvable.
-            seed_key = str(record.get("seed_key") or "")
-            if seed_key in {"dexverse", "builtin:dexverse", "egoverse", "builtin:egoverse"} or (
-                seed_key.removeprefix("builtin:").startswith("egoverse-")
-                and seed_key.removeprefix("builtin:") not in {"egoverse-act", "egoverse-hpt", "egoverse-pi"}
-            ):
-                self.database.archive_adapter(str(record["id"]))
-                continue
-            if not str(record.get("seed_key") or "").startswith("builtin:"):
-                continue
-            try:
-                version = self._selected_version(record)
-                AdapterManifest.model_validate(version.get("manifest"))
-            except (TypeError, ValueError):
+            if record.get("seed_key") == "egoverse":
                 self.database.archive_adapter(str(record["id"]))
         for suite in get_evaluation_catalog():
             if ("suite", suite_key(suite.evaluator, suite.suite)) in exclusions:
@@ -2050,148 +2025,6 @@ class PipelineService:
         }
 
     @staticmethod
-    def _binding_value_for_canonical(legacy_value: Any, binding: Any) -> Any:
-        if not binding.value_map:
-            return legacy_value
-        if isinstance(legacy_value, bool):
-            serialized = "true" if legacy_value else "false"
-        elif isinstance(legacy_value, str):
-            serialized = legacy_value
-        else:
-            serialized = canonical_json(legacy_value)
-        if serialized in binding.value_map:
-            return serialized
-        candidates = [
-            canonical
-            for canonical, native in binding.value_map.items()
-            if native == serialized
-        ]
-        if len(candidates) == 1:
-            return candidates[0]
-        raise ValueError(
-            f"legacy value {serialized!r} is not represented by the adapter's canonical value map"
-        )
-
-    @classmethod
-    def _migrate_bound_native_overrides(
-        cls, payload: dict[str, Any], manifest: AdapterManifest
-    ) -> list[dict[str, Any]]:
-        """Move legacy same-name native overrides into manifest-bound train fields."""
-        native = payload.get("native")
-        overrides = native.get("overrides") if isinstance(native, dict) else None
-        if not isinstance(overrides, dict):
-            return []
-        migrations: list[dict[str, Any]] = []
-        for canonical_path, binding in sorted(manifest.train.parameter_flags.items()):
-            if not canonical_path.startswith("train."):
-                continue
-            legacy_key = canonical_path.rsplit(".", 1)[-1]
-            if legacy_key not in overrides:
-                continue
-            legacy_value = overrides[legacy_key]
-            canonical_value = cls._binding_value_for_canonical(legacy_value, binding)
-            present, existing = cls._manifest_input_lookup(payload, canonical_path)
-            if present and existing is not None and existing != canonical_value:
-                raise ValueError(
-                    f"clean retry cannot migrate native.overrides.{legacy_key}: "
-                    f"it conflicts with {canonical_path}"
-                )
-            if not present or existing is None:
-                parts = canonical_path.split(".")
-                target = payload
-                for part in parts[:-1]:
-                    target = target.setdefault(part, {})
-                target[parts[-1]] = copy.deepcopy(canonical_value)
-            intent = payload.setdefault(
-                "intent",
-                {"explicit_parameters": explicit_train_parameter_paths(payload)},
-            )
-            explicit_parameters = intent.setdefault("explicit_parameters", [])
-            if canonical_path not in explicit_parameters:
-                explicit_parameters.append(canonical_path)
-                explicit_parameters.sort()
-            del overrides[legacy_key]
-            migrations.append(
-                {
-                    "kind": "native_override_to_canonical_binding",
-                    "from": f"native.overrides.{legacy_key}",
-                    "to": canonical_path,
-                    "input_value": copy.deepcopy(legacy_value),
-                    "resolved_value": copy.deepcopy(canonical_value),
-                }
-            )
-        return migrations
-
-    def _prepare_clean_retry(
-        self, run: Mapping[str, Any]
-    ) -> tuple[ExperimentSpec, AdapterPlan, dict[str, Any]]:
-        original = copy.deepcopy(dict(run["resolved_spec_json"]))
-        payload = copy.deepcopy(original)
-        source = dict(payload.get("source") or {})
-        pinned_adapter = {
-            "id": source.get("adapter_id"),
-            "version_id": source.get("adapter_version_id"),
-            "version": source.get("adapter_version"),
-            "slug": source.get("adapter"),
-            "manifest_sha256": source.get("adapter_manifest_sha256"),
-        }
-        slug = str(source.get("adapter") or "")
-        if not slug:
-            raise ValueError("clean retry requires the stored adapter slug")
-        for key in (
-            "adapter_id",
-            "adapter_version_id",
-            "adapter_version",
-            "adapter_manifest",
-            "adapter_manifest_sha256",
-        ):
-            source.pop(key, None)
-        source["adapter"] = slug
-        source, manifest, _ = self._snapshot_adapter(source, slug)
-        payload["source"] = source
-        transformations = self._migrate_bound_native_overrides(payload, manifest)
-        native_config = payload.setdefault("native", {}).setdefault("config", {})
-        removed_checkpoint_fields = [
-            key
-            for key in ("initial_checkpoint", "initial_checkpoint_mode")
-            if key in native_config
-        ]
-        for key in removed_checkpoint_fields:
-            native_config.pop(key, None)
-        payload.setdefault("train", {}).setdefault("checkpoint", {})[
-            "auto_resume"
-        ] = False
-        if removed_checkpoint_fields:
-            transformations.append(
-                {
-                    "kind": "clean_retry_checkpoint_reset",
-                    "removed": removed_checkpoint_fields,
-                }
-            )
-        payload = self._apply_canonical_manifest_defaults(payload, manifest)
-        spec = ExperimentSpec.model_validate(payload)
-        plan = resolve_adapter_plan(spec)
-        current_adapter = {
-            "id": spec.source.adapter_id,
-            "version_id": spec.source.adapter_version_id,
-            "version": spec.source.adapter_version,
-            "slug": spec.source.adapter,
-            "manifest_sha256": spec.source.adapter_manifest_sha256,
-        }
-        provenance = {
-            "policy": "clean_retry_current_adapter",
-            "source": "variants.resolved_spec_json",
-            "source_spec_sha256": canonical_sha256(original),
-            "adapter_resolution": {
-                "pinned": pinned_adapter,
-                "current": current_adapter,
-            },
-            "checkpoint": None,
-            "transformations": transformations,
-        }
-        return spec, plan, provenance
-
-    @staticmethod
     def _attempt_execution_snapshot(
         spec: ExperimentSpec,
         plan: AdapterPlan,
@@ -2229,7 +2062,7 @@ class PipelineService:
                 "schema_version": "skynet.repository-input-selections/v1",
                 "selected": selected_repository_inputs,
             },
-            "model_io": resolve_model_io(spec.source.adapter_manifest, resolved_spec, legacy=True),
+            "model_io": resolve_model_io(spec.source.adapter_manifest, resolved_spec),
             "common_hyperparameters": common_hyperparameters,
             "migration_provenance": copy.deepcopy(dict(provenance)),
         }
@@ -2312,10 +2145,9 @@ class PipelineService:
         if gpu:
             resource_document["gpu"] = gpu
         tracking = defaults.tracking.model_dump(
-            mode="json", exclude_none=True, exclude={"enabled"}
+            mode="json", exclude_none=True,
+            exclude={"enabled", "mlflow_tracking_uri", "mlflow_experiment"},
         )
-        if defaults.tracking.enabled is False:
-            tracking["mlflow_tracking_uri"] = None
         return {
             "source": {
                 "project_subdirectory": defaults.effective_project_subdirectory
@@ -2647,23 +2479,6 @@ class PipelineService:
         repository = str(source.get("repository") or "")
         parameters = self._repository_inspection_cache_parameters(source, manifest)
         entry = self.source_metadata.get("inspection", repository, parameters)
-        if entry is None:
-            legacy_parameters = {
-                "revision": parameters["revision"],
-                "project_subdirectory": parameters["project_subdirectory"],
-                "adapter_id": str(source.get("adapter_id") or ""),
-                "adapter_version_id": str(source.get("adapter_version_id") or ""),
-                "adapter_manifest_sha256": str(
-                    source.get("adapter_manifest_sha256") or ""
-                ),
-            }
-            legacy_entry = self.source_metadata.get(
-                "inspection", repository, legacy_parameters
-            )
-            if legacy_entry is not None:
-                entry = self.source_metadata.put(
-                    "inspection", repository, parameters, legacy_entry["payload"]
-                )
         payload = entry.get("payload") if entry is not None else None
         if not isinstance(payload, Mapping):
             return None
@@ -2821,9 +2636,6 @@ class PipelineService:
 
         tracking = document.setdefault("tracking", {})
         for field, value in {
-            "enabled": defaults.tracking.enabled,
-            "uri": defaults.tracking.mlflow_tracking_uri,
-            "experiment": defaults.tracking.mlflow_experiment,
             "native_tracking": defaults.tracking.native_tracking,
             "tags": defaults.tracking.tags or None,
             "offline_spool": defaults.tracking.offline_spool,
@@ -3783,26 +3595,11 @@ class PipelineService:
                     "project": provider_input.get("project") or None,
                 })
             providers.append(normalized_provider)
-        legacy_uri = tracking_input.get("tracking_uri") or tracking_input.get("uri")
-        legacy_experiment = (
-            tracking_input.get("mlflow_experiment") or tracking_input.get("experiment")
-        )
-        if not providers and tracking_input.get("enabled", bool(legacy_uri)) and legacy_uri:
-            providers.append({
-                "provider": "mlflow",
-                "enabled": True,
-                "tracking_uri": legacy_uri,
-                "experiment": legacy_experiment or str(payload.get("name") or "skynet"),
-            })
         native_tracking = tracking_input.get("native_tracking", "preserve")
         if isinstance(native_tracking, bool):
             native_tracking = "preserve" if native_tracking else "disable"
         tracking = {
             "providers": providers,
-            "mlflow_tracking_uri": legacy_uri if any(
-                item["provider"] == "mlflow" and item["enabled"] for item in providers
-            ) else None,
-            "mlflow_experiment": legacy_experiment or str(payload.get("name") or "skynet"),
             "native_tracking": native_tracking,
             "tags": copy.deepcopy(tracking_input.get("tags") or {}),
             "offline_spool": bool(tracking_input.get("offline_spool", True)),
@@ -6026,17 +5823,7 @@ class PipelineService:
             return {"connection": self.tracking_connections()["connections"][provider]}
 
     def _active_tracking_providers(self, spec: ExperimentSpec) -> list[Any]:
-        if spec.tracking.providers:
-            return [item for item in spec.tracking.providers if item.enabled]
-        if spec.tracking.mlflow_tracking_uri:
-            return [{
-                "provider": "mlflow",
-                "enabled": True,
-                "tracking_uri": spec.tracking.mlflow_tracking_uri,
-                "experiment": spec.tracking.mlflow_experiment,
-                "run_name_template": None,
-            }]
-        return []
+        return [item for item in spec.tracking.providers if item.enabled]
 
     def run_tracking_actions(
         self,
@@ -6440,8 +6227,6 @@ class PipelineService:
                     if experiment_name:
                         experiment_metadata["experiment"] = experiment_name
                     experiment_metadata["endpoint"] = settings.public_dict()["tracking_uri"]
-                    if remote_id:
-                        self.database.update_run(run_id, mlflow_run_id=remote_id)
                 else:
                     entity = str(
                         metadata.get("entity")
@@ -6676,7 +6461,6 @@ class PipelineService:
                     bridge = self._mlflow_bridge(LOCAL_CAPSULE_ROOT / local_run_id, settings)
                     experiment_name = (
                         self._tracking_provider_value(provider, "experiment")
-                        or spec.tracking.mlflow_experiment
                         or spec.identity.experiment
                     )
                     experiment_result = bridge.ensure_experiment(experiment_name)
@@ -6761,8 +6545,6 @@ class PipelineService:
                         },
                         last_error=error,
                     )
-                    if remote_run_id:
-                        self.database.update_run(local_run_id, mlflow_run_id=remote_run_id)
                 elif name == "wandb":
                     settings = self._wandb_settings(provider)
                     if auto_flush is not None:
@@ -7987,13 +7769,8 @@ class PipelineService:
                                       OR (b.provider='wandb' AND COALESCE(
                                           b.metadata_json::jsonb ->> 'terminal_sync_protocol', '') <> '{WANDB_TERMINAL_SYNC_PROTOCOL}'))
                             ) OR EXISTS (
-                                SELECT 1 FROM jsonb_array_elements(
-                                    CASE WHEN jsonb_array_length(COALESCE(
-                                        v.resolved_spec_json::jsonb #> '{{tracking,providers}}', '[]'::jsonb)) > 0
-                                    THEN v.resolved_spec_json::jsonb #> '{{tracking,providers}}'
-                                    WHEN NULLIF(v.resolved_spec_json::jsonb #>> '{{tracking,mlflow_tracking_uri}}', '') IS NOT NULL
-                                    THEN '[{{"provider":"mlflow","enabled":true}}]'::jsonb
-                                    ELSE '[]'::jsonb END
+                                SELECT 1 FROM jsonb_array_elements(COALESCE(
+                                    v.resolved_spec_json::jsonb #> '{{tracking,providers}}', '[]'::jsonb)
                                 ) AS requested(value)
                                 WHERE COALESCE((requested.value ->> 'enabled')::boolean, true)
                                   AND NOT EXISTS (
@@ -10898,7 +10675,7 @@ def preview_model_io(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         bundle_id = payload.get("bundle_id")
         bundle = (data_selection.snapshot(service.database, payload["data_selections"])
                   if payload.get("data_selections") else service.database.get_data_bundle(bundle_id) if bundle_id else None)
-        return resolve_model_io(payload.get("manifest") or {}, preview_spec(payload.get("values"), bundle), legacy=True)
+        return resolve_model_io(payload.get("manifest") or {}, preview_spec(payload.get("values"), bundle))
     except (TypeError, ValueError) as error:
         raise _http_error(error) from error
 
@@ -11118,8 +10895,6 @@ def inspect_source(
             project_subdirectory
         )
         input_fields: list[dict[str, Any]] = []
-        resolved_adapter_version_id = ""
-        manifest_hash = ""
         if adapter_version_id and not adapter_id:
             raise ValueError("adapter_version_id requires adapter_id")
         if adapter_id:
@@ -11140,10 +10915,6 @@ def inspect_source(
             input_fields = [
                 field.model_dump(mode="json") for field in manifest.train.input_fields
             ]
-            resolved_adapter_version_id = str(version["id"])
-            manifest_hash = str(
-                version.get("manifest_sha256") or adapter_manifest_sha256(manifest)
-            )
 
         discovery_fields = [
             {
@@ -11171,21 +10942,6 @@ def inspect_source(
         entry = None if refresh else service.source_metadata.get(
             "inspection", repository, parameters
         )
-        if entry is None and not refresh:
-            legacy_parameters = {
-                "revision": normalized_revision,
-                "project_subdirectory": subdirectory,
-                "adapter_id": adapter_id or "",
-                "adapter_version_id": resolved_adapter_version_id,
-                "adapter_manifest_sha256": manifest_hash,
-            }
-            legacy_entry = service.source_metadata.get(
-                "inspection", repository, legacy_parameters
-            )
-            if legacy_entry is not None:
-                entry = service.source_metadata.put(
-                    "inspection", repository, parameters, legacy_entry["payload"]
-                )
         if entry is not None:
             cached_payload = entry.get("payload")
             cached_commit = (
@@ -12308,10 +12064,7 @@ def get_run(run_id: str, include_payloads: bool = True) -> dict[str, Any]:
         common = _attempt_common_hyperparameter_contract(
             run, attempt, receipt_event
         )
-        snapshot = attempt.get("execution_snapshot_json") or {}
-        pinned_spec = snapshot.get("resolved_spec") or run.get("resolved_spec_json") or {}
-        pinned_manifest = (snapshot.get("adapter") or {}).get("manifest") or (pinned_spec.get("source") or {}).get("adapter_manifest") or {}
-        attempt["model_io"] = snapshot.get("model_io") or resolve_model_io(pinned_manifest, pinned_spec, legacy=True)
+        attempt["model_io"] = (attempt.get("execution_snapshot_json") or {}).get("model_io")
         attempt["adapter_settings"] = common.get("adapter_settings", {})
         attempt["common_hyperparameters"] = common["values"]
         attempt["common_hyperparameter_provenance"] = common["provenance"]

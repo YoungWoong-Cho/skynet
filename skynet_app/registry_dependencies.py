@@ -2,7 +2,7 @@
 
 import json
 
-from .registry_reference_match import registry_reference_match
+from .registry_reference_match import registry_reference_match, suite_reference
 from .payload_store import ImmutableProjectionCache
 
 _INLINE_REFERENCES = ImmutableProjectionCache()
@@ -42,32 +42,28 @@ def suite_removal_notices(connection, target, workspace_id):
     ]
 
 
-def consumer_identity(kind, records):
+def consumer_ids(kind, records):
     ids = {row["id"] for row in records}
     if kind == "adapter":
         ids.update(row["adapter_key"] for row in records)
-        aliases = set()
-        for row in records:
-            manifest = json.loads(row["manifest_json"] or "{}")
-            aliases.update(filter(None, [manifest.get("slug"), row.get("seed_key"), *manifest.get("aliases", [])]))
     else:
-        aliases = {row["name"] for row in records}
-
-    return ids, aliases
+        # Experiment specs and adapter defaults name a suite version, not its ID.
+        ids.update(suite_reference(row["evaluator_adapter"], row["name"], row["suite_version"]) for row in records)
+    return ids
 
 
 def consumer_matcher(kind, records):
-    ids, aliases = consumer_identity(kind, records)
-    return lambda value: registry_reference_match(value, kind, ids, aliases)
+    ids = consumer_ids(kind, records)
+    return lambda value: registry_reference_match(value, ids)
 
 
 def consumer_flags(connection, rows, column, kind, records):
-    ids, aliases = consumer_identity(kind, records)
+    ids = consumer_ids(kind, records)
     documents = [json.loads(row.get(column) or "{}") for row in rows]
     store = getattr(connection, "payload_store", None)
     if store:
-        return store.registry_matches(documents, kind, ids, aliases)
-    return [registry_reference_match(document, kind, ids, aliases) for document in documents]
+        return store.registry_matches(documents, ids)
+    return [registry_reference_match(document, ids) for document in documents]
 
 
 def inline_consumers(connection, table, kind, records):
@@ -75,42 +71,37 @@ def inline_consumers(connection, table, kind, records):
 
     Specifications embed adapter code. Downloading all revisions and variants
     just to find references transfers gigabytes during a registry preview.
-    JSON paths select exact references while preserving nested/legacy matches.
+    JSON paths select exact identity references.
     """
     columns = {"experiment_revisions": "requested_spec_json", "variants": "resolved_spec_json"}
     column = columns[table]
     digest_column = "requested_spec_sha256" if table == "experiment_revisions" else "resolved_spec_sha256"
     parent_column = "experiment_id" if table == "experiment_revisions" else "experiment_revision_id"
-    ids, aliases = consumer_identity(kind, records)
-    variables = json.dumps({"ids": sorted(ids), "aliases": sorted(aliases)})
+    ids = consumer_ids(kind, records)
+    suites = [{"adapter": row["evaluator_adapter"], "suite": row["name"], "suite_version": row["suite_version"]}
+              for row in records] if kind == "suite" else []
+    variables = json.dumps({"ids": sorted(ids), "suites": suites})
     identity_path = 'strict $.** ? (@.type() == "string" && @ == $ids[*])'
     fallback_path = 'strict $.** ? (@.type() == "object").** ? (@.type() == "string" && @ == $ids[*])'
-    if kind == "adapter":
-        alias_path = ('strict $.** ? (@.type() == "object" && exists(@.source)).source '
-                      '? (@.type() == "object" && exists(@.adapter) && @.adapter == $aliases[*])')
-        alias_sql = """EXISTS (SELECT 1 FROM jsonb_path_query(body, ?::jsonpath, ?::jsonb) source
-            WHERE coalesce(source->'adapter_id','null'::jsonb) IN ('null','false','0','""','[]','{}')
-              AND coalesce(source->'adapter_version_id','null'::jsonb) IN ('null','false','0','""','[]','{}'))"""
-    else:
-        alias_path = ('strict $.** ? (@.type() == "object" && exists(@.evaluation)).evaluation '
-                      '? (@.type() == "object" && exists(@.suites)).suites.** '
-                      '? (@.type() == "string" && @ == $aliases[*])')
-        alias_sql = "jsonb_path_exists(body, ?::jsonpath, ?::jsonb)"
+    # Records of one suite share its evaluator and name, so matching each field
+    # against any record is the same as matching one record's version.
+    named_path = ('strict $.** ? (@.type() == "object" && @.adapter == $suites[*].adapter '
+                  '&& @.suite == $suites[*].suite && @.suite_version == $suites[*].suite_version)')
     headers = [dict(row) for row in connection.execute(
         f"SELECT id, owner_id, {parent_column}, {digest_column} AS digest FROM {table}"
     ).fetchall()]
     info = connection.raw.info
-    namespace = (info.host, info.port, info.dbname, info.user, kind, tuple(sorted(ids)), tuple(sorted(aliases)))
+    namespace = (info.host, info.port, info.dbname, info.user, tuple(sorted(ids)))
     references = {(*namespace, row['digest']): row['digest'] for row in headers}
 
     def load(digests):
         matched = {row['digest']: row['referenced'] for row in connection.execute(f"""
             SELECT digest,
                    jsonb_path_exists(body, CASE WHEN jsonb_typeof(body)='object' THEN ?::jsonpath ELSE ?::jsonpath END, ?::jsonb)
-                   OR {alias_sql} AS referenced
+                   OR jsonb_path_exists(body, ?::jsonpath, ?::jsonb) AS referenced
             FROM (SELECT DISTINCT ON ({digest_column}) {digest_column} AS digest,
                          {column}::jsonb AS body FROM {table} WHERE {digest_column}=ANY(?)) documents
-        """, (identity_path, fallback_path, variables, alias_path, variables, digests)).fetchall()}
+        """, (identity_path, fallback_path, variables, named_path, variables, digests)).fetchall()}
         if set(digests) != set(matched):
             raise ValueError('Registry dependencies changed; review deletion again')
         return [matched[digest] for digest in digests]

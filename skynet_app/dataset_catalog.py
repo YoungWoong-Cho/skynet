@@ -8,10 +8,10 @@ from .database import utc_now
 
 
 def recording_ids(resource, version, source_version=None):
-    """Use this output's sources only, honoring explicit copied-episode ownership."""
+    """Use this output's sources only, falling back to the dataset's own recording."""
     parent = resource.get("metadata") or {}
     owner = parent.get("recording_session_id")
-    legacy = parent.get("session_id")
+    session = parent.get("session_id")
     metadata = version.get("metadata") or {}
     sources = metadata.get("sources")
     if not isinstance(sources, list):
@@ -24,18 +24,15 @@ def recording_ids(resource, version, source_version=None):
         if not isinstance(source, dict):
             continue
         value = source.get("recording_session_id") or source.get("session_id")
-        if owner and (value == legacy or (not legacy and value == resource.get("source_key"))):
-            value = owner
         if isinstance(value, str) and value:
             result.add(value)
-    # A single-episode copy may have an older receipt naming its parent. Its
-    # explicit owner wins; never add sibling versions' sessions to this result.
+    # Never add sibling versions' sessions to this result.
     if owner and not result:
         result.add(owner)
     elif not result:
         value = metadata.get("recording_session_id") or metadata.get("session_id")
         if not value and (resource.get("provider") == "collection" or parent.get("managed_dataset")):
-            value = legacy
+            value = session
         if isinstance(value, str) and value:
             result.add(value)
     return sorted(result)

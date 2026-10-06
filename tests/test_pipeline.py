@@ -46,8 +46,7 @@ def submitted_execution(cluster):
     raise AssertionError("Submitted capsule has no execution.json")
 
 
-def test_retired_dexverse_preserves_pinned_experiments_and_collection(tmp_path):
-    from skynet_app.adapters import _builtin_manifest
+def test_retired_egoverse_seed_stays_archived_and_pinned_experiments_resolve(tmp_path):
     from skynet_app.collection import CollectionService
     from skynet_app.experiments import ExperimentSpec
 
@@ -56,34 +55,24 @@ def test_retired_dexverse_preserves_pinned_experiments_and_collection(tmp_path):
     collection_before = collection.store.adapter_by_key("dexverse-cloudxr")
     assert collection_before is not None
     service = PipelineService(database, FakeCluster())
-    assert "dexverse" not in {item["seed_key"] for item in database.list_adapter_registry()}
-
-    # Recreate an installation with two historical versions of the retired seed.
-    manifest = _builtin_manifest(
-        "dexverse", "DexVerse", "https://github.com/ycyao216/DexVerse", [], "conda"
-    ).model_dump(mode="json")
-    original = database.upsert_seed_adapter(
-        seed_key="dexverse", name="DexVerse", manifest=manifest
+    retired = next(
+        item for item in database.list_adapter_registry(include_archived=True)
+        if item["seed_key"] == "egoverse"
     )
-    manifest["warnings"].append("Historical revision")
-    original = database.upsert_seed_adapter(
-        seed_key="dexverse", name="DexVerse", manifest=manifest
-    )
-    assert original["latest_version_number"] == 2
-    custom = database.clone_adapter(original["id"], name="Custom external trainer")
-    other_before = {
-        item["id"]: item for item in database.list_adapter_registry()
-        if item["id"] != original["id"]
-    }
+    assert retired["archived_at"] is not None
+    with pytest.raises(ValueError, match="archived"):
+        service._adapter_selection(retired["id"])
+    custom = database.clone_adapter(retired["id"], name="Custom EgoVerse launcher")
+    manifest = retired["latest_version"]["manifest"]
     source, _, _ = service._snapshot_adapter({
         "repository": manifest["default_repository"],
         "revision": COMMIT,
-        "adapter": "dexverse",
-        "adapter_id": original["id"],
-        "adapter_version": 1,
-    }, "dexverse")
+        "adapter": "egoverse",
+        "adapter_id": retired["id"],
+        "adapter_version": retired["latest_version_number"],
+    }, "egoverse")
     spec = ExperimentSpec.model_validate({
-        "identity": {"project": "qa", "experiment": "retired-dexverse"},
+        "identity": {"project": "qa", "experiment": "retired-egoverse"},
         "source": source,
         "runtime": {"backend": "existing", "bootstrap_uv": False},
         "resources": {"gpu": {"mode": "explicit", "count": 1}},
@@ -91,27 +80,22 @@ def test_retired_dexverse_preserves_pinned_experiments_and_collection(tmp_path):
         "native": {"argv": ["python", "external_trainer.py"]},
     })
     plan_before = resolve_adapter_plan(spec)
-    assert plan_before.runnable
+    archived = database.get_adapter(retired["id"])
+    others_before = {
+        item["id"]: item for item in database.list_adapter_registry()
+        if item["id"] != retired["id"]
+    }
 
     service._seed_registries()
-    archived = database.get_adapter(original["id"])
-    assert archived["archived_at"] is not None
-    assert archived["latest_version_number"] == 2
-    assert [item["manifest_sha256"] for item in archived["versions"]] == [
-        item["manifest_sha256"] for item in original["versions"]
-    ]
-    with pytest.raises(ValueError, match="archived"):
-        service._adapter_selection(original["id"])
+    assert database.get_adapter(retired["id"]) == archived
     assert resolve_adapter_plan(spec) == plan_before
-    assert service._snapshot_adapter(dict(source), "dexverse")[0] == source
-    assert collection.store.adapter_by_key("dexverse-cloudxr") == collection_before
+    assert service._snapshot_adapter(dict(source), "egoverse")[0] == source
     assert database.get_adapter(custom["id"])["archived_at"] is None
-    assert {item["id"]: item for item in database.list_adapter_registry()} == other_before
-
-    service._seed_registries()
-    assert database.get_adapter(original["id"]) == archived
+    assert {
+        item["id"]: item for item in database.list_adapter_registry()
+        if item["id"] != retired["id"]
+    } == others_before
     assert collection.store.adapter_by_key("dexverse-cloudxr") == collection_before
-
 
 def seed_repository_choices(service, slug, *, manifest=None):
     """Provide the exact cached metadata that real users obtain via Inspect.

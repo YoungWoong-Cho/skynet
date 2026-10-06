@@ -105,13 +105,13 @@ def remote_video(tmp_path):
     videos.executor.shutdown(wait=True)
 
 
-@pytest.mark.parametrize('legacy_derived',[False,True])
-def test_archive_and_legacy_cached_video_play_without_loading_recording_states(remote_video,legacy_derived):
+@pytest.mark.parametrize('derived',[False,True])
+def test_archive_and_derived_cached_video_play_without_loading_recording_states(remote_video,derived):
     c=remote_video
-    video=(c.derived/'cached-videos/0/0'/'a.mp4') if legacy_derived else c.original/'recordings/demo.mp4'
+    video=(c.derived/'cached-videos/0/0'/'a.mp4') if derived else c.original/'recordings/demo.mp4'
     video.parent.mkdir(parents=True)
     video.write_bytes(b'cached MP4')
-    # Legacy READY receipts may have no generation. Summary-only video lookup
+    # READY receipts may have no generation. Summary-only video lookup
     # must not need the full review states or a local video file.
     c.videos.publish(c.directory,state='READY',kind='capture',remote_artifact={'gateway':'sky2','path':str(video)})
     artifact=c.videos.artifact('session',0)

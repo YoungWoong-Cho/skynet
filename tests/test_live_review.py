@@ -255,7 +255,7 @@ def test_video_failure_and_interrupted_preparation_are_explicit_and_retryable(re
     assert not videos.queue
 
 
-def test_video_recovers_legacy_busy_errors_and_interrupted_jobs(review):
+def test_video_recovers_interrupted_jobs(review):
     from skynet_app.live_xr_video import LiveVideoService
 
     reviews, _, _ = review
@@ -263,13 +263,6 @@ def test_video_recovers_legacy_busy_errors_and_interrupted_jobs(review):
     reviews.prepare("session", 0)
     videos = LiveVideoService(reviews)
     directory = videos.source("session", 0, 0)[3]
-    for message in (
-        "rl2-bonjour: End the live session before preparing video for this older recording.",
-        "rl2-bonjour: The GPU is busy with another session or video job. Retry when it finishes.",
-        "Video preparation was interrupted. Retry to continue.",
-    ):
-        videos.publish(directory, state="FAILED", error=message)
-        assert videos.status("session", 0)["state"] == "NOT_PREPARED"
     for state in ("QUEUED", "PREPARING", "WAITING_GPU"):
         videos.publish(directory, state=state)
         assert videos.status("session", 0)["state"] == "NOT_PREPARED"
@@ -723,13 +716,10 @@ def test_recovered_video_transport_validation_failure_can_be_retried(videos):
     assert videos.cancel("session", 0)["state"] == "CANCELLED"
 
 
-@pytest.mark.parametrize("legacy", [True, False])
-def test_remote_completed_cache_is_reused_without_new_gpu_work(
-    video_supervisor, legacy
-):
+def test_remote_completed_cache_is_reused_without_new_gpu_work(video_supervisor):
     control, value, _, calls, root = video_supervisor
     base = root.parent.parent
-    cached_root = base if legacy else base / "attempts" / ("b" * 32)
+    cached_root = base / "attempts" / ("b" * 32)
     cached_root.mkdir(parents=True, exist_ok=True)
     video = cached_root / "video.mp4"
     video.write_bytes(b"cached video")

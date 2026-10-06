@@ -211,10 +211,6 @@ class FakeWandBBridge(WandBBridge):
             return {"upsertBucket": {"bucket": {
                 "id": run["id"], "name": run["name"], "displayName": run.get("displayName")
             }}}
-        if "SkynetExistingSummary" in query:
-            run = self.remote_runs.get(str(variables["name"]))
-            return {"project": {"run": {"id": run["id"], "name": run["name"],
-                "summaryMetrics": json.dumps(run["summary"])} if run else None}}
         if "SkynetUpdateSummary" in query:
             run = next(
                 item for item in self.remote_runs.values() if item["id"] == variables["id"]

@@ -223,8 +223,8 @@
       metadata = model;
       if (model.simulation_robot) {
         const url = new URL(location.href);
-        url.hash = "collection";
-        url.searchParams.set("collection_view", "live");
+        url.hash = "data";
+        url.searchParams.set("data_view", "collect");
         url.searchParams.set("live_hand", model.simulation_robot);
         el("hand-use-simulation").href = url.href;
         el("hand-use-simulation").hidden = false;

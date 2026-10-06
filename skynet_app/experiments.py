@@ -35,7 +35,6 @@ class CanonicalModel(BaseModel):
 class AdapterName(StrEnum):
     GENERIC = "generic"
     EGOVERSE = "egoverse"
-    DEXVERSE = "dexverse"
     DEXMIMICGEN = "dexmimicgen"
     GET_ZERO = "get_zero"
     GROOT = "groot"
@@ -639,6 +638,8 @@ class TrackingProviderSpec(CanonicalModel):
 
 class TrackingSpec(CanonicalModel):
     providers: list[TrackingProviderSpec] = Field(default_factory=list)
+    # Ignored for tracking (providers decide); stored, checksum-pinned specs still
+    # carry these keys, and a stored URI must still not embed credentials.
     mlflow_tracking_uri: str | None = None
     mlflow_experiment: str | None = None
     native_tracking: Literal["preserve", "disable"] = "preserve"

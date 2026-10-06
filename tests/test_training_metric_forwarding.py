@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 import skynet_app.pipeline_api as pipeline
-from skynet_app.adapters import builtin_adapter_manifests
+from skynet_app.adapters import builtin_adapter_manifests, canonical_adapter_manifest
 from skynet_app.database import Database
 from skynet_app.experiments import ExperimentSpec
 from skynet_app.tracking import WandBBridge, WandBSettings
@@ -185,6 +185,9 @@ def forwarding_service(tmp_path, monkeypatch):
         "source": {
             "repository": "https://github.com/XPolicyLab/XPolicyLab",
             "revision": "a" * 40, "adapter": "xpolicylab-act",
+            "adapter_manifest": canonical_adapter_manifest(next(
+                adapter for adapter in builtin_adapter_manifests() if adapter.slug == "xpolicylab-act"
+            )),
         },
         "native": {"config": {"epochs": 10}},
         "tracking": {"providers": [{

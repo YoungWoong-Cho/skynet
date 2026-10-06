@@ -123,7 +123,7 @@ def _set_path(document, path, value):
     target[parts[-1]] = deepcopy(value)
 
 
-def resolve_model_io(manifest, spec=None, *, legacy=False):
+def resolve_model_io(manifest, spec=None):
     manifest = manifest or {}
     spec = deepcopy(spec or {})
     train = manifest.get("train") or {}
@@ -138,7 +138,7 @@ def resolve_model_io(manifest, spec=None, *, legacy=False):
         for assignment in sorted(selected, key=lambda item: item.get("position", 0)):
             single = deepcopy(spec)
             single["data"]["bundle"]["assignments"] = [assignment]
-            results.append(resolve_model_io(manifest, single, legacy=legacy))
+            results.append(resolve_model_io(manifest, single))
         labels = list(dict.fromkeys(label for result in results for label, _ in result["entries"]))
         entries, compatible = [], True
         for label in labels:
@@ -151,14 +151,6 @@ def resolve_model_io(manifest, spec=None, *, legacy=False):
                 "resolved": compatible and all(result["resolved"] for result in results),
                 "note": results[0]["note"] if compatible else "Selected datasets have incompatible model input or output dimensions."}
     contract = train.get("model_io")
-    if not contract and legacy:
-        # Older receipts predate I/O declarations. Only infer our recorded-joint
-        # integrations; use the receipt's own settings and dataset, not the registry.
-        if manifest.get("slug") == "egoverse-dp-joints":
-            # This retired adapter is still describable in immutable history.
-            contract = adapter_io_contract("egoverse-hpt-joints")
-        elif manifest.get("slug") in {"xpolicylab-act", "egoverse-act", "egoverse-hpt-joints"}:
-            contract = adapter_io_contract(manifest["slug"])
     if isinstance(contract, ModelIOContract):
         contract = contract.model_dump(mode="json")
     contract = ModelIOContract.model_validate(contract) if contract else None
@@ -217,7 +209,7 @@ def resolve_model_io(manifest, spec=None, *, legacy=False):
                 if shape and stream.note:
                     size += "; " + stream.note
                 entries.append([("Input" if direction == "inputs" else "Output") + " · " + name, size])
-    return {"schema_version": "skynet.model-io/v1", "source": "saved_configuration" if legacy else "declared_configuration",
+    return {"schema_version": "skynet.model-io/v1", "source": "declared_configuration",
             "resolved": bool(resolved), "entries": entries,
             "note": " ".join(filter(None, [contract.note, "Per sample; batch dimension omitted." if resolved else "? = dimension not recorded or no dataset selected."]))}
 

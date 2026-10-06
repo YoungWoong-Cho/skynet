@@ -12,10 +12,10 @@ import subprocess
 import zlib
 from pathlib import PurePosixPath
 
-from .registry_reference_match import registry_reference_match
+from . import registry_reference_match as registry_reference_module
 
 MAX_BYTES = 16 * 1024 * 1024
-_REMOTE = inspect.getsource(registry_reference_match) + r"""
+_REMOTE = inspect.getsource(registry_reference_module) + r"""
 import base64, hashlib, json, os, pathlib, sys, tempfile, zlib
 
 def handle(request):
@@ -58,7 +58,7 @@ def handle(request):
     if len(content) > 16 * 1024 * 1024 or hashlib.sha256(content).hexdigest() != digest:
         raise ValueError("Metadata object checksum mismatch")
     if request["operation"] == "registry_matches":
-        found = registry_reference_match(json.loads(content), request["kind"], request["identifiers"], request["aliases"])
+        found = registry_reference_match(json.loads(content), request["identifiers"])
         return {"sha256": digest, "size": len(content), "found": found}
     if request["operation"] == "project":
         document = json.loads(content)
@@ -193,7 +193,7 @@ class MetadataObjects:
                 result.append(value["found"])
         return result
 
-    def registry_matches(self, references, kind, identifiers, aliases):
+    def registry_matches(self, references, identifiers):
         """Return checksum-verified dependency flags, never execution bodies."""
         result = []
         for start in range(0, len(references), 128):
@@ -203,7 +203,7 @@ class MetadataObjects:
                     raise ValueError("Invalid metadata object path")
             values = self._exchange([
                 {"operation": "registry_matches", "root": str(self.root), "sha256": ref["sha256"],
-                 "name": "body", "kind": kind, "identifiers": list(identifiers), "aliases": list(aliases)}
+                 "name": "body", "identifiers": list(identifiers)}
                 for ref in batch
             ])
             if len(values) != len(batch):

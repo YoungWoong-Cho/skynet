@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 import skynet_app.pipeline_api as pipeline
+from skynet_app.adapters import canonical_adapter_manifest
+from skynet_app.adapters.act_manifest import manifest as act_manifest
 from skynet_app.database import Database
 from skynet_app.training_progress_log import read_execution_log
 from skynet_app.cluster_runtime import JobStatusSnapshot
@@ -16,7 +18,8 @@ from skynet_app.cluster_runtime import JobStatusSnapshot
 @pytest.fixture
 def progress(tmp_path):
     database = Database(tmp_path / "restart.db")
-    spec = {"native": {"config": {"epochs": 10}}}
+    spec = {"source": {"adapter_manifest": canonical_adapter_manifest(act_manifest())},
+            "native": {"config": {"epochs": 10}}}
     project = database.create_project("restart")
     experiment = database.create_experiment(project_id=project["id"], name="progress", requested_spec=spec)
     variant = database.create_variant(experiment["latest_revision"]["id"], name="one", parameters={}, resolved_spec=spec)

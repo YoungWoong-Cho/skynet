@@ -220,13 +220,13 @@ def test_uv_runtime_has_fallback_and_pinned_bootstrap():
 
 def test_blocked_adapter_cannot_compile():
     payload = make_spec().model_dump(mode="json", by_alias=True)
-    payload["source"]["adapter"] = "dexverse"
+    payload["source"]["adapter"] = "generic"
     payload["runtime"] = {"backend": "existing", "bootstrap_uv": False}
     payload["native"] = {"argv": [], "resume_argv": [], "config": {}, "overrides": {}}
     spec = ExperimentSpec.model_validate(payload)
     plan = resolve_adapter_plan(spec)
     assert not plan.runnable
-    with pytest.raises(SlurmCompileError, match="DexVerse defines Isaac Lab environments"):
+    with pytest.raises(SlurmCompileError, match="generic adapter requires native.argv"):
         compile_sbatch(spec, plan, run_id="blocked-001")
 
 

@@ -66,8 +66,7 @@ def test_held_out_suite_rejects_overfit_before_submission():
         bind_suite_to_dataset(suite, spec)
 
 
-def test_recording_links_follow_exact_result_and_copied_episode_ownership(setup, monkeypatch):
-    import copy
+def test_recording_links_follow_the_exact_conversion_result(setup):
     service, original, _ = setup
     full = create(service, original['id'], 'egoverse', 'All recordings')
     subset = create(service, original['id'], 'egoverse', 'Episode 1', overfit_episode=0)
@@ -78,16 +77,6 @@ def test_recording_links_follow_exact_result_and_copied_episode_ownership(setup,
     before = {row['id']: row['recording_ids'] for row in service.database.list_datasets()}
     assert before[full['version_id']] == [original['id']]
     assert before[subset['version_id']] == [original['id']]
-    derived = copy.deepcopy(original)
-    derived.update(id='derived', recordings=original['recordings'][:1])
-    resource = service.database.get_data_resource(subset['resource_id'])
-    service.database.update_data_resource(resource['id'], metadata={**resource['metadata'], 'recording_session_id': derived['id']})
-    monkeypatch.setattr(service.live, 'list', lambda **_: [derived, original])
-    monkeypatch.setattr(service.live, 'get', lambda identifier: derived if identifier == derived['id'] else original)
-    links = {row['id']: row['recording_ids'] for row in service.database.list_datasets()}
-    assert links == {full['version_id']: [original['id']], subset['version_id']: [derived['id']]}
-    assert service.dataset(derived, create=False)['id'] == subset['resource_id']
-    assert service.get(subset['id'])['sources'][0]['session_id'] == original['id'], 'immutable source lineage is unchanged'
 
 
 def test_overfit_of_a_one_episode_recording_keeps_its_dataset_link(setup):

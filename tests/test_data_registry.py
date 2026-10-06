@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from skynet_app.database import Database, canonical_json, content_sha256, new_id, utc_now
+from skynet_app.database import Database, content_sha256
 from skynet_app.adapters import builtin_adapter_manifests
 from skynet_app.pipeline_api import PipelineService
 
@@ -193,58 +193,6 @@ class DataRegistryTestCase(unittest.TestCase):
                 "runtime": {"backend": "existing", "bootstrap_uv": False},
                 "data_bundle_id": bundle["id"],
             })
-
-    def test_canonical_seed_advances_migrated_legacy_adapter(self) -> None:
-        manifest = next(
-            item for item in builtin_adapter_manifests() if item.slug == "dexmimicgen"
-        )
-        legacy_manifest = {
-            "schema_version": "skynet.adapter/v1",
-            "legacy_adapter_version": "1",
-            "repository": {"url": "https://github.com/NVlabs/dexmimicgen"},
-            "capabilities": {"name": "dexmimicgen"},
-            "parameter_schema": {"type": "object"},
-        }
-        adapter_key = new_id()
-        now = utc_now()
-        with self.database.transaction() as connection:
-            connection.execute(
-                """
-                INSERT INTO adapters (
-                    id, name, version, repository_url, capabilities_json, schema_json,
-                    enabled, created_at, updated_at, adapter_key, version_number,
-                    description, manifest_json, manifest_sha256, archived_at,
-                    created_by, change_note, seed_key
-                ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 1, '', ?, ?, NULL, ?, '', ?)
-                """,
-                (
-                    new_id(),
-                    "dexmimicgen",
-                    "1",
-                    "https://github.com/NVlabs/dexmimicgen",
-                    canonical_json({"name": "dexmimicgen"}),
-                    canonical_json({"type": "object"}),
-                    now,
-                    now,
-                    adapter_key,
-                    canonical_json(legacy_manifest),
-                    content_sha256(legacy_manifest),
-                    "__migration__",
-                    manifest.slug,
-                ),
-            )
-
-        advanced = self.database.upsert_seed_adapter(
-            seed_key=manifest.slug,
-            name=manifest.display_name,
-            manifest=manifest.model_dump(mode="json"),
-            description=manifest.description,
-            repository_url=manifest.default_repository,
-        )
-
-        self.assertEqual(advanced["latest_version_number"], 2)
-        self.assertEqual(advanced["latest_version"]["manifest"]["slug"], "dexmimicgen")
-        self.assertEqual(advanced["latest_version"]["created_by"], "__seed__")
 
 
 if __name__ == "__main__":

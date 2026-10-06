@@ -752,7 +752,6 @@ class Database:
         status: str = "PENDING",
         source_commit: str | None = None,
         runtime_profile: str | None = None,
-        mlflow_run_id: str | None = None,
         run_number: int | None = None,
         restarted_from_run_id: str | None = None,
     ) -> dict[str, Any]:
@@ -790,7 +789,7 @@ class Database:
                 "status": status, "adapter_name": adapter_name,
                 "adapter_version": adapter_version,
                 "source_commit": source_commit, "runtime_profile": runtime_profile,
-                "run_directory": run_directory, "mlflow_run_id": mlflow_run_id,
+                "run_directory": run_directory,
                 "created_at": now, "started_at": None, "completed_at": None,
                 "updated_at": now,
             }
@@ -1156,8 +1155,7 @@ class Database:
         if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
             raise KeyError("Record not found in this workspace")
         encoded = self._encode_updates(fields, allowed=frozenset({
-            "status", "run_directory", "mlflow_run_id",
-            "started_at", "completed_at",
+            "status", "run_directory", "started_at", "completed_at",
         }))
         encoded["updated_at"] = utc_now()
         with self.transaction() as connection:
@@ -1651,7 +1649,7 @@ class Database:
             encoded_run = self._encode_updates(
                 run_updates,
                 allowed=frozenset({
-                    "status", "source_commit", "runtime_profile", "run_directory", "mlflow_run_id",
+                    "status", "source_commit", "runtime_profile", "run_directory",
                     "started_at", "completed_at",
                 }),
             )
@@ -2296,8 +2294,8 @@ class Database:
                 "SELECT * FROM evaluation_episodes WHERE evaluation_id = ? ORDER BY task, seed, episode_index",
                 (evaluation_id,),
             ).fetchall())
-            # Older terminal records may predate episode finalization. Present
-            # their effective state without changing the stored historical row.
+            # Lifecycle transitions and workflow repair end an evaluation without
+            # finalizing its episode rows. Present their effective state.
             terminal = self._unfinished_evaluation_episode_state(evaluation["status"])
             if terminal:
                 for episode in evaluation["episodes"]:
@@ -2373,7 +2371,7 @@ class Database:
             return result
 
     def repair_incomplete_evaluation_ledgers(self) -> int:
-        """Recover interrupted legacy ledger creation for already accepted work."""
+        """Fill ledgers left incomplete when creation stopped between the evaluation row and its episodes."""
         with self.connection() as connection:
             rows = connection.execute(f"""
                 SELECT e.id FROM evaluations e
@@ -2890,7 +2888,6 @@ class Database:
             "id": decoded["id"],
             "adapter_id": decoded["adapter_key"],
             "version_number": decoded["version_number"],
-            "legacy_version": decoded["version"],
             "name": decoded["name"],
             "description": decoded.get("description") or "",
             "repository_url": decoded.get("repository_url"),
@@ -2984,24 +2981,16 @@ class Database:
         seed_key: str | None = None,
         source_adapter_key: str | None = None,
         source_version_number: int | None = None,
-        legacy_version: str | None = None,
     ) -> str:
         manifest_json = canonical_json(manifest)
         capabilities = manifest.get("capabilities")
         parameter_schema = manifest.get("parameter_schema", manifest.get("schema"))
         now = utc_now()
         version_id = new_id()
-        stored_version = str(version_number)
-        if legacy_version:
-            stored_version = (
-                legacy_version
-                if version_number == 1
-                else f"{legacy_version}+registry.{version_number}"
-            )
         cls._insert(connection, "adapters", {
             "id": version_id,
             "name": name,
-            "version": stored_version,
+            "version": str(version_number),
             "repository_url": repository_url,
             "capabilities_json": canonical_json(capabilities if isinstance(capabilities, Mapping) else {}),
             "schema_json": canonical_json(parameter_schema if isinstance(parameter_schema, Mapping) else {}),
@@ -3287,7 +3276,6 @@ class Database:
         manifest: Mapping[str, Any],
         description: str = "",
         repository_url: str | None = None,
-        legacy_version: str | None = None,
         change_note: str | None = None,
         materialize_result: bool = True,
     ) -> dict[str, Any] | None:
@@ -3305,31 +3293,19 @@ class Database:
                 (normalized_seed,),
             ).fetchone()
             if seeded is None:
-                same_name = connection.execute(
-                    "SELECT adapter_key FROM adapters WHERE lower(name) = lower(?) LIMIT 1",
-                    (normalized_name,),
-                ).fetchone()
-                if same_name is not None:
-                    adapter_key = same_name["adapter_key"]
-                    connection.execute(
-                        "UPDATE adapters SET seed_key = ? WHERE adapter_key = ? AND seed_key IS NULL",
-                        (normalized_seed, adapter_key),
-                    )
-                else:
-                    adapter_key = new_id()
-                    self._insert_adapter_version(
-                        connection,
-                        adapter_key=adapter_key,
-                        version_number=1,
-                        name=normalized_name,
-                        manifest=manifest,
-                        description=description,
-                        repository_url=resolved_url,
-                        created_by="__seed__",
-                        change_note=change_note,
-                        seed_key=normalized_seed,
-                        legacy_version=legacy_version,
-                    )
+                adapter_key = new_id()
+                self._insert_adapter_version(
+                    connection,
+                    adapter_key=adapter_key,
+                    version_number=1,
+                    name=normalized_name,
+                    manifest=manifest,
+                    description=description,
+                    repository_url=resolved_url,
+                    created_by="__seed__",
+                    change_note=change_note,
+                    seed_key=normalized_seed,
+                )
             else:
                 adapter_key = seeded["adapter_key"]
 
@@ -3341,10 +3317,9 @@ class Database:
                 "ORDER BY version_number DESC LIMIT 1", (adapter_key,),
             ).fetchone()
             assert latest is not None
-            # Canonical seeds may advance seed or schema-migration output, but never
-            # supersede a user-authored adapter version.
-            if (latest["manifest_sha256"] != manifest_sha256
-                    and latest["created_by"] in {"__seed__", "__migration__"}):
+            # Canonical seeds advance their own output, but never supersede a
+            # user-authored adapter version.
+            if latest["manifest_sha256"] != manifest_sha256 and latest["created_by"] == "__seed__":
                 self._insert_adapter_version(
                     connection,
                     adapter_key=adapter_key,
@@ -3357,7 +3332,6 @@ class Database:
                     change_note=change_note,
                     archived_at=latest["archived_at"],
                     seed_key=normalized_seed,
-                    legacy_version=legacy_version,
                 )
             if not materialize_result:
                 return None
@@ -4681,47 +4655,6 @@ class Database:
             **bundle["manifest"],
             "manifest_sha256": bundle["manifest_sha256"],
         }
-
-    def register_adapter(
-        self,
-        *,
-        name: str,
-        version: str,
-        capabilities: Mapping[str, Any],
-        schema: Mapping[str, Any],
-        repository_url: str | None = None,
-        enabled: bool = True,
-    ) -> dict[str, Any]:
-        """Compatibility seed registration; never overwrites user-created versions."""
-        manifest = {
-            "schema_version": "skynet.adapter/v1",
-            "legacy_adapter_version": version,
-            "repository": {"url": repository_url},
-            "capabilities": dict(capabilities),
-            "parameter_schema": dict(schema),
-        }
-        adapter = self.upsert_seed_adapter(
-            seed_key=f"builtin:{name}",
-            name=name,
-            manifest=manifest,
-            repository_url=repository_url,
-            legacy_version=version,
-        )
-        if not enabled and adapter["archived_at"] is None:
-            adapter = self.archive_adapter(adapter["id"])
-        version_id = adapter["latest_version"]["id"]
-        with self.connection() as connection:
-            result = self._row_by_id(connection, "adapters", version_id)
-        assert result is not None
-        return result
-
-    def list_adapters(self, *, enabled_only: bool = True) -> list[dict[str, Any]]:
-        """Compatibility flat version listing; prefer list_adapter_registry for UI/API use."""
-        where = f"WHERE {visible_sql('adapters')}" + (" AND enabled = 1" if enabled_only else "")
-        with self.connection() as connection:
-            return self._decode_many(connection.execute(
-                f"SELECT * FROM adapters {where} ORDER BY name, version_number"
-            ).fetchall())
 
 
 __all__ = [

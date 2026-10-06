@@ -166,18 +166,17 @@ def control(value):
                     stream.seek(max(0, log.stat().st_size - 1500))
                     error = stream.read().decode(errors="replace")
             return {"state": "FAILED", "error": error or "Video service exited without a completed video"}
-        # Preserve the previous remote-cache behavior, including completed
-        # videos from older releases, without launching a new GPU process.
+        # Reuse a completed video from an earlier owned attempt without
+        # launching a new GPU process.
         base = root.parent.parent
         cache = base / "video.json"
         if cache.exists():
             cached = json.loads(cache.read_text())
             path = Path(cached.get("path", ""))
-            legacy = path == base / "video.mp4"
             owned = (path.name == "video.mp4" and path.parent.parent == base / "attempts"
                      and re.fullmatch(r"[a-f0-9]{32}", path.parent.name)
                      and not (path.parent / "cancelled").exists())
-            if cached.get("state") == "READY" and (legacy or owned) and path.is_file():
+            if cached.get("state") == "READY" and owned and path.is_file():
                 return cached
         profile = value["profile"]
         for name, content in value["sources"].items():

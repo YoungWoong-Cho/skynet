@@ -37,15 +37,6 @@ def test_flat_catalog_keeps_exact_sources_and_hides_raw_and_files(tmp_path):
     assert db.get_dataset(raw['id']) is None and db.get_dataset(parent['id']) is None
 
 
-def test_copied_single_episode_owner_overrides_parent_receipt(tmp_path):
-    db=Database(tmp_path/'db');parent=resource(db)
-    db.update_data_resource(parent['id'],metadata={'session_id':'a','recording_session_id':'copy'})
-    one=version(db,parent,metadata={'sources':[{'session_id':'a'}]})
-    two=version(db,parent,'two',metadata={'sources':[{'session_id':'b'}]})
-    assert db.get_dataset(one['id'])['recording_ids']==['copy']
-    assert db.get_dataset(two['id'])['recording_ids']==['b']
-
-
 def test_edit_archive_isolated_and_does_not_change_manifests_or_snapshots(tmp_path):
     db=Database(tmp_path/'db');parent=resource(db)
     first=version(db,parent,metadata={'display_name':'First dataset','sources':[{'session_id':'a'}]})

@@ -12,7 +12,6 @@ from pydantic import Field
 
 from skynet_app.adapters import (
     AdapterPlan,
-    builtin_adapter_manifests,
     resolve_gpu_count,
     resolve_gpu_type,
     resolve_training_progress_contract,
@@ -1185,9 +1184,6 @@ def _training_progress_source(spec: ExperimentSpec, plan: AdapterPlan) -> dict[s
     progress = plan.progress
     if progress is None and spec.source.adapter_manifest is not None:
         progress = (spec.source.adapter_manifest.get("train") or {}).get("progress")
-    if progress is None:
-        progress = next((manifest.train.progress for manifest in builtin_adapter_manifests()
-                         if manifest.slug == plan.adapter), None)
     if progress is None:
         return None
     source = resolve_training_progress_contract(progress, spec.model_dump(mode="json")).source
