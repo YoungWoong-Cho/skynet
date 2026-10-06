@@ -792,6 +792,7 @@ job 환경변수: `SKYNET_RUN_ID`, `SKYNET_RUN_DIR`, `SKYNET_SOURCE_DIR`, `SKYNE
 
 - progress와 W&B 전송은 백엔드 서버가 떠 있어야 된다. 브라우저는 닫아도 된다(`docs/training-metrics.md:47-49`).
 - W&B에는 선언된 JSONL source의 유한한 scalar가 모두 간다. `training/{completed,total,...}` 내부 counter는 가지 않는다.
+- W&B는 두 층이다. **컨트롤 플레인 추적**은 어댑터와 무관하게 Skynet이 앱 쪽에서 run을 예약·기록한다(파라미터, provenance, Slurm 식별자, progress scalar, 최종 summary, 평가 집계, 종료 상태). API key는 절대 job 환경에 들어가지 않으므로 job 안에서 `wandb.init()`를 부르면 "No API key configured"가 난다 — generic adapter 스크립트에서는 정상이다. **네이티브 추적**(job 안의 wandb SDK가 직접 로깅)은 어댑터가 `native_tracking`(`NativeTrackingIntegration(provider="wandb", parameter_paths=..., run_id_file=...)`, `skynet_app/adapters/__init__.py`; manifest adapter는 command template의 `native_tracking`)을 선언할 때만 켜지고, 그러면 Skynet이 `WANDB_BASE_URL/ENTITY/PROJECT/RUN_ID(=run id, RESUME=allow)/MODE/DIR`와 key 파일(`state/runtime-secrets/<stage>/wandb-api-key` → `WANDB_API_KEY`)을 job에 넣어 같은 run에 live curve가 쌓인다(HAT가 이 방식). 자기 스크립트에서 live curve를 원하면 manifest adapter에 `native_tracking`을 선언한다.
 - Slack 알림은 Slurm job id가 확인된 attempt만 보낸다(`docs/slack-notifications.md`).
 
 ### 6-3. 자동 재개와 상태 불명
