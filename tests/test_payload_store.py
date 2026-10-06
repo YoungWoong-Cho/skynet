@@ -557,3 +557,25 @@ def test_offloaded_adapter_manifests_are_listed_from_projections_without_body_re
     assert [refs for refs in fetched if refs] == [[json.loads(marker)['$skynet_object_v1']['sha256']]], 'one body read, for the one missing projection'
     assert next(item for item in db.list_adapter_registry(manifests='projected') if item['id'] == adapter['id'])['latest_version']['manifest'] == compact(ADAPTER_MANIFEST)
     assert db.get_adapter(adapter['id'])['latest_version']['manifest'] == ADAPTER_MANIFEST
+
+
+def test_run_details_list_summaries_without_body_reads(object_db, monkeypatch):
+    db, _ = object_db
+    db.payload_store = PayloadStore(db)
+    from test_document_projections import LIST_SPEC
+    experiment = db.create_experiment(name='details', requested_spec=LIST_SPEC)
+    variant = db.create_variant(experiment['latest_revision']['id'], name='run', parameters={}, resolved_spec=LIST_SPEC)
+    runs = [db.create_run(variant['id'], seed=seed, adapter_name='x', adapter_version='1', run_directory=f'/run{seed}', status='RUNNING') for seed in (1, 2)]
+    stages = [db.create_stage(run['id'], stage_type='TRAIN', name='train', resolved_config={'plan': {'code': 'x' * 200000}}) for run in runs]
+    for stage in stages:
+        db.create_job_attempt(stage['id'], status='FAILED', execution_snapshot_json={'plan': {'blob': 'y' * 200000}})
+    reads = track_payload_reads(db, monkeypatch)
+    details = db.list_run_details([run['id'] for run in runs] + ['missing'])
+    assert set(details) == {run['id'] for run in runs}
+    for run, stage in zip(runs, stages):
+        detail = details[run['id']]
+        assert detail['resolved_spec_json'] == LIST_SPEC and detail['experiment_id'] == experiment['id']
+        assert [s['id'] for s in detail['stages']] == [stage['id']] and 'resolved_config_json' not in detail['stages'][0]
+        assert [a['stage_id'] for a in detail['attempts']] == [stage['id']] and 'execution_snapshot_json' not in detail['attempts'][0]
+    assert reads == [], 'run summaries never download stage documents or snapshots'
+    assert db.list_run_details([]) == {}

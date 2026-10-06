@@ -16,6 +16,10 @@ from threading import RLock
 from pathlib import Path, PurePosixPath
 
 from . import history_journals, storage_files
+
+# The storage helper runs remotely from its source: one SSH exchange per operation.
+_STORAGE_SCRIPT = Path(storage_files.__file__).read_text()
+STORAGE_OPERATION_TIMEOUT = 120
 from .database import canonical_json, utc_now
 from .workspace_schema import LEGACY_WORKSPACE, visible_sql
 from .workspace_storage import WorkspaceStorage
@@ -110,11 +114,9 @@ class Maintenance:
         self.local_capsules = Path(local_capsules) if local_capsules else None
 
     def remote(self, operation, root, items=None, protected=None, gateway="auto", scope="all"):
-        host = self.cluster.resolve_gateway(gateway)
-        script = Path(storage_files.__file__).read_text()
-        result = self.cluster.ssh(
-            host,
-            shlex.join(["python3", "-c", script]),
+        _, result = self.cluster.run_with_fallback(
+            shlex.join(["python3", "-c", _STORAGE_SCRIPT]),
+            gateway,
             stdin=json.dumps(
                 {
                     "operation": operation,
@@ -124,7 +126,7 @@ class Maintenance:
                     "scope": scope,
                 }
             ),
-            timeout=120,
+            attempt_timeout=STORAGE_OPERATION_TIMEOUT,
         )
         return json.loads(result)
 

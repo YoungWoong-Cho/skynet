@@ -127,6 +127,8 @@ from pydantic import ConfigDict, SecretStr
 RESULT_READ_GRACE = timedelta(minutes=10)
 # A job the scheduler no longer describes is settled from the exit record its own batch
 # script wrote ({run}/attempts/{job}/final.json); without one it is held, never guessed.
+# Rows a list endpoint returns at most; the UI filters within this window.
+LIST_RESPONSE_LIMIT = 1000
 EXIT_RECORD_SOURCE = "exit-record"
 EXIT_RECORD_REASON = "Taken from the job's exit record; Slurm no longer has a record of this job"
 FORGOTTEN_JOB_CANCELLED = "Cancellation requested; Slurm no longer lists this job"
@@ -4086,10 +4088,11 @@ class PipelineService:
             if not detail["runs"]:
                 self._materialize_cleaned_revision(revision, detail["variants"])
                 detail = self.experiment_detail(experiment_id)
-            run_details: list[dict[str, Any]] = []
+            # Selection needs lifecycle state and specs, not stage documents or snapshots.
+            run_details_by_id = self.database.list_run_details([run["id"] for run in detail["runs"]])
             candidates: list[tuple[dict[str, Any], dict[str, Any], str]] = []
             for run in detail["runs"]:
-                run_detail = self.database.get_run(run["id"])
+                run_detail = run_details_by_id.get(run["id"])
                 if not run_detail:
                     raise KeyError("Run not found")
                 training = [
@@ -4145,7 +4148,6 @@ class PipelineService:
                             candidates.append(
                                 (run_detail, stage, "retry_pre_slurm_failure")
                             )
-                run_details.append(run_detail)
 
             candidate_specs: list[ExperimentSpec] = []
             candidate_run_ids: set[str] = set()
@@ -6087,6 +6089,11 @@ class PipelineService:
         bindings = [binding for binding in self.database.list_tracking_bindings_for_provider(
             provider, scope_type="run", statuses=("QUEUED", "ERROR")
         ) if run_ids is None or str(binding["scope_id"]) in run_ids][:limit]
+        # Experiment bindings are read once per flush, not once per run.
+        experiment_bindings = {
+            str(item["scope_id"]): item
+            for item in self.database.list_tracking_bindings_for_provider(provider, scope_type="experiment")
+        }
         for existing in bindings:
             run_id = str(existing["scope_id"])
             capsule = LOCAL_CAPSULE_ROOT / run_id
@@ -6128,18 +6135,7 @@ class PipelineService:
                 remote_url = (binding or {}).get("url") or existing.get("remote_url")
                 run = self.database.get_run(run_id, include_details=False) or {}
                 experiment_scope_id = str(run.get("experiment_id") or "")
-                experiment_binding = (
-                    next(
-                        (
-                            item for item in self.database.list_tracking_bindings(
-                                "experiment", experiment_scope_id
-                            ) if item["provider"] == provider
-                        ),
-                        {},
-                    )
-                    if experiment_scope_id
-                    else {}
-                )
+                experiment_binding = experiment_bindings.get(experiment_scope_id, {}) if experiment_scope_id else {}
                 experiment_metadata = dict(experiment_binding.get("metadata_json") or {})
                 experiment_remote_id = experiment_binding.get("remote_id")
                 experiment_remote_url = experiment_binding.get("remote_url")
@@ -6221,6 +6217,9 @@ class PipelineService:
                         metadata=experiment_metadata,
                         last_error=None if experiment_recovered else drain_error,
                     )
+                    experiment_bindings[experiment_scope_id] = next(
+                        (item for item in self.database.list_tracking_bindings("experiment", experiment_scope_id)
+                         if item["provider"] == provider), {})
             except Exception as error:
                 secrets = tuple(self.credentials.get(provider).values())
                 message = str(sanitize(str(error), secrets=secrets))
@@ -11064,7 +11063,7 @@ def create_experiment(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
 
 @router.get("/experiments")
 def list_experiments() -> dict[str, Any]:
-    records = service.database.list_experiments(limit=1000)
+    records = service.database.list_experiments(limit=LIST_RESPONSE_LIMIT)
     dataset_links = service.database.dataset_preset_links()
     datasets_by_experiment: dict[str, set[str]] = {}
     for link in dataset_links:
@@ -11126,7 +11125,7 @@ def list_runs(
         experiment_revision_id=experiment_revision_id,
         variant_id=variant_id,
         status=status,
-        limit=1000,
+        limit=LIST_RESPONSE_LIMIT,
     )
     connections = service.tracking_connections()["connections"]
     progress_refresh_pending = (service._queue_list_progress_refresh("training", runs) if refresh_progress
@@ -12104,7 +12103,7 @@ def cancel_run(run_id: str) -> dict[str, Any]:
 
 @router.get("/evaluations")
 def list_evaluations(refresh_progress: bool = Query(default=True)) -> dict[str, Any]:
-    evaluations = service.database.list_evaluations()
+    evaluations = service.database.list_evaluations(limit=LIST_RESPONSE_LIMIT)
     progress_refresh_pending = (service._queue_list_progress_refresh("evaluation", evaluations) if refresh_progress
                                 else service._list_progress_refresh_pending("evaluation", evaluations))
     _attach_evaluation_progress_summaries(service.database, evaluations)

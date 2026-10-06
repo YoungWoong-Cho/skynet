@@ -13,6 +13,7 @@ from skynet_app import storage_files
 from skynet_app.database import Database
 from skynet_app.maintenance import Maintenance
 from skynet_app.slurm import source_cache_directory
+from skynet_app.cluster_runtime import ClusterClient
 
 
 def test_storage_reference_index_preserves_parent_child_and_sibling_boundaries():
@@ -64,8 +65,13 @@ def test_pretrained_inspection_uses_same_safe_cleanup_contract(history, monkeypa
     assert (logs / 'unrelated').exists() and Path(evaluation['result_path']).exists()
 
 
-class LocalCluster:
-    def resolve_gateway(self, value):
+class LocalCluster(ClusterClient):
+    """Runs every remote program locally; the single gateway never needs probing."""
+
+    def __init__(self):
+        super().__init__(("test",))
+
+    def resolve_gateway(self, value="auto"):
         return "test"
 
     def ssh(self, host, command, *, stdin=None, timeout=None):

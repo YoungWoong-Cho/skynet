@@ -955,6 +955,42 @@ class Database:
             self._attach_tracking_links(connection, results, "run")
             return results
 
+    def list_run_details(self, run_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Several runs with their stage and attempt summaries, keyed by id.
+
+        Lifecycle fields only: no stage documents or execution snapshots are
+        read, so no object-store round trip happens for any number of runs.
+        """
+        if not run_ids:
+            return {}
+        with self.connection() as connection:
+            runs = {run["id"]: run for run in self._decode_many(connection.execute(f"""
+                SELECT r.*, v.name AS variant_name, v.parameters_json, v.resolved_spec_json,
+                       er.experiment_id, er.id AS experiment_revision_id,
+                       er.revision_number AS experiment_revision_number,
+                       e.name AS experiment_name
+                FROM runs r
+                JOIN variants v ON v.id = r.variant_id
+                JOIN experiment_revisions er ON er.id = v.experiment_revision_id
+                JOIN experiments e ON e.id = er.experiment_id
+                WHERE r.id = ANY(?) AND {visible_sql('runs', 'r')}
+            """, (list(run_ids),)).fetchall())}
+            for run in runs.values():
+                run["stages"], run["attempts"] = [], []
+            for row in connection.execute(
+                "SELECT to_jsonb(s) - 'resolved_config_json' AS summary FROM workflow_stages s "
+                "WHERE run_id = ANY(?) ORDER BY created_at", (list(runs),),
+            ).fetchall():
+                stage = self._decode(row["summary"])
+                runs[stage["run_id"]]["stages"].append(stage)
+            for row in connection.execute(
+                "SELECT to_jsonb(a) - 'execution_snapshot_json' AS summary, s.run_id FROM job_attempts a "
+                "JOIN workflow_stages s ON s.id = a.stage_id WHERE s.run_id = ANY(?) ORDER BY a.created_at",
+                (list(runs),),
+            ).fetchall():
+                runs[row["run_id"]]["attempts"].append(self._decode(row["summary"]))
+        return runs
+
     def get_run(self, run_id: str, *, include_details: bool = True, include_payloads: bool = True,
                 execution_stage_ids: Sequence[str] | None = None) -> dict[str, Any] | None:
         if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
@@ -2222,7 +2258,7 @@ class Database:
         return result
 
     def list_evaluations(
-        self, *, run_id: str | None = None, status: str | None = None
+        self, *, run_id: str | None = None, status: str | None = None, limit: int | None = None, offset: int = 0
     ) -> list[dict[str, Any]]:
         if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
             return []
@@ -2235,9 +2271,13 @@ class Database:
             clauses.append("status = ?")
             parameters.append(status)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        window = ""
+        if limit is not None:
+            window = " LIMIT ? OFFSET ?"
+            parameters.extend([limit, offset])
         with self.connection() as connection:
             evaluations = self._decode_many(connection.execute(
-                f"SELECT * FROM evaluations {where} ORDER BY created_at DESC", parameters
+                f"SELECT * FROM evaluations {where} ORDER BY created_at DESC{window}", parameters
             ).fetchall())
             self._attach_evaluation_context(connection, evaluations)
             # Fetch result summaries in batches; list rows must not depend on
