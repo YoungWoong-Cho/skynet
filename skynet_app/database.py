@@ -17,7 +17,8 @@ from .db_backend import PostgresBackend, PostgresConnection, Record, Distributed
 from .data_paths import validate_mount_path
 from .data_resource_policy import validate_resource_metadata, validate_resource_type, resource_recording_ids
 from .workspace_schema import PRIVATE_TABLES, LEGACY_WORKSPACE, visible_sql
-from .preparation_states import TRANSIENT_STATES
+from .preparation_states import ATTEMPT_TERMINAL_STATES, TRANSIENT_STATES
+from .workflow_states import ACTIVE_STAGE_STATES, CANCELLABLE_STAGE_STATES, SLURM_BOUND_ATTEMPT_STATES, sql_list
 from .training_metrics import is_scalar
 
 
@@ -1451,17 +1452,12 @@ class Database:
         if self.workspace_id is not None and stage_id is not None and not self.owns("workflow_stages", stage_id):
             raise KeyError("Record not found in this workspace")
 
-        cancellable_states = {
-            "CREATED", "PENDING", "RETRY_PENDING", "SUBMITTING", "SUBMITTED",
-            "PENDING_SLURM", "RUNNING", "REQUEUED",
-        }
+        cancellable_states = CANCELLABLE_STAGE_STATES
         inflight_stage_states = {
             "SUBMITTING", "SUBMITTED", "PENDING_SLURM", "RUNNING", "REQUEUED",
         }
-        inflight_attempt_states = {
-            "SUBMITTING", "SUBMITTED", "PENDING", "RUNNING", "REQUEUED",
-            "CANCELLING",
-        }
+        # An attempt still being handed to the scheduler counts as in flight here.
+        inflight_attempt_states = SLURM_BOUND_ATTEMPT_STATES | {"SUBMITTING"}
         if entity_type not in {"run", "evaluation"}:
             raise ValueError("cancellation entity_type must be run or evaluation")
 
@@ -1857,13 +1853,8 @@ class Database:
 
         draft_repairs = self.repair_pre_submission_orphans()
         ledger_repairs = self.repair_incomplete_evaluation_ledgers()
-        active_stage_states = (
-            "SUBMITTING", "SUBMITTED", "PENDING_SLURM", "RUNNING", "CANCELLING",
-        )
-        terminal_attempt_states = tuple(sorted(
-            {"SUBMISSION_FAILED", "FAILED", "OUT_OF_MEMORY", "CANCELLED", "DEADLINE", "SPECIAL_EXIT"}
-            | TRANSIENT_STATES
-        ))
+        active_stage_states = tuple(sorted(ACTIVE_STAGE_STATES))
+        terminal_attempt_states = tuple(sorted(ATTEMPT_TERMINAL_STATES))
         now = utc_now()
         repaired = 0
         run_ids: set[str] = set()
@@ -1896,7 +1887,7 @@ class Database:
                       SELECT 1 FROM job_attempts active
                       WHERE active.stage_id = a.stage_id
                         AND active.slurm_job_id IS NOT NULL
-                        AND active.status IN ('SUBMITTED', 'PENDING', 'RUNNING', 'REQUEUED', 'CANCELLING')
+                        AND active.status IN ({sql_list(SLURM_BOUND_ATTEMPT_STATES)})
                   )
                   AND NOT EXISTS (
                       SELECT 1 FROM job_attempts newer

@@ -48,7 +48,8 @@ from .adapters import (
 from .adapters.dataset_inputs import evaluation_context_json
 from .gpu_preflight import GPU_MISSING_EXIT_CODE, GPU_MISSING_MESSAGE, GPU_MISSING_STATE, gpu_missing_receipt
 from .gpu_quota import account_gpu_quota, idle_partition_quota
-from .preparation_states import TRANSIENT_STATES
+from .preparation_states import ATTEMPT_FAILURE_STATES, EXECUTING_STATES, TRANSIENT_STATES
+from .workflow_states import ACTIVE_STAGE_STATES, CANCELLABLE_STAGE_STATES, SLURM_BOUND_ATTEMPT_STATES, sql_list
 from .cluster_config import CLUSTER
 from .evaluation_placement import resolve_evaluation_resources, uses_isaac_sim
 from .evaluation_compatibility import inspect_compatibility, compose_evaluator, declaration_matches, policy_loader, dataset_metadata
@@ -69,10 +70,10 @@ from .credential_store import (
     KeyringCredentialStore,
 )
 from .database import Database, canonical_json, content_sha256, new_id, utc_now
-from .workspace_schema import visible_sql
+from .workspace_schema import LEGACY_WORKSPACE, visible_sql
 from .workspace_storage import WorkspaceStorage, paths_for_root, validate_work_root, evaluation_execution_directory
 from .slack_notifications import SlackNotifications
-from .job_status import attach_attempt_display_status, attach_job_display_status
+from .job_status import SUBMISSION_UNKNOWN_PREFIX, attach_attempt_display_status, attach_job_display_status
 from .workspaces import WorkspaceServices, require_workspace_records
 from .experiments import (
     CanonicalResult,
@@ -120,9 +121,6 @@ from .tracking import (
 from pydantic import ConfigDict, SecretStr
 
 
-TERMINAL_FAILURE_STATES = {"FAILED", "OUT_OF_MEMORY", "DEADLINE", "SPECIAL_EXIT"}
-# The job holds its allocation: executing, or in the epilog the controller reports.
-EXECUTING_STATES = frozenset({"RUNNING", "COMPLETING"})
 # The gateway's NFS view can trail a job's end, so what a finished job left behind
 # (an evaluation's result.json, a training launch boundary) is read again for a
 # short window before its absence is final.
@@ -172,7 +170,6 @@ _PROGRESS_FAILURE_STATES = {
     "FAILED", "CANCELLED", "CANCELED", "TIMEOUT", "TIMED_OUT",
     "OUT_OF_MEMORY", "DEADLINE", "SPECIAL_EXIT", "BLOCKED",
 }
-_PROGRESS_RUNNING_STATES = {"RUNNING", "COMPLETING"}
 _PROGRESS_WAITING_STATES = {
     "DRAFT", "CREATED", "PENDING", "SUBMITTED", "QUEUED", "CONFIGURING",
     "REQUEUED", "RETRY_PENDING", "RESIZING", "SUSPENDED", "PREEMPTED", "CANCELLING",
@@ -606,7 +603,7 @@ def training_progress_summary(
         return _progress_payload(
             **common, eta_seconds=None, eta_state="waiting", eta_reason="attempt_not_running"
         )
-    if attempt_status and attempt_status not in _PROGRESS_RUNNING_STATES:
+    if attempt_status and attempt_status not in EXECUTING_STATES:
         return _progress_payload(
             **common, eta_seconds=None, eta_state="waiting", eta_reason="waiting_for_retry"
         )
@@ -721,7 +718,7 @@ def evaluation_progress_summary(
         return _progress_payload(
             **common, eta_seconds=None, eta_state="waiting", eta_reason="attempt_not_running"
         )
-    if attempt_status and attempt_status not in _PROGRESS_RUNNING_STATES:
+    if attempt_status and attempt_status not in EXECUTING_STATES:
         return _progress_payload(
             **common, eta_seconds=None, eta_state="waiting", eta_reason="waiting_for_retry"
         )
@@ -827,10 +824,6 @@ _MANUAL_ACTION_ACTIVE_STATES = frozenset({
     "RETRY_PENDING", "CANCELLING",
 })
 
-_CANCELLABLE_STAGE_STATES = frozenset({
-    "CREATED", "PENDING", "RETRY_PENDING", "SUBMITTING", "SUBMITTED",
-    "PENDING_SLURM", "RUNNING", "REQUEUED",
-})
 _RUN_CANCELLATION_STAGE_TYPES = frozenset({"TRAIN", "UTILITY"})
 
 
@@ -845,7 +838,7 @@ def manual_cancel_action(
         return {"enabled": False, "reason": "Cancellation has already been requested."}
     if state == "CANCELLED":
         return {"enabled": False, "reason": "This work has already been cancelled."}
-    if state not in _CANCELLABLE_STAGE_STATES:
+    if state not in CANCELLABLE_STAGE_STATES:
         return {
             "enabled": False,
             "reason": f"Only queued, submitting, or active work can be cancelled; current state is {state or 'UNKNOWN'}.",
@@ -873,7 +866,7 @@ def _run_cancellation_stage(run: Mapping[str, Any]) -> Mapping[str, Any] | None:
     active = [
         stage for stage in candidates
         if str(stage.get("status") or "").upper()
-        in (_CANCELLABLE_STAGE_STATES | {"CANCELLING"})
+        in (CANCELLABLE_STAGE_STATES | {"CANCELLING"})
     ]
     return (active or candidates)[-1] if (active or candidates) else None
 _MANUAL_ACTION_SUCCESS_STATES = frozenset({"SUCCEEDED", "COMPLETED"})
@@ -1208,7 +1201,7 @@ def manual_run_actions(
         actions = {"resume": disabled(reason), "rerun": disabled(reason), "cancel": cancel}
         pending = stage_state == "SUBMITTING" and run_state != "CANCELLING" and any(
             item.get("status") == "SUBMITTING" and not item.get("slurm_job_id")
-            and str(item.get("slurm_reason") or "").startswith("Submission outcome unknown")
+            and str(item.get("slurm_reason") or "").startswith(SUBMISSION_UNKNOWN_PREFIX)
             for item in _training_stage_attempts(run, stage))
         if pending:
             actions["recover_submission"] = {"enabled": True,
@@ -1941,14 +1934,12 @@ class PipelineService:
         ]
         latest = max(attempts, key=lambda item: int(item.get("attempt_number") or 0), default={})
         submission_failed = latest.get("status") == "SUBMISSION_FAILED" and not latest.get("slurm_job_id")
-        execution_failed = bool(latest.get("slurm_job_id")) and latest.get("status") in (
-            TRANSIENT_STATES | TERMINAL_FAILURE_STATES
-        )
+        execution_failed = bool(latest.get("slurm_job_id")) and latest.get("status") in ATTEMPT_FAILURE_STATES
         retryable = bool(
             stage and stage.get("status") == "FAILED"
             and evaluation.get("status") == "FAILED"
             and (submission_failed or execution_failed)
-            and not any(item.get("status") in (_PROGRESS_RUNNING_STATES |
+            and not any(item.get("status") in (EXECUTING_STATES |
                         (_PROGRESS_WAITING_STATES - TRANSIENT_STATES) | {"SUBMISSION_UNCONFIRMED"})
                         for item in attempts if item.get("id") != latest.get("id"))
         )
@@ -4362,13 +4353,13 @@ class PipelineService:
         spec = ExperimentSpec.model_validate(revision["requested_spec_json"])
         with self.database.connection() as connection:
             active = connection.execute(
-                """
+                f"""
                 SELECT COUNT(*) FROM workflow_stages s
                 JOIN runs r ON r.id = s.run_id
                 JOIN variants v ON v.id = r.variant_id
                 JOIN experiment_revisions er ON er.id = v.experiment_revision_id
                 WHERE er.experiment_id = ? AND er.id = ?
-                  AND s.status IN ('SUBMITTING','SUBMITTED','PENDING_SLURM','RUNNING','CANCELLING')
+                  AND s.status IN ({sql_list(ACTIVE_STAGE_STATES)})
                 """,
                 (experiment_id, revision["id"]),
             ).fetchone()[0]
@@ -4422,7 +4413,7 @@ class PipelineService:
             if attempt and attempt.get("slurm_job_id"):
                 self._repair_recovered_submission_tracking({**attempt, "run_id": run_id, "stage_type": "TRAIN"})
                 return {"run_id": run_id, "status": run["status"], "slurm_job_id": attempt["slurm_job_id"]}
-            if not attempt or stage["status"] != "SUBMITTING" or attempt["status"] != "SUBMITTING" or not str(attempt.get("slurm_reason") or "").startswith("Submission outcome unknown"):
+            if not attempt or stage["status"] != "SUBMITTING" or attempt["status"] != "SUBMITTING" or not str(attempt.get("slurm_reason") or "").startswith(SUBMISSION_UNKNOWN_PREFIX):
                 raise ValueError("Only an unconfirmed training submission can be recovered. Cancelled submissions cannot be restarted here.")
             selected_gateway = self.cluster.resolve_gateway(gateway) if gateway == "auto" else self.cluster.candidates(gateway)[0]
             self.database.update_job_attempt(attempt["id"], gateway=selected_gateway)
@@ -4447,7 +4438,7 @@ class PipelineService:
                     submission = self.cluster.submit_script(content.decode("utf-8"), run_id, selected_gateway,
                                                             submission_key=attempt["id"])
             except (ClusterError, OSError, ValueError) as error:
-                self.database.update_job_attempt(attempt["id"], slurm_reason=f"Submission outcome unknown: recovery did not complete: {error}")
+                self.database.update_job_attempt(attempt["id"], slurm_reason=f"{SUBMISSION_UNKNOWN_PREFIX}: recovery did not complete: {error}")
                 raise
             self._record_recovered_submission({**attempt, "stage_id": stage["id"], "stage_type": "TRAIN",
                 "stage_status": stage["status"], "run_id": run_id, "run_started_at": run.get("started_at"), "evaluation_id": None}, submission)
@@ -5055,7 +5046,7 @@ class PipelineService:
                 attempt_updates={
                     "status": "SUBMITTING",
                     "gateway": test_gateway,
-                    "slurm_reason": f"Submission outcome unknown: {error}",
+                    "slurm_reason": f"{SUBMISSION_UNKNOWN_PREFIX}: {error}",
                 },
                 stage_id=stage_id,
                 stage_updates={"status": "SUBMITTING", "completed_at": None},
@@ -5087,7 +5078,7 @@ class PipelineService:
                         attempt_updates={
                             "status": "CANCELLING",
                             "gateway": test_gateway,
-                            "slurm_reason": f"Submission outcome unknown during cancellation: {error}",
+                            "slurm_reason": f"{SUBMISSION_UNKNOWN_PREFIX} during cancellation: {error}",
                         },
                         event_type="SUBMISSION_OUTCOME_UNKNOWN",
                         details={"error": str(error), "attempt_id": attempt["id"]},
@@ -5321,7 +5312,7 @@ class PipelineService:
         )
 
     def _tracking_environment(self):
-        return os.environ if self.database.workspace_id in (None, "legacy") else {}
+        return os.environ if self.database.workspace_id in (None, LEGACY_WORKSPACE) else {}
 
     def _environment_credentials(self, provider: str) -> dict[str, str]:
         if provider == "wandb":
@@ -5669,7 +5660,7 @@ class PipelineService:
             )
             try:
                 bridge = self._wandb_bridge(
-                    LOCAL_CAPSULE_ROOT / ".tracking-connections" / (self.database.workspace_id or "legacy") / "wandb", settings
+                    LOCAL_CAPSULE_ROOT / ".tracking-connections" / (self.database.workspace_id or LEGACY_WORKSPACE) / "wandb", settings
                 )
                 identity = bridge.validate_connection()
                 entity = request.entity or str(identity["entity"])
@@ -5737,7 +5728,7 @@ class PipelineService:
             )
             try:
                 self._mlflow_bridge(
-                    LOCAL_CAPSULE_ROOT / ".tracking-connections" / (self.database.workspace_id or "legacy") / "mlflow", settings
+                    LOCAL_CAPSULE_ROOT / ".tracking-connections" / (self.database.workspace_id or LEGACY_WORKSPACE) / "mlflow", settings
                 ).validate_connection()
             except Exception as error:
                 safe_error = str(sanitize(str(error), secrets=(token, password)))
@@ -5901,9 +5892,7 @@ class PipelineService:
                 final_status = "FINISHED"
             elif state == "CANCELLED":
                 final_status = "KILLED"
-            elif state in TERMINAL_FAILURE_STATES | {
-                "FAILED", "TIMEOUT", "OUT_OF_MEMORY", "DEADLINE", "SPECIAL_EXIT"
-            }:
+            elif state in ATTEMPT_FAILURE_STATES:
                 final_status = "FAILED"
             else:
                 final_status = None
@@ -7172,7 +7161,7 @@ class PipelineService:
                     LEFT JOIN evaluations e ON e.stage_id = s.id
                     WHERE {visible_sql('job_attempts', 'a')} AND a.status IN ('SUBMITTING', 'CANCELLING')
                       AND a.slurm_job_id IS NULL
-                      AND a.slurm_reason LIKE 'Submission outcome unknown%'
+                      AND a.slurm_reason LIKE '{SUBMISSION_UNKNOWN_PREFIX}%'
                     """
                     ).fetchall()
                 ]
@@ -7192,7 +7181,7 @@ class PipelineService:
                 recovered_submissions += 1
             self._repair_missing_attempt_log_paths()
             try:
-                if self.database.workspace_id in (None, "legacy"):
+                if self.database.workspace_id in (None, LEGACY_WORKSPACE):
                     self.reconcile_data_imports()
             except Exception:
                 pass
@@ -7221,7 +7210,7 @@ class PipelineService:
                     JOIN experiment_revisions er ON er.id = v.experiment_revision_id
                     WHERE {visible_sql("job_attempts", "a")} AND a.slurm_job_id IS NOT NULL
                       AND (
-                          a.status IN ('SUBMITTED','PENDING','RUNNING','REQUEUED','CANCELLING')
+                          a.status IN ({sql_list(SLURM_BOUND_ATTEMPT_STATES)})
                           OR (
                               a.status = 'SUCCEEDED'
                               AND s.status IN ('SUBMITTING','SUBMITTED','PENDING_SLURM','RUNNING','CANCELLING')
@@ -7498,7 +7487,7 @@ class PipelineService:
                         )
                         updated += 1
                         continue
-                    if state in TRANSIENT_STATES | TERMINAL_FAILURE_STATES | {"CANCELLED"}:
+                    if state in ATTEMPT_FAILURE_STATES | {"CANCELLED"}:
                         finished = accounting_finished or utc_now()
                         target_status = (
                             "CANCELLED"
@@ -7985,7 +7974,7 @@ class PipelineService:
     def _queue_list_progress_refresh(self, kind: str, records: list[dict[str, Any]]) -> bool:
         """Keep optional remote progress reads off the list response path."""
         now = __import__("time").monotonic()
-        active_states = _PROGRESS_RUNNING_STATES if kind == "training" else {"RUNNING"}
+        active_states = EXECUTING_STATES if kind == "training" else {"RUNNING"}
         eligible = active_states | (_PROGRESS_SUCCESS_STATES | _PROGRESS_FAILURE_STATES if kind == "training" else set())
         keys = {(kind, str(record["id"])) for record in records}
         with self._progress_refresh_lock:
@@ -8043,7 +8032,7 @@ class PipelineService:
     def _ingest_training_progress(self, value: Mapping[str, Any], *, raise_on_error: bool = False) -> int:
         status = str(value.get("status") or value.get("state") or "").upper()
         terminal_states = _PROGRESS_SUCCESS_STATES | _PROGRESS_FAILURE_STATES
-        if status not in _PROGRESS_RUNNING_STATES | terminal_states:
+        if status not in EXECUTING_STATES | terminal_states:
             return 0
         run = value if value.get("stages") and value.get("attempts") else self.database.get_run(
             str(value.get("id") or value.get("run_id") or "")
@@ -8068,7 +8057,7 @@ class PipelineService:
             return 0
         attempt_status = str(attempt.get("status") or "").upper()
         final_read = attempt_status in terminal_states and bool(attempt.get("slurm_job_id"))
-        if attempt_status not in _PROGRESS_RUNNING_STATES and not final_read:
+        if attempt_status not in EXECUTING_STATES and not final_read:
             return 0
         attempt_id = str(attempt.get("id") or "")
         if not attempt_id:
@@ -9332,7 +9321,7 @@ class PipelineService:
             if record is None and snapshot.controller_error is None:
                 record = self._exit_record_status({**latest, "run_id": run["id"]})
             state = str((record or {}).get("State") or "UNKNOWN").upper()
-            if state not in TRANSIENT_STATES | TERMINAL_FAILURE_STATES:
+            if state not in ATTEMPT_FAILURE_STATES:
                 raise ValueError(f"Retry requires a confirmed failed Slurm job; {job_id} is {state}")
         else:
             # A failed lookup must never be interpreted as no Slurm receipt.
@@ -11025,7 +11014,7 @@ def evaluation_suites(
             **row,
             "config_json": {key: value for key, value in config.items() if key != "target_dataset"},
             "slug": row["id"],
-            "can_delete": service.database.workspace_id in (None, "legacy"),
+            "can_delete": service.database.workspace_id in (None, LEGACY_WORKSPACE),
             "is_default": bool(compatibility and compatibility["ready"] and config.get("initial_state") == "single_training_episode"),
             "compatibility": compatibility,
             "allowed_gpu_types": allowed_gpu_types if isaac_evaluation else None,

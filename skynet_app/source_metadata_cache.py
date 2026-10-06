@@ -7,6 +7,7 @@ import re
 from typing import Any, Mapping
 
 from .database import Database, canonical_json, utc_now
+from .workspace_schema import LEGACY_WORKSPACE
 
 
 FULL_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -135,7 +136,7 @@ class SourceMetadataStore:
                 FROM source_repository_selections
                 WHERE owner_id = ? AND repository_url = ?
                 """,
-                (self.database.workspace_id or "legacy", repository_url),
+                (self.database.workspace_id or LEGACY_WORKSPACE, repository_url),
             ).fetchone()
         if row is None:
             return {"branch": "", "commits": {}, "updated_at": None}
@@ -159,7 +160,7 @@ class SourceMetadataStore:
                 FROM source_repository_selections
                 WHERE owner_id = ? AND repository_url = ?
                 """,
-                (self.database.workspace_id or "legacy", repository_url),
+                (self.database.workspace_id or LEGACY_WORKSPACE, repository_url),
             ).fetchone()
             commits = (
                 self._decode_object(row["commits_json"], "source commit selection")
@@ -179,7 +180,7 @@ class SourceMetadataStore:
                     updated_at = excluded.updated_at
                 """,
                 (
-                    self.database.workspace_id or "legacy",
+                    self.database.workspace_id or LEGACY_WORKSPACE,
                     repository_url,
                     branch,
                     canonical_json(commits),

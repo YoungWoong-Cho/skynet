@@ -11,6 +11,14 @@ TERMINAL_FAILURE_STATES = frozenset({
 })
 # After these an attempt with automatic resume and remaining budget is resubmitted.
 TRANSIENT_STATES = frozenset({'PREEMPTED', 'TIMEOUT', 'NODE_FAIL', 'BOOT_FAIL', 'REVOKED'})
+# Scheduler results that end a training or evaluation attempt without a retry.
+# SPECIAL_EXIT is a requeue hold for the preparation observers (WAITING_STATES)
+# but ends a pipeline attempt.
+NON_TRANSIENT_FAILURE_STATES = frozenset({'FAILED', 'OUT_OF_MEMORY', 'DEADLINE', 'SPECIAL_EXIT'})
+ATTEMPT_FAILURE_STATES = TRANSIENT_STATES | NON_TRANSIENT_FAILURE_STATES
+ATTEMPT_TERMINAL_STATES = ATTEMPT_FAILURE_STATES | frozenset({'CANCELLED', 'SUBMISSION_FAILED'})
+# The job holds its allocation: executing, or in the epilog the controller reports.
+EXECUTING_STATES = frozenset({'RUNNING', 'COMPLETING'})
 RUNNING_STATES = frozenset({'RUNNING', 'COMPLETING', 'RESIZING', 'STAGE_OUT'})
 WAITING_STATES = frozenset({
     'PENDING', 'CONFIGURING', 'SUSPENDED', 'STOPPED', 'POWER_UP_NODE',

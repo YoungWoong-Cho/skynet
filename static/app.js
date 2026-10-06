@@ -8233,6 +8233,21 @@ function attemptEnded(attempt) {
   ].includes(normalizedRunState(attempt?.status || attempt?.state));
 }
 
+// Run and evaluation states in which the workflow is still in progress (cancellable, polled).
+const WORKFLOW_ACTIVE_STATES = new Set([
+  "CREATED",
+  "SUBMITTING",
+  "PENDING",
+  "PENDING_SLURM",
+  "SUBMITTED",
+  "QUEUED",
+  "CONFIGURING",
+  "RUNNING",
+  "REQUEUED",
+  "RETRY_PENDING",
+  "CANCELLING",
+]);
+
 function attemptSucceeded(attempt) {
   return ["COMPLETED", "SUCCEEDED"].includes(
     normalizedRunState(attempt?.status || attempt?.state),
@@ -9906,7 +9921,7 @@ function runRowDescriptor(run) {
       {
         className: "row-actions",
         preserve: active,
-        html: `<button type="button" data-run-action="view" data-id="${escapeHtml(id)}" aria-controls="run-detail" aria-expanded="false">View</button>${["CREATED", "SUBMITTING", "SUBMITTED", "PENDING", "PENDING_SLURM", "QUEUED", "CONFIGURING", "RUNNING", "CANCELLING", "RESUMING", "RETRYING", "RETRY_PENDING", "REQUEUED"].includes(state) ? cancellationActionButton("run", id, run.manual_actions || { cancel: { enabled: state !== "CANCELLING" } }, { label: "Cancel", className: "" }) : `<button type="button" data-delete-kind="run" data-delete-id="${escapeHtml(id)}">Delete</button>`}`,
+        html: `<button type="button" data-run-action="view" data-id="${escapeHtml(id)}" aria-controls="run-detail" aria-expanded="false">View</button>${WORKFLOW_ACTIVE_STATES.has(state) ? cancellationActionButton("run", id, run.manual_actions || { cancel: { enabled: state !== "CANCELLING" } }, { label: "Cancel", className: "" }) : `<button type="button" data-delete-kind="run" data-delete-id="${escapeHtml(id)}">Delete</button>`}`,
       },
     ],
   };
@@ -13036,7 +13051,7 @@ function evaluationLifecycleAction(evaluation, id) {
   const state = String(
     evaluation.status || evaluation.state || "",
   ).toUpperCase();
-  if (!EVALUATION_ACTIVE_STATES.has(state)) {
+  if (!WORKFLOW_ACTIVE_STATES.has(state)) {
     return `<button type="button" data-delete-kind="evaluation" data-delete-id="${escapeHtml(id)}">Delete</button>`;
   }
   const cancelling = state === "CANCELLING";
@@ -13223,19 +13238,6 @@ function updateEvaluationRow(evaluation, { background = false } = {}) {
   return true;
 }
 
-const EVALUATION_ACTIVE_STATES = new Set([
-  "CREATED",
-  "SUBMITTING",
-  "PENDING",
-  "PENDING_SLURM",
-  "SUBMITTED",
-  "QUEUED",
-  "CONFIGURING",
-  "RUNNING",
-  "REQUEUED",
-  "RETRY_PENDING",
-  "CANCELLING",
-]);
 const EVALUATION_LIST_POLL_INTERVAL_MS = 5000;
 
 function revalidateFinishedEvaluation(previous, next) {
@@ -13244,14 +13246,14 @@ function revalidateFinishedEvaluation(previous, next) {
     previous.some(
       (row) =>
         String(row.run_id) === runId &&
-        EVALUATION_ACTIVE_STATES.has(
+        WORKFLOW_ACTIVE_STATES.has(
           String(row.status || row.state).toUpperCase(),
         ),
     ) &&
     !next.some(
       (row) =>
         String(row.run_id) === runId &&
-        EVALUATION_ACTIVE_STATES.has(
+        WORKFLOW_ACTIVE_STATES.has(
           String(row.status || row.state).toUpperCase(),
         ),
     )
@@ -13271,7 +13273,7 @@ function evaluationListPollEligible() {
       activeTab === "evaluation-runs" &&
       (evaluationProgressRefreshPending ||
         evaluationRows.some((evaluation) =>
-          EVALUATION_ACTIVE_STATES.has(
+          WORKFLOW_ACTIVE_STATES.has(
             String(evaluation.status || evaluation.state || "").toUpperCase(),
           ),
         )),
@@ -13633,7 +13635,7 @@ function renderEvaluationRolloutModal(evaluation, episode) {
   const key = `${evaluation.id}:${episode.id}:${episode.video_path || ""}`;
   video.hidden = !episode.video_path;
   empty.hidden = Boolean(episode.video_path);
-  empty.textContent = !EVALUATION_ACTIVE_STATES.has(
+  empty.textContent = !WORKFLOW_ACTIVE_STATES.has(
     String(evaluation.status || evaluation.state).toUpperCase(),
   )
     ? "No video was recorded for this episode."

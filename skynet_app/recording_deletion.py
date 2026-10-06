@@ -12,6 +12,7 @@ from .dataset_catalog import recording_ids
 from .data_version_retirement import references
 from .live_xr_archive import archive_descriptor, TERMINAL_STATES
 from .maintenance import Maintenance, rows, in_ids
+from .workspace_schema import LEGACY_WORKSPACE
 
 
 def mentions(value, identifier):
@@ -55,7 +56,7 @@ class RecordingMaintenance(Maintenance):
         return dict(
             record,
             name=(job.get("profile") or {}).get("task_name") or identifier,
-            owner_id=self.db.workspace_id or "legacy",
+            owner_id=self.db.workspace_id or LEGACY_WORKSPACE,
         )
 
     def _graph(self, c, kind, identifier, *, pending_target=None, selected_path=None):

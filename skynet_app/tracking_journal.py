@@ -6,6 +6,7 @@ import hashlib
 import json
 
 from .payload_store import MARKER
+from .workspace_schema import LEGACY_WORKSPACE
 
 CHUNKS = "$skynet_chunks_v1"
 CHUNK_BYTES = 64 * 1024
@@ -193,7 +194,7 @@ class TrackingJournal:
     def __init__(self, database, scope):
         self.database = database
         self.scope = scope
-        self.owner = database.workspace_id or "legacy"
+        self.owner = database.workspace_id or LEGACY_WORKSPACE
         self.lock = database.operation_lock(
             "tracking-journal:" + self.owner + ":" + scope
         )

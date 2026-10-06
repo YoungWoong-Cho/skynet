@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath
 
 from . import history_journals, storage_files
 from .database import canonical_json, utc_now
-from .workspace_schema import visible_sql
+from .workspace_schema import LEGACY_WORKSPACE, visible_sql
 from .workspace_storage import WorkspaceStorage
 from .registry_dependencies import extend_graph, suite_removal_notices
 from .registry_policy import suppress_defaults
@@ -141,7 +141,7 @@ class Maintenance:
             raise KeyError("History item not found")
         if kind == "adapter" and self.db.workspace_id is not None and target["owner_id"] != self.db.workspace_id:
             raise KeyError("Adapter is not editable in this workspace")
-        if kind == "suite" and self.db.workspace_id not in (None, "legacy"):
+        if kind == "suite" and self.db.workspace_id not in (None, LEGACY_WORKSPACE):
             raise KeyError("Only the installation owner can remove default evaluation suites")
         return dict(target)
 
@@ -592,7 +592,7 @@ class Maintenance:
         plan = {
             "kind": kind,
             "id": identifier,
-            "owner_id": target.get("owner_id") or "legacy",
+            "owner_id": target.get("owner_id") or LEGACY_WORKSPACE,
             "label": (target.get("description") if kind == "suite" else None) or target.get("name") or target.get("suite_name") or identifier,
             "counts": {table: len(data) for table, data in graph.items()},
             "records": {
@@ -745,7 +745,7 @@ class Maintenance:
                 c,
                 "maintenance_operations",
                 "owner_id=?",
-                (self.db.workspace_id or "legacy",),
+                (self.db.workspace_id or LEGACY_WORKSPACE,),
             )
             unreferenced_payloads = []
             if self.db.payload_store:
@@ -830,7 +830,7 @@ class Maintenance:
                 c.execute(
                     "INSERT INTO maintenance_operations(target_kind,target_id,owner_id,plan_json,created_at) VALUES ('storage',?,?,?,?) "
                     "ON CONFLICT(target_kind,target_id) DO UPDATE SET plan_json=excluded.plan_json",
-                    (operation_id, self.db.workspace_id or 'legacy', canonical_json(plan), utc_now()),
+                    (operation_id, self.db.workspace_id or LEGACY_WORKSPACE, canonical_json(plan), utc_now()),
                 )
             deleted = []
             for root in sorted({item["root"] for item in items}):
