@@ -145,9 +145,25 @@ def test_listing_orders_notes_by_creation_and_folders_by_name(system):
     with client(SimpleNamespace(database=alice)) as api:
         listing = api.get("/api/notes").json()
     assert [note["id"] for note in listing["notes"]] == ["new", "same-b", "same-a", "old"], "A later edit does not move a note up"
-    assert listing["notes"][-1] == {"id": "old", "title": "Old", "folder_id": "ego",
+    assert listing["notes"][-1] == {"id": "old", "title": "Old", "folder_id": "ego", "status": None,
                                     "created_at": "2026-09-01T00:00:00.000Z", "updated_at": "2026-09-30T00:00:00.000Z"}
     assert listing["folders"] == [{"id": "ego", "name": "Egoisim"}, {"id": "warp", "name": "warp-extension"}]
+
+
+def test_listing_reads_the_status_from_the_note_header(system):
+    alice = workspace(system, "alice@example.com")
+    with client(SimpleNamespace(database=alice)) as api:
+        done = create(api, "Done", "# Done\n\n- **상태:** 완료 (10/1)\n- **질문:** q\n\n- **상태:** 진행")
+        active = create(api, "Active", "# Active\n\n- **상태:** 진행\n")
+        plain = create(api, "Plain", "# Plain\n\n상태: 진행 is prose, not a header line\n")
+        late = create(api, "Late", "# Late\n\n" + "x" * 3000 + "\n- **상태:** 완료\n")
+        blank = create(api, "Blank", "# Blank\n\n- **상태:**\n- **질문:** q")
+        spaced = create(api, "Spaced", "# Spaced\n\n- **상태:** \n\n**목표:** x")
+        cut = create(api, "Cut", "x" * 1988 + "\n- **상태:** 완료\n")
+        statuses = {note["id"]: note["status"] for note in api.get("/api/notes").json()["notes"]}
+    assert statuses == {done["id"]: "완료", active["id"]: "진행", plain["id"]: None, late["id"]: None,
+                        blank["id"]: None, spaced["id"]: None, cut["id"]: None}, \
+        "Only a complete first header line near the top counts, and an empty one stays empty"
 
 
 def test_update_validates_and_refuses_stale_edits(system):
@@ -178,15 +194,23 @@ def test_text_fields_refuse_object_references_and_nul(system):
     # Database reads resolve an object reference in any column, so a stored title that is
     # one would break the listing or show another workspace's object body.
     forged = json.dumps({"$skynet_object_v1": {"sha256": "0" * 64, "path": "/x", "size": 1}})
+    # Falsy markers are references too, and the listing reads the first 2000 characters on their own.
+    falsy = ['{"$skynet_object_v1":0}', '{"$skynet_object_v1": {}}', '{"$skynet_object_v1": ""}']
+    head = '{"$skynet_object_v1": 0' + " " * 1975 + "}" + "\nmore text"
     with client(SimpleNamespace(database=workspace(system, "alice@example.com"))) as api:
         mine = create(api, "Mine")
+        for name in falsy:
+            assert api.post("/api/notes/folders", json={"name": name}).status_code == 422, name
         for text, message in [({"title": forged}, "Object references"), ({"markdown": forged}, "Object references"),
+                              *[({"title": value}, "Object references") for value in falsy],
+                              ({"markdown": head}, "Object references"),
                               ({"title": "x\x00y"}, "NUL"), ({"markdown": "a\x00b"}, "NUL")]:
             body = {"title": "x", "markdown": "", "folder_id": None, **text}
             for response in [api.post("/api/notes", json=body),
                              api.put(f"/api/notes/{mine['id']}", json={**body, "expected_updated_at": mine["updated_at"]})]:
                 assert response.status_code == 422 and message in response.text
-        assert [note["title"] for note in api.get("/api/notes").json()["notes"]] == ["Mine"]
+        listing = api.get("/api/notes").json()
+        assert [note["title"] for note in listing["notes"]] == ["Mine"] and listing["folders"] == []
 
 
 def test_read_download_and_delete_release_attachment_references(system):
@@ -319,13 +343,35 @@ def test_math_is_left_as_escaped_tex_for_katex():
     assert '<span class="math math-inline">H(A|S)</span>' in html
 
 
-def test_folder_controls_stay_removed(system):
+def test_folders_are_created_per_workspace_and_hold_notes(system):
+    alice, bob = workspace(system, "alice@example.com"), workspace(system, "bob@example.com")
+    add_folder(alice, "ego", "Egoisim")
+    with client(SimpleNamespace(database=alice)) as api:
+        response = api.post("/api/notes/folders", json={"name": "  warp-extension-archive "})
+        assert response.status_code == 200, response.text
+        folder = response.json()["folder"]
+        assert folder["name"] == "warp-extension-archive" and re.fullmatch(r"[0-9a-f-]{36}", folder["id"])
+        assert api.get("/api/notes").json()["folders"] == [
+            {"id": "ego", "name": "Egoisim"}, {"id": folder["id"], "name": "warp-extension-archive"}]
+        note = create(api, "Archived", folder_id=folder["id"])
+        assert note["folder_id"] == folder["id"]
+        duplicate = api.post("/api/notes/folders", json={"name": "warp-extension-archive"})
+        assert duplicate.status_code == 422 and "already exists" in duplicate.json()["detail"]
+        for body in ({"name": " "}, {"name": "x" * 241}, {"name": "a\x00b"}, {}, {"name": "x", "parent_id": "ego"}):
+            assert api.post("/api/notes/folders", json=body).status_code == 422, body
+    with client(SimpleNamespace(database=bob)) as api:
+        assert api.get("/api/notes").json()["folders"] == []
+        # The same name is free in another workspace; folder ids stay unique per workspace.
+        assert api.post("/api/notes/folders", json={"name": "warp-extension-archive"}).status_code == 200
+        assert api.post("/api/notes", json={"title": "x", "markdown": "", "folder_id": folder["id"]}).status_code == 422
+
+
+def test_folder_rename_delete_and_bulk_move_are_not_offered(system):
     alice = workspace(system, "alice@example.com")
     add_folder(alice, "ego", "Egoisim")
     with client(SimpleNamespace(database=alice)) as api:
         note = create(api, "First", folder_id="ego")
         for method, path, body in [
-            ("POST", "/api/notes/folders", {"name": "New"}),
             ("PATCH", "/api/notes/folders/ego", {"name": "Renamed"}),
             ("DELETE", "/api/notes/folders/ego", None),
             ("POST", "/api/notes/move", {"note_ids": [note["id"]], "folder_id": None}),

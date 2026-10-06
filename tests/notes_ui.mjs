@@ -48,7 +48,7 @@ const editorDialog=()=>el('note-editor-dialog'),viewer=()=>el('workspace-note-di
 try {
   for(const file of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js'])
     w.eval(await readFile(new URL('../static/'+file,import.meta.url),'utf8'));
-  const note={id:'latest',title:'UniDex latest',folder_id:null,created_at:'2026-09-18T12:00:00Z',updated_at:'2026-09-20T18:00:00Z'};
+  const note={id:'latest',title:'UniDex latest',folder_id:null,status:'진행',created_at:'2026-09-18T12:00:00Z',updated_at:'2026-09-20T18:00:00Z'};
   const full=(value,extra={})=>({note:{markdown:'',html:'',attachments:[],...value,...extra}});
   routes={'GET /api/notes':{notes:[note],folders:[]},'GET /api/notes/latest':full(note,{html:'<p>1,000 steps · latest 3 · final 1</p>'})};
   const mark=fetched.length;
@@ -61,8 +61,17 @@ try {
   assert.equal(el('experiment-tab-notes').getAttribute('aria-selected'),'true');
   assert.deepEqual(fetched.slice(mark).filter(path=>/^\/api\/(data|collection)/.test(path)),[],'Notes does not fetch collection or registry');
   assert.equal(el('notes-table').querySelectorAll('tbody tr').length,1);
-  assert.deepEqual([...el('notes-table').querySelectorAll('thead th')].map(cell=>cell.textContent.trim()),['Name','Kind','Created','Updated','Actions']);
-  assert.deepEqual([...el('notes-table').querySelectorAll('tbody td')].slice(2,4).map(cell=>cell.textContent.trim()),
+  assert.deepEqual([...el('notes-table').querySelectorAll('thead th')].map(cell=>cell.textContent.trim()),['Name','Kind','Status','Created','Updated','Actions']);
+  assert.equal(el('notes-table').querySelectorAll('tbody td')[2].textContent.trim(),'진행','Status shows the header status');
+  // A status comes from note text, so it is shown as text.
+  const markup='<img/src/onerror=alert&#40;1&#41;>';
+  routes['GET /api/notes']={notes:[{...note,status:markup}],folders:[]};
+  await w.loadNotes();
+  assert.equal(el('notes-table').querySelectorAll('tbody td')[2].textContent,markup,'A status is shown as text');
+  assert.equal(el('notes-table').querySelector('tbody img'),null);
+  routes['GET /api/notes']={notes:[note],folders:[]};
+  await w.loadNotes();
+  assert.deepEqual([...el('notes-table').querySelectorAll('tbody td')].slice(3,5).map(cell=>cell.textContent.trim()),
     [w.formatDate(note.created_at),w.formatDate(note.updated_at)],'Created and Updated show their own times');
   assert.ok(visible('refresh-experiments'));assert.equal(visible('refresh-collection'),false);
   assert.ok(visible('new-note'));
@@ -89,7 +98,7 @@ try {
   routes['GET /api/notes/latest']=full({...note,folder_id:'folder-0'},{html:'<p>Original note</p>'});
   await w.loadNotes();
   assert.equal(el('notes-table').querySelectorAll('[data-note-folder].entity-link').length,2);
-  assert.equal(el('notes-table').querySelector('tbody tr').children.length,5,'Folder rows fill every column');
+  assert.equal(el('notes-table').querySelector('tbody tr').children.length,6,'Folder rows fill every column');
   assert.equal(el('notes-table').querySelectorAll('[data-open-note]').length,0);
   el('notes-table').querySelector('[data-note-folder="folder-0"]').click();
   assert.match(el('notes-path').textContent,/egoisim/);
@@ -105,6 +114,62 @@ try {
   el('notes-table').querySelector('[data-note-folder="folder-1"]').click();await w.loadNotes();
   assert.match(el('notes-path').textContent,/warp-extension/);
   assert.match(el('notes-table').textContent,/This folder is empty/);
+  // New folders are made at the top level with the shared prompt, then opened.
+  assert.equal(visible('new-folder'),false,'Folders are one level deep');
+  el('notes-path').querySelector('[data-note-folder=""]').click();
+  assert.ok(visible('new-folder'));
+  const prompt=()=>w.document.querySelector('dialog[data-app-confirmation]');
+  count=requests.length;
+  el('new-folder').click();await settle();
+  prompt().querySelector('button[type="button"]:not([data-dialog-close])').click();await settle();
+  assert.deepEqual(writes(count),[],'A cancelled prompt creates nothing');
+  routes['POST /api/notes/folders']=()=>json({detail:'A folder named warp-extension already exists'},422);
+  el('new-folder').click();await settle();
+  prompt().querySelector('input').value='warp-extension';
+  prompt().querySelector('button[type="submit"]').click();await settle();
+  assert.match(el('notes-error').textContent,/already exists/);
+  assert.equal(new URL(w.location.href).searchParams.get('note_folder'),null);
+  const archive={id:'folder-2',name:'warp-archive'};
+  // A response whose body arrives only when released.
+  const heldResponse=value=>{let release;const held=new Promise(resolve=>release=resolve);
+    return {release,response:()=>new Response(new ReadableStream({start(controller){held.then(()=>{
+      controller.enqueue(new TextEncoder().encode(JSON.stringify(value)));controller.close();});}}),
+      {headers:{'Content-Type':'application/json'}})};};
+  routes['POST /api/notes/folders']=init=>({folder:{...archive,name:JSON.parse(init.body).name}});
+  const refresh=heldResponse({notes:[{...note,folder_id:'folder-0'}],folders:[...folders,archive]});
+  routes['GET /api/notes']=refresh.response;
+  count=requests.length;
+  el('new-folder').click();await settle();
+  prompt().querySelector('input').value='  warp-archive ';
+  prompt().querySelector('button[type="submit"]').click();await settle();
+  assert.deepEqual(writes(count).map(request=>[request.method,request.path,JSON.parse(request.body)]),
+    [['POST','/api/notes/folders',{name:'warp-archive'}]]);
+  assert.equal(new URL(w.location.href).searchParams.get('note_folder'),'folder-2');
+  assert.match(el('notes-path').textContent,/warp-archive/,'The new folder is named before the list refresh');
+  assert.equal(visible('new-folder'),false);
+  assert.equal(w.document.activeElement,el('new-note'),'Focus moves off the hidden New folder button');
+  refresh.release();await settle();
+  assert.equal(new URL(w.location.href).searchParams.get('note_folder'),'folder-2');
+  routes['GET /api/notes']={notes:[{...note,folder_id:'folder-0'}],folders:[...folders,archive]};
+  el('new-note').click();await settle();
+  assert.equal(el('note-editor-folder').value,'folder-2','A new note starts in the opened folder');
+  editorDialog().querySelector('[data-dialog-close]').click();await settle();
+  // When the list refresh lands before the create response's body, the folder still shows once.
+  el('notes-path').querySelector('[data-note-folder=""]').click();
+  const second={id:'folder-3',name:'warp-second'};
+  const createdFolder=heldResponse({folder:second});
+  routes['POST /api/notes/folders']=createdFolder.response;
+  routes['GET /api/notes']={notes:[{...note,folder_id:'folder-0'}],folders:[...folders,archive,second]};
+  el('new-folder').click();await settle();
+  prompt().querySelector('input').value='warp-second';
+  prompt().querySelector('button[type="submit"]').click();await settle();
+  await w.loadNotes();
+  createdFolder.release();await settle();
+  el('notes-path').querySelector('[data-note-folder=""]').click();
+  assert.deepEqual(rows().filter(id=>id==='folder-3'),['folder-3'],'A new folder is listed once');
+  routes['GET /api/notes']={notes:[{...note,folder_id:'folder-0'}],folders};
+  await w.loadNotes();
+  el('notes-table').querySelector('[data-note-folder="folder-1"]').click();await w.loadNotes();
   for(const id of ['notes-new-folder','notes-up-folder','notes-rename-folder','notes-selection',
     'notes-select-all','notes-selection-count','notes-move','notes-folder-dialog','notes-move-dialog'])
     assert.equal(el(id),null, id+' is removed entirely');
@@ -115,6 +180,12 @@ try {
   routes['GET /api/notes']={notes:[{...note,folder_id:'folder-1'},older],folders};
   await w.loadNotes();
   assert.deepEqual(rows(),['latest','older'],'Rows keep the server order: newest created first, even when an older note was edited later');
+  const index={id:'index',title:'00 목차 · WARP++',created_at:'2026-08-15T00:00:00Z',updated_at:'2026-08-15T00:00:00Z',folder_id:'folder-1'};
+  routes['GET /api/notes']={notes:[{...note,folder_id:'folder-1'},index,older],folders};
+  await w.loadNotes();
+  assert.deepEqual(rows(),['index','latest','older'],'An index note titled "00 ..." stays on top, the rest keep the server order');
+  routes['GET /api/notes']={notes:[{...note,folder_id:'folder-1'},older],folders};
+  await w.loadNotes();
 
   // A search matches titles in every folder, and folder names at the root.
   const egoNote={id:'ego-note',title:'Egoisim latest results',folder_id:'folder-0',created_at:'2026-08-01T00:00:00Z',updated_at:'2026-08-01T00:00:00Z'};

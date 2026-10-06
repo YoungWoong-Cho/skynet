@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, HTTPException, Request, Response
 from markdown_it import MarkdownIt
 from markdown_it.common.utils import escapeHtml
-from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, StringConstraints, field_validator
 from starlette.concurrency import run_in_threadpool
 
 from .database import new_id, utc_now
@@ -25,6 +25,10 @@ MEDIA_TYPES = {
     "webp": "image/webp", "gif": "image/gif", "json": "application/json", "html": "text/html",
     "csv": "text/csv", "txt": "text/plain", "md": "text/markdown",
 }
+# A note's status is the first "- **상태:** <word>" line of its header. The listing reads only the start
+# of each note, so the status shows in the list without loading note bodies.
+NOTE_STATUS = re.compile(r"^- \*\*상태:\*\*[ \t]*([^\s(·,.]+)", re.MULTILINE)
+STATUS_HEAD_CHARS = 2000
 OBJECT_STORE_REQUIRED = "Note attachments need the central object store. Configure object_store_root for this app."
 
 
@@ -40,32 +44,39 @@ def storable(value: str) -> str:
     """Text for a notes column: PostgreSQL refuses NUL, and database reads resolve object references."""
     if "\x00" in value:
         raise ValueError("Notes cannot contain NUL characters")
-    if reference(value):
+    # Reads resolve any value reference() recognizes, including falsy markers.
+    if reference(value) is not None:
         raise ValueError("Object references cannot be supplied as note content")
     return value
 
 
+# A note title or folder name.
+Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=240), AfterValidator(storable)]
+
+
 class NoteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=240)]
+    title: Name
     markdown: str
     folder_id: str | None
-
-    @field_validator("title", "markdown")
-    @classmethod
-    def _storable(cls, value: str) -> str:
-        return storable(value)
 
     @field_validator("markdown")
     @classmethod
     def _markdown(cls, value: str) -> str:
         if len(value.encode("utf-8")) > MAX_MARKDOWN_BYTES:
             raise ValueError("A note can contain at most 1 MiB of Markdown")
-        return value
+        # The listing reads the start of each note for its status, as its own column.
+        storable(value[:STATUS_HEAD_CHARS])
+        return storable(value)
 
 
 class NoteUpdate(NoteRequest):
     expected_updated_at: str
+
+
+class FolderRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: Name
 
 
 def attachment_type(name: str) -> str:
@@ -237,15 +248,35 @@ class NoteStore:
     def listing(self) -> dict:
         with self.database.read_snapshot() as connection:
             notes = [dict(row) for row in connection.execute(
-                "SELECT id,title,folder_id,created_at,updated_at FROM notes WHERE owner_id=?", (self.owner,)
+                f"SELECT id,title,folder_id,created_at,updated_at,substr(markdown,1,{STATUS_HEAD_CHARS}) AS head "
+                "FROM notes WHERE owner_id=?", (self.owner,)
             ).fetchall()]
             folders = [dict(row) for row in connection.execute(
                 "SELECT id,name FROM note_folders WHERE owner_id=?", (self.owner,)
             ).fetchall()]
+        for note in notes:
+            head = note.pop("head") or ""
+            if len(head) == STATUS_HEAD_CHARS:
+                head = head[:head.rfind("\n") + 1]  # A cut-off last line is not a status.
+            match = NOTE_STATUS.search(head)
+            note["status"] = match.group(1) if match else None
         return {
             "notes": sorted(notes, key=lambda note: (note["created_at"], note["id"]), reverse=True),
             "folders": sorted(folders, key=lambda folder: (folder["name"].casefold(), folder["id"])),
         }
+
+    def create_folder(self, name: str) -> dict:
+        # Folders are one level deep, named uniquely within the workspace.
+        with self.database.transaction() as connection:
+            if connection.execute(
+                "SELECT 1 FROM note_folders WHERE owner_id=? AND name=?", (self.owner, name)
+            ).fetchone() is not None:
+                raise ValueError(f"A folder named {name} already exists")
+            identifier = new_id()
+            connection.execute(
+                "INSERT INTO note_folders(owner_id,id,name) VALUES (?,?,?)", (self.owner, identifier, name)
+            )
+        return {"id": identifier, "name": name}
 
     def read(self, identifier: str) -> dict:
         with self.database.read_snapshot() as connection:
@@ -385,6 +416,10 @@ def notes_router(services):
     @router.post("")
     def create_note(request: NoteRequest):
         return {"note": checked(store().create, request.title, request.markdown, request.folder_id)}
+
+    @router.post("/folders")
+    def create_folder(request: FolderRequest):
+        return {"folder": checked(store().create_folder, request.name)}
 
     @router.get("/{note_id}")
     def read_note(note_id: str):

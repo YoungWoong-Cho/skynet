@@ -23,9 +23,12 @@
     attachmentTypes.some(type => name.toLowerCase().endsWith(type));
 
   // A search spans every folder; an empty search lists the current folder.
+  // An index note (title starting "00 ") stays on top. The rest keep the server's newest-first order.
+  const pinned = note => note.title.startsWith("00 ");
   function visibleNotes(query) {
-    return notes.filter(note => query ? note.title.toLowerCase().includes(query)
+    const shown = notes.filter(note => query ? note.title.toLowerCase().includes(query)
       : (note.folder_id || "") === activeFolder);
+    return [...shown.filter(pinned), ...shown.filter(note => !pinned(note))];
   }
 
   function chooseFolder(id) {
@@ -53,18 +56,21 @@
       ? `<button type="button" class="entity-link" data-note-folder="">Notes</button><span aria-hidden="true">/</span><strong aria-current="page">${escapeHtml(folderName(activeFolder))}</strong>`
       : '<strong aria-current="page">Notes</strong>';
     el("notes-location").hidden = !activeFolder;
+    // Folders are one level deep: new folders are made from the top level.
+    el("new-folder").hidden = Boolean(activeFolder);
     const folderRows = activeFolder ? [] : folders.filter(folder => folder.name.toLowerCase().includes(query)).map(folder => ({
       id:folder.id,
       cells:[
         {className:"wrap-cell", html:`<button type="button" class="entity-link node-name" data-note-folder="${escapeHtml(folder.id)}"><span aria-hidden="true">📁</span> ${escapeHtml(folder.name)}</button>`},
         `Folder · ${counts.get(folder.id) || 0} notes`,
+        '',
         '—',
         '—',
         {className:"row-actions", html:`<button type="button" data-note-folder="${escapeHtml(folder.id)}">Open</button>`},
       ],
     }));
     SkynetJobHistory.render(table, {
-      columns: ["Name", "Kind", "Created", "Updated", "Actions"],
+      columns: ["Name", "Kind", "Status", "Created", "Updated", "Actions"],
       empty: query ? "No notes match your filter." : "This folder is empty.",
       rows: [...folderRows, ...visibleNotes(query).map(note => ({
         id: note.id,
@@ -72,6 +78,8 @@
           {className: "wrap-cell", html: `<button type="button" class="entity-link node-name" data-open-note="${escapeHtml(note.id)}">${escapeHtml(note.title)}</button>`},
           // A search spans folders, so its results name the folder each note is in.
           query ? `Markdown · ${escapeHtml(folderName(note.folder_id))}` : 'Markdown',
+          // The status comes from the note's "상태:" header line. Notes without one leave it blank.
+          escapeHtml(note.status || ""),
           escapeHtml(formatDate(note.created_at)),
           escapeHtml(formatDate(note.updated_at)),
           {className: "row-actions", html: `<button type="button" data-open-note="${escapeHtml(note.id)}">View</button>`},
@@ -287,6 +295,29 @@
     }
   });
   el("new-note").addEventListener("click", event => openEditor(null, event.currentTarget));
+  el("new-folder").addEventListener("click", async event => {
+    const button = event.currentTarget;
+    const name = (await askUserDialog("Folder name", ""))?.trim();
+    if (!name) return;
+    clearNotice(el("notes-error"));
+    button.disabled = true;
+    try {
+      const {folder} = await api("/api/notes/folders", {method: "POST", body: JSON.stringify({name})});
+      // The write's list refresh may already hold the folder; it also brings the server's order.
+      folders = [...folders.filter(item => item.id !== folder.id), folder];
+      if (isActive() && !activeFolder) {
+        chooseFolder(folder.id);
+        // New folder hides inside a folder; a new note now starts in this one.
+        el("new-note").focus({preventScroll: true});
+      } else {
+        render();
+      }
+    } catch (error) {
+      showNotice(el("notes-error"), error.message, {scope: "notes"});
+    } finally {
+      button.disabled = false;
+    }
+  });
   el("workspace-note-edit").addEventListener("click", event => openEditor(shown, event.currentTarget));
   el("workspace-note-delete").addEventListener("click", async () => {
     const note = shown;
