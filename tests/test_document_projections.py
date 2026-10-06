@@ -82,7 +82,7 @@ def test_migration_backfills_existing_documents_and_rollback_keeps_paths(tmp_pat
         c.execute('DROP FUNCTION skynet_project_document(TEXT,TEXT)')
         c.execute('DROP TABLE document_projections')
         c.execute("INSERT INTO policy_exports(id,payload_json) VALUES ('old-record',?)",(json.dumps({'path':'/old/path'}),))
-        for version in ('018','020','021','022'):
+        for version in ('018','020','021','022','023'):
             c.executescript(next((Path(__file__).parents[1]/'skynet_app/migrations/postgresql').glob(f'{version}_*.sql')).read_text())
         assert c.execute("SELECT projection_json->'paths' FROM document_projections WHERE record_id='old-record'").fetchone()[0]==['/old/path']
     with pytest.raises(RuntimeError):
@@ -270,3 +270,46 @@ def test_022_projects_attempt_resume_pins_and_keeps_other_kinds_byte_identical(t
         db.run_progress_evidence([run['id']])
     assert db.repair_document_projections()==1
     assert db.run_progress_evidence([run['id']])[run['id']]['attempts'][-1]['has_initial_checkpoint'] is True
+
+
+ADAPTER_MANIFEST = {
+    'schema_version': 'skynet.adapter/v1', 'slug': 'compact', 'display_name': 'Compact', 'aliases': ['cmp'],
+    'runtime': {'allowed_backends': ['uv']}, 'capabilities': {'version': 1},
+    'defaults': {'resources': {'gpu_type': 'any'}},
+    'train': {'capsule_files': {'train.py': 'print(1)' * 50}, 'model_io': {'inputs': ['rgb']},
+              'input_fields': [{'path': 'native.config.epochs', 'label': 'Epochs'}], 'supported_canonical_fields': ['epochs']},
+    'evaluations': [{'environment': 'sim', 'suites': ['s1'], 'command': {'capsule_files': {'eval.py': 'x' * 100}, 'model_io': {}, 'argv': ['python']}}, 'not-an-object'],
+}
+
+
+def compact(manifest):
+    train = {k: v for k, v in manifest['train'].items() if k not in ('capsule_files', 'model_io')}
+    evaluations = [({**e, 'command': {k: v for k, v in e['command'].items() if k not in ('capsule_files', 'model_io')}}
+                    if isinstance(e, dict) else e) for e in manifest['evaluations']]
+    return {**manifest, 'train': train, 'evaluations': evaluations}
+
+
+def test_023_projects_compact_adapter_manifests_and_keeps_other_kinds_byte_identical(tmp_path):
+    db=Database(tmp_path/'projection.db')
+    experiment=db.create_experiment(name='pins',requested_spec=LIST_SPEC)
+    db.create_variant(experiment['latest_revision']['id'],name='run',parameters={},resolved_spec=LIST_SPEC)
+    adapter=db.create_adapter(name='Compact',manifest=ADAPTER_MANIFEST)
+    scalar=db.create_adapter(name='Scalar',manifest={'slug':'scalar','train':3,'evaluations':'none'})
+    with db.transaction() as c:
+        reapply(c, ['018','020','021','022'])
+        before={row[0]:row[1] for row in c.execute("SELECT table_name||':'||record_id, projection_json::text FROM document_projections").fetchall()}
+        assert not any(key.startswith('adapters:') for key in before)
+        c.executescript(next(MIGRATIONS.glob('023_*.sql')).read_text())
+        after={row[0]:row[1] for row in c.execute("SELECT table_name||':'||record_id, projection_json::text FROM document_projections").fetchall()}
+    for key,value in before.items():
+        assert after[key]==value, key
+    version=adapter['latest_version']['id']
+    assert json.loads(after['adapters:'+version])=={'manifest':compact(ADAPTER_MANIFEST)}
+    # Non-object subtrees are left alone rather than failing the projection.
+    assert json.loads(after['adapters:'+scalar['latest_version']['id']])=={'manifest':{'slug':'scalar','train':3,'evaluations':'none'}}
+    # The list serves the projection; the detail keeps the full manifest.
+    listed=next(item for item in db.list_adapter_registry(manifests='projected') if item['id']==adapter['id'])
+    assert listed['latest_version']['manifest']==compact(ADAPTER_MANIFEST)
+    assert 'capsule_files' not in listed['latest_version']['manifest']['train']
+    assert db.get_adapter(adapter['id'])['latest_version']['manifest']==ADAPTER_MANIFEST
+    assert next(item for item in db.list_adapter_registry(manifests='none') if item['id']==adapter['id'])['latest_version']['manifest']=={}

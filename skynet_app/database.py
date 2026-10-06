@@ -8,7 +8,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence, Literal
 
 from psycopg import IntegrityError
 
@@ -195,7 +195,8 @@ class Database:
         }
         for key in JSON_COLUMNS.intersection(result):
             raw = result[key]
-            if raw is not None:
+            # A row assembled from to_jsonb() may already carry parsed documents.
+            if isinstance(raw, str):
                 result[key] = json.loads(raw)
         for key in tuple(result):
             if key.startswith("is_") or key in {"auto_resume", "enabled", "success", "required"}:
@@ -3048,11 +3049,18 @@ class Database:
         return version_id
 
     def list_adapter_registry(
-        self, *, include_archived: bool = False, include_editable: bool = False
+        self, *, include_archived: bool = False, include_editable: bool = False,
+        manifests: Literal["full", "projected", "none"] = "full",
     ) -> list[dict[str, Any]]:
+        """The latest version of every visible adapter.
+
+        ``manifests`` chooses what each ``latest_version.manifest`` carries: the
+        full stored manifest (hydrated from the object store), the compact
+        projection migration 023 keeps for every version (never a body read), or
+        nothing. Historical versions contribute counts, creation time and key
+        eligibility without being decoded.
+        """
         with self.connection() as connection:
-            # Select only the latest manifest; historical versions contribute
-            # counts, creation time and key eligibility without being decoded.
             rows = connection.execute(
                 f"""
                 WITH visible_adapters AS (
@@ -3065,11 +3073,15 @@ class Database:
                            ) AS sort_name
                     FROM visible_adapters GROUP BY adapter_key
                 )
-                SELECT a.*, r.registry_count, r.registry_created_at,
+                SELECT {"a.*" if manifests == "full" else "to_jsonb(a) - 'manifest_json' AS document"},
+                       r.registry_count, r.registry_created_at,
                        (current_workspace_id() IS NULL OR
-                        a.owner_id = current_workspace_id()) AS registry_editable
+                        a.owner_id = current_workspace_id()) AS registry_editable,
+                       p.projection_json -> 'manifest' AS projected_manifest,
+                       (a.manifest_json LIKE '{{"$skynet_object_v1":%') AS offloaded
                 FROM visible_adapters a JOIN registry r
                     ON r.adapter_key = a.adapter_key AND r.latest_number = a.version_number
+                LEFT JOIN document_projections p ON p.table_name = 'adapters' AND p.record_id = a.id
                 WHERE r.sort_name IS NOT NULL
                 ORDER BY r.sort_name, r.adapter_key
                 """,
@@ -3077,7 +3089,18 @@ class Database:
             ).fetchall()
             result = []
             for row in rows:
-                item = self._adapter_bundle([row])
+                if manifests == "full":
+                    item = self._adapter_bundle([row])
+                else:
+                    document = dict(row["document"])
+                    if manifests == "projected":
+                        if row["projected_manifest"] is None and (row["offloaded"] or document.get("id")):
+                            raise ValueError("Stored adapter projections are incomplete; "
+                                             "the adapter list is unavailable until the projection repair finishes")
+                        document["manifest_json"] = row["projected_manifest"]
+                    else:
+                        document["manifest_json"] = {}
+                    item = self._adapter_bundle([document])
                 item.update(version_count=row["registry_count"], created_at=row["registry_created_at"])
                 if include_editable:
                     item["editable"] = bool(row["registry_editable"])
@@ -4195,10 +4218,13 @@ class Database:
         on them.
         """
         from .payload_store import FIELDS, MARKER, PROJECTED_PATHS
+        # Rows whose projection the app reads first come first.
+        orders = {"workflow_stages": "(s.stage_type <> 'EVALUATE'), s.created_at",
+                  "adapters": "(s.archived_at IS NOT NULL), s.version_number DESC, s.created_at DESC"}
         repaired = 0
         for table, paths in PROJECTED_PATHS.items():
             column = FIELDS[table]
-            order = "(s.stage_type <> 'EVALUATE'), s.created_at" if table == "workflow_stages" else "s.created_at"
+            order = orders.get(table, "s.created_at")
             with self.connection() as connection:
                 # to_jsonb keeps the offloaded column as its reference instead of hydrating the body.
                 rows = connection.execute(f"""
@@ -4218,15 +4244,21 @@ class Database:
             if markers:
                 if self.payload_store is None:
                     raise ValueError(f"Offloaded {table} bodies need the object store to rebuild their projections")
-                for (record_id, _), values in zip(markers, self.payload_store.project([marker for _, marker in markers], paths)):
-                    rebuilt: dict[str, Any] = {}
-                    for path, value in values.items():
-                        cursor = rebuilt
-                        *parents, leaf = path.split(".")
-                        for key in parents:
-                            cursor = cursor.setdefault(key, {})
-                        cursor[leaf] = value
-                    documents.append((record_id, json.dumps(rebuilt)))
+                if not paths:
+                    # The projection reads the whole body.
+                    bodies = self.payload_store.objects.read_many([marker[MARKER] for _, marker in markers])
+                    documents.extend((record_id, body.decode("utf-8") if isinstance(body, bytes) else body)
+                                     for (record_id, _), body in zip(markers, bodies))
+                else:
+                    for (record_id, _), values in zip(markers, self.payload_store.project([marker for _, marker in markers], paths)):
+                        rebuilt: dict[str, Any] = {}
+                        for path, value in values.items():
+                            cursor = rebuilt
+                            *parents, leaf = path.split(".")
+                            for key in parents:
+                                cursor = cursor.setdefault(key, {})
+                            cursor[leaf] = value
+                        documents.append((record_id, json.dumps(rebuilt)))
             if not documents:
                 continue
             with self.transaction() as connection:

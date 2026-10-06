@@ -523,3 +523,37 @@ def test_subtree_projection_equals_full_body_projection(object_db):
         rows = [c.execute("SELECT skynet_project_document(?, 'workflow_stages')", (json.dumps(body),)).fetchone()[0] for body in (full, subtree, {'plan': subtree['plan']}, {})]
     assert rows[0] == rows[1] == rows[2] == {'assignments': [{'role': 'evaluation_target', 'version_id': 'v', 'digest': 'd' * 64, 'path': '/t'}]}
     assert rows[3] == {'assignments': []}
+
+
+def test_offloaded_adapter_manifests_are_listed_from_projections_without_body_reads(object_db, monkeypatch):
+    from skynet_app.payload_store import PROJECTED_PATHS
+    from test_document_projections import ADAPTER_MANIFEST, compact
+    db, _ = object_db
+    db.payload_store = PayloadStore(db)
+    adapter = db.create_adapter(name='Compact', manifest=ADAPTER_MANIFEST)
+    version = adapter['latest_version']['id']
+    with db.connection() as c:
+        marker = c.execute("SELECT to_jsonb(a) AS document FROM adapters a WHERE id=?", (version,)).fetchone()[0]['manifest_json']
+        assert marker.startswith('{"$skynet_object_v1"'), 'the manifest is offloaded'
+        projected = c.execute("SELECT projection_json FROM document_projections WHERE table_name='adapters' AND record_id=?", (version,)).fetchone()[0]
+    assert projected == {'manifest': compact(ADAPTER_MANIFEST)}
+    reads = track_payload_reads(db, monkeypatch)
+    original_read_many = db.payload_store.objects.read_many
+    monkeypatch.setattr(db.payload_store.objects, 'read_many', lambda references: pytest.fail('the list must not read manifest bodies') if references else [])
+    listed = next(item for item in db.list_adapter_registry(manifests='projected') if item['id'] == adapter['id'])
+    assert listed['latest_version']['manifest'] == compact(ADAPTER_MANIFEST) and reads == []
+    assert next(item for item in db.list_adapter_registry(manifests='none') if item['id'] == adapter['id'])['latest_version']['manifest'] == {}
+    # A version written before migration 023 has no projection: the list fails closed, the repair reads the body once.
+    with db.transaction() as c:
+        c.execute("DELETE FROM document_projections WHERE table_name='adapters' AND record_id=?", (version,))
+    with pytest.raises(ValueError, match='incomplete'):
+        db.list_adapter_registry(manifests='projected')
+    fetched = []
+    def read_many(references):
+        fetched.append([ref['sha256'] for ref in references])
+        return original_read_many(references)
+    monkeypatch.setattr(db.payload_store.objects, 'read_many', read_many)
+    assert PROJECTED_PATHS['adapters'] == () and db.repair_document_projections() == 1
+    assert [refs for refs in fetched if refs] == [[json.loads(marker)['$skynet_object_v1']['sha256']]], 'one body read, for the one missing projection'
+    assert next(item for item in db.list_adapter_registry(manifests='projected') if item['id'] == adapter['id'])['latest_version']['manifest'] == compact(ADAPTER_MANIFEST)
+    assert db.get_adapter(adapter['id'])['latest_version']['manifest'] == ADAPTER_MANIFEST

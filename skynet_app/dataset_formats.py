@@ -37,7 +37,7 @@ def catalog(database):
     """One registry query. Merely opening Convert performs no preparation."""
     return [
         _entry(adapter, adapter["latest_version"])
-        for adapter in database.list_adapter_registry()
+        for adapter in database.list_adapter_registry(manifests="projected")
         if not adapter.get("archived_at") and adapter.get("enabled", True)
     ]
 

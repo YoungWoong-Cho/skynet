@@ -13,6 +13,12 @@ import zlib
 from pathlib import PurePosixPath
 
 from . import registry_reference_match as registry_reference_module
+
+# References per SSH exchange. Bodies are whole documents (tens of kilobytes each);
+# projections and truthiness checks return only small subtrees.
+_BODY_BATCH = 64
+_PROJECTION_BATCH = 128
+_UPLOAD_BATCH = 16
 from .cluster_runtime import ssh_argv
 
 MAX_BYTES = 16 * 1024 * 1024
@@ -165,8 +171,8 @@ class MetadataObjects:
     def truthy_paths(self, references, paths):
         """Inspect verified immutable bodies remotely, returning only booleans."""
         result = []
-        for start in range(0, len(references), 128):
-            batch = references[start:start + 128]
+        for start in range(0, len(references), _PROJECTION_BATCH):
+            batch = references[start:start + _PROJECTION_BATCH]
             for ref in batch:
                 if ref["path"] != self.path(ref["sha256"], "body"):
                     raise ValueError("Invalid metadata object path")
@@ -186,8 +192,8 @@ class MetadataObjects:
     def registry_matches(self, references, identifiers):
         """Return checksum-verified dependency flags, never execution bodies."""
         result = []
-        for start in range(0, len(references), 128):
-            batch = references[start:start + 128]
+        for start in range(0, len(references), _PROJECTION_BATCH):
+            batch = references[start:start + _PROJECTION_BATCH]
             for ref in batch:
                 if ref["path"] != self.path(ref["sha256"], "body"):
                     raise ValueError("Invalid metadata object path")
@@ -207,8 +213,8 @@ class MetadataObjects:
     def project(self, references, paths):
         """Return selected fields from verified bodies, without transporting code/data."""
         result = []
-        for start in range(0, len(references), 128):
-            batch = references[start:start + 128]
+        for start in range(0, len(references), _PROJECTION_BATCH):
+            batch = references[start:start + _PROJECTION_BATCH]
             for ref in batch:
                 if ref["path"] != self.path(ref["sha256"], "body"):
                     raise ValueError("Invalid metadata object path")
@@ -238,8 +244,8 @@ class MetadataObjects:
         """Deduplicated and bounded bulk transfer for an offline migration."""
         unique = {hashlib.sha256(content).hexdigest(): content for content in contents}
         values = list(unique.items())
-        for start in range(0, len(values), 16):
-            batch = values[start : start + 16]
+        for start in range(0, len(values), _UPLOAD_BATCH):
+            batch = values[start : start + _UPLOAD_BATCH]
             if any(len(content) > MAX_BYTES for _, content in batch):
                 raise ValueError("Supporting metadata file exceeds 16 MiB")
             result = self._exchange(
@@ -277,8 +283,8 @@ class MetadataObjects:
 
     def read_many(self, references):
         output = []
-        for start in range(0, len(references), 16):
-            batch = references[start : start + 16]
+        for start in range(0, len(references), _BODY_BATCH):
+            batch = references[start : start + _BODY_BATCH]
             for ref in batch:
                 if ref["path"] != self.path(ref["sha256"], "body"):
                     raise ValueError("Invalid metadata object path")

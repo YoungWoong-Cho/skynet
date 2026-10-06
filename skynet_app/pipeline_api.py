@@ -1683,7 +1683,7 @@ class PipelineService:
             )
         # The plain EgoVerse launcher is retired in favour of the native EgoVerse
         # manifests. Keep its seed archived; saved versions remain resolvable.
-        for record in self.database.list_adapter_registry(include_archived=False):
+        for record in self.database.list_adapter_registry(include_archived=False, manifests="none"):
             if record.get("seed_key") == "egoverse":
                 self.database.archive_adapter(str(record["id"]))
         for suite in get_evaluation_catalog():
@@ -1780,7 +1780,8 @@ class PipelineService:
     ) -> tuple[dict[str, Any], Mapping[str, Any], AdapterManifest]:
         requested = adapter_key.strip()
         matches: list[dict[str, Any]] = []
-        for record in self.database.list_adapter_registry(include_archived=False):
+        # Key matching reads the compact projections; the match below is re-read in full.
+        for record in self.database.list_adapter_registry(include_archived=False, manifests="projected"):
             version = self._selected_version(record)
             raw_manifest = version.get("manifest")
             if not isinstance(raw_manifest, Mapping):
@@ -10619,7 +10620,10 @@ def preview_model_io(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
 @router.get("/adapters")
 def adapters(include_archived: bool = Query(default=False)) -> dict[str, Any]:
     records = []
-    for row in service.database.list_adapter_registry(include_archived=include_archived, include_editable=True):
+    # The list carries each adapter's compact projected manifest (no capsule code);
+    # its validity is judged on that projection, the detail route on the full body.
+    for row in service.database.list_adapter_registry(include_archived=include_archived, include_editable=True,
+                                                      manifests="projected"):
         version = row.get("latest_version") or {}
         manifest = version.get("manifest") or {}
         manifest_error = None

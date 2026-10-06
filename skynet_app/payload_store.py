@@ -23,6 +23,8 @@ PROJECTED_PATHS = {
     "workflow_stages": ("context.target_dataset", "plan.native_config.canonical_evaluation.target_dataset"),
     "job_attempts": ("plan.native_config.initial_checkpoint", "migration_provenance.checkpoint",
                      "resolved_spec.native.config.initial_checkpoint"),
+    # No paths: the projection reads the whole body, so a repair fetches it.
+    "adapters": (),
 }
 MARKER = "$skynet_object_v1"
 _CACHE = OrderedDict()

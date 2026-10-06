@@ -19,7 +19,7 @@ def version(manifest, identifier="version-1", number=1):
 
 def registry(*versions):
     row = dict(id="adapter-1", name="Adapter", latest_version=versions[-1], versions=list(versions))
-    return row, SimpleNamespace(list_adapter_registry=lambda: [row], get_adapter=lambda *a, **kw: row)
+    return row, SimpleNamespace(list_adapter_registry=lambda **_: [row], get_adapter=lambda *a, **kw: row)
 
 
 def test_catalog_and_selection_read_the_same_pinned_declaration():

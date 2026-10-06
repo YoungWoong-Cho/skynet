@@ -281,7 +281,7 @@ def test_native_act_declares_recording_conversion_and_existing_formats():
     from skynet_app.dataset_formats import catalog as conversion_catalog
     records = manifests()
     class Registry:
-        def list_adapter_registry(self):
+        def list_adapter_registry(self, **_):
             return [{'id':m.slug,'name':m.display_name,'latest_version':{'id':m.slug+'-v1','version_number':1,'manifest':m.model_dump(mode='json')}} for m in records]
     options = conversion_catalog(Registry())
     native = next(p for p in options if p['id'] == 'xpolicylab-act-native')
