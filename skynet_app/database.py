@@ -1070,34 +1070,17 @@ class Database:
                     f"SELECT id, variant_id FROM runs WHERE id IN ({placeholders})", batch
                 ).fetchall()}
                 with self._progress_cache_lock:
-                    missing_ids = list({variant_id: run_id for run_id, variant_id in variant_ids.items()
-                                        if variant_id not in self._progress_spec_cache}.values())
-                    if missing_ids:
-                        missing_placeholders = ",".join("?" for _ in missing_ids)
-                        variants = self._decode_many(connection.execute(f"""
-                            WITH selected_specs AS MATERIALIZED (
-                                SELECT r.id AS run_id, v.resolved_spec_json::jsonb AS spec
-                                FROM runs r JOIN variants v ON v.id = r.variant_id
-                                WHERE r.id IN ({missing_placeholders})
-                            )
-                            SELECT run_id,
-                              jsonb_set(
-                                spec #- '{{source,adapter_manifest,train,capsule_files}}',
-                                '{{data,bundle,assignments}}',
-                                COALESCE((SELECT jsonb_agg(jsonb_set(item, '{{version,metadata}}',
-                                  (COALESCE(item #> '{{version,metadata}}', '{{}}'::jsonb)
-                                    - 'episodes' - 'shared_artifacts') || jsonb_build_object('episodes',
-                                    CASE WHEN jsonb_typeof(item #> '{{version,metadata,episodes}}') = 'array'
-                                      THEN to_jsonb(jsonb_array_length(item #> '{{version,metadata,episodes}}'))
-                                      ELSE item #> '{{version,metadata,episodes}}' END)))
-                                  FROM jsonb_array_elements(COALESCE(
-                                    spec #> '{{data,bundle,assignments}}', '[]'::jsonb)) item),
-                                  '[]'::jsonb)
-                              )::text AS resolved_spec_json
-                            FROM selected_specs
-                        """, missing_ids).fetchall())
-                        for row in variants:
-                            self._progress_spec_cache[variant_ids[row["run_id"]]] = row.get("resolved_spec_json")
+                    missing = [variant_id for variant_id in dict.fromkeys(variant_ids.values())
+                               if variant_id not in self._progress_spec_cache]
+                    if missing:
+                        # The variants projection holds the compact display spec (migration 020).
+                        found = {row["id"]: row["display"] for row in connection.execute("""
+                            SELECT record_id AS id, projection_json -> 'display' AS display
+                            FROM document_projections WHERE table_name='variants' AND record_id=ANY(?)
+                        """, (missing,)).fetchall()}
+                        if len(found) != len(missing):
+                            raise ValueError("Stored variant projections are incomplete; the run list is unavailable")
+                        self._progress_spec_cache.update(found)
                     for run_id, variant_id in variant_ids.items():
                         evidence[run_id]["resolved_spec_json"] = self._progress_spec_cache[variant_id]
                     while len(self._progress_spec_cache) > 512:
@@ -3963,14 +3946,15 @@ class Database:
             for table, column in [
                 ("experiment_revisions", "requested_spec_json"),
                 ("variants", "resolved_spec_json"),
-                ("workflow_stages", "resolved_config_json"),
-                ("job_attempts", "execution_snapshot_json"),
             ]:
                 for row in c.execute(f"SELECT {column} FROM {table}"):
                     if row[0] and references_dataset(json.loads(row[0])):
                         raise ValueError(
                             "This dataset is used by an experiment and cannot be deleted"
                         )
+            # Evaluation stages are offloaded; their frozen targets are read from projections.
+            if self._evaluation_target_references(c, references):
+                raise ValueError("This dataset is used by an experiment and cannot be deleted")
             for row in c.execute(
                 "SELECT i.input_version_id, d.output_version_id FROM data_derivation_inputs i JOIN data_derivations d ON d.id=i.derivation_id"
             ):
@@ -4133,45 +4117,36 @@ class Database:
         result = {digest: [] for digest in digests}
         hidden = set()
         with self.connection() as connection:
+            # Revision inputs and frozen evaluation targets are both read from their projections,
+            # so no stored specification is parsed here.
             rows = connection.execute("""
-                WITH usages AS (
-                    SELECT json_extract(assignment.value, '$.version.manifest_sha256') AS digest,
-                           e.owner_id AS usage_owner_id, e.id AS experiment_id, e.name,
+                WITH wanted AS (SELECT digest FROM unnest(?::text[]) AS d(digest)),
+                usages AS (
+                    SELECT w.digest, e.owner_id AS usage_owner_id, e.id AS experiment_id, e.name,
                            er.revision_number, r.id AS run_id, r.status AS run_status
-                    FROM experiment_revisions er JOIN experiments e ON e.id=er.experiment_id
+                    FROM wanted w
+                    JOIN document_projections p
+                      ON p.table_name='experiment_revisions'
+                     AND p.projection_json -> 'assignments' @> jsonb_build_array(jsonb_build_object('digest', w.digest))
+                    JOIN experiment_revisions er ON er.id=p.record_id
+                    JOIN experiments e ON e.id=er.experiment_id
                     LEFT JOIN variants v ON v.experiment_revision_id=er.id
                     LEFT JOIN runs r ON r.variant_id=v.id
-                    CROSS JOIN json_each(er.requested_spec_json, '$.data.bundle.assignments') assignment
                     UNION ALL
-                    SELECT target.digest, e.owner_id, e.id, e.name,
-                           er.revision_number, r.id, r.status
-                    FROM workflow_stages stage
+                    SELECT w.digest, e.owner_id, e.id, e.name, er.revision_number, r.id, r.status
+                    FROM wanted w
+                    JOIN document_projections p
+                      ON p.table_name='workflow_stages'
+                     AND p.projection_json -> 'assignments' @> jsonb_build_array(jsonb_build_object('digest', w.digest))
+                    JOIN workflow_stages stage ON stage.id=p.record_id
                     JOIN runs r ON r.id=stage.run_id
                     JOIN variants v ON v.id=r.variant_id
                     JOIN experiment_revisions er ON er.id=v.experiment_revision_id
                     JOIN experiments e ON e.id=er.experiment_id
-                    CROSS JOIN LATERAL (VALUES
-                        (json_extract(stage.resolved_config_json, '$.context.target_dataset.manifest_sha256')),
-                        (json_extract(stage.resolved_config_json, '$.plan.native_config.canonical_evaluation.target_dataset.manifest_sha256'))
-                    ) target(digest)
-                    UNION ALL
-                    SELECT target.digest, e.owner_id, e.id, e.name,
-                           er.revision_number, r.id, r.status
-                    FROM job_attempts attempt
-                    JOIN workflow_stages stage ON stage.id=attempt.stage_id
-                    JOIN runs r ON r.id=stage.run_id
-                    JOIN variants v ON v.id=r.variant_id
-                    JOIN experiment_revisions er ON er.id=v.experiment_revision_id
-                    JOIN experiments e ON e.id=er.experiment_id
-                    CROSS JOIN LATERAL (VALUES
-                        (json_extract(attempt.execution_snapshot_json, '$.plan.native_config.canonical_evaluation.target_dataset.manifest_sha256')),
-                        (json_extract(attempt.execution_snapshot_json, '$.context.target_dataset.manifest_sha256'))
-                    ) target(digest)
                 )
                 SELECT DISTINCT digest, usage_owner_id, experiment_id, name,
                        revision_number, run_id, run_status
-                FROM usages WHERE digest = ANY(?)
-                ORDER BY name, revision_number, run_id
+                FROM usages ORDER BY name, revision_number, run_id
             """, (digests,)).fetchall()
         for row in rows:
             item = dict(row)
@@ -4183,6 +4158,75 @@ class Database:
         for digest in hidden:
             result[digest].append({"other_workspace": True})
         return result
+
+    @staticmethod
+    def _evaluation_target_references(connection, needles) -> bool:
+        """Whether any evaluation stage's frozen target names one of the needles.
+
+        Stage bodies live in the object store; their projection rows carry the
+        target identity. The check fails closed while a stage lacks its projection.
+        """
+        needles = [str(value) for value in needles if value]
+        if connection.execute("""
+            SELECT 1 FROM workflow_stages s LEFT JOIN document_projections p
+              ON p.table_name='workflow_stages' AND p.record_id=s.id WHERE p.record_id IS NULL LIMIT 1
+        """).fetchone():
+            raise ValueError("Stored evaluation references are incomplete; deletion is unavailable until the projection repair finishes")
+        prefixes = [value.rstrip("/") + "/" for value in needles if value.startswith("/")]
+        return connection.execute("""
+            SELECT 1 FROM document_projections p
+            CROSS JOIN LATERAL jsonb_array_elements(p.projection_json -> 'assignments') a(value)
+            WHERE p.table_name='workflow_stages'
+              AND (a.value ->> 'version_id' = ANY(?) OR a.value ->> 'digest' = ANY(?) OR a.value ->> 'path' = ANY(?)
+                   OR EXISTS (SELECT 1 FROM unnest(?::text[]) prefix WHERE starts_with(a.value ->> 'path', prefix)))
+            LIMIT 1
+        """, (needles, needles, needles, prefixes)).fetchone() is not None
+
+    def repair_document_projections(self, limit: int = 128) -> int:
+        """Project stages written before migration 020 from their offloaded bodies.
+
+        Only the target subtrees cross the wire; the projection itself stays in SQL.
+        """
+        from .payload_store import MARKER, PROJECTED_PATHS
+        paths = PROJECTED_PATHS["workflow_stages"]
+        with self.connection() as connection:
+            # to_jsonb keeps the offloaded column as its reference instead of hydrating the body.
+            rows = connection.execute(f"""
+                SELECT to_jsonb(s) AS document FROM workflow_stages s
+                LEFT JOIN document_projections p ON p.table_name='workflow_stages' AND p.record_id=s.id
+                WHERE p.record_id IS NULL AND {visible_sql('workflow_stages', 's')}
+                ORDER BY (s.stage_type <> 'EVALUATE'), s.created_at LIMIT ?
+            """, (limit,)).fetchall()
+        documents = []
+        markers = []
+        for row in rows:
+            body = row["document"]["resolved_config_json"] or "{}"
+            parsed = json.loads(body)
+            if isinstance(parsed, dict) and MARKER in parsed:
+                markers.append((row["document"]["id"], parsed))
+            else:
+                documents.append((row["document"]["id"], body))
+        if markers:
+            if self.payload_store is None:
+                raise ValueError("Offloaded stage bodies need the object store to rebuild their projections")
+            for (stage_id, _), values in zip(markers, self.payload_store.project([marker for _, marker in markers], paths)):
+                rebuilt: dict[str, Any] = {}
+                for path, value in values.items():
+                    cursor = rebuilt
+                    *parents, leaf = path.split(".")
+                    for key in parents:
+                        cursor = cursor.setdefault(key, {})
+                    cursor[leaf] = value
+                documents.append((stage_id, json.dumps(rebuilt)))
+        if not documents:
+            return 0
+        with self.transaction() as connection:
+            connection.executemany(
+                """INSERT INTO document_projections VALUES ('workflow_stages', ?, skynet_project_document(?, 'workflow_stages'))
+                   ON CONFLICT (table_name, record_id) DO UPDATE SET projection_json=excluded.projection_json""",
+                documents,
+            )
+        return len(documents)
 
     def data_version_usage(self, manifest_sha256):
         return self.data_version_usage_many([manifest_sha256])[manifest_sha256]

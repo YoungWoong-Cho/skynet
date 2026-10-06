@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from test_postgres import pg as pg
@@ -451,3 +452,60 @@ def test_compressed_metadata_rejects_invalid_or_unbounded_content(object_db, kin
     with pytest.raises(OSError):
         objects._exchange({"operation": "put", "root": str(objects.root),
             "sha256": hashlib.sha256(body).hexdigest(), "name": "body", **value})
+
+
+def test_offloaded_evaluation_targets_are_found_and_repaired_without_body_reads(object_db, monkeypatch, tmp_path):
+    from skynet_app import prepared_deletion
+    from skynet_app.payload_store import PROJECTED_PATHS
+    from test_evaluation_dataset_lifecycle import dataset, evaluation_reference
+    db, _ = object_db
+    db.payload_store = PayloadStore(db)
+    reads = track_payload_reads(db, monkeypatch)
+    parent, target = dataset(db)
+    experiment, run, stage = evaluation_reference(db, target, kind='context')
+    with db.connection() as c:
+        # Nested inside a JSON document the column keeps its object reference instead of being hydrated.
+        marker = c.execute("SELECT to_jsonb(s) AS document FROM workflow_stages s WHERE id=?", (stage['id'],)).fetchone()[0]['resolved_config_json']
+        assert marker.startswith('{"$skynet_object_v1"'), 'the stage body is offloaded'
+        projected = c.execute("SELECT projection_json FROM document_projections WHERE table_name='workflow_stages' AND record_id=?", (stage['id'],)).fetchone()[0]
+    assert projected['assignments'][0]['digest'] == target['manifest_sha256']
+    assert db.data_version_usage(target['manifest_sha256']) == [dict(experiment_id=experiment['id'], name=experiment['name'], revision_number=1, run_id=run['id'], run_status='COMPLETED')]
+    service = SimpleNamespace(database=db, root=tmp_path)
+    assert prepared_deletion.preview(service, SimpleNamespace(owns=lambda *_: True), 'dataset', target['id'])['blockers'][0]['id'] == experiment['id']
+    with pytest.raises(ValueError, match='used by an experiment'):
+        db.delete_prepared_dataset(parent['id'], lambda *_: None, version_id=target['id'])
+    assert reads == [], 'usage and deletion checks never download stage bodies'
+    # Rows written before migration 020 have no projection: deletion fails closed, the repair rebuilds them remotely.
+    with db.transaction() as c:
+        c.execute("DELETE FROM document_projections WHERE table_name='workflow_stages' AND record_id=?", (stage['id'],))
+    with pytest.raises(ValueError, match='incomplete'):
+        db.delete_prepared_dataset(parent['id'], lambda *_: None, version_id=target['id'])
+    projected_paths = []
+    original_project = db.payload_store.objects.project
+    def project(references, paths):
+        projected_paths.append(tuple(paths))
+        return original_project(references, paths)
+    monkeypatch.setattr(db.payload_store.objects, 'project', project)
+    assert db.repair_document_projections() == 1
+    assert projected_paths == [PROJECTED_PATHS['workflow_stages']] and reads == []
+    assert db.repair_document_projections() == 0
+    assert db.data_version_usage(target['manifest_sha256'])[0]['experiment_id'] == experiment['id']
+    with db.transaction() as c:
+        c.execute('DELETE FROM workflow_stages WHERE id=?', (stage['id'],))
+    assert db.data_version_usage(target['manifest_sha256']) == []
+    assert db.delete_prepared_dataset(parent['id'], lambda *_: None, version_id=target['id'])['deleted']
+
+
+def test_subtree_projection_equals_full_body_projection(object_db):
+    from skynet_app.payload_store import PROJECTED_PATHS
+    db, _ = object_db
+    db.payload_store = PayloadStore(db)
+    target = {'version_id': 'v', 'manifest_sha256': 'd' * 64, 'path': '/t', 'metadata': {'x': 1}}
+    full = {'context': {'target_dataset': target, 'other': 'x'}, 'plan': {'argv': ['a'], 'native_config': {'canonical_evaluation': {'target_dataset': target}}}}
+    subtree = {'context': {'target_dataset': target}, 'plan': {'native_config': {'canonical_evaluation': {'target_dataset': target}}}}
+    with db.connection() as c:
+        values = db.payload_store.project([full], PROJECTED_PATHS['workflow_stages'])[0]
+        assert set(values) == set(PROJECTED_PATHS['workflow_stages'])
+        rows = [c.execute("SELECT skynet_project_document(?, 'workflow_stages')", (json.dumps(body),)).fetchone()[0] for body in (full, subtree, {'plan': subtree['plan']}, {})]
+    assert rows[0] == rows[1] == rows[2] == {'assignments': [{'role': 'evaluation_target', 'version_id': 'v', 'digest': 'd' * 64, 'path': '/t'}]}
+    assert rows[3] == {'assignments': []}

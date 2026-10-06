@@ -82,8 +82,8 @@ def test_migration_backfills_existing_documents_and_rollback_keeps_paths(tmp_pat
         c.execute('DROP FUNCTION skynet_project_document(TEXT,TEXT)')
         c.execute('DROP TABLE document_projections')
         c.execute("INSERT INTO policy_exports(id,payload_json) VALUES ('old-record',?)",(json.dumps({'path':'/old/path'}),))
-        migration=Path(__file__).parents[1]/'skynet_app/migrations/postgresql/018_document_projections.sql'
-        c.executescript(migration.read_text())
+        for version in ('018','020'):
+            c.executescript(next((Path(__file__).parents[1]/'skynet_app/migrations/postgresql').glob(f'{version}_*.sql')).read_text())
         assert c.execute("SELECT projection_json->'paths' FROM document_projections WHERE record_id='old-record'").fetchone()[0]==['/old/path']
     with pytest.raises(RuntimeError):
         with db.transaction() as c:
@@ -92,3 +92,89 @@ def test_migration_backfills_existing_documents_and_rollback_keeps_paths(tmp_pat
             raise RuntimeError('rollback')
     with db.connection() as c:
         assert c.execute("SELECT projection_json->'paths' FROM document_projections WHERE record_id='old-record'").fetchone()[0]==['/old/path']
+
+
+MIGRATIONS = Path(__file__).parents[1] / 'skynet_app/migrations/postgresql'
+OLD_DISPLAY_EXPRESSION = """
+    SELECT jsonb_set(spec #- '{source,adapter_manifest,train,capsule_files}', '{data,bundle,assignments}',
+        COALESCE((SELECT jsonb_agg(jsonb_set(item, '{version,metadata}',
+            (COALESCE(item #> '{version,metadata}', '{}'::jsonb) - 'episodes' - 'shared_artifacts') || jsonb_build_object('episodes',
+            CASE WHEN jsonb_typeof(item #> '{version,metadata,episodes}') = 'array'
+                 THEN to_jsonb(jsonb_array_length(item #> '{version,metadata,episodes}'))
+                 ELSE item #> '{version,metadata,episodes}' END)))
+          FROM jsonb_array_elements(COALESCE(spec #> '{data,bundle,assignments}', '[]'::jsonb)) item), '[]'::jsonb))::text
+    FROM (SELECT ?::jsonb AS spec) selected
+"""
+
+
+def reapply(c, versions):
+    c.execute('DROP FUNCTION skynet_refresh_document_projection() CASCADE')
+    c.execute('DROP FUNCTION skynet_project_document(TEXT,TEXT)')
+    c.execute('DROP TABLE document_projections')
+    for version in versions:
+        c.executescript(next(MIGRATIONS.glob(f'{version}_*.sql')).read_text())
+
+
+def test_020_keeps_earlier_projections_byte_identical_and_extends_variants(tmp_path):
+    db=Database(tmp_path/'projection.db')
+    project=db.create_project('project')
+    spec={'source':{'revision':'abc','repository':'repo','project_subdirectory':'train','adapter_manifest':{'train':{'capsule_files':{'a.py':'x'*5000}}}},
+          'tracking':{'providers':[{'provider':'wandb','enabled':True}]},
+          'data':{'bundle':{'assignments':[{'resource':{'provider':'p','namespace':'n','name':'data'},
+             'version':{'manifest_sha256':'digest','metadata':{'registered_version_id':'version','episodes':[1,2,3],'shared_artifacts':['/s']}}}]}}}
+    experiment=db.create_experiment(project_id=project['id'],name='test',requested_spec=spec)
+    variant=db.create_variant(experiment['latest_revision']['id'],name='one',parameters={},resolved_spec=spec)
+    with db.transaction() as c:
+        c.execute("INSERT INTO policy_exports(id,payload_json) VALUES ('export',?)",(json.dumps({'path':'/exported'}),))
+        reapply(c, ['018'])
+        before={row[0]:row[1] for row in c.execute("SELECT table_name||':'||record_id, projection_json::text FROM document_projections").fetchall()}
+        c.executescript(next(MIGRATIONS.glob('020_*.sql')).read_text())
+        after={row[0]:row[1] for row in c.execute("SELECT table_name||':'||record_id, projection_json::text FROM document_projections").fetchall()}
+        display=c.execute(OLD_DISPLAY_EXPRESSION,(json.dumps(spec),)).fetchone()[0]
+    for key in before:
+        if key.startswith('variants:'):
+            assert json.loads(after[key])=={**json.loads(before[key]),'tracking_providers':spec['tracking']['providers'],'display':json.loads(display)}
+        else:
+            assert after[key]==before[key], key
+    assert json.loads(display)['data']['bundle']['assignments'][0]['version']['metadata']=={'registered_version_id':'version','episodes':3}
+    assert 'capsule_files' not in json.dumps(json.loads(display)['source'])
+    # The run list reads that projection, not the stored specification.
+    run=db.create_run(variant['id'],seed=1,adapter_name='x',adapter_version='1',run_directory='/run',status='SUCCEEDED')
+    assert db.run_progress_evidence([run['id']])[run['id']]['resolved_spec_json']==json.loads(display)
+
+
+def test_display_projection_matches_the_run_list_expression_on_large_specs(tmp_path):
+    db=Database(tmp_path/'projection.db')
+    specs=[{'train':{'max_steps':1},'source':{'adapter_manifest':{'train':{'capsule_files':{'big.py':'c'*500_000}}}},
+            'data':{'bundle':{'assignments':[{'version':{'metadata':{'episodes':list(range(50_000)),'shared_artifacts':['/a']*1000,'display_name':'d'}}},
+                                             {'version':{'metadata':{'episodes':12}}},{'version':{}}]}}},
+           {'train':{'max_steps':2}},{}]
+    with db.connection() as c:
+        for spec in specs:
+            projected=c.execute("SELECT skynet_project_document(?, 'variants') -> 'display'",(json.dumps(spec),)).fetchone()[0]
+            expected=json.loads(c.execute(OLD_DISPLAY_EXPRESSION,(json.dumps(spec),)).fetchone()[0])
+            assert projected==expected
+            assert len(json.dumps(projected))<10_000
+
+
+def test_offloaded_bodies_are_skipped_by_the_trigger_and_projected_by_their_writer(tmp_path):
+    db=Database(tmp_path/'projection.db')
+    experiment=db.create_experiment(name='stage',requested_spec={})
+    variant=db.create_variant(experiment['latest_revision']['id'],name='run',parameters={},resolved_spec={})
+    run=db.create_run(variant['id'],seed=1,adapter_name='x',adapter_version='1',run_directory='/run',status='COMPLETED')
+    target={'version_id':'v','manifest_sha256':'d'*64,'path':'/target'}
+    marker=json.dumps({'$skynet_object_v1':{'sha256':'0'*64,'path':'/objects/0','size':1}})
+    with db.transaction() as c:
+        c.execute("INSERT INTO workflow_stages(id,run_id,stage_type,name,status,resolved_config_json,created_at,updated_at) VALUES ('inline',?,'EVALUATE','e','COMPLETED',?,?,?)",
+                  (run['id'],json.dumps({'context':{'target_dataset':target}}),'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'))
+        c.execute("INSERT INTO workflow_stages(id,run_id,stage_type,name,status,resolved_config_json,created_at,updated_at) VALUES ('offloaded',?,'EVALUATE','f','COMPLETED',?,?,?)",
+                  (run['id'],marker,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'))
+        rows={row[0]:row[1] for row in c.execute("SELECT record_id, projection_json FROM document_projections WHERE table_name='workflow_stages'").fetchall()}
+        assert rows=={'inline':{'assignments':[{'role':'evaluation_target','version_id':'v','digest':'d'*64,'path':'/target'}]}}
+        # A later marker write keeps whatever the writer projected; a delete removes it.
+        c.execute("UPDATE workflow_stages SET resolved_config_json=? WHERE id='inline'",(marker,))
+        assert c.execute("SELECT count(*) FROM document_projections WHERE record_id='inline'").fetchone()[0]==1
+        c.execute("DELETE FROM workflow_stages WHERE id='inline'")
+        assert c.execute("SELECT count(*) FROM document_projections WHERE record_id='inline'").fetchone()[0]==0
+    with db.connection() as c, pytest.raises(ValueError,match='incomplete'):
+        db._evaluation_target_references(c,['v'])

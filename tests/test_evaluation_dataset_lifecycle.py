@@ -1,4 +1,4 @@
-"""Separate evaluation targets are retained by stage and attempt provenance."""
+"""Separate evaluation targets are retained by their stage's frozen context or plan."""
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from types import SimpleNamespace
@@ -40,7 +40,7 @@ def evaluation_reference(db, target, *, kind='context', name='Evaluate held-out 
     return experiment, run, stage
 
 
-@pytest.mark.parametrize('kind', ['context', 'plan', 'attempt'])
+@pytest.mark.parametrize('kind', ['context', 'plan'])
 def test_eval_only_target_usage_prevents_all_cleanup_until_history_is_removed(tmp_path, kind):
     db = Database(tmp_path/'targets')
     parent, target = dataset(db)
@@ -84,7 +84,7 @@ def test_evaluation_usage_redacts_other_workspaces_and_deduplicates_snapshot_cop
     assert 'Private' not in canonical_json(rows)
 
 
-@pytest.mark.parametrize('kind', ['context', 'attempt'])
+@pytest.mark.parametrize('kind', ['context', 'plan'])
 def test_retirement_cannot_delete_an_evaluation_target_even_after_training_head_rebound(migration, kind):
     m = migration
     evaluation_reference(m.db, m.old, kind=kind)

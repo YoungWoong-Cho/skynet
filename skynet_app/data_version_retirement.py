@@ -121,12 +121,8 @@ class DataVersionRetirement:
         # Evaluation targets are independent of experiment training revisions.
         # They cannot be rebound by creating a new training revision, and their
         # frozen stages/attempts may be resumed after completion or failure.
-        for row in connection.execute("SELECT resolved_config_json FROM workflow_stages WHERE stage_type='EVALUATE'").fetchall():
-            if references(_json(row['resolved_config_json']), old_refs):
-                raise ValueError('An evaluation still references the old dataset; remove that evaluation before retiring its payload')
-        for row in connection.execute("SELECT a.execution_snapshot_json FROM job_attempts a JOIN workflow_stages s ON s.id=a.stage_id WHERE s.stage_type='EVALUATE'").fetchall():
-            if row['execution_snapshot_json'] and references(_json(row['execution_snapshot_json']), old_refs):
-                raise ValueError('A frozen evaluation attempt still references the old dataset; remove that evaluation before retiring its payload')
+        if self.db._evaluation_target_references(connection, old_refs):
+            raise ValueError('An evaluation still references the old dataset; remove that evaluation before retiring its payload')
         revisions=connection.execute('SELECT id,experiment_id,revision_number,requested_spec_json FROM experiment_revisions ORDER BY experiment_id,revision_number DESC').fetchall()
         heads={};affected=set()
         for row in revisions:

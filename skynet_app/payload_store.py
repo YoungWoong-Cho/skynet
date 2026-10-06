@@ -16,6 +16,12 @@ FIELDS = {
     "job_attempts": "execution_snapshot_json",
     "workflow_stages": "resolved_config_json",
 }
+# Offloaded documents whose projection (skynet_project_document) is written by the
+# uploader, because the database trigger sees only the object reference. The paths
+# are the subtrees that projection reads, so a repair can rebuild it remotely.
+PROJECTED_PATHS = {
+    "workflow_stages": ("context.target_dataset", "plan.native_config.canonical_evaluation.target_dataset"),
+}
 MARKER = "$skynet_object_v1"
 _CACHE = OrderedDict()
 _CACHE_LOCK = RLock()
@@ -255,6 +261,12 @@ class PayloadStore:
         if reference(body):
             raise ValueError("Object references cannot be supplied as document content")
         ref = self.put_bytes(connection, table, identifier, field, body.encode("utf-8"))
+        if table in PROJECTED_PATHS:
+            connection.execute(
+                """INSERT INTO document_projections VALUES (?, ?, skynet_project_document(?, ?))
+                   ON CONFLICT (table_name, record_id) DO UPDATE SET projection_json=excluded.projection_json""",
+                (table, identifier, body, table),
+            )
         return json.dumps({MARKER: ref}, separators=(",", ":"))
 
     def put_bytes(self, connection, table, identifier, field, content):

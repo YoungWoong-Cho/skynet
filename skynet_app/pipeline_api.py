@@ -7139,6 +7139,7 @@ class PipelineService:
         try:
             with self._reconcile_lock:
                 repairs = self.database.repair_workflow_state_invariants()
+                repairs["document_projections_repaired"] = self.database.repair_document_projections()
             recovered_submissions = 0
             with self.database.connection() as connection:
                 unknown_rows = [
@@ -7711,10 +7712,11 @@ class PipelineService:
                                       OR (b.provider='wandb' AND COALESCE(
                                           b.metadata_json::jsonb ->> 'terminal_sync_protocol', '') <> '{WANDB_TERMINAL_SYNC_PROTOCOL}'))
                             ) OR EXISTS (
-                                SELECT 1 FROM jsonb_array_elements(COALESCE(
-                                    v.resolved_spec_json::jsonb #> '{{tracking,providers}}', '[]'::jsonb)
-                                ) AS requested(value)
-                                WHERE COALESCE((requested.value ->> 'enabled')::boolean, true)
+                                SELECT 1 FROM document_projections vp
+                                CROSS JOIN LATERAL jsonb_array_elements(COALESCE(
+                                    vp.projection_json -> 'tracking_providers', '[]'::jsonb)) AS requested(value)
+                                WHERE vp.table_name='variants' AND vp.record_id=v.id
+                                  AND COALESCE((requested.value ->> 'enabled')::boolean, true)
                                   AND NOT EXISTS (
                                       SELECT 1 FROM tracking_bindings b
                                       WHERE b.scope_type='run' AND b.scope_id=r.id

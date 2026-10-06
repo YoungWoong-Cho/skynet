@@ -381,3 +381,17 @@ def test_retry_that_ended_without_a_launch_boundary_still_finishes_tracking(tmp_
     assert service.reconcile_tracking()['synced'] == 0
     assert reads == [(f"{run['run_directory']}/artifacts/logs.json.txt", True)]
     assert 'Run tracking reconciliation failed' not in caplog.text
+
+
+def test_tracking_reconcile_reads_provider_requests_from_projections(tmp_path, monkeypatch):
+    from skynet_app.db_backend import PostgresConnection
+    db, cluster, service, run_id = submitted(tmp_path, monkeypatch)
+    statements = []
+    original = PostgresConnection.execute
+    def recorded(self, statement, parameters=None):
+        statements.append(statement)
+        return original(self, statement, parameters)
+    monkeypatch.setattr(PostgresConnection, 'execute', recorded)
+    service.reconcile_tracking()
+    assert any('tracking_providers' in statement for statement in statements)
+    assert not any('resolved_spec_json::jsonb' in statement for statement in statements)
