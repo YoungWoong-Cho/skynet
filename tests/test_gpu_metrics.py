@@ -1,3 +1,4 @@
+import hashlib
 import json
 import time
 from types import SimpleNamespace
@@ -181,15 +182,8 @@ def test_native_sdk_keeps_ownership_of_wandb_stream(tmp_path):
     assert not list(tmp_path.iterdir())
 
 
-@pytest.mark.parametrize("interrupted,strict", [(False, False), (True, False), (True, True)])
-def test_controller_ingests_existing_job_once_and_preserves_pending_samples(tmp_path, interrupted, strict):
-    settings = WandBSettings(api_key="fake", entity="team", auto_flush=False)
-    bridge = FakeWandBBridge(tmp_path / "run", settings)
-    bridge.ensure_run(
-        local_run_id="run", entity="team", project="test", run_name="test", group="test"
-    )
-    bridge.drain_spool()
-    service = SimpleNamespace(
+def gpu_service(settings):
+    return SimpleNamespace(
         _native_tracking_provider_names=lambda spec: set(),
         _active_tracking_providers=lambda spec: [{"provider": "wandb"}],
         _tracking_provider_value=lambda provider, key: provider[key],
@@ -197,7 +191,10 @@ def test_controller_ingests_existing_job_once_and_preserves_pending_samples(tmp_
         _training_progress_timestamp_ms=lambda value: 100000,
         _tracking_failure=lambda *a: None,
     )
-    run = {
+
+
+def tracked_run():
+    return {
         "id": "run",
         "run_directory": "/runs/run",
         "resolved_spec_json": make_spec().model_dump(mode="json", by_alias=True),
@@ -220,19 +217,35 @@ def test_controller_ingests_existing_job_once_and_preserves_pending_samples(tmp_
             },
         ],
     }
+
+
+def gpu_response():
     record = {
         "timestamp_ms": 120000,
         "job_id": "123",
         "node": "node-a",
         "devices": gpu_metrics.parse_devices(CSV),
     }
-    empty = {"records": [], "cursors": {}, "latest": 0, "oldest": 0}
-    response = {
+    return {
         "records": [{**record, "timestamp_ms": 120000 + index * 15000} for index in range(3)],
         "cursors": {"node-a.jsonl": 300},
         "latest": time.time(),
         "oldest": time.time(),
     }
+
+
+@pytest.mark.parametrize("interrupted,strict", [(False, False), (True, False), (True, True)])
+def test_controller_ingests_existing_job_once_and_preserves_pending_samples(tmp_path, interrupted, strict):
+    settings = WandBSettings(api_key="fake", entity="team", auto_flush=False)
+    bridge = FakeWandBBridge(tmp_path / "run", settings)
+    bridge.ensure_run(
+        local_run_id="run", entity="team", project="test", run_name="test", group="test"
+    )
+    bridge.drain_spool()
+    service = gpu_service(settings)
+    run = tracked_run()
+    empty = {"records": [], "cursors": {}, "latest": 0, "oldest": 0}
+    response = gpu_response()
     enqueue_batch = bridge.log_system_metrics_batch
     batches = []
 
@@ -265,6 +278,34 @@ def test_controller_ingests_existing_job_once_and_preserves_pending_samples(tmp_
     assert [row["_runtime"] for row in bridge.system_rows] == [20, 35, 50]
     state = json.loads((tmp_path / "run/gpu-statistics.json").read_text())
     assert state["attempt"]["cursors"] == response["cursors"]
+
+
+def test_gpu_state_lives_in_the_bridge_journal_when_the_run_has_one(tmp_path):
+    from skynet_app.database import Database
+    from skynet_app.tracking_journal import TrackingJournal
+
+    journal = TrackingJournal(Database(tmp_path / "gpu.db"), "run")
+    settings = WandBSettings(api_key="fake", entity="team", auto_flush=False)
+    bridge = FakeWandBBridge(tmp_path / "run", settings, journal=journal)
+    bridge.ensure_run(
+        local_run_id="run", entity="team", project="test", run_name="test", group="test"
+    )
+    bridge.drain_spool()
+    response = gpu_response()
+    with (
+        patch.object(gpu_tracking, "WandBBridge", return_value=bridge),
+        patch.object(gpu_tracking, "_read", return_value=response),
+        patch.object(gpu_tracking, "_sample_existing") as probe,
+    ):
+        assert gpu_tracking.sync_gpu_statistics(gpu_service(settings), tracked_run(), tmp_path, force=True) == 3
+    assert probe.call_count == 0
+    assert len(bridge.system_rows) == 3
+    # The source cursor is shared through the journal, never through the local capsule.
+    state = json.loads(journal.file("gpu-statistics.json").read_text())
+    assert state["attempt"]["cursors"] == response["cursors"]
+    assert not (tmp_path / "run" / "gpu-statistics.json").exists()
+    spool = journal.file("wandb-spool.jsonl")
+    assert spool.sha256() == hashlib.sha256(spool.read_bytes()).hexdigest()
 
 
 def test_terminal_gpu_sync_cannot_report_success_when_another_sync_owns_the_lock(tmp_path):

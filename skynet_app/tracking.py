@@ -14,6 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -27,20 +28,17 @@ except ImportError:  # pragma: no cover - the application runs on Linux/macOS.
 
 
 SPOOL_SCHEMA_VERSION = 1
-SPOOL_FILENAME = "mlflow-spool.jsonl"
-STATE_FILENAME = "mlflow-state.json"
-LOCK_FILENAME = ".mlflow-spool.lock"
 CURSOR_TAG = "skynet.spool.cursor"
 LOCAL_RUN_TAG = "skynet.local_run_id"
 RUN_STATUS_TAG = "skynet.status"
 ATTEMPT_NUMBER_TAG = "skynet.attempt_number"
-WANDB_SPOOL_FILENAME = "wandb-spool.jsonl"
-WANDB_STATE_FILENAME = "wandb-state.json"
 WANDB_ENQUEUE_BATCH_SIZE = 1000
-WANDB_LOCK_FILENAME = ".wandb-spool.lock"
 WANDB_TAG_MAX_LENGTH = 64
 WANDB_TAG_HASH_LENGTH = 12
 WANDB_TAG_METADATA_CONFIG_KEY = "skynet_tag_metadata"
+USER_AGENT = "skynet-slurm-console/0.2"
+# Parsed spools shared by the per-call bridge instances, bounded by their serialized size.
+SPOOL_CACHE_BYTES = 32 * 1024 * 1024
 
 
 def compact_tracking_parameters(values: Mapping[str, Any]) -> dict[str, Any]:
@@ -123,12 +121,7 @@ def _sanitize_url(value: str) -> str:
         return value
     if parsed.scheme not in {"http", "https", "s3", "gs", "ftp"}:
         return value
-    hostname = parsed.hostname or ""
-    if ":" in hostname and not hostname.startswith("["):
-        hostname = f"[{hostname}]"
-    netloc = hostname
-    if parsed.port is not None:
-        netloc = f"{netloc}:{parsed.port}"
+    netloc = _netloc(parsed)
     if parsed.username is not None or parsed.password is not None:
         netloc = f"[REDACTED]@{netloc}"
     query = []
@@ -257,28 +250,124 @@ class TrackingRequestError(RuntimeError):
         self.retry_after = retry_after
 
 
-class MLflowBridge:
-    """Offline-first, dependency-free MLflow REST bridge for one run capsule."""
+def _netloc(parsed: urllib.parse.SplitResult) -> str:
+    """Host and port without credentials; IPv6 literals keep their brackets."""
+    hostname = parsed.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    return hostname if parsed.port is None else f"{hostname}:{parsed.port}"
+
+
+def _urlopen_bytes(
+    request: urllib.request.Request,
+    *,
+    timeout: float,
+    verify_tls: bool,
+    label: str,
+    retry_after: bool = False,
+) -> bytes:
+    """One transport for every bridge: TLS policy and error mapping are not per provider."""
+    context = None
+    if urllib.parse.urlsplit(request.full_url).scheme == "https" and not verify_tls:
+        context = ssl._create_unverified_context()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
+            return response.read()
+    except urllib.error.HTTPError as error:
+        try:
+            detail = error.read().decode("utf-8", errors="replace")[:2000]
+        except Exception:
+            detail = str(error.reason)
+        raise TrackingRequestError(
+            f"{label} returned HTTP {error.code}: {detail}",
+            status_code=error.code,
+            retry_after=(
+                _retry_after_seconds((error.headers or {}).get("Retry-After")) if retry_after else None
+            ),
+        ) from error
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        raise TrackingRequestError(f"{label} transport unavailable: {error}") from error
+
+
+def _event_line(event: Mapping[str, Any]) -> bytes:
+    return json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8") + b"\n"
+
+
+def _serialize_events(events: Sequence[Mapping[str, Any]]) -> bytes:
+    return b"".join(_event_line(event) for event in events)
+
+
+class _SpoolCache:
+    """Parsed spools keyed by content digest; bridges are rebuilt on every call."""
+
+    def __init__(self, budget_bytes: int) -> None:
+        self._budget = budget_bytes
+        self._lock = threading.Lock()
+        self._entries: OrderedDict[tuple[str, str], tuple[list[dict[str, Any]], bool, int]] = OrderedDict()
+        self._size = 0
+
+    def get(self, key: tuple[str, str]) -> tuple[list[dict[str, Any]], bool] | None:
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            self._entries.move_to_end(key)
+            return entry[0], entry[1]
+
+    def put(self, key: tuple[str, str], events: list[dict[str, Any]], dirty: bool, size: int) -> None:
+        with self._lock:
+            previous = self._entries.pop(key, None)
+            if previous is not None:
+                self._size -= previous[2]
+            if size > self._budget:
+                return
+            self._entries[key] = (events, dirty, size)
+            self._size += size
+            while self._size > self._budget:
+                _, (_, _, evicted) = self._entries.popitem(last=False)
+                self._size -= evicted
+
+
+_SPOOL_CACHE = _SpoolCache(SPOOL_CACHE_BYTES)
+
+
+class _SpoolBridge:
+    """Offline-first delivery queue shared by the provider bridges.
+
+    One run capsule owns an append-only JSONL spool and a state document. Both
+    live in the shared tracking journal when the run has one, otherwise beside
+    the capsule under an advisory file lock. Subclasses supply the provider's
+    file names, settings, secrets and remote delivery.
+    """
+
+    SPOOL_FILENAME: str
+    STATE_FILENAME: str
+    LOCK_FILENAME: str
+    STATE_COLLECTIONS: tuple[str, ...]
+    SPOOL_LABEL: str
+    SETTINGS: type
+    METRIC_KEY_OPERATIONS: frozenset[str]
+    METRIC_NAME_OPERATIONS: frozenset[str]
 
     def __init__(
         self,
         run_capsule: str | os.PathLike[str],
-        settings: TrackingSettings | None = None,
+        settings=None,
         *, journal=None,
     ) -> None:
         self._journal = journal
         self.run_capsule = Path(run_capsule).expanduser().resolve()
-        self.settings = settings or TrackingSettings.from_env()
-        self.spool_path = journal.file(SPOOL_FILENAME) if journal else self.run_capsule / SPOOL_FILENAME
-        self.state_path = journal.file(STATE_FILENAME) if journal else self.run_capsule / STATE_FILENAME
-        self.lock_path = self.run_capsule / LOCK_FILENAME
+        self.settings = settings or self.SETTINGS.from_env()
+        self.spool_path = self.sidecar(self.SPOOL_FILENAME)
+        self.state_path = self.sidecar(self.STATE_FILENAME)
+        self.lock_path = self.run_capsule / self.LOCK_FILENAME
         self._thread_lock = threading.RLock()
         self._last_error: str | None = None
         if not journal:
             self.run_capsule.mkdir(parents=True, exist_ok=True)
         with self._locked():
             if not self.spool_path.exists():
-                self._atomic_write(self.spool_path, b"")
+                self._write_spool_unlocked(b"", [])
             if not self.state_path.exists():
                 self._write_state_unlocked(self._empty_state())
 
@@ -286,8 +375,15 @@ class MLflowBridge:
     def last_error(self) -> str | None:
         return self._last_error
 
+    def sidecar(self, name: str):
+        """A capsule-scoped file beside the spool, journal-backed when the run has a journal."""
+        return self._journal.file(name) if self._journal else self.run_capsule / name
+
+    def write_sidecar(self, name: str, payload: bytes) -> None:
+        self._atomic_write(self.sidecar(name), payload)
+
     def _runtime_secrets(self) -> tuple[str | None, ...]:
-        return (self.settings.token, self.settings.username, self.settings.password)
+        raise NotImplementedError
 
     def _safe_error(self, error: BaseException) -> str:
         return str(sanitize(str(error), secrets=self._runtime_secrets()))
@@ -309,19 +405,16 @@ class MLflowBridge:
                     fcntl.flock(descriptor, fcntl.LOCK_UN)
                 os.close(descriptor)
 
-    @staticmethod
-    def _empty_state() -> dict[str, Any]:
+    def _empty_state(self) -> dict[str, Any]:
         return {
             "schema_version": SPOOL_SCHEMA_VERSION,
             "acked_through": 0,
-            "inflight_sequence": None,
-            "experiments": {},
-            "runs": {},
+            **{name: {} for name in self.STATE_COLLECTIONS},
             "updated_at": _utc_now(),
         }
 
-    def _atomic_write(self, path: Path, payload: bytes) -> None:
-        if self._journal and not isinstance(path, Path):
+    def _atomic_write(self, path, payload: bytes) -> None:
+        if not isinstance(path, Path):
             path.write_bytes(payload)
             return
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -342,14 +435,13 @@ class MLflowBridge:
         try:
             loaded = json.loads(self.state_path.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError, OSError):
-            loaded = self._empty_state()
+            loaded = {}
         state = self._empty_state()
         if isinstance(loaded, Mapping):
             state.update(loaded)
-        if not isinstance(state.get("experiments"), dict):
-            state["experiments"] = {}
-        if not isinstance(state.get("runs"), dict):
-            state["runs"] = {}
+        for name in self.STATE_COLLECTIONS:
+            if not isinstance(state.get(name), dict):
+                state[name] = {}
         return state
 
     def _write_state_unlocked(self, state: Mapping[str, Any]) -> None:
@@ -359,70 +451,200 @@ class MLflowBridge:
         serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         self._atomic_write(self.state_path, (serialized + "\n").encode("utf-8"))
 
-    def _read_events_unlocked(self) -> list[dict[str, Any]]:
+    def _cache_key(self, digest: str) -> tuple[str, str]:
+        return (self.SPOOL_FILENAME, digest)
+
+    def _parse_events(self, payload: bytes) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
-        try:
-            lines = self.spool_path.read_text(encoding="utf-8").splitlines()
-        except FileNotFoundError:
-            return events
-        for line_number, line in enumerate(lines, start=1):
+        for line_number, line in enumerate(payload.decode("utf-8").splitlines(), start=1):
             if not line.strip():
                 continue
             try:
                 event = json.loads(line)
             except json.JSONDecodeError as error:
-                raise ValueError(f"Invalid tracking spool record at line {line_number}") from error
+                raise ValueError(f"Invalid {self.SPOOL_LABEL} spool record at line {line_number}") from error
             if not isinstance(event, dict) or not isinstance(event.get("sequence"), int):
-                raise ValueError(f"Invalid tracking spool record at line {line_number}")
+                raise ValueError(f"Invalid {self.SPOOL_LABEL} spool record at line {line_number}")
             events.append(event)
         return events
 
-    def _enqueue(self, operation: str, payload: Mapping[str, Any]) -> TrackingResult:
-        safe_payload = sanitize(payload, secrets=self._runtime_secrets())
-        with self._locked():
-            events = self._read_events_unlocked()
-            idempotency_key = safe_payload.get("idempotency_key")
-            event = next(
-                (
-                    item
-                    for item in events
-                    if idempotency_key
-                    and item.get("operation") == operation
-                    and isinstance(item.get("payload"), Mapping)
-                    and item["payload"].get("idempotency_key") == idempotency_key
-                ),
-                None,
-            )
-            if event is None:
-                sequence = max((int(item["sequence"]) for item in events), default=0) + 1
-                event = {
-                    "schema_version": SPOOL_SCHEMA_VERSION,
-                    "id": str(uuid.uuid4()),
-                    "sequence": sequence,
-                    "operation": operation,
-                    "payload": safe_payload,
-                    "created_at": _utc_now(),
-                }
-                existing = self.spool_path.read_bytes() if self.spool_path.exists() else b""
-                line = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8") + b"\n"
-                self._atomic_write(self.spool_path, existing + line)
-            else:
-                sequence = int(event["sequence"])
+    def _normalize_events(self, events: list[dict[str, Any]]) -> bool:
+        """Migrate legacy queued events in place; True when the spool must be rewritten."""
+        return False
 
-        report = self.drain_spool() if self.settings.auto_flush else DrainReport(0, 0, self.pending_count(), False)
+    def _spool_snapshot(self) -> tuple[list[dict[str, Any]], bool, bytes | None]:
+        """Parsed spool events, memoised on their content digest.
+
+        Returns (events, dirty, payload): ``dirty`` marks events normalised in
+        memory that the stored bytes do not reflect yet, and ``payload`` carries
+        the bytes when they had to be read. A journal records its digest, so an
+        unchanged journal spool is served without fetching its chunks. Callers
+        share the list and never mutate it.
+        """
+        try:
+            if self._journal:
+                cached = _SPOOL_CACHE.get(self._cache_key(self.spool_path.sha256()))
+                if cached is not None:
+                    return (*cached, None)
+            payload = self.spool_path.read_bytes()
+        except FileNotFoundError:
+            return [], False, None
+        key = self._cache_key(hashlib.sha256(payload).hexdigest())
+        cached = _SPOOL_CACHE.get(key)
+        if cached is None:
+            events = self._parse_events(payload)
+            cached = (events, self._normalize_events(events))
+            _SPOOL_CACHE.put(key, *cached, len(payload))
+        return (*cached, payload)
+
+    def _events_unlocked(self) -> list[dict[str, Any]]:
+        return self._spool_snapshot()[0]
+
+    def _write_spool_unlocked(self, payload: bytes, events: list[dict[str, Any]], dirty: bool = False) -> None:
+        self._atomic_write(self.spool_path, payload)
+        _SPOOL_CACHE.put(self._cache_key(hashlib.sha256(payload).hexdigest()), events, dirty, len(payload))
+
+    def _persisted_events_unlocked(self) -> list[dict[str, Any]]:
+        events, dirty, _ = self._spool_snapshot()
+        if dirty:
+            self._write_spool_unlocked(_serialize_events(events), events)
+        return events
+
+    def _idempotency_key(
+        self,
+        operation: str,
+        safe_payload: dict[str, Any],
+        events: Sequence[Mapping[str, Any]],
+        selected: Sequence[Mapping[str, Any]],
+    ) -> str | None:
+        return safe_payload.get("idempotency_key")
+
+    def _remote_id_for_event(self, event: Mapping[str, Any], state: Mapping[str, Any]) -> str | None:
+        raise NotImplementedError
+
+    def _enqueue(self, operation: str, payload: Mapping[str, Any]) -> TrackingResult:
+        return self._enqueue_batch([(operation, payload)])[0]
+
+    def _enqueue_batch(
+        self, requests: Sequence[tuple[str, Mapping[str, Any]]]
+    ) -> list[TrackingResult]:
+        """Atomically append bounded batches with existing per-event retry identities."""
+        results = []
+        for offset in range(0, len(requests), WANDB_ENQUEUE_BATCH_SIZE):
+            results.extend(self._enqueue_chunk(
+                requests[offset:offset + WANDB_ENQUEUE_BATCH_SIZE]
+            ))
+        return results
+
+    def _enqueue_chunk(
+        self, requests: Sequence[tuple[str, Mapping[str, Any]]]
+    ) -> list[TrackingResult]:
+        safe_requests = [
+            (operation, sanitize(payload, secrets=self._runtime_secrets()))
+            for operation, payload in requests
+        ]
+        with self._locked():
+            events, dirty, existing = self._spool_snapshot()
+            by_key = {
+                (item.get("operation"), item["payload"]["idempotency_key"]): item
+                for item in events
+                if isinstance(item.get("payload"), Mapping)
+                and item["payload"].get("idempotency_key")
+            }
+            sequence = max((int(item["sequence"]) for item in events), default=0)
+            selected: list[dict[str, Any]] = []
+            appended: list[dict[str, Any]] = []
+            for operation, safe_payload in safe_requests:
+                key = self._idempotency_key(operation, safe_payload, events, selected)
+                event = by_key.get((operation, key)) if key else None
+                if event is None:
+                    sequence += 1
+                    event = {
+                        "schema_version": SPOOL_SCHEMA_VERSION,
+                        "id": str(uuid.uuid4()),
+                        "sequence": sequence,
+                        "operation": operation,
+                        "payload": safe_payload,
+                        "created_at": _utc_now(),
+                    }
+                    appended.append(event)
+                    if key:
+                        by_key[(operation, key)] = event
+                selected.append(event)
+            if appended or dirty:
+                if dirty:
+                    existing = _serialize_events(events)
+                elif existing is None:
+                    existing = self.spool_path.read_bytes() if self.spool_path.exists() else b""
+                # The shared journal and filesystem both atomically publish the
+                # append. No caller advances its source cursor before this succeeds.
+                payload = existing + _serialize_events(appended)
+                # Events are queued as sanitized; legacy shapes migrate on the next pass.
+                self._write_spool_unlocked(payload, [*events, *appended], self._normalize_events(appended))
+        report = self.drain_spool() if self.settings.auto_flush else None
+        error = report.errors[0] if report and report.errors else None
         with self._locked():
             state = self._load_state_unlocked()
-            delivered = int(state.get("acked_through", 0)) >= sequence
-            remote_id = self._remote_id_for_event(event, state)
-        error = report.errors[0] if report.errors else None
-        return TrackingResult(
-            event_id=event["id"],
-            sequence=sequence,
-            delivered=delivered,
-            queued=not delivered,
-            remote_id=remote_id,
-            error=error,
-        )
+            cursor = int(state.get("acked_through", 0))
+            return [
+                TrackingResult(
+                    event_id=str(event["id"]),
+                    sequence=int(event["sequence"]),
+                    delivered=cursor >= int(event["sequence"]),
+                    queued=cursor < int(event["sequence"]),
+                    remote_id=self._remote_id_for_event(event, state),
+                    error=error,
+                )
+                for event in selected
+            ]
+
+    def pending_count(self) -> int:
+        with self._locked():
+            acknowledged = int(self._load_state_unlocked().get("acked_through", 0))
+            return sum(int(event["sequence"]) > acknowledged for event in self._events_unlocked())
+
+    def _keyed_metric_payloads(self, operations: frozenset[str]) -> list[tuple[str, Mapping[str, Any]]]:
+        return [
+            (str(payload["idempotency_key"]), payload)
+            for event in self._events_unlocked()
+            if event.get("operation") in operations
+            and isinstance((payload := event.get("payload")), Mapping)
+            and payload.get("idempotency_key")
+        ]
+
+    def metric_idempotency_keys(self) -> set[str]:
+        with self._locked():
+            return {key for key, _ in self._keyed_metric_payloads(self.METRIC_KEY_OPERATIONS)}
+
+    def _metric_names(self, payload: Mapping[str, Any]) -> set[str]:
+        raise NotImplementedError
+
+    def metric_names_by_idempotency_key(self) -> dict[str, set[str]]:
+        """Include queued and delivered fields so enrichment cannot duplicate them."""
+        with self._locked():
+            return {
+                key: self._metric_names(payload)
+                for key, payload in self._keyed_metric_payloads(self.METRIC_NAME_OPERATIONS)
+            }
+
+
+class MLflowBridge(_SpoolBridge):
+    """Offline-first, dependency-free MLflow REST bridge for one run capsule."""
+
+    SPOOL_FILENAME = "mlflow-spool.jsonl"
+    STATE_FILENAME = "mlflow-state.json"
+    LOCK_FILENAME = ".mlflow-spool.lock"
+    STATE_COLLECTIONS = ("experiments", "runs")
+    SPOOL_LABEL = "tracking"
+    SETTINGS = TrackingSettings
+    METRIC_KEY_OPERATIONS = frozenset({"log_batch"})
+    METRIC_NAME_OPERATIONS = frozenset({"log_batch"})
+
+    def _runtime_secrets(self) -> tuple[str | None, ...]:
+        return (self.settings.token, self.settings.username, self.settings.password)
+
+    def _empty_state(self) -> dict[str, Any]:
+        return {**super()._empty_state(), "inflight_sequence": None}
 
     @staticmethod
     def _remote_id_for_event(event: Mapping[str, Any], state: Mapping[str, Any]) -> str | None:
@@ -434,34 +656,9 @@ class MLflowBridge:
         local_run_id = payload.get("local_run_id")
         return state.get("runs", {}).get(local_run_id) if local_run_id else None
 
-    def pending_count(self) -> int:
-        with self._locked():
-            state = self._load_state_unlocked()
-            acknowledged = int(state.get("acked_through", 0))
-            return sum(event["sequence"] > acknowledged for event in self._read_events_unlocked())
-
-    def metric_idempotency_keys(self) -> set[str]:
-        with self._locked():
-            return {
-                str(payload["idempotency_key"])
-                for event in self._read_events_unlocked()
-                if event.get("operation") == "log_batch"
-                and isinstance((payload := event.get("payload")), Mapping)
-                and payload.get("idempotency_key")
-            }
-
-    def metric_names_by_idempotency_key(self) -> dict[str, set[str]]:
-        """Include queued and delivered fields so enrichment cannot duplicate them."""
-        with self._locked():
-            return {
-                str(payload["idempotency_key"]): {
-                    str(metric["key"]) for metric in payload.get("metrics", [])
-                }
-                for event in self._read_events_unlocked()
-                if event.get("operation") == "log_batch"
-                and isinstance((payload := event.get("payload")), Mapping)
-                and payload.get("idempotency_key")
-            }
+    @staticmethod
+    def _metric_names(payload: Mapping[str, Any]) -> set[str]:
+        return {str(metric["key"]) for metric in payload.get("metrics", [])}
 
     def ensure_experiment(
         self,
@@ -642,7 +839,7 @@ class MLflowBridge:
         errors: list[str] = []
         with self._locked():
             try:
-                events = self._read_events_unlocked()
+                events = self._persisted_events_unlocked()
                 state = self._load_state_unlocked()
                 acknowledged = int(state.get("acked_through", 0))
                 pending = [event for event in events if int(event["sequence"]) > acknowledged]
@@ -889,7 +1086,7 @@ class MLflowBridge:
             "sha256": payload.get("sha256"),
             "metadata": payload.get("metadata", {}),
         }
-        manifest_path = self._journal.file("tracking-artifact-links.json") if self._journal else self.run_capsule / "tracking-artifact-links.json"
+        manifest_path = self.sidecar("tracking-artifact-links.json")
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError, OSError):
@@ -923,13 +1120,7 @@ class MLflowBridge:
         if not self.settings.tracking_uri:
             raise TrackingRequestError("MLflow tracking URI is not configured")
         parsed = urllib.parse.urlsplit(self.settings.tracking_uri.rstrip("/"))
-        hostname = parsed.hostname or ""
-        if ":" in hostname and not hostname.startswith("["):
-            hostname = f"[{hostname}]"
-        netloc = hostname
-        if parsed.port is not None:
-            netloc = f"{netloc}:{parsed.port}"
-        base_uri = urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path.rstrip("/"), "", ""))
+        base_uri = urllib.parse.urlunsplit((parsed.scheme, _netloc(parsed), parsed.path.rstrip("/"), "", ""))
         request_uri = f"{base_uri}{path}"
         if query:
             request_uri = f"{request_uri}?{urllib.parse.urlencode(query)}"
@@ -948,24 +1139,12 @@ class MLflowBridge:
             body = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(request_uri, data=body, headers=headers, method=method)
-        context = None
-        if parsed.scheme == "https" and not self.settings.verify_tls:
-            context = ssl._create_unverified_context()
-        try:
-            with urllib.request.urlopen(
-                request, timeout=self.settings.timeout_seconds, context=context
-            ) as response:
-                raw = response.read()
-        except urllib.error.HTTPError as error:
-            try:
-                detail = error.read().decode("utf-8", errors="replace")[:2000]
-            except Exception:
-                detail = str(error.reason)
-            raise TrackingRequestError(
-                f"MLflow returned HTTP {error.code}: {detail}", status_code=error.code
-            ) from error
-        except (urllib.error.URLError, TimeoutError, OSError) as error:
-            raise TrackingRequestError(f"MLflow transport unavailable: {error}") from error
+        raw = _urlopen_bytes(
+            request,
+            timeout=self.settings.timeout_seconds,
+            verify_tls=self.settings.verify_tls,
+            label="MLflow",
+        )
         if not raw:
             return {}
         try:
@@ -1157,200 +1336,47 @@ def mlflow_run_url(tracking_uri: str, experiment_id: str, run_id: str) -> str:
     )
 
 
-class WandBBridge:
+class WandBBridge(_SpoolBridge):
     """Offline-first W&B GraphQL bridge with stable Skynet run identities."""
 
-    def __init__(
+    SPOOL_FILENAME = "wandb-spool.jsonl"
+    STATE_FILENAME = "wandb-state.json"
+    LOCK_FILENAME = ".wandb-spool.lock"
+    STATE_COLLECTIONS = ("projects", "runs")
+    SPOOL_LABEL = "W&B"
+    SETTINGS = WandBSettings
+    METRIC_KEY_OPERATIONS = frozenset({"log_metrics", "log_system_metrics"})
+    METRIC_NAME_OPERATIONS = frozenset({"log_metrics"})
+    _normalize_events = staticmethod(_compact_wandb_event_parameters)
+
+    def _runtime_secrets(self) -> tuple[str | None, ...]:
+        return (self.settings.api_key,)
+
+    def _idempotency_key(
         self,
-        run_capsule: str | os.PathLike[str],
-        settings: WandBSettings | None = None,
-        *, journal=None,
-    ) -> None:
-        self._journal = journal
-        self.run_capsule = Path(run_capsule).expanduser().resolve()
-        self.settings = settings or WandBSettings.from_env()
-        self.spool_path = journal.file(WANDB_SPOOL_FILENAME) if journal else self.run_capsule / WANDB_SPOOL_FILENAME
-        self.state_path = journal.file(WANDB_STATE_FILENAME) if journal else self.run_capsule / WANDB_STATE_FILENAME
-        self.lock_path = self.run_capsule / WANDB_LOCK_FILENAME
-        self._thread_lock = threading.RLock()
-        self._last_error: str | None = None
-        if not journal:
-            self.run_capsule.mkdir(parents=True, exist_ok=True)
-        with self._locked():
-            if not self.spool_path.exists():
-                self._atomic_write(self.spool_path, b"")
-            if not self.state_path.exists():
-                self._write_state_unlocked(self._empty_state())
+        operation: str,
+        safe_payload: dict[str, Any],
+        events: Sequence[Mapping[str, Any]],
+        selected: Sequence[Mapping[str, Any]],
+    ) -> str | None:
+        key = safe_payload.get("idempotency_key")
+        if operation == "finish_run" and key:
+            # Late data needs a fresh completion, under this same lock.
+            last_data = max((int(item["sequence"]) for item in [*events, *selected]
+                if item.get("operation") != "finish_run"
+                and item.get("payload", {}).get("local_run_id") == safe_payload.get("local_run_id")), default=0)
+            key = f"{key}:through:{last_data}"
+            safe_payload["idempotency_key"] = key
+        return key
 
     @staticmethod
-    def _empty_state() -> dict[str, Any]:
-        return {
-            "schema_version": SPOOL_SCHEMA_VERSION,
-            "acked_through": 0,
-            "projects": {},
-            "runs": {},
-            "updated_at": _utc_now(),
-        }
+    def _remote_id_for_event(event: Mapping[str, Any], state: Mapping[str, Any]) -> str | None:
+        run = state.get("runs", {}).get(str(event["payload"].get("local_run_id", "")), {})
+        return str(run["remote_id"]) if run.get("remote_id") else None
 
-    @contextmanager
-    def _locked(self) -> Iterator[None]:
-        if self._journal:
-            with self._journal.lock:
-                yield
-            return
-        with self._thread_lock:
-            descriptor = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-            try:
-                if fcntl is not None:
-                    fcntl.flock(descriptor, fcntl.LOCK_EX)
-                yield
-            finally:
-                if fcntl is not None:
-                    fcntl.flock(descriptor, fcntl.LOCK_UN)
-                os.close(descriptor)
-
-    def _atomic_write(self, path: Path, payload: bytes) -> None:
-        if self._journal and not isinstance(path, Path):
-            path.write_bytes(payload)
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        temporary_path = Path(temporary_name)
-        try:
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary_path, path)
-        finally:
-            if temporary_path.exists():
-                temporary_path.unlink()
-
-    def _load_state_unlocked(self) -> dict[str, Any]:
-        try:
-            loaded = json.loads(self.state_path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            loaded = {}
-        state = self._empty_state()
-        if isinstance(loaded, Mapping):
-            state.update(loaded)
-        for key in ("projects", "runs"):
-            if not isinstance(state.get(key), dict):
-                state[key] = {}
-        return state
-
-    def _write_state_unlocked(self, state: Mapping[str, Any]) -> None:
-        payload = dict(state)
-        payload["updated_at"] = _utc_now()
-        self._atomic_write(
-            self.state_path,
-            (json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode(),
-        )
-
-    def _events_unlocked(self, payload: bytes | None = None) -> list[dict[str, Any]]:
-        events: list[dict[str, Any]] = []
-        text = (
-            self.spool_path.read_text(encoding="utf-8")
-            if payload is None else payload.decode("utf-8")
-        )
-        for line_number, line in enumerate(text.splitlines(), start=1):
-            if not line.strip():
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError as error:
-                raise ValueError(f"Invalid W&B spool record at line {line_number}") from error
-            if not isinstance(event, dict) or not isinstance(event.get("sequence"), int):
-                raise ValueError(f"Invalid W&B spool record at line {line_number}")
-            events.append(event)
-        return events
-
-    def _enqueue(self, operation: str, payload: Mapping[str, Any]) -> TrackingResult:
-        return self._enqueue_batch([(operation, payload)])[0]
-
-    def _enqueue_batch(
-        self, requests: Sequence[tuple[str, Mapping[str, Any]]]
-    ) -> list[TrackingResult]:
-        """Atomically append bounded batches with existing per-event retry identities."""
-        results = []
-        for offset in range(0, len(requests), WANDB_ENQUEUE_BATCH_SIZE):
-            results.extend(self._enqueue_chunk(
-                requests[offset:offset + WANDB_ENQUEUE_BATCH_SIZE]
-            ))
-        return results
-
-    def _enqueue_chunk(
-        self, requests: Sequence[tuple[str, Mapping[str, Any]]]
-    ) -> list[TrackingResult]:
-        safe_requests = [
-            (operation, sanitize(payload, secrets=(self.settings.api_key,)))
-            for operation, payload in requests
-        ]
-        with self._locked():
-            existing = self.spool_path.read_bytes()
-            events = self._events_unlocked(existing)
-            compacted = _compact_wandb_event_parameters(events)
-            if compacted:
-                existing = b"".join(json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
-                                    for event in events)
-            by_key = {
-                (item.get("operation"), item["payload"]["idempotency_key"]): item
-                for item in events
-                if isinstance(item.get("payload"), Mapping)
-                and item["payload"].get("idempotency_key")
-            }
-            sequence = max((int(item["sequence"]) for item in events), default=0)
-            selected = []
-            lines = []
-            for operation, safe_payload in safe_requests:
-                key = safe_payload.get("idempotency_key")
-                if operation == "finish_run" and key:
-                    # Late data needs a fresh completion, under this same lock.
-                    last_data = max((int(item["sequence"]) for item in [*events, *selected]
-                        if item.get("operation") != "finish_run"
-                        and item.get("payload", {}).get("local_run_id") == safe_payload.get("local_run_id")), default=0)
-                    key = f"{key}:through:{last_data}"
-                    safe_payload["idempotency_key"] = key
-                event = by_key.get((operation, key)) if key else None
-                if event is None:
-                    sequence += 1
-                    event = {
-                        "schema_version": SPOOL_SCHEMA_VERSION,
-                        "id": str(uuid.uuid4()),
-                        "sequence": sequence,
-                        "operation": operation,
-                        "payload": safe_payload,
-                        "created_at": _utc_now(),
-                    }
-                    lines.append(
-                        json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-                        + b"\n"
-                    )
-                    if key:
-                        by_key[(operation, key)] = event
-                selected.append(event)
-            if lines or compacted:
-                # The shared journal and filesystem both atomically publish the
-                # append. No caller advances its source cursor before this succeeds.
-                self._atomic_write(self.spool_path, existing + b"".join(lines))
-        report = self.drain_spool() if self.settings.auto_flush else None
-        with self._locked():
-            state = self._load_state_unlocked()
-            cursor = int(state.get("acked_through", 0))
-            results = []
-            for event in selected:
-                delivered = cursor >= int(event["sequence"])
-                run = state.get("runs", {}).get(str(event["payload"].get("local_run_id", "")), {})
-                results.append(TrackingResult(
-                    event_id=str(event["id"]),
-                    sequence=int(event["sequence"]),
-                    delivered=delivered,
-                    queued=not delivered,
-                    remote_id=str(run.get("remote_id")) if run.get("remote_id") else None,
-                    error=report.errors[0] if report and report.errors else None,
-                ))
-        return results
+    @staticmethod
+    def _metric_names(payload: Mapping[str, Any]) -> set[str]:
+        return set(payload.get("metrics") or {})
 
     def validate_connection(self) -> dict[str, Any]:
         if not self.settings.configured:
@@ -1506,33 +1532,6 @@ class WandBBridge:
             "idempotency_key": f"reopen:{local_run_id}:attempt:{attempt}",
         })
 
-    def pending_count(self) -> int:
-        with self._locked():
-            state = self._load_state_unlocked()
-            cursor = int(state.get("acked_through", 0))
-            return sum(int(item["sequence"]) > cursor for item in self._events_unlocked())
-
-    def metric_idempotency_keys(self) -> set[str]:
-        with self._locked():
-            return {
-                str(payload["idempotency_key"])
-                for event in self._events_unlocked()
-                if event.get("operation") in {"log_metrics", "log_system_metrics"}
-                and isinstance((payload := event.get("payload")), Mapping)
-                and payload.get("idempotency_key")
-            }
-
-    def metric_names_by_idempotency_key(self) -> dict[str, set[str]]:
-        """Include queued and delivered fields so enrichment cannot duplicate them."""
-        with self._locked():
-            return {
-                str(payload["idempotency_key"]): set(payload.get("metrics") or {})
-                for event in self._events_unlocked()
-                if event.get("operation") == "log_metrics"
-                and isinstance((payload := event.get("payload")), Mapping)
-                and payload.get("idempotency_key")
-            }
-
     def binding(self, local_run_id: str) -> dict[str, str] | None:
         with self._locked():
             value = self._load_state_unlocked().get("runs", {}).get(local_run_id)
@@ -1550,11 +1549,7 @@ class WandBBridge:
         attempted = delivered = 0
         errors: list[str] = []
         with self._locked():
-            events = self._events_unlocked()
-            if _compact_wandb_event_parameters(events):
-                self._atomic_write(self.spool_path, b"".join(
-                    json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
-                    for event in events))
+            events = self._persisted_events_unlocked()
             state = self._load_state_unlocked()
             compacted = False
             for run in state.get("runs", {}).values():
@@ -1591,7 +1586,7 @@ class WandBBridge:
                     delivery_state = copy.deepcopy(state)
                     self._deliver_event(event, delivery_state)
                 except Exception as error:
-                    message = str(sanitize(str(error), secrets=(self.settings.api_key,)))
+                    message = self._safe_error(error)
                     if isinstance(error, TrackingRequestError) and error.status_code == 429:
                         retries = int(state.get("rate_limit_retries", 0)) + 1
                         delay = max(error.retry_after or 0, min(900, 60 * 2 ** min(retries - 1, 4)))
@@ -1789,28 +1784,27 @@ class WandBBridge:
         project = urllib.parse.quote(str(run["project"]), safe="")
         remote_name = urllib.parse.quote(str(run["name"]), safe="")
         uri = f"{self.settings.base_url.rstrip('/')}/files/{entity}/{project}/{remote_name}/file_stream"
+        _urlopen_bytes(
+            self._wandb_request(uri, payload),
+            timeout=self.settings.timeout_seconds,
+            verify_tls=self.settings.verify_tls,
+            label="W&B file stream",
+            retry_after=True,
+        )
+
+    def _wandb_request(self, uri: str, body: Mapping[str, Any]) -> urllib.request.Request:
         token = base64.b64encode(f"api:{self.settings.api_key}".encode()).decode("ascii")
-        request = urllib.request.Request(
-            uri, data=json.dumps(payload, separators=(",", ":")).encode(),
-            headers={"Accept": "application/json", "Content-Type": "application/json",
-                     "Authorization": f"Basic {token}", "User-Agent": "skynet-slurm-console/0.2"},
+        return urllib.request.Request(
+            uri,
+            data=json.dumps(body, separators=(",", ":")).encode(),
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"Basic {token}",
+                "User-Agent": USER_AGENT,
+            },
             method="POST",
         )
-        context = None
-        if urllib.parse.urlsplit(uri).scheme == "https" and not self.settings.verify_tls:
-            context = ssl._create_unverified_context()
-        try:
-            with urllib.request.urlopen(request, timeout=self.settings.timeout_seconds, context=context) as response:
-                response.read()
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")[:2000]
-            raise TrackingRequestError(
-                f"W&B file stream returned HTTP {error.code}: {detail}",
-                status_code=error.code,
-                retry_after=_retry_after_seconds((error.headers or {}).get("Retry-After")),
-            ) from error
-        except (urllib.error.URLError, TimeoutError, OSError) as error:
-            raise TrackingRequestError(f"W&B file stream transport unavailable: {error}") from error
 
     @staticmethod
     def _wandb_config(
@@ -1928,35 +1922,13 @@ class WandBBridge:
     def _graphql(self, query: str, variables: Mapping[str, Any]) -> dict[str, Any]:
         if not self.settings.api_key:
             raise TrackingRequestError("W&B API key is not configured")
-        uri = f"{self.settings.base_url.rstrip('/')}/graphql"
-        token = base64.b64encode(f"api:{self.settings.api_key}".encode()).decode("ascii")
-        body = json.dumps({"query": query, "variables": variables}, separators=(",", ":")).encode()
-        request = urllib.request.Request(
-            uri,
-            data=body,
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "Authorization": f"Basic {token}",
-                "User-Agent": "skynet-slurm-console/0.2",
-            },
-            method="POST",
+        raw = _urlopen_bytes(
+            self._wandb_request(f"{self.settings.base_url.rstrip('/')}/graphql",
+                                {"query": query, "variables": variables}),
+            timeout=self.settings.timeout_seconds,
+            verify_tls=self.settings.verify_tls,
+            label="W&B",
         )
-        context = None
-        if urllib.parse.urlsplit(uri).scheme == "https" and not self.settings.verify_tls:
-            context = ssl._create_unverified_context()
-        try:
-            with urllib.request.urlopen(
-                request, timeout=self.settings.timeout_seconds, context=context
-            ) as response:
-                raw = response.read()
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", errors="replace")[:2000]
-            raise TrackingRequestError(
-                f"W&B returned HTTP {error.code}: {detail}", status_code=error.code
-            ) from error
-        except (urllib.error.URLError, TimeoutError, OSError) as error:
-            raise TrackingRequestError(f"W&B transport unavailable: {error}") from error
         try:
             result = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:

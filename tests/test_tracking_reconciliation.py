@@ -1,4 +1,5 @@
 """Optional telemetry never owns scheduler lifecycle reconciliation."""
+import copy
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -247,7 +248,8 @@ def test_legacy_finished_binding_gets_real_terminal_receipt_once(tmp_path, monke
         status='FINISHED', metadata={})
     assert fixture.remote[fixture.run_id]['state'] == 'running'
     bridge = fixture.bridge()
-    events = bridge._events_unlocked()
+    # The parsed spool is shared between bridge instances; edit a private copy.
+    events = copy.deepcopy(bridge._events_unlocked())
     for event in events:
         key = event.get('payload', {}).get('idempotency_key', '')
         if key.endswith(':finish:file-stream-v1'):

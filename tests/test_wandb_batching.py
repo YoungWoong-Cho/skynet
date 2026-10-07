@@ -4,6 +4,8 @@ import json
 import urllib.error
 from email.message import Message
 
+import pytest
+
 from test_tracking import FakeWandBBridge
 from skynet_app.tracking import WandBBridge, WandBSettings
 
@@ -137,7 +139,8 @@ def test_metrics_never_resend_configuration(tmp_path):
     assert client.remote_runs["run"]["summary"]["loss"] == 0.25
 
 
-def test_legacy_large_spool_compacts_without_losing_ids_or_metric_rows(tmp_path):
+@pytest.mark.parametrize("trigger", ["enqueue", "drain"])
+def test_legacy_large_spool_compacts_without_losing_ids_or_metric_rows(tmp_path, trigger):
     client = FakeWandBBridge(tmp_path, WandBSettings(api_key="fake", entity="team", auto_flush=False))
     create_run(client)
     client._enqueue("log_params", {"local_run_id": "run", "params": {
@@ -146,14 +149,48 @@ def test_legacy_large_spool_compacts_without_losing_ids_or_metric_rows(tmp_path)
     before = [(e["id"], e["sequence"]) for e in client._events_unlocked()]
     cursor = client._load_state_unlocked()["acked_through"]
     assert client.spool_path.stat().st_size > 4000000
-    client.log_metrics("run", {"loss": 0.5}, step=8000, idempotency_key="sample-final")
+    if trigger == "enqueue":
+        client.log_metrics("run", {"loss": 0.5}, step=8000, idempotency_key="sample-final")
+        assert client._load_state_unlocked()["acked_through"] == cursor
+    else:
+        assert client.drain_spool().remaining == 0
     assert client.spool_path.stat().st_size < 5000
     assert [(e["id"], e["sequence"]) for e in client._events_unlocked()][:len(before)] == before
-    assert client._load_state_unlocked()["acked_through"] == cursor
     assert client.drain_spool().remaining == 0
     assert client.remote_runs["run"]["config"]["data_bundle_id"]["value"] == "bundle-original"
-    assert client.history_rows[0]["_step"] == 8000
+    if trigger == "enqueue":
+        assert client.history_rows[0]["_step"] == 8000
     assert client.drain_spool().attempted == 0
+
+
+def test_unchanged_spool_is_parsed_once_across_reads_and_bridges(tmp_path, monkeypatch):
+    monkeypatch.setattr("skynet_app.tracking.urllib.request.urlopen",
+                        lambda *args, **kwargs: pytest.fail("Spool reads must not contact the network"))
+    settings = WandBSettings(api_key="fake", entity="team", auto_flush=False)
+    client = FakeWandBBridge(tmp_path, settings)
+    create_run(client)
+    client.log_metrics("run", {"loss": 0.5}, step=1, idempotency_key="sample-1")
+    parses = []
+    parse = WandBBridge._parse_events
+    monkeypatch.setattr(WandBBridge, "_parse_events",
+                        lambda self, payload: parses.append(len(payload)) or parse(self, payload))
+    # The append already memoised the parsed queue for every reader of this capsule.
+    assert client.pending_count() == 1
+    assert client.metric_idempotency_keys() == {"sample-1"}
+    assert client.metric_names_by_idempotency_key() == {"sample-1": {"loss"}}
+    other = FakeWandBBridge(tmp_path, settings)
+    other.remote_runs = client.remote_runs
+    assert other.pending_count() == 1
+    assert other.drain_spool().remaining == 0
+    assert parses == []
+    # A write outside the bridge changes the content digest: parsed once, then shared again.
+    events = other._events_unlocked()
+    injected = json.dumps({**events[-1], "id": "injected", "sequence": 99}).encode() + b"\n"
+    other._atomic_write(other.spool_path, other.spool_path.read_bytes() + injected)
+    assert client.pending_count() == 1
+    assert other.pending_count() == 1
+    assert [event["id"] for event in client._events_unlocked()][-1] == "injected"
+    assert len(parses) == 1
 
 
 def test_artifact_links_batch_preserves_all_links_and_cursor_on_failure(tmp_path, monkeypatch):

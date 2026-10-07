@@ -59,6 +59,18 @@ class JournalFile:
     def read_text(self, encoding="utf-8"):
         return self.read_bytes().decode(encoding)
 
+    def sha256(self):
+        """Content digest; a chunked row records it, so no chunk object is fetched."""
+        row = self._row()
+        if row is None:
+            raise FileNotFoundError(self.name)
+        payload = bytes(row[0])
+        store = self.journal.database.payload_store
+        document = chunk_document(payload) if store else None
+        if document is not None:
+            return document["sha256"]
+        return hashlib.sha256(decode_payload(store, payload)).hexdigest()
+
     def write_bytes(self, payload):
         journal = self.journal
         database = journal.database

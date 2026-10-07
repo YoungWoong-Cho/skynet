@@ -20,6 +20,12 @@ from .tracking import WandBBridge, sanitize
 _LOCK = threading.Lock()
 _LAST_POLLS = {}
 _SOURCE = Path(__file__).with_name("gpu_metrics.py").read_text()
+STATE_FILENAME = "gpu-statistics.json"
+ERROR_FILENAME = "gpu-statistics-error.txt"
+
+
+def _error_path(capsule_root, run_id):
+    return Path(capsule_root) / run_id / ERROR_FILENAME
 
 
 def system_metrics(record, multi_node=False):
@@ -115,9 +121,7 @@ def _sync(service, run, capsule_root, force, *, raise_on_error=False):
     if not force and time.monotonic() - _LAST_POLLS.get(run_id, 0) < 30:
         return 0
     _LAST_POLLS[run_id] = time.monotonic()
-    state_path = Path(capsule_root) / run_id / "gpu-statistics.json"
-    journal = getattr(bridge, "_journal", None)
-    state_file = journal.file("gpu-statistics.json") if journal else state_path
+    state_file = bridge.sidecar(STATE_FILENAME)
     state = json.loads(state_file.read_text()) if state_file.exists() else {}
     train_stages = {
         s["id"] for s in run.get("stages", []) if s.get("stage_type") == "TRAIN"
@@ -190,11 +194,8 @@ def _sync(service, run, capsule_root, force, *, raise_on_error=False):
         }
     state["updated_at"] = datetime.now().astimezone().isoformat()
     state.pop("error", None)
-    if journal:
-        state_file.write_bytes(json.dumps(state).encode())
-    else:
-        bridge._atomic_write(state_path, json.dumps(state).encode())
-    state_path.with_name("gpu-statistics-error.txt").unlink(missing_ok=True)
+    bridge.write_sidecar(STATE_FILENAME, json.dumps(state).encode())
+    _error_path(capsule_root, run_id).unlink(missing_ok=True)
     report = bridge.drain_spool(limit=100)
     if report.errors:
         error = RuntimeError(report.errors[0])
@@ -222,9 +223,7 @@ def sync_gpu_statistics(
         except Exception as error:
             # Telemetry must never change the training outcome. Keep an actionable
             # diagnostic alongside the local run rather than failing the trainer.
-            path = (
-                Path(capsule_root) / str(run.get("id", "")) / "gpu-statistics-error.txt"
-            )
+            path = _error_path(capsule_root, str(run.get("id", "")))
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(str(sanitize(str(error)))[:2000])
             if raise_on_error:

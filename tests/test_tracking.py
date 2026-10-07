@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import io
 import json
 import os
+import ssl
 import tempfile
 import unittest
+import urllib.error
+from email.message import Message
 from pathlib import Path
 from typing import Any, Mapping
 from types import SimpleNamespace
@@ -30,6 +34,7 @@ from skynet_app.tracking import (
     TrackingSettings,
     SESSION_CREDENTIALS,
     SessionCredentialStore,
+    USER_AGENT,
     WANDB_TAG_METADATA_CONFIG_KEY,
     WandBBridge,
     WandBSettings,
@@ -266,6 +271,85 @@ class OfflineTrackingTestCase(unittest.TestCase):
             self.assertEqual(bridge.pending_count(), 1)
             self.assertNotIn("runtime-token", spool)
             self.assertIn("[REDACTED]", spool)
+
+
+class TransportTestCase(unittest.TestCase):
+    def test_bridges_share_one_transport_with_provider_specific_requests(self) -> None:
+        calls: list[tuple[Any, dict[str, Any]]] = []
+
+        class Response:
+            def __init__(self, body: bytes) -> None:
+                self.body = body
+
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *args: Any) -> bool:
+                return False
+
+            def read(self) -> bytes:
+                return self.body
+
+        def urlopen(request, **kwargs):
+            calls.append((request, kwargs))
+            if request.full_url.endswith("/graphql"):
+                return Response(b'{"data": {"viewer": {"id": "v", "username": "alice", "entity": "team"}}}')
+            return Response(b'{"experiments": []}')
+
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "skynet_app.tracking.urllib.request.urlopen", urlopen
+        ):
+            mlflow = MLflowBridge(
+                Path(directory) / "mlflow",
+                TrackingSettings("https://mlflow.test", token="runtime-token", auto_flush=False, verify_tls=False),
+            )
+            wandb = WandBBridge(
+                Path(directory) / "wandb",
+                WandBSettings(api_key="wandb-key", entity="team", auto_flush=False),
+            )
+            self.assertEqual(mlflow.validate_connection(), {"server_version": None})
+            self.assertEqual(wandb.validate_connection()["entity"], "team")
+
+        (mlflow_request, mlflow_kwargs), (wandb_request, wandb_kwargs) = calls
+        self.assertEqual(mlflow_request.get_header("Authorization"), "Bearer runtime-token")
+        self.assertFalse(mlflow_request.has_header("User-agent"))
+        self.assertIsInstance(mlflow_kwargs["context"], ssl.SSLContext)
+        self.assertEqual(mlflow_kwargs["timeout"], 5.0)
+        self.assertEqual(wandb_request.get_header("User-agent"), USER_AGENT)
+        self.assertIsNone(wandb_kwargs["context"])
+        self.assertEqual(wandb_kwargs["timeout"], 8.0)
+
+    def test_transport_failures_become_tracking_errors_and_only_the_file_stream_keeps_retry_hints(self) -> None:
+        headers = Message()
+        headers["Retry-After"] = "30"
+
+        def rate_limited(request, **kwargs):
+            raise urllib.error.HTTPError(request.full_url, 429, "busy", headers, io.BytesIO(b"slow down"))
+
+        def offline(request, **kwargs):
+            raise urllib.error.URLError("connection refused")
+
+        with tempfile.TemporaryDirectory() as directory:
+            wandb = WandBBridge(
+                Path(directory) / "wandb",
+                WandBSettings(api_key="wandb-key", entity="team", auto_flush=False),
+            )
+            run = {"entity": "team", "project": "test", "name": "run"}
+            with patch("skynet_app.tracking.urllib.request.urlopen", rate_limited):
+                with self.assertRaises(TrackingRequestError) as graphql_error:
+                    wandb._graphql("query { viewer { id } }", {})
+                with self.assertRaises(TrackingRequestError) as stream_error:
+                    wandb._post_file_stream(run, {"complete": True, "exitcode": 0})
+            with patch("skynet_app.tracking.urllib.request.urlopen", offline):
+                with self.assertRaises(TrackingRequestError) as offline_error:
+                    wandb._graphql("query { viewer { id } }", {})
+
+        self.assertEqual(str(graphql_error.exception), "W&B returned HTTP 429: slow down")
+        self.assertEqual(graphql_error.exception.status_code, 429)
+        self.assertIsNone(graphql_error.exception.retry_after)
+        self.assertEqual(str(stream_error.exception), "W&B file stream returned HTTP 429: slow down")
+        self.assertEqual(stream_error.exception.retry_after, 30.0)
+        self.assertIn("W&B transport unavailable", str(offline_error.exception))
 
 
 class DeliveryTestCase(unittest.TestCase):
