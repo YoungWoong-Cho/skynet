@@ -20,6 +20,8 @@ from .live_xr_archive_remote import archive_control
 
 AVAILABLE_STATES = frozenset({"VERIFIED", "CLEANUP_PENDING", "READY"})
 TERMINAL_STATES = frozenset({"CAPTURED", "STOPPED", "TIMED_OUT", "FAILED"})
+# The monitor looks for ended workstation sessions without an archive this often.
+ARCHIVE_MONITOR_POLL_SECONDS = 10
 
 
 def is_archived(job):
@@ -409,7 +411,7 @@ class LiveArchiveService:
                         self.dispatch(job["id"])
             except Exception:
                 pass  # Next pass reconciles persisted state after connection recovery.
-            self.stopping.wait(10)
+            self.stopping.wait(ARCHIVE_MONITOR_POLL_SECONDS)
 
     def request_stop(self):
         self.stopping.set()

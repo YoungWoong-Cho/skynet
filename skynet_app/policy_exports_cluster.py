@@ -15,8 +15,11 @@ from .database import canonical_json
 from .training_contracts import RECORDING_DATASET_FORMAT as DATASET_FORMAT
 from .remote_artifacts import RemoteArtifact
 from .recording_preflight import RecordingPreflight
-from .observation_preparation import ObservationsPending
+from .observation_preparation import ObservationsPending, job_status
 from .preparation_states import TERMINAL_FAILURE_STATES, RUNNING_STATES, WAITING_STATES, observed_state
+
+# States after which the background monitor never dispatches a preparation.
+FINISHED_STATES = frozenset({"READY", "FAILED", "DELETE_FAILED"})
 
 
 class ArchivePending(ValueError):
@@ -67,9 +70,9 @@ class ClusterPolicyPreparation(RecordingPreflight):
                           remote_worker + "/" + declaration["script"], *argv],
                     schemas=declaration["schemas"], mode=declaration.get("mode", "rgb"))
 
-    def _stage_cluster_attempt(self, job):
-        sources = self._preflight_sources(job, self._archived_sources(job))
-        sources = self.observations.ensure(job, sources)
+    def _stage_cluster_attempt(self, job, statuses=None):
+        sources = self._preflight_sources(job, self._archived_sources(job), statuses)
+        sources = self.observations.ensure(job, sources, statuses)
         queue = CLUSTER.queue(CLUSTER.defaults.background_queue_policy)
         shape = CLUSTER.defaults.background_jobs.recording_preparation
         self.update(job["id"], state="STAGING", stage="STAGING", error=None,
@@ -122,19 +125,19 @@ class ClusterPolicyPreparation(RecordingPreflight):
                            state="SUBMITTING", stage="SUBMITTING", error=None,
                            detail="Submitting shared recording preparation")
 
-    def _prepare_cluster(self, identifier):
+    def _prepare_cluster(self, identifier, statuses=None):
+        """Advance one preparation; `statuses` is the monitor pass's shared read."""
         job = self.get(identifier)
         try:
             if not job.get("cluster_script"):
-                job = self._stage_cluster_attempt(job)
+                job = self._stage_cluster_attempt(job, statuses)
             if not job.get("cluster_job_id"):
                 submission = self.cluster.submit_script(job["cluster_script"], identifier, DEFAULT_GATEWAY,
                     submission_key=f"{identifier}-preparation-{job['attempt_id']}")
                 job = self.update(identifier, cluster_job_id=submission.job_id, gateway=submission.gateway,
                                   state="PENDING", stage="QUEUED",
                                   detail=f"Waiting for {CLUSTER.defaults.background_jobs.recording_preparation.cpus_per_task} CPU slots on the training cluster", error=None)
-            _, statuses = self.cluster.job_statuses([job["cluster_job_id"]], DEFAULT_GATEWAY)
-            status = statuses.get(job["cluster_job_id"])
+            status = job_status(self.cluster, statuses, job["cluster_job_id"])
             if not status:
                 return
             state = status["State"]
@@ -211,7 +214,7 @@ class ClusterPolicyPreparation(RecordingPreflight):
 
     def status(self, identifier):
         job = self.get(identifier)
-        if job["state"] not in {"READY", "FAILED", "DELETE_FAILED"}:
+        if job["state"] not in FINISHED_STATES:
             self.dispatch(identifier)
         return job
 

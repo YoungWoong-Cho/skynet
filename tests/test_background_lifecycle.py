@@ -9,7 +9,9 @@ import pytest
 
 from skynet_app.background_owner import stop_background_services
 from skynet_app.database import Database
+from skynet_app import live_xr_archive
 from skynet_app.live_xr_archive import LiveArchiveService
+from skynet_app.observation_preparation import JobStatusLookup
 from skynet_app.policy_exports import DATASET_FORMAT, PolicyExportService
 from skynet_app.workspaces import CURRENT_WORKSPACE, LEGACY_WORKSPACE, WorkspaceServices
 
@@ -46,7 +48,7 @@ def test_policy_monitor_recovers_independent_failures_and_restarts_without_db_lo
     service = PolicyExportService(SimpleNamespace(live=SimpleNamespace(database=database, root=tmp_path)))
     service.monitor_interval = 0.005
     prepared = threading.Event()
-    scans = []
+    scans, ticks, prepared_with = [], [], []
 
     @contextmanager
     def unavailable_lock():
@@ -61,19 +63,27 @@ def test_policy_monitor_recovers_independent_failures_and_restarts_without_db_lo
             raise ConnectionError("Transient pending-list read failure")
         return [{"id": "pending", "format": DATASET_FORMAT, "state": "PENDING"}]
 
-    def observation_failure():
+    def observation_failure(statuses):
+        ticks.append(statuses)
         raise ConnectionError("Independent observation job failure")
+
+    def prepare_cluster(identifier, statuses):
+        prepared_with.append(statuses)
+        prepared.set()
 
     monkeypatch.setattr(service, "lock", unavailable_lock())
     monkeypatch.setattr(service, "pending", scan)
     monkeypatch.setattr(service.observations, "tick", observation_failure)
-    monkeypatch.setattr(service, "_prepare_cluster", lambda _: prepared.set())
+    monkeypatch.setattr(service, "_prepare_cluster", prepare_cluster)
     try:
         service.start()
         first_monitor, first_executor = service.monitor_thread, service.executor
         service.start()
         assert service.monitor_thread is first_monitor
         assert prepared.wait(3), "Observation and list failures must not permanently stall pending work"
+        # The pass that found work handed its one shared read to the tick and the preparation.
+        assert isinstance(prepared_with[0], JobStatusLookup)
+        assert any(seen is prepared_with[0] for seen in ticks)
         service.stop()
         assert not first_monitor.is_alive()
         assert service.executor is None and not service.active
@@ -87,7 +97,8 @@ def test_policy_monitor_recovers_independent_failures_and_restarts_without_db_lo
 
 
 def test_archive_stop_drains_worker_then_restarts_executor_and_monitor(monkeypatch):
-    service = LiveArchiveService(SimpleNamespace(cluster=object(), list=lambda: []))
+    passes = []
+    service = LiveArchiveService(SimpleNamespace(cluster=object(), list=lambda: passes.append(True) or []))
     entered, finished = threading.Event(), threading.Event()
 
     def archive(identifier, *, cleanup):
@@ -96,11 +107,13 @@ def test_archive_stop_drains_worker_then_restarts_executor_and_monitor(monkeypat
         finished.set()
 
     monkeypatch.setattr(service, "archive", archive)
+    monkeypatch.setattr(live_xr_archive, "ARCHIVE_MONITOR_POLL_SECONDS", 0.005)
     try:
         service.start(enabled=True)
         old_monitor, old_executor = service.monitor, service.executor
         service.start(enabled=True)
         assert service.monitor is old_monitor
+        eventually(lambda: len(passes) >= 3)  # The module constant paces the passes.
         service.dispatch("first")
         assert entered.wait(3)
         service.stop()

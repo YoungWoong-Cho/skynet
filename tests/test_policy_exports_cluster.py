@@ -13,6 +13,7 @@ from skynet_app.cluster_config import CLUSTER
 from skynet_app.cluster_runtime import DEFAULT_GATEWAY, ClusterClient, ClusterError, SubmissionOutcomeUnknown, WORK_ROOT
 from skynet_app.training_contracts import RECORDING_DATASET_FORMAT
 from skynet_app.policy_exports import PolicyExportService
+from skynet_app.recording_preflight import RecordingPreflight
 from skynet_app import policy_exports_api as api
 from test_policy_exports import setup as offline_setup, create
 
@@ -86,8 +87,8 @@ def setup(offline_setup, monkeypatch):
     monkeypatch.setattr(service, "prepare", PolicyExportService.prepare.__get__(service))
     # These lifecycle tests isolate CPU source inspection and observation production,
     # which have independent suites; Slurm identity/retry/publication stays real.
-    monkeypatch.setattr(PolicyExportService, "_preflight_sources", lambda self, job, sources: sources)
-    monkeypatch.setattr(service.observations, "ensure", lambda job, sources: sources)
+    monkeypatch.setattr(PolicyExportService, "_preflight_sources", lambda self, job, sources, statuses=None: sources)
+    monkeypatch.setattr(service.observations, "ensure", lambda job, sources, statuses=None: sources)
     session["archive"] = dict(state="READY", root=f"{WORK_ROOT}/datasets/raw/test/output")
     resolved, ensured = [], []
     service.cluster = Cluster()
@@ -191,7 +192,7 @@ def test_lost_submission_reply_and_restart_reuse_exact_script_and_identity(setup
     assert unknown["state"] == "SUBMISSION_UNKNOWN"
     other = PolicyExportService(service.reviews, root=service.root, cluster=service.cluster)
     resumed = []
-    monkeypatch.setattr(other, "dispatch", resumed.append)
+    monkeypatch.setattr(other, "dispatch", lambda identifier, statuses=None: resumed.append(identifier))
     other.start()
     assert resumed == [job["id"]]
     other.prepare(job["id"])
@@ -301,6 +302,44 @@ def test_background_monitor_finishes_after_browser_closes_and_stops_cleanly(setu
     count = len(polls)
     service.dispatch(job["id"])
     assert len(polls) == count
+
+def test_monitor_pass_reads_every_pending_job_once_and_feeds_each_consumer(setup, monkeypatch):
+    service, session, _, _, _ = setup
+    monkeypatch.setattr(PolicyExportService, "_preflight_sources", RecordingPreflight._preflight_sources)
+    converting = create(service, session["id"], "fixture-rgb", "Converting")
+    checking = create(service, session["id"], "fixture-state", "Checking inputs")
+    service.update(converting["id"], state="PENDING", stage="QUEUED", cluster_script="#!/bin/sh", attempt_id="attempt",
+                   cluster_root=f"{WORK_ROOT}/jobs/runs/{converting['id']}/preparation/attempt", cluster_job_id="42")
+    service.update(checking["id"], preflight_script="#!/bin/sh", preflight_token="token",
+                   preflight_root=f"{WORK_ROOT}/jobs/runs/{checking['id']}/preflight/token", preflight_job_id="43")
+    reads = []
+    def statuses(identifiers, gateway):
+        reads.append(list(identifiers))
+        return gateway, {"42": {"State": "RUNNING"}, "43": {"State": "PENDING"}}
+    service.cluster.job_statuses = statuses
+    monkeypatch.setattr(service, "dispatch", lambda identifier, statuses=None: service.prepare(identifier, statuses))
+    service._dispatch_pending()
+    assert [set(read) for read in reads] == [{"42", "43"}], "One read covers the conversion and the preflight"
+    assert service.get(converting["id"])["state"] == "RUNNING"
+    assert service.get(converting["id"])["stage"] == "CONVERTING"
+    assert service.get(checking["id"])["stage"] == "OBSERVATIONS"
+    assert service.get(checking["id"])["detail"] == "Checking recorded inputs and existing observations on cluster CPUs"
+    # Outside the monitor each call still reads its own job.
+    service.prepare(converting["id"])
+    assert reads[-1] == ["42"]
+    # A pass whose read failed leaves every consumer the recovery of a failed read of its own.
+    def unavailable(identifiers, gateway):
+        reads.append(list(identifiers))
+        raise ClusterError("temporary connection loss")
+    service.cluster.job_statuses = unavailable
+    service._dispatch_pending()
+    assert len(reads) == 3
+    for identifier in (converting["id"], checking["id"]):
+        job = service.get(identifier)
+        assert job["error"] == "temporary connection loss"
+        assert job["detail"] == "Cluster status is temporarily unavailable; refresh to reconnect"
+    assert service.get(converting["id"])["state"] == "RUNNING"
+    assert service.get(checking["id"])["state"] == "QUEUED"
 
 def test_loader_timeout_keeps_diagnostics_and_terminates_child_group(tmp_path, monkeypatch):
     import importlib.util

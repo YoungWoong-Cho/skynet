@@ -76,6 +76,37 @@ class ObservationsPending(ValueError):
     pass
 
 
+class JobStatusLookup:
+    """Scheduler records for every job one monitor pass may consult.
+
+    The monitor asks Slurm once per pass for the cluster and preflight jobs of
+    every pending preparation together with every observation producer's job,
+    then hands the result to each consumer. A job the read did not list is
+    None, exactly as a direct read reports a missing status; a read that
+    failed raises its ClusterError at every lookup, so each consumer keeps the
+    recovery it applies to a failed read of its own.
+    """
+
+    def __init__(self, cluster, job_ids):
+        self.statuses, self.error = {}, None
+        job_ids = [job_id for job_id in dict.fromkeys(job_ids) if job_id]
+        if job_ids:
+            try:
+                _, self.statuses = cluster.job_statuses(job_ids, DEFAULT_GATEWAY)
+            except ClusterError as exc:
+                self.error = exc
+
+    def get(self, job_id):
+        if self.error is not None:
+            raise self.error
+        return self.statuses.get(job_id)
+
+
+def job_status(cluster, statuses, job_id):
+    """One job's record from the pass read, or its own read outside the monitor."""
+    return (JobStatusLookup(cluster, [job_id]) if statuses is None else statuses).get(job_id)
+
+
 class ObservationPreparation:
     def __init__(self, service):
         self.service = service
@@ -101,7 +132,7 @@ class ObservationPreparation:
         from .simulation_profiles import frozen_cluster_profile
         return frozen_cluster_profile(self.service.live.root, self.cluster, session)
 
-    def ensure(self, job, sources):
+    def ensure(self, job, sources, statuses=None):
         """Attach the immutable plan, schedule missing layers, return ready refs."""
         contract = job.get('observation_contract')
         if not contract or not contract['streams']:
@@ -173,7 +204,12 @@ class ObservationPreparation:
                         max_sources=MAX_DERIVE_BATCH_SOURCES if mode == 'derive' else MAX_BATCH_SOURCES):
                     self.store.claim(batch, dict(schema=PREPARE_SCHEMA, mode=mode,
                         sources=batch_sources, worker_files=files))
-        self.tick()
+        # A monitor pass shares its scheduler read; a one-off conversion lets
+        # the tick read the producers' status for itself.
+        if statuses is None:
+            self.tick()
+        else:
+            self.tick(statuses)
         existing = self.store.for_job(job['id'])
         failed = next((a for a in existing.values() if a['state'] == 'FAILED'), None)
         if failed:
@@ -272,17 +308,18 @@ class ObservationPreparation:
             pass
         return message
 
-    def tick(self):
+    def cluster_job_ids(self, producers=None):
+        """Slurm ids of the unfinished producers, for one shared status read."""
+        if producers is None:
+            producers = self.store.producers()
+        return [producer['cluster_job_id'] for producer in producers if producer.get('cluster_job_id')]
+
+    def tick(self, statuses=None):
         # Producers are recoverable even if no initiating Convert is being polled.
         snapshots = self.store.producers()
-        job_ids = list(dict.fromkeys(p['cluster_job_id'] for p in snapshots if p.get('cluster_job_id')))
-        statuses = {}
-        if job_ids:
-            try:
-                _, statuses = self.cluster.job_statuses(job_ids, DEFAULT_GATEWAY)
-            except ClusterError:
-                # A failed shared read cannot mark any existing attempt failed.
-                pass
+        if statuses is None:
+            # Outside a monitor pass one read still covers every producer.
+            statuses = JobStatusLookup(self.cluster, self.cluster_job_ids(snapshots))
         for snapshot in snapshots:
             producer = self.store.acquire(snapshot['id'])
             if not producer:
@@ -294,7 +331,8 @@ class ObservationPreparation:
                     submitted = self.cluster.submit_script(producer['script'], producer['id'], DEFAULT_GATEWAY,
                         submission_key=f"{producer['id']}-observations-{producer['attempt_token']}")
                     producer = self.store.update(producer, state='PENDING', cluster_job_id=submitted.job_id)
-                # New submissions stay pending until the next shared status read.
+                # New submissions stay pending until the next shared status read;
+                # a failed read raises here and cannot mark the attempt failed.
                 status = statuses.get(producer['cluster_job_id'])
                 if not status:
                     continue

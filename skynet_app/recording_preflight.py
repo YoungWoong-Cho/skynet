@@ -9,12 +9,12 @@ from .cluster_config import CLUSTER
 from .sbatch import SHEBANG, cpu_thread_exports, sbatch_header, shell_prelude
 from .cluster_runtime import DEFAULT_GATEWAY, WORK_ROOT, ClusterError
 from .database import canonical_json
-from .observation_preparation import ObservationsPending
+from .observation_preparation import ObservationsPending, job_status
 from .preparation_states import TERMINAL_FAILURE_STATES
 
 
 class RecordingPreflight:
-    def _preflight_sources(self, job, sources):
+    def _preflight_sources(self, job, sources, statuses=None):
         local_result = self.root / job["id"] / "source-preflight.json"
         if job.get("preflight_sha256"):
             raw = local_result.read_bytes()
@@ -50,8 +50,7 @@ class RecordingPreflight:
                 submission = self.cluster.submit_script(job["preflight_script"], job["id"], DEFAULT_GATEWAY,
                     submission_key=f"{job['id']}-preflight-{job['preflight_token']}")
                 job = self.update(job["id"], preflight_job_id=submission.job_id)
-            _, statuses = self.cluster.job_statuses([job["preflight_job_id"]], DEFAULT_GATEWAY)
-            status = statuses.get(job["preflight_job_id"])
+            status = job_status(self.cluster, statuses, job["preflight_job_id"])
             if not status or status["State"] not in TERMINAL_FAILURE_STATES | {"COMPLETED"}:
                 raise ObservationsPending("Checking recorded inputs and existing observations on cluster CPUs")
             if status["State"] in TERMINAL_FAILURE_STATES:

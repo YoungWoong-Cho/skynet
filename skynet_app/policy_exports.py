@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import inspect
 import json
+import logging
 from pathlib import Path, PurePosixPath
 import re
 import shlex
@@ -21,21 +22,19 @@ from .recording_guard import guarded_recording
 from .database import canonical_json, utc_now
 from . import dataset_cleanup
 from .dataset_formats import catalog, resolve_adapter
+from .training_contracts import RECORDING_DATASET_FORMAT as DATASET_FORMAT
 
-DATASET_FORMAT = "skynet.recording-dataset/v1"
-# States after which the background monitor never dispatches a preparation.
-FINISHED_STATES = frozenset({"READY", "FAILED", "DELETE_FAILED"})
 # The monitor refreshes observation producers and pending preparations this often.
 DATASET_PREPARATION_POLL_SECONDS = 2.0
 from .live_xr import TERMINAL
 from .live_xr_review import ArrayUnpickler
 from .cluster_config import CLUSTER
 from .cluster_runtime import ClusterClient, ClusterError, WORK_ROOT
-from .policy_exports_cluster import ClusterPolicyPreparation
+from .policy_exports_cluster import ClusterPolicyPreparation, FINISHED_STATES
 from .observation_contracts import validate_requirements
-from .observation_preparation import ObservationPreparation
+from .observation_preparation import JobStatusLookup, ObservationPreparation
 
-
+log = logging.getLogger(__name__)
 
 
 def fingerprint(value):
@@ -157,29 +156,44 @@ class PolicyExportService(ClusterPolicyPreparation):
         try:
             self._dispatch_pending()
         except Exception:
-            import logging
-            logging.getLogger(__name__).exception("Dataset preparation recovery will retry")
+            log.exception("Dataset preparation recovery will retry")
 
-    def _dispatch_pending(self):
-        for job in self.pending():
+    def _status_snapshot(self, jobs):
+        """One Slurm read for every job a pass over `jobs` and the producers may consult."""
+        return JobStatusLookup(self.cluster, [
+            *(job.get(key) for job in jobs for key in ("cluster_job_id", "preflight_job_id")),
+            *self.observations.cluster_job_ids(),
+        ])
+
+    def _dispatch_pending(self, jobs=None, statuses=None):
+        """Dispatch unfinished preparations; a pass shares one scheduler read among them."""
+        if jobs is None:
+            jobs = self.pending()
+            statuses = self._status_snapshot(jobs)
+        for job in jobs:
             if self.monitor_stop.is_set():
                 break
-            self.dispatch(job["id"])
+            self.dispatch(job["id"], statuses)
 
     def _monitor(self):
         while not self.monitor_stop.wait(self.monitor_interval):
+            # Without the pass's shared read each consumer reads for itself.
+            jobs, statuses = [], None
             try:
-                self.observations.tick()
+                jobs = self.pending()
+                statuses = self._status_snapshot(jobs)
             except Exception:
-                import logging
-                logging.getLogger(__name__).exception("Observation monitor could not refresh cluster work")
+                log.exception("Dataset preparation monitor could not refresh pending work")
+            try:
+                self.observations.tick(statuses)
+            except Exception:
+                log.exception("Observation monitor could not refresh cluster work")
             if self.monitor_stop.is_set():
                 break
             try:
-                self._dispatch_pending()
+                self._dispatch_pending(jobs, statuses)
             except Exception:
-                import logging
-                logging.getLogger(__name__).exception("Dataset preparation monitor could not refresh pending work")
+                log.exception("Dataset preparation monitor could not refresh pending work")
 
     def request_stop(self):
         with self._lifecycle_lock:
@@ -612,17 +626,17 @@ class PolicyExportService(ClusterPolicyPreparation):
             self.dispatch(identifier)
             return job
 
-    def dispatch(self, identifier):
+    def dispatch(self, identifier, statuses=None):
         with self._lifecycle_lock:
             if identifier in self.active or self.stopping:
                 return
             self.active.add(identifier)
-            self.executor.submit(self.prepare, identifier)
+            self.executor.submit(self.prepare, identifier, statuses)
 
 
-    def prepare(self, identifier):
+    def prepare(self, identifier, statuses=None):
         try:
-            self._prepare_cluster(identifier)
+            self._prepare_cluster(identifier, statuses)
         finally:
             with self._lifecycle_lock:
                 self.active.discard(identifier)

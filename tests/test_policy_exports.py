@@ -188,7 +188,7 @@ def test_missing_images_queue_conversion_with_declared_observations(setup):
     assert all("image_path" not in source for source in job["sources"])
     assert service.preparation_options(session["id"])["session"]["eligible"]
 
-def test_checksum_failure_does_not_register_a_version_and_can_retry(setup):
+def test_checksum_failure_does_not_register_a_version_and_can_retry(setup, monkeypatch):
     service, session, source = setup
     job = create(service, session["id"], "fixture-rgb", "Corrupt")
     raw = source / session["recordings"][0]
@@ -197,6 +197,10 @@ def test_checksum_failure_does_not_register_a_version_and_can_retry(setup):
     assert service.get(job["id"])["state"] == "FAILED"
     assert all(v["format"] == "skynet.episodes/v1" for r in service.database.list_data_resources() for v in service.database.get_data_resource(r["id"])["versions"])
     assert service.pending() == []
+    # The monitor's scan and a status read agree on which states are finished.
+    with monkeypatch.context() as finished:
+        finished.setattr(service, "dispatch", lambda _: pytest.fail("Finished preparations are never re-dispatched"))
+        assert service.status(job["id"])["state"] == "FAILED"
     retry = create(service, session["id"], "fixture-rgb", "Retry")
     assert retry["id"] != job["id"]
     # The monitor's pending scan skips finished and legacy rows and lists newest first.

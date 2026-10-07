@@ -143,8 +143,8 @@ def context(tmp_path, monkeypatch):
                                                    ensure=lambda _: pytest.fail('archive already ready')))
     service = PolicyExportService(LiveReviewService(live, root=tmp_path / 'reviews'), root=tmp_path / 'exports', cluster=cluster)
     install_adapters(service)
-    monkeypatch.setattr(PolicyExportService, '_preflight_sources', lambda self, job, sources: sources)
-    monkeypatch.setattr(service, 'dispatch', lambda _: None)
+    monkeypatch.setattr(PolicyExportService, '_preflight_sources', lambda self, job, sources, statuses=None: sources)
+    monkeypatch.setattr(service, 'dispatch', lambda identifier, statuses=None: None)
     yield SimpleNamespace(service=service, cluster=cluster, sessions=sessions, add_session=add_session, db=db)
     service.stop()
 
@@ -391,6 +391,38 @@ def test_unknown_scheduler_status_keeps_same_attempt_until_recovery(context, mon
     service.prepare(job['id'])
     assert service.get(job['id'])['state'] == 'PENDING'
     assert len(cluster.requests('render')) == 1 and len(cluster.submissions) == 2
+
+
+def test_monitor_pass_shares_its_status_read_with_the_tick_and_the_conversion(context, monkeypatch):
+    service, cluster = context.service, context.cluster
+    context.add_session('second', robot='skynet_wuji_2_right', checksum='b' * 64)
+    job = create(service, 'first', 'fixture-rgb', 'Shared pass read',
+        selections=[dict(session_id='first', indices=None), dict(session_id='second', indices=None)])
+    service.prepare(job['id'])
+    producers = service.observations.store.producers()
+    job_ids = {producer['cluster_job_id'] for producer in producers}
+    assert len(job_ids) == 2 and cluster.status_calls == []
+    for identifier in job_ids:
+        cluster.states[identifier] = 'RUNNING'
+    statuses = service._status_snapshot(service.pending())
+    assert [set(call) for call in cluster.status_calls] == [job_ids], 'The pass read covers every producer'
+    service.observations.tick(statuses)
+    service.prepare(job['id'], statuses)
+    assert len(cluster.status_calls) == 1, 'The tick and the conversion look their jobs up in the pass read'
+    assert all(producer['state'] == 'RUNNING' for producer in service.observations.store.producers())
+    refreshed = service.get(job['id'])
+    assert refreshed['stage'] == 'OBSERVATIONS' and refreshed['detail'].startswith('Rendering required camera data')
+    # A pass whose read failed preserves every attempt, as a failed read of the tick's own does.
+    def unavailable(identifiers, gateway):
+        raise ClusterError('gateway unavailable')
+    monkeypatch.setattr(cluster, 'job_statuses', unavailable)
+    outage = service._status_snapshot(service.pending())
+    service.observations.tick(outage)
+    service.prepare(job['id'], outage)
+    unchanged = service.observations.store.producers()
+    assert {(p['id'], p['attempt_token'], p['cluster_job_id'], p['state']) for p in unchanged} == {
+        (p['id'], p['attempt_token'], p['cluster_job_id'], 'RUNNING') for p in producers}
+    assert service.get(job['id'])['stage'] == 'OBSERVATIONS' and len(cluster.submissions) == 2
 
 
 def test_long_selection_is_partitioned_into_bounded_complete_render_requests(context, monkeypatch):
