@@ -211,7 +211,7 @@ class MetadataObjects:
         return path
 
     def put_many(self, contents):
-        """Deduplicated and bounded bulk transfer for an offline migration."""
+        """Deduplicated, bounded bulk upload of bodies prepared before a SQL write."""
         unique = {hashlib.sha256(content).hexdigest(): content for content in contents}
         values = list(unique.items())
         for start in range(0, len(values), _UPLOAD_BATCH):

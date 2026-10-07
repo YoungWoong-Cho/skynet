@@ -83,8 +83,8 @@ class LocalCluster(ClusterClient):
         return result.stdout
 
 
-@pytest.fixture
-def history(tmp_path):
+def build_history(tmp_path, *, offloaded=False):
+    """A retained run with one evaluation; offloaded writes large bodies to cluster objects."""
     system = Database(tmp_path / "test.db")
     with system.transaction() as c:
         c.execute(
@@ -95,6 +95,10 @@ def history(tmp_path):
             ("alice", str(tmp_path / "cluster")),
         )
     db = system.for_workspace("alice")
+    if offloaded:
+        from skynet_app.payload_store import PayloadStore
+
+        db.payload_store = PayloadStore(db)
     root = tmp_path / "cluster"
     project = db.create_project("Testing")
     experiment = db.create_experiment(
@@ -181,6 +185,21 @@ def history(tmp_path):
     (run_dir / "dataset-link").symlink_to(raw.parent, target_is_directory=True)
     service = Maintenance(db, LocalCluster(), local_capsules=tmp_path / "capsules")
     return service, db, system, experiment, run, evaluation, root
+
+
+@pytest.fixture
+def history(tmp_path):
+    return build_history(tmp_path)
+
+
+@pytest.fixture
+def offloaded_history(tmp_path, monkeypatch):
+    """Bodies are offloaded from their first write, as every row in the central database is."""
+    from skynet_app.metadata_objects import MetadataObjects
+    from test_payload_store import local_exchange
+
+    monkeypatch.setattr(MetadataObjects, "_exchange", local_exchange)
+    return build_history(tmp_path, offloaded=True)
 
 
 def test_evaluation_removes_own_attempt_inside_retained_run(history):
@@ -424,28 +443,11 @@ def test_batch_validates_every_path_before_deleting_and_rejects_symlinks(tmp_pat
 
 
 def test_central_evaluation_delete_scrubs_journal_and_removes_retired_bodies(
-    history, monkeypatch
+    offloaded_history,
 ):
-    from skynet_app.metadata_objects import _REMOTE, MetadataObjects
-    from skynet_app.payload_migration import relocate
-    from skynet_app.payload_store import PayloadStore
     from skynet_app.tracking_journal import TrackingJournal
 
-    service, db, _, _, run, evaluation, root = history
-
-    def exchange(self, request):
-        result = subprocess.run(
-            ["python3", "-c", _REMOTE],
-            input=json.dumps(request),
-            text=True,
-            capture_output=True,
-            check=True,
-        )
-        return json.loads(result.stdout)
-
-    monkeypatch.setattr(MetadataObjects, "_exchange", exchange)
-    db.payload_store = PayloadStore(db)
-    relocate(db)
+    service, db, _, _, run, evaluation, root = offloaded_history
     journal = TrackingJournal(db, run["id"]).file("wandb-spool.jsonl")
     event = {
         "sequence": 1,

@@ -1,6 +1,7 @@
-"""Real SQL and disk receipts: migration is lossless, immutable and portable."""
+"""Real SQL and disk receipts: offloading is lossless, immutable and portable."""
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,33 +11,31 @@ from test_postgres import pg as pg
 from skynet_app.database import Database
 from skynet_app.db_backend import INTEGRITY_ERRORS
 from skynet_app.metadata_objects import _REMOTE, MetadataObjects
-from skynet_app.payload_migration import relocate
 from skynet_app.payload_store import _CACHE, PayloadStore
 from skynet_app.tracking_journal import TrackingJournal
 
 
+def local_exchange(self, request):
+    """Run the cluster-side metadata program locally instead of over SSH."""
+    result = subprocess.run(
+        ["python3", "-c", _REMOTE],
+        input=json.dumps(request),
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode:
+        raise OSError(result.stderr)
+    return json.loads(result.stdout)
+
+
 @pytest.fixture
 def object_db(pg, tmp_path, monkeypatch):
-    import subprocess
-
     db, url = pg
     db.endpoint_config = {
         "ssh_host": "test",
         "object_store_root": str(tmp_path / "objects"),
     }
-
-    def exchange(self, request):
-        result = subprocess.run(
-            ["python3", "-c", _REMOTE],
-            input=json.dumps(request),
-            text=True,
-            capture_output=True,
-        )
-        if result.returncode:
-            raise OSError(result.stderr)
-        return json.loads(result.stdout)
-
-    monkeypatch.setattr(MetadataObjects, "_exchange", exchange)
+    monkeypatch.setattr(MetadataObjects, "_exchange", local_exchange)
     return db, url
 
 
@@ -192,8 +191,9 @@ def test_startup_seeding_reads_only_latest_catalog_body(object_db, monkeypatch):
     assert len(reads) <= 1, "Startup must only fetch the latest body, unless preparation already cached it"
 
 
-def test_relocate_preserves_bytes_hashes_and_refuses_receipt_mutations(object_db):
+def test_second_client_reads_offloaded_bodies_and_receipts_stay_immutable(object_db):
     db, url = object_db
+    db.payload_store = PayloadStore(db)
     adapter = db.upsert_seed_adapter(
         seed_key="qa", name="QA", manifest={"large": "x" * 200000}
     )
@@ -228,35 +228,22 @@ def test_relocate_preserves_bytes_hashes_and_refuses_receipt_mutations(object_db
     payload = b'{"metric":1}\n' * 100000
     journal.write_bytes(payload)
     original = db.get_run(run["id"])
-    db.payload_store = PayloadStore(db)
-    report = relocate(db)
-    assert report["documents"] == 4
-    assert report["bytes_after"] < report["bytes_before"] / 100
-    _CACHE.clear()
-    assert db.get_run(run["id"]) == original
-    assert journal.read_bytes() == payload
-    assert (
-        db.get_adapter(adapter["id"])["versions"][0]["manifest"]["large"]
-        == "x" * 200000
-    )
     with pytest.raises(INTEGRITY_ERRORS), db.transaction() as c:
         c.execute(
             "UPDATE job_attempts SET execution_snapshot_json=? WHERE id=?",
             ("{}", attempt["id"]),
         )
-    with pytest.raises(INTEGRITY_ERRORS), db.transaction() as c:
-        c.execute("SET LOCAL skynet.relocate_payloads='on'")
-        c.execute(
-            "UPDATE job_attempts SET execution_snapshot_json=? WHERE id=?",
-            ("{}", attempt["id"]),
-        )
-    assert relocate(db)["documents"] == 0
-    # A second process/database object reads the same cluster bodies.
+    # Another app host reads the same cluster bodies without this process's cache.
     second = Database(url=url)
     second.endpoint_config = db.endpoint_config
     second.payload_store = PayloadStore(second)
     _CACHE.clear()
     assert second.get_run(run["id"]) == original
+    assert TrackingJournal(second, run["id"]).file("wandb-spool.jsonl").read_bytes() == payload
+    assert (
+        second.get_adapter(adapter["id"])["versions"][0]["manifest"]["large"]
+        == "x" * 200000
+    )
 
 
 def test_new_stage_writes_external_body_and_missing_or_changed_object_fails(object_db):
