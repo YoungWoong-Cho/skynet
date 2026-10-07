@@ -357,26 +357,6 @@ class ClusterClient:
         host, _ = self.run_with_fallback(command, gateway, timeout=30)
         return host
 
-    def initialize_workspace(self, gateway: str = "auto", *, work_root: str | None = None) -> str:
-        from .workspace_storage import validate_work_root
-
-        root = validate_work_root(work_root or self.work_root)
-        directories = (
-            "workspace repos repos/shared envs datasets artifacts logs jobs eval/catalogs eval/datasets "
-            "eval/assets eval/runs mlflow/db mlflow/artifacts .cache/uv "
-            ".cache/huggingface .cache/torch"
-        )
-        paths = [root, *(f"{root}/{item}" for item in directories.split())]
-        command = (
-            "set -eu; umask 077; "
-            + " ".join(
-                f"mkdir -p {shlex.quote(path)}; test -w {shlex.quote(path)}; test -x {shlex.quote(path)};"
-                for path in paths
-            )
-        )
-        host, _ = self.run_with_fallback(command, gateway)
-        return host
-
     def initialize_personal_workspace(self, root: str, owner_id: str, gateway: str = "auto") -> str:
         from .workspace_storage import validate_work_root
 

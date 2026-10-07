@@ -5,12 +5,11 @@ New selections do not create a separate data_bundles row.
 """
 
 from .database import content_sha256
+from .maintenance import _json, references
 
 
 def assert_available(database, *execution_inputs):
     """Reject obsolete pinned inputs before a launch can change run state."""
-    from .data_version_retirement import references, _json
-
     with database.connection() as connection:
         versions = connection.execute(
             "SELECT v.id,v.manifest_sha256,v.path,r.plan_json AS retirement_plan FROM data_resource_versions v "

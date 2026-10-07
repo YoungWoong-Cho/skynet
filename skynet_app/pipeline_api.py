@@ -74,12 +74,14 @@ from .workspace_schema import LEGACY_WORKSPACE, visible_sql
 from .workspace_storage import WorkspaceStorage, paths_for_root, validate_work_root, evaluation_execution_directory
 from .slack_notifications import SlackNotifications
 from .job_status import SUBMISSION_UNKNOWN_PREFIX, attach_attempt_display_status, attach_job_display_status
+from .metadata_objects import MetadataObjects
 from .workspaces import WorkspaceServices, require_workspace_records
 from .experiments import (
     CanonicalResult,
     ExperimentSpec,
     FULL_COMMIT_RE,
     ResourceSpec,
+    SPEC_API_VERSION,
     canonical_sha256,
     explicit_train_parameter_paths,
     expand_sweep,
@@ -87,7 +89,6 @@ from .experiments import (
     parse_slurm_duration,
 )
 from .slurm import (
-    CompiledSlurmJob,
     SlurmCompileError,
     compile_sbatch,
     resolve_slurm_log_path,
@@ -3335,7 +3336,7 @@ class PipelineService:
             canonical["data"] = self._normalize_data_input(canonical)
             canonical.pop("data_bundle_id", None)
             canonical.pop("data_selections", None)
-            canonical.setdefault("apiVersion", canonical.pop("api_version", "skynet.rl2/v1"))
+            canonical.setdefault("apiVersion", SPEC_API_VERSION)
             resources = canonical.setdefault("resources", {})
             source = dict(canonical["source"])
             adapter_key = str(source.get("adapter_id") or source.get("adapter") or "")
@@ -3499,14 +3500,6 @@ class PipelineService:
         }
 
         tracking_input = dict(payload.get("tracking") or {})
-        forbidden_tracking_keys = {
-            "api_key", "token", "password", "secret", "access_key", "private_key"
-        }
-        for key in tracking_input:
-            if str(key).lower() in forbidden_tracking_keys:
-                raise ValueError(
-                    "tracking credentials must be configured through Settings > Connections"
-                )
         provider_inputs = copy.deepcopy(tracking_input.get("providers") or [])
         if not isinstance(provider_inputs, list):
             raise ValueError("tracking.providers must be a list")
@@ -3514,10 +3507,6 @@ class PipelineService:
         for provider_input in provider_inputs:
             if not isinstance(provider_input, Mapping):
                 raise ValueError("each tracking provider must be an object")
-            if any(str(key).lower() in forbidden_tracking_keys for key in provider_input):
-                raise ValueError(
-                    "tracking credentials must be configured through Settings > Connections"
-                )
             provider_name = str(provider_input.get("provider") or "").lower()
             if provider_name not in {"mlflow", "wandb"}:
                 raise ValueError(f"unsupported tracking provider: {provider_name or '<missing>'}")
@@ -3568,7 +3557,7 @@ class PipelineService:
                 })
 
         canonical = {
-            "apiVersion": "skynet.rl2/v1",
+            "apiVersion": SPEC_API_VERSION,
             "kind": "Experiment",
             "identity": {
                 "project": str(payload.get("project") or "default"),
@@ -4384,10 +4373,6 @@ class PipelineService:
             submissions.append(result)
         return submissions
 
-    def _local_capsule(self, run_id: str, compiled: CompiledSlurmJob) -> Path:
-        # Logical journal identity; actual capsule files are submitted to the cluster.
-        return LOCAL_CAPSULE_ROOT / run_id
-
     def _save_submission_script(self, run_id: str, attempt_id: str, script: str) -> dict[str, Any]:
         """Keep the exact transport payload independently of later run capsules."""
         content = script.encode("utf-8")
@@ -4398,7 +4383,6 @@ class PipelineService:
             if existing.get("sha256") != digest:
                 raise ValueError("The saved submission checksum differs from this attempt")
             return existing
-        from .metadata_objects import MetadataObjects
         path = MetadataObjects(self.database).put(content, name=f"{attempt_id}.sbatch")
         location = "cluster_objects"
         return self.database.create_artifact(run_id, artifact_type="SUBMISSION_SCRIPT", path=str(path),
@@ -4423,18 +4407,11 @@ class PipelineService:
                 submission = self.cluster.recover_submission(run_id, attempt["id"], selected_gateway)
                 if submission is None:
                     artifact = next((item for item in self.database.list_artifacts(run_id, artifact_type="SUBMISSION_SCRIPT")
-                                     if item.get("metadata_json", {}).get("attempt_id") == attempt["id"]), None)
+                                     if item.get("metadata_json", {}).get("attempt_id") == attempt["id"]
+                                     and item.get("metadata_json", {}).get("location") == "cluster_objects"), None)
                     if not artifact:
                         raise ValueError("No accepted job was found and this older attempt has no saved submission script. Its original script must be restored before upload recovery.")
-                    if artifact.get("metadata_json", {}).get("location") == "cluster_objects":
-                        from .metadata_objects import MetadataObjects
-                        content = MetadataObjects(self.database).read(artifact["path"], artifact["sha256"])
-                    else:
-                        path = Path(artifact["path"])
-                        expected = (LOCAL_CAPSULE_ROOT / run_id / "submissions" / f"{attempt['id']}.sbatch").resolve()
-                        if path.resolve() != expected:
-                            raise ValueError("Saved submission path does not match this attempt")
-                        content = path.read_bytes()
+                    content = MetadataObjects(self.database).read(artifact["path"], artifact["sha256"])
                     if hashlib.sha256(content).hexdigest() != artifact["sha256"]:
                         raise ValueError("Saved submission script changed; restore the original before recovery")
                     submission = self.cluster.submit_script(content.decode("utf-8"), run_id, selected_gateway,
@@ -5004,7 +4981,8 @@ class PipelineService:
                     ),
                 )
                 self._require_native_tracking_bindings(run_id, native_providers)
-            capsule = self._local_capsule(run_id, compiled)
+            # Logical journal identity; actual capsule files are submitted to the cluster.
+            capsule = LOCAL_CAPSULE_ROOT / run_id
             self._save_submission_script(run_id, attempt["id"], compiled.script)
             # Keep scheduler scripts small regardless of dataset count. Files
             # are pinned by their checksum manifest and verified before sbatch.
@@ -5242,7 +5220,7 @@ class PipelineService:
                 run_id,
                 attempt_id=attempt["id"],
                 manifest_type="RESOLVED",
-                schema_version="skynet.rl2/v1",
+                schema_version=SPEC_API_VERSION,
                 path=f"{attempt_directory}/resolved-spec.json",
                 sha256=compiled.spec_sha256,
             )
@@ -7972,7 +7950,7 @@ class PipelineService:
 
     def _queue_list_progress_refresh(self, kind: str, records: list[dict[str, Any]]) -> bool:
         """Keep optional remote progress reads off the list response path."""
-        now = __import__("time").monotonic()
+        now = time.monotonic()
         active_states = EXECUTING_STATES if kind == "training" else {"RUNNING"}
         eligible = active_states | (_PROGRESS_SUCCESS_STATES | _PROGRESS_FAILURE_STATES if kind == "training" else set())
         keys = {(kind, str(record["id"])) for record in records}
@@ -8026,7 +8004,7 @@ class PipelineService:
             finally:
                 with self._progress_refresh_lock:
                     self._progress_refresh_inflight.discard(key)
-                    self._progress_refresh_due[key] = __import__("time").monotonic() + (4 if priority == 0 else 60)
+                    self._progress_refresh_due[key] = time.monotonic() + (4 if priority == 0 else 60)
 
     def _ingest_training_progress(self, value: Mapping[str, Any], *, raise_on_error: bool = False) -> int:
         status = str(value.get("status") or value.get("state") or "").upper()
@@ -8093,7 +8071,7 @@ class PipelineService:
         final_reads = getattr(self, "_training_progress_final_reads", set())
         if final_read and final_key in final_reads:
             return 0
-        monotonic_now = __import__("time").monotonic()
+        monotonic_now = time.monotonic()
         last_reads = getattr(self, "_training_progress_last_reads", {})
         final_failures = getattr(self, "_training_progress_final_failures", {})
         if final_read and monotonic_now < final_failures.get(final_key, 0):
@@ -8127,7 +8105,7 @@ class PipelineService:
                 final_failures.pop(final_key, None)
                 return 0
             if final_read:
-                final_failures[final_key] = __import__("time").monotonic() + 60
+                final_failures[final_key] = time.monotonic() + 60
                 self._training_progress_final_failures = final_failures
             if raise_on_error:
                 raise
@@ -8141,7 +8119,7 @@ class PipelineService:
         if not records:
             if final_read and attempt_status in _PROGRESS_SUCCESS_STATES:
                 # An empty/temporarily unavailable tail is not completion evidence.
-                final_failures[final_key] = __import__("time").monotonic() + 60
+                final_failures[final_key] = time.monotonic() + 60
                 self._training_progress_final_failures = final_failures
                 if raise_on_error:
                     raise ClusterError("Successful training has no valid final progress evidence yet")
@@ -8401,7 +8379,7 @@ class PipelineService:
 
         # The list and detail endpoints can be polled together. Keep that from
         # causing duplicate SSH reads while still making progress visibly live.
-        now = __import__("time").monotonic()
+        now = time.monotonic()
         last_reads = getattr(self, "_evaluation_progress_last_reads", {})
         if now - float(last_reads.get(evaluation["id"], 0.0)) < 4.0:
             return
@@ -9601,7 +9579,7 @@ class PipelineService:
             cache_lock = threading.Lock()
             self._evaluator_runtime_readiness_cache = cache
             self._evaluator_runtime_readiness_lock = cache_lock
-        now = __import__("time").monotonic()
+        now = time.monotonic()
         if not refresh:
             with cache_lock:
                 cached = cache.get(cache_key)
@@ -10918,9 +10896,6 @@ def inspect_source(
                 gateway,
                 subdirectory,
             )
-        for candidate in result.get("candidates", []):
-            candidate.setdefault("type", candidate.get("backend"))
-            candidate.setdefault("confidence", candidate.get("strength"))
         result["runtime_profiles"] = service.runtime_profiles(gateway, verify=True)
         entry = service.source_metadata.put(
             "inspection", repository, parameters, result
@@ -11037,7 +11012,7 @@ def evaluation_suites(
             "current": bool(row["enabled"]),
             **({"evaluator_implementation": copy.deepcopy(evaluator_identity)} if evaluator_identity is not None else {}),
         })
-    return {"suites": suites, "evaluation_suites": suites, "unavailable_suites": unavailable_suites}
+    return {"suites": suites, "unavailable_suites": unavailable_suites}
 
 
 @router.post("/experiments/preview")

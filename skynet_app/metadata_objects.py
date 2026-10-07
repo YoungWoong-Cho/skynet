@@ -15,7 +15,7 @@ from pathlib import PurePosixPath
 from . import registry_reference_match as registry_reference_module
 
 # References per SSH exchange. Bodies are whole documents (tens of kilobytes each);
-# projections and truthiness checks return only small subtrees.
+# projections and registry checks return only small subtrees.
 _BODY_BATCH = 64
 _PROJECTION_BATCH = 128
 _UPLOAD_BATCH = 16
@@ -76,15 +76,6 @@ def handle(request):
                 value = value.get(key) if isinstance(value, dict) else None
             projected[path] = value
         return {"sha256": digest, "size": len(content), "values": projected}
-    if request["operation"] == "truthy_paths":
-        document = json.loads(content)
-        found = False
-        for path in request["paths"]:
-            value = document
-            for key in path.split("."):
-                value = value.get(key) if isinstance(value, dict) else None
-            found = found or bool(value)
-        return {"sha256": digest, "size": len(content), "found": found}
     return {"sha256": digest, "size": len(content), "encoding": "zlib", "content":
         base64.b64encode(zlib.compress(content, 1)).decode() if request["operation"] == "get" else None}
 request = json.load(sys.stdin)
@@ -167,27 +158,6 @@ class MetadataObjects:
         if content is not None:
             request.update(_encode_content(content))
         return self._exchange(request)
-
-    def truthy_paths(self, references, paths):
-        """Inspect verified immutable bodies remotely, returning only booleans."""
-        result = []
-        for start in range(0, len(references), _PROJECTION_BATCH):
-            batch = references[start:start + _PROJECTION_BATCH]
-            for ref in batch:
-                if ref["path"] != self.path(ref["sha256"], "body"):
-                    raise ValueError("Invalid metadata object path")
-            values = self._exchange([
-                {"operation": "truthy_paths", "root": str(self.root),
-                 "sha256": ref["sha256"], "name": "body", "paths": list(paths)}
-                for ref in batch
-            ])
-            if len(values) != len(batch):
-                raise ValueError("Incomplete metadata object batch")
-            for value, ref in zip(values, batch):
-                if value["sha256"] != ref["sha256"] or value["size"] != ref["size"]:
-                    raise ValueError("Metadata object checksum mismatch")
-                result.append(value["found"])
-        return result
 
     def registry_matches(self, references, identifiers):
         """Return checksum-verified dependency flags, never execution bodies."""

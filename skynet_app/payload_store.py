@@ -91,15 +91,8 @@ class ImmutableProjectionCache:
                 for key, value in values.items()}
 
 
-_PATH_FLAGS = ImmutableProjectionCache()
 _PROJECTIONS = ImmutableProjectionCache()
 _REGISTRY_FLAGS = ImmutableProjectionCache()
-
-
-def _path_value(document, path):
-    for key in path.split("."):
-        document = document.get(key) if isinstance(document, dict) else None
-    return bool(document)
 
 
 def reference(value):
@@ -187,28 +180,6 @@ class PayloadStore:
             # Callers can enrich a display without corrupting this immutable cache.
             result.append(json.loads(json.dumps(value)))
         return result
-
-    def truthy_paths(self, documents, paths):
-        """Read compact resume evidence without downloading execution capsules."""
-        paths = tuple(paths)
-        references = {}
-        for document in documents:
-            if isinstance(document, dict) and MARKER in document:
-                ref = document[MARKER]
-                if ref["path"] != self.objects.path(ref["sha256"], "body"):
-                    raise ValueError("Invalid metadata object path")
-                key = (*self._key(ref["sha256"]), ref["size"], paths)
-                references[key] = ref
-        batch_flags = _PATH_FLAGS.load(references, lambda refs: self.objects.truthy_paths(refs, paths))
-        results = []
-        for document in documents:
-            if isinstance(document, dict) and MARKER in document:
-                ref = document[MARKER]
-                key = (*self._key(ref["sha256"]), ref["size"], paths)
-                results.append(batch_flags[key])
-            else:
-                results.append(any(_path_value(document, path) for path in paths))
-        return results
 
     def registry_matches(self, documents, identifiers):
         signature = tuple(sorted(identifiers))

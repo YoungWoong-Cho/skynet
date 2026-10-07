@@ -96,21 +96,19 @@ def test_wandb_system_stream_retries_without_changing_training_steps(tmp_path):
     bridge.log_metrics("run", {"loss": 0.2}, step=77, timestamp_ms=100000)
     assert not bridge.drain_spool().errors
     for i in range(3):
-        bridge.log_system_metrics(
-            "run",
-            {"gpu.0.gpu": 80 + i},
-            timestamp_ms=101000 + i * 15000,
-            runtime_seconds=1 + i * 15,
-            idempotency_key=f"gpu:{i}",
-        )
+        bridge.log_system_metrics_batch("run", [{
+            "metrics": {"gpu.0.gpu": 80 + i},
+            "timestamp_ms": 101000 + i * 15000,
+            "runtime_seconds": 1 + i * 15,
+            "idempotency_key": f"gpu:{i}",
+        }])
     # The same persisted samples can safely be ingested after a controller restart.
-    bridge.log_system_metrics(
-        "run",
-        {"gpu.0.gpu": 80},
-        timestamp_ms=101000,
-        runtime_seconds=1,
-        idempotency_key="gpu:0",
-    )
+    bridge.log_system_metrics_batch("run", [{
+        "metrics": {"gpu.0.gpu": 80},
+        "timestamp_ms": 101000,
+        "runtime_seconds": 1,
+        "idempotency_key": "gpu:0",
+    }])
     with patch.object(
         bridge,
         "_append_system_rows",

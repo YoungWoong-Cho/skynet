@@ -440,12 +440,6 @@ class MLflowBridge:
             acknowledged = int(state.get("acked_through", 0))
             return sum(event["sequence"] > acknowledged for event in self._read_events_unlocked())
 
-    def pending_events(self) -> list[dict[str, Any]]:
-        with self._locked():
-            state = self._load_state_unlocked()
-            acknowledged = int(state.get("acked_through", 0))
-            return [event for event in self._read_events_unlocked() if event["sequence"] > acknowledged]
-
     def metric_idempotency_keys(self) -> set[str]:
         with self._locked():
             return {
@@ -482,8 +476,6 @@ class MLflowBridge:
             "tags": tags or {},
         })
 
-    get_or_create_experiment = ensure_experiment
-
     def ensure_run(
         self,
         *,
@@ -500,8 +492,6 @@ class MLflowBridge:
             "tags": tags or {},
             "start_time": start_time_ms or _milliseconds_now(),
         })
-
-    get_or_create_run = ensure_run
 
     def log_params(self, local_run_id: str, params: Mapping[str, Any]) -> TrackingResult:
         return self._enqueue("log_batch", {
@@ -1456,15 +1446,6 @@ class WandBBridge:
 
     def set_tags(self, local_run_id: str, tags: Mapping[str, Any]) -> TrackingResult:
         return self._enqueue("set_tags", {"local_run_id": local_run_id, "tags": tags})
-
-    def log_system_metrics(
-        self, local_run_id: str, metrics: Mapping[str, float | int], *,
-        timestamp_ms: int, runtime_seconds: float, idempotency_key: str,
-    ) -> TrackingResult:
-        return self.log_system_metrics_batch(local_run_id, [{
-            "metrics": metrics, "timestamp_ms": timestamp_ms,
-            "runtime_seconds": runtime_seconds, "idempotency_key": idempotency_key,
-        }])[0]
 
     def log_system_metrics_batch(
         self, local_run_id: str, samples: Sequence[Mapping[str, Any]]

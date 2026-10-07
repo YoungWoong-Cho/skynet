@@ -16,6 +16,7 @@ from .database_endpoint import load_endpoint
 from .db_backend import PostgresBackend, PostgresConnection, Record, DistributedRLock, lock_key
 from .data_paths import validate_mount_path
 from .data_resource_policy import validate_resource_metadata, validate_resource_type, resource_recording_ids
+from .experiments import SPEC_API_VERSION
 from .workspace_schema import PRIVATE_TABLES, LEGACY_WORKSPACE, visible_sql
 from .preparation_states import ATTEMPT_TERMINAL_STATES, TRANSIENT_STATES
 from .workflow_states import ACTIVE_STAGE_STATES, CANCELLABLE_STAGE_STATES, SLURM_BOUND_ATTEMPT_STATES, sql_list
@@ -479,7 +480,7 @@ class Database:
         project_id: str | None = None,
         description: str = "",
         status: str = "DRAFT",
-        spec_schema_version: str = "skynet.rl2/v1",
+        spec_schema_version: str = SPEC_API_VERSION,
         created_by: str | None = None,
         mlflow_experiment_id: str | None = None,
     ) -> dict[str, Any]:
@@ -510,7 +511,7 @@ class Database:
         experiment_id: str,
         requested_spec: Mapping[str, Any],
         *,
-        spec_schema_version: str = "skynet.rl2/v1",
+        spec_schema_version: str = SPEC_API_VERSION,
         created_by: str | None = None,
     ) -> dict[str, Any]:
         if self.workspace_id is not None and experiment_id is not None and not self.owns("experiments", experiment_id):

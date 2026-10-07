@@ -2,8 +2,6 @@ import hashlib
 import json
 import pickle
 import shlex
-import subprocess
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,18 +11,7 @@ from fastapi.testclient import TestClient
 from skynet_app.cluster_runtime import DEFAULT_GATEWAY
 from skynet_app.live_xr_review import LiveReviewService
 from skynet_app.remote_artifacts import RemoteArtifact
-from test_live_review import payload
-
-
-class Files:
-    def file_size(self, path, gateway):
-        return gateway, Path(path).stat().st_size
-
-    def stream_file_range(self, path, gateway, *, start, end):
-        yield Path(path).read_bytes()[start:end + 1]
-
-    def run_with_fallback(self, command, gateway, *, stdin=None, **budget):
-        return 'answering-host', subprocess.run(shlex.split(command), input=stdin, text=True, capture_output=True, check=True).stdout
+from test_live_review import Files, payload
 
 
 def test_remote_review_preserves_checksums_without_mac_payloads(tmp_path, payload):

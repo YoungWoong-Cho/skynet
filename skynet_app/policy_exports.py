@@ -90,10 +90,6 @@ class PolicyExportService(ClusterPolicyPreparation):
         self.monitor_stop = threading.Event()
         self.monitor_thread = None
         self.monitor_interval = 2.0
-        with self.database.transaction() as c:
-            c.execute(
-                "CREATE TABLE IF NOT EXISTS policy_exports (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL)"
-            )
 
     def list(self):
         with self.database.connection() as c:
@@ -749,22 +745,6 @@ class PolicyExportService(ClusterPolicyPreparation):
             except ClusterError as exc:
                 failures.append(str(exc))
         raise ClusterError('; '.join(failures) or 'No SSH gateway is available')
-
-    def _delete_pointcloud_copies(self, artifacts, *, jobs):
-        """Remove only the verified, unshared observations in a retirement plan."""
-        from .recording_deletion import RecordingMaintenance
-        observations = []
-        for artifact in artifacts:
-            spec = json.loads(artifact['spec_json'])
-            if spec.get('modality') != 'point_cloud' or not 0 < spec['recipe']['num_points'] < 10000:
-                raise ValueError('Only obsolete point clouds belong in this cleanup')
-            observations.append(dict(path=RecordingMaintenance._observation_path(artifact),
-                artifact_key=artifact['artifact_key'], manifest_sha256=artifact['manifest_sha256'],
-                source_sha256=spec['source_sha256'], camera_id=spec['camera_id'], modality='point_cloud'))
-        if not observations:
-            return
-        self._delete_cluster_copies(
-            dict(root=str(WORK_ROOT), observations=observations, cluster=True), jobs, timeout=120)
 
     def artifact(self, identifier, name):
         self.get(identifier)

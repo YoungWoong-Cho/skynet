@@ -9,9 +9,8 @@ from uuid import UUID
 from .cluster_config import CLUSTER
 from .cluster_runtime import DEFAULT_GATEWAY, WORK_ROOT
 from .dataset_catalog import recording_ids
-from .data_version_retirement import references
 from .live_xr_archive import archive_descriptor, TERMINAL_STATES
-from .maintenance import Maintenance, rows, in_ids
+from .maintenance import Maintenance, references, rows, in_ids
 from .workspace_schema import LEGACY_WORKSPACE
 
 

@@ -80,6 +80,18 @@ def paths_in(value):
             yield from paths_in(item)
 
 
+def _json(value):
+    return json.loads(value) if isinstance(value, str) else value
+
+
+def references(value, needles):
+    if isinstance(value, str):
+        return value in needles or any(value.startswith(path.rstrip('/') + '/') for path in needles if path.startswith('/'))
+    if isinstance(value, dict):
+        return any(references(item, needles) for item in value.values())
+    return isinstance(value, (list, tuple)) and any(references(item, needles) for item in value)
+
+
 def fingerprint(value):
     return hashlib.sha256(canonical_json(value).encode()).hexdigest()
 

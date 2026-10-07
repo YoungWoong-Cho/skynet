@@ -5,7 +5,7 @@ import pytest
 
 from skynet_app.database import Database
 from skynet_app.pipeline_api import EvaluationRequest, PipelineService
-from test_data_version_retirement import migration
+from test_data_version_retirement import insert_retirement, migration
 from test_evaluation_dataset_lifecycle import dataset, evaluation_run
 
 
@@ -96,17 +96,13 @@ def test_blocked_evaluation_is_created_with_settled_episodes(tmp_path):
 def test_target_retired_during_planning_cannot_create_an_evaluation(migration):
     m = migration
     case = evaluation_case(m.db, m.old)
-    def retire():
-        plan = m.retirement.preview(m.old["id"], m.new["id"])
-        assert m.retirement.retire(m.old["id"], m.new["id"], plan["token"])["state"] == "RETIRED"
-    case.service._resolve_evaluation_implementation = resolve_plan(case, retire)
+    case.service._resolve_evaluation_implementation = resolve_plan(case, lambda: insert_retirement(m, "RETIRED"))
     with pytest.raises(ValueError, match="Evaluation target dataset changed"):
         # Exercise the final repository guard independently of the outer API
         # pipeline lock, as if another writer retired the target while planning.
         case.service._create_evaluation(case.request)
     assert m.db.list_stages(case.run["id"]) == []
     assert m.db.list_evaluations(run_id=case.run["id"]) == []
-    assert len(m.calls) == 1
 
 
 def test_target_archived_during_planning_cannot_create_an_evaluation(tmp_path):

@@ -15,16 +15,14 @@ from .sbatch import SHEBANG, sbatch_header, shell_prelude
 def compile_isaac_job(profile, root, name, argv, checks=(), after=(), *, resources=None):
     """One single-GPU Isaac job; ``resources`` defaults to the configured replay shape."""
     resources = resources or CLUSTER.defaults.background_jobs.isaac_replay
-    for key in ("account", "partition"):
-        if not re.fullmatch(r"[a-zA-Z0-9_-]+", profile[key]):
-            raise ValueError(f"Invalid {key}")
     if not re.fullmatch(r"[a-zA-Z0-9_-]+", name):
         raise ValueError("Invalid job name")
     for path in (root, profile["runtime"], profile["repository"]):
         validate_remote_path(path)
         if any(c.isspace() for c in path):
             raise ValueError("Isaac job paths cannot contain whitespace")
-    runtime, repo = profile["runtime"], profile["repository"]
+    # The partition must be a configured queue (which supplies the account) and
+    # the GPU type a configured alias; both raise ValueError otherwise.
     gres = CLUSTER.gres(profile.get("gpu_type", CLUSTER.defaults.gpu_type), 1)
     return "\n".join(
         [

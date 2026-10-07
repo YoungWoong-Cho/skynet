@@ -58,7 +58,7 @@ def setup(tmp_path, monkeypatch):
     source.mkdir(parents=True)
     receipts = [capture(source, i, both=True)[0] for i in range(2)]
     session = dict(id="session-1", state="STOPPED", root=str(source.parent), gateway="test-host", created_at="2026-09-08", profile=dict(display_name="Test hand", task="test-task", robot="floating_shadow_bimanual"), recordings=[r["path"] for r in receipts], recording_checksums={r["path"]: r["sha256"] for r in receipts}, recording_images={r["path"]: r["images"] for r in receipts})
-    live = SimpleNamespace(root=ROOT, database=Database(tmp_path / "db.store"), get=lambda _:session,list=lambda **_:[session])
+    live = SimpleNamespace(archive=SimpleNamespace(resolve=lambda job, path: (None, "test", path)), root=ROOT, database=Database(tmp_path / "db.store"), get=lambda _:session,list=lambda **_:[session])
     service = PolicyExportService(LiveReviewService(live,root=tmp_path/'reviews'),root=tmp_path/'exports')
     install_adapters(service)
     monkeypatch.setattr(service,'dispatch',lambda _:None)

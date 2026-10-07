@@ -83,7 +83,6 @@ def test_rendered_readiness_job_requests_one_l40s_without_accepting_eula() -> No
 
 
 def test_readiness_rejects_resources_below_profile_minimum() -> None:
-    assert "#SBATCH --cpus-per-task=8" in render_readiness_sbatch(PROFILE, SUITE, cpus_per_task=4)
     with pytest.raises(ValueError, match="requires at least 64 GB"):
         render_readiness_sbatch(PROFILE, SUITE, memory_gb=32)
     with pytest.raises(ValueError, match="time limit of at least 02:00:00"):

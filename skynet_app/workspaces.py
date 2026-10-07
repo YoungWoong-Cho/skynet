@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import argparse
 from contextvars import ContextVar
 import hashlib
-import json
 import logging
-import os
-from pathlib import Path
 import secrets
 import threading
 import time
@@ -22,7 +18,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import MutableHeaders
 
 from .availability import DATABASE_CONNECTION_ERRORS, outage, unavailable_response
-from .database import APP_ROOT, Database
+from .database import Database
 from .workspace_schema import LEGACY_WORKSPACE, normalize_email
 
 
@@ -42,17 +38,6 @@ RECORD_PARAMETERS = {
 class WorkspaceDirectory:
     def __init__(self, database: Database):
         self.database = database
-
-    def claim_legacy(self, email: str) -> None:
-        email = normalize_email(email)
-        with self.database.transaction() as connection:
-            row = connection.execute("SELECT email FROM workspaces WHERE id=?", (LEGACY_WORKSPACE,)).fetchone()
-            if row["email"] not in (None, email):
-                raise ValueError("The existing workspace already belongs to another email")
-            existing = connection.execute("SELECT id FROM workspaces WHERE email=?", (email,)).fetchone()
-            if existing and existing["id"] != LEGACY_WORKSPACE:
-                raise ValueError("That email already has a workspace; migrate it explicitly before claiming legacy records")
-            connection.execute("UPDATE workspaces SET email=? WHERE id=?", (email, LEGACY_WORKSPACE))
 
     def open(self, email: str) -> tuple[dict[str, str], str]:
         email = normalize_email(email)
@@ -89,12 +74,6 @@ class WorkspaceServices:
     def __init__(self, system_service: Any):
         self.system = system_service
         self.directory = WorkspaceDirectory(system_service.database)
-        owner_file = system_service.database.data_root / "workspace-owner.json"
-        owner_email = os.environ.get("SKYNET_LEGACY_OWNER_EMAIL")
-        if not owner_email and owner_file.exists():
-            owner_email = json.loads(owner_file.read_text())["email"]
-        if owner_email:
-            self.directory.claim_legacy(owner_email)
         self._services: dict[str, Any] = {}
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -374,26 +353,3 @@ def session_router(directory: WorkspaceDirectory) -> APIRouter:
         return {"workspace": None}
 
     return router
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Assign pre-workspace Skynet records to their owner")
-    parser.add_argument("--data-root", default=os.environ.get("SKYNET_DATA_ROOT", str(APP_ROOT / "data")))
-    parser.add_argument("--legacy-owner", required=True)
-    parser.add_argument("--prepare-owner", action="store_true", help="Save the owner for the next app startup without opening or migrating the database")
-    args = parser.parse_args()
-    if args.prepare_owner:
-        owner_file = Path(args.data_root).expanduser().resolve() / "workspace-owner.json"
-        email = normalize_email(args.legacy_owner)
-        if owner_file.exists() and json.loads(owner_file.read_text()).get("email") != email:
-            parser.error("An owner is already configured; update it explicitly")
-        owner_file.parent.mkdir(parents=True, exist_ok=True)
-        owner_file.write_text(json.dumps({"email": email}) + "\n")
-        print("Existing workspace owner saved for the next startup")
-        return
-    WorkspaceDirectory(Database(data_root=args.data_root)).claim_legacy(args.legacy_owner)
-    print("Existing workspace assigned")
-
-
-if __name__ == "__main__":
-    main()

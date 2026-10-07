@@ -1223,17 +1223,11 @@ def _execution_files(
         "auto_resume": stage_auto_resume,
         "checkpoint": spec.train.checkpoint.model_dump(mode="json") if is_training else {},
         "checkpoint_globs": plan.checkpoint_globs if is_training else [],
-        "checkpoint_candidate_kind": getattr(plan, "checkpoint_candidate_kind", "any"),
-        "checkpoint_basename_regex": getattr(plan, "checkpoint_basename_regex", None),
-        "checkpoint_prune_globs": (
-            getattr(plan, "checkpoint_prune_globs", []) if is_training else []
-        ),
-        "training_output_prune_globs": (
-            getattr(plan, "training_output_prune_globs", []) if is_training else []
-        ),
-        "checkpoint_inference_required_globs": getattr(
-            plan, "checkpoint_inference_required_globs", []
-        ),
+        "checkpoint_candidate_kind": plan.checkpoint_candidate_kind,
+        "checkpoint_basename_regex": plan.checkpoint_basename_regex,
+        "checkpoint_prune_globs": plan.checkpoint_prune_globs if is_training else [],
+        "training_output_prune_globs": plan.training_output_prune_globs if is_training else [],
+        "checkpoint_inference_required_globs": plan.checkpoint_inference_required_globs,
         "initial_checkpoint": (
             plan.native_config.get("initial_checkpoint") if is_training else None
         ),

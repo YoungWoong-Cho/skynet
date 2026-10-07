@@ -151,29 +151,8 @@ def episode_viewer_artifact(identifier: str, index: int, name: str, request: Req
 def review_file(identifier: str, index: int, name: str, request: Request, episode: int = 0):
     if name == "video.mp4":
         artifact = checked(videos.artifact, identifier, index, episode)
-        if isinstance(artifact, RemoteArtifact):
-            return checked(lambda: artifact.response(request, media_type="video/mp4"))
-        return FileResponse(
-            artifact,
-            media_type="video/mp4",
-            headers={
-                "X-Content-Type-Options": "nosniff",
-                "Cache-Control": "private, max-age=3600",
-            },
-        )
-    path = checked(reviews.artifact, identifier, index, name)
-    if isinstance(path, RemoteArtifact):
-        return checked(lambda: path.response(
-            request, media_type="application/json" if name.endswith(".json") else "application/octet-stream",
-            filename=None if name == "review.json" else f"{identifier[:8]}-{index}-{name}"))
-    return FileResponse(
-        path,
-        media_type="application/json"
-        if name.endswith(".json")
-        else "application/octet-stream",
-        filename=None if name == "review.json" else f"{identifier[:8]}-{index}-{name}",
-        headers={
-            "X-Content-Type-Options": "nosniff",
-            "Cache-Control": "private, max-age=3600",
-        },
-    )
+        return checked(lambda: artifact.response(request, media_type="video/mp4"))
+    artifact = checked(reviews.artifact, identifier, index, name)
+    return checked(lambda: artifact.response(
+        request, media_type="application/json" if name.endswith(".json") else "application/octet-stream",
+        filename=None if name == "review.json" else f"{identifier[:8]}-{index}-{name}"))

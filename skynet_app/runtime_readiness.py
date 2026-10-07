@@ -265,7 +265,6 @@ def render_readiness_sbatch(
     *,
     queue_policy: str | None = None,
     gpu_type: str | None = None,
-    cpus_per_task: int | None = None,
     memory_gb: int | None = None,
     time_limit: str | None = None,
     node: str | None = None,
@@ -285,6 +284,7 @@ def render_readiness_sbatch(
     queue_policy = queue_policy or minimum.queue_policy
     gpu_type = gpu_type or minimum.gpu_type
     from .cluster_config import cpus_for_gpus
+    # CPUs follow CLUSTER.defaults.cpus_per_gpu; callers cannot override them.
     cpus_per_task = cpus_for_gpus(minimum.gpu_count)
     memory_gb = minimum.memory_gb if memory_gb is None else memory_gb
     time_limit = time_limit or minimum.time_limit
@@ -382,7 +382,6 @@ def submit_readiness_sbatch(
     gateway: str = "auto",
     queue_policy: str | None = None,
     gpu_type: str | None = None,
-    cpus_per_task: int | None = None,
     memory_gb: int | None = None,
     time_limit: str | None = None,
     node: str | None = None,
@@ -395,7 +394,6 @@ def submit_readiness_sbatch(
         suite_id,
         queue_policy=queue_policy,
         gpu_type=gpu_type,
-        cpus_per_task=cpus_per_task,
         memory_gb=memory_gb,
         time_limit=time_limit,
         node=node,
@@ -829,7 +827,6 @@ def _parser() -> argparse.ArgumentParser:
     render.add_argument("--suite", required=True)
     render.add_argument("--queue-policy")
     render.add_argument("--gpu-type")
-    render.add_argument("--cpus-per-task", type=int)
     render.add_argument("--memory-gb", type=int)
     render.add_argument("--time-limit")
     render.add_argument(
@@ -842,7 +839,6 @@ def _parser() -> argparse.ArgumentParser:
     submit.add_argument("--suite", required=True)
     submit.add_argument("--queue-policy")
     submit.add_argument("--gpu-type")
-    submit.add_argument("--cpus-per-task", type=int)
     submit.add_argument("--memory-gb", type=int)
     submit.add_argument("--time-limit")
     submit.add_argument(
@@ -872,7 +868,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             gateway=args.gateway,
             queue_policy=args.queue_policy,
             gpu_type=args.gpu_type,
-            cpus_per_task=args.cpus_per_task,
             memory_gb=args.memory_gb,
             time_limit=args.time_limit,
             node=args.node,
@@ -885,7 +880,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.suite,
             queue_policy=args.queue_policy,
             gpu_type=args.gpu_type,
-            cpus_per_task=args.cpus_per_task,
             memory_gb=args.memory_gb,
             time_limit=args.time_limit,
             node=args.node,

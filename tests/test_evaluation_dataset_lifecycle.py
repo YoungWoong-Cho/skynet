@@ -8,7 +8,7 @@ import pytest
 from skynet_app import data_selection, prepared_deletion
 from skynet_app.database import Database, canonical_json
 from skynet_app.workspaces import WorkspaceDirectory
-from test_data_version_retirement import migration
+from test_data_version_retirement import insert_retirement, migration
 
 
 def dataset(db):
@@ -84,19 +84,9 @@ def test_evaluation_usage_redacts_other_workspaces_and_deduplicates_snapshot_cop
     assert 'Private' not in canonical_json(rows)
 
 
-@pytest.mark.parametrize('kind', ['context', 'plan'])
-def test_retirement_cannot_delete_an_evaluation_target_even_after_training_head_rebound(migration, kind):
-    m = migration
-    evaluation_reference(m.db, m.old, kind=kind)
-    with pytest.raises(ValueError, match='evaluation.*references'):
-        m.retirement.preview(m.old['id'], m.new['id'])
-    assert not m.calls
-
-
 def test_resume_availability_checks_frozen_target_not_just_training_data(migration):
     m = migration
-    plan = m.retirement.preview(m.old['id'], m.new['id'])
-    m.retirement.retire(m.old['id'], m.new['id'], plan['token'])
+    insert_retirement(m, 'RETIRED')
     config = {'context': {'target_dataset': {'version_id': m.old['id'], 'manifest_sha256': m.old['manifest_sha256']}}}
     with pytest.raises(ValueError, match='retired converted data'):
         data_selection.assert_available(m.db, {'data': {}}, config)

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from skynet_app import live_xr_video
-from test_live_review import payload, review  # Shared local recording fixtures.
+from test_live_review import payload, review  # Shared recording fixtures.
 
 
 KEY = ("session", 0, 0)
@@ -80,7 +80,7 @@ def test_allocated_cluster_startup_uses_render_limit_instead_of_queue_limit(vide
         return ready(case)
 
     monkeypatch.setattr(case.service, "_control", control)
-    monkeypatch.setattr(case.service, "download", lambda *args: (case.directory / "video.mp4").write_bytes(b"cached"))
+    monkeypatch.setattr(case.service, "verify_remote_video", lambda *args: None)
     run_worker(case)
     assert case.service.status(*KEY)["state"] == "READY"
     assert case.generation.render_deadline == 119 + live_xr_video.RENDER_TIMEOUT_SECONDS
@@ -122,7 +122,7 @@ def test_gpu_busy_retries_keep_waiting_until_remote_confirms_rendering(video_cas
         return json.dumps(ready(case))
 
     case.service.live.transport = lambda _job: SimpleNamespace(ssh=ssh)
-    monkeypatch.setattr(case.service, "download", lambda *args: (case.directory / "video.mp4").write_bytes(b"cached"))
+    monkeypatch.setattr(case.service, "verify_remote_video", lambda *args: None)
     run_worker(case)
     result = case.service.status(*KEY)
     assert result["state"] == "READY", result
@@ -156,7 +156,7 @@ def test_gpu_wait_has_a_finite_deadline_without_rendering_flicker(video_case, mo
         return json.dumps({"state": "WAITING_GPU", "busy_owner": BUSY_OWNER})
 
     case.service.live.transport = lambda _job: SimpleNamespace(ssh=ssh)
-    monkeypatch.setattr(case.service, "download", lambda *args: pytest.fail("Busy GPU must not download or publish a video"))
+    monkeypatch.setattr(case.service, "verify_remote_video", lambda *args: pytest.fail("Busy GPU must not verify or publish a video"))
     run_worker(case)
     result = case.service.status(*KEY)
     assert result["state"] == "FAILED", result
@@ -172,7 +172,6 @@ def test_gpu_wait_has_a_finite_deadline_without_rendering_flicker(video_case, mo
     assert all(type(value) is int for value in remaining)
     assert not any(item["state"] == "PREPARING" for item in case.observations)
     assert {item["generation"] for item in calls} == {case.generation.token}
-    assert not (case.directory / "video.mp4").exists()
     assert not case.service.active and not case.service.queue
 
 
@@ -186,7 +185,7 @@ def test_unconfirmed_starting_has_one_cumulative_deadline_and_owned_cleanup(vide
         return json.dumps({"state": "CANCELLED" if request["operation"] == "cancel" else "STARTING"})
 
     case.service.live.transport = lambda _job: SimpleNamespace(ssh=ssh)
-    monkeypatch.setattr(case.service, "download", lambda *args: pytest.fail("Unconfirmed startup must not download"))
+    monkeypatch.setattr(case.service, "verify_remote_video", lambda *args: pytest.fail("Unconfirmed startup must not verify a video"))
     run_worker(case)
     result = case.service.status(*KEY)
     assert result["state"] == "FAILED", result
@@ -196,7 +195,7 @@ def test_unconfirmed_starting_has_one_cumulative_deadline_and_owned_cleanup(vide
     assert [item["operation"] for item in calls].count("cancel") == 1
     assert {item["generation"] for item in calls} == {case.generation.token}
     assert not any(item["state"] == "PREPARING" for item in case.observations)
-    assert not case.service.active and not (case.directory / "video.mp4").exists()
+    assert not case.service.active
 
 
 def test_render_deadline_survives_unexpected_remote_state_regression(video_case, monkeypatch):
@@ -212,14 +211,14 @@ def test_render_deadline_survives_unexpected_remote_state_regression(video_case,
         return json.dumps({"state": "PREPARING" if request["operation"] == "start" else "STARTING"})
 
     case.service.live.transport = lambda _job: SimpleNamespace(ssh=ssh)
-    monkeypatch.setattr(case.service, "download", lambda *args: pytest.fail("Timed-out rendering must not download"))
+    monkeypatch.setattr(case.service, "verify_remote_video", lambda *args: pytest.fail("Timed-out rendering must not verify a video"))
     run_worker(case)
     result = case.service.status(*KEY)
     assert result["state"] == "FAILED", result
     assert case.clock["now"] == 3
     assert "time limit" in result["error"] and "Test guard" not in result["error"]
     assert result["generation"] == case.generation.token
-    assert not case.service.active and not (case.directory / "video.mp4").exists()
+    assert not case.service.active
 
 
 @pytest.mark.parametrize("waiting_state", ["STARTING", "WAITING_GPU"])
@@ -241,7 +240,7 @@ def test_cancel_during_start_or_gpu_wait_stops_this_generation_without_another_r
         return case.generation.cancel.is_set()
 
     monkeypatch.setattr(case.generation.cancel, "wait", cancel_in_wait)
-    monkeypatch.setattr(case.service, "download", lambda *args: pytest.fail("Cancelled generation must not download"))
+    monkeypatch.setattr(case.service, "verify_remote_video", lambda *args: pytest.fail("Cancelled generation must not verify a video"))
     run_worker(case)
     result = case.service.status(*KEY)
     assert result["state"] == "CANCELLED", result
@@ -249,7 +248,7 @@ def test_cancel_during_start_or_gpu_wait_stops_this_generation_without_another_r
     assert [item["operation"] for item in calls].count("start") == 1
     assert {item["generation"] for item in calls} == {case.generation.token}
     assert not case.service.active and not case.service.queue
-    assert not list(case.directory.glob("*.part")) and not (case.directory / "video.mp4").exists()
+    assert [path.name for path in case.directory.iterdir()] == ["status.json"]
     replacement = case.service.create(*KEY)
     assert replacement["generation"] != case.generation.token
     assert case.service.cancel(*KEY, expected_generation=case.generation.token)["state"] == "QUEUED"

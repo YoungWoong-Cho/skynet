@@ -26,7 +26,9 @@ def services(tmp_path, monkeypatch):
         database, cluster=Mock(), credential_store=Mock(load=lambda _: None),
         session_credentials=SessionCredentialStore(),
     ))
-    coordinator.directory.claim_legacy('ycho420@gatech.edu')
+    # The production legacy workspace already carries its owner's email.
+    with database.transaction() as connection:
+        connection.execute("UPDATE workspaces SET email=? WHERE id=?", ('ycho420@gatech.edu', 'legacy'))
     monkeypatch.setattr('skynet_app.pipeline_api.service', coordinator)
     return coordinator
 
@@ -76,8 +78,6 @@ def test_sessions_normalize_resume_revoke_and_expire(services):
     assert directory.resolve(second) is None
     with pytest.raises(ValueError):
         directory.open('invalid')
-    with pytest.raises(ValueError):
-        directory.claim_legacy('other@example.com')
 
 
 def test_same_email_concurrent_logins_share_one_workspace(services):

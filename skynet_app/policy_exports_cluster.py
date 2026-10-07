@@ -24,9 +24,7 @@ class ArchivePending(ValueError):
 
 class ClusterPolicyPreparation(RecordingPreflight):
     def _archived_sources(self, job):
-        archive = getattr(self.live, "archive", None)
-        if archive is None:
-            raise ValueError("Collection archiving is unavailable; preparation requires a verified copy on the training cluster")
+        archive = self.live.archive
         sources = []
         sessions = {}
         for item in job["sources"]:

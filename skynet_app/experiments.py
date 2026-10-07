@@ -762,8 +762,11 @@ class ExperimentIntentSpec(CanonicalModel):
         )
 
 
+SPEC_API_VERSION = "skynet.rl2/v1"
+
+
 class ExperimentSpec(CanonicalModel):
-    api_version: Literal["skynet.rl2/v1"] = Field(default="skynet.rl2/v1", alias="apiVersion")
+    api_version: Literal[SPEC_API_VERSION] = Field(default=SPEC_API_VERSION, alias="apiVersion")
     kind: Literal["Experiment"] = "Experiment"
     identity: IdentitySpec
     source: SourceSpec

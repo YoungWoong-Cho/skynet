@@ -44,7 +44,6 @@ class VideoGeneration:
     stopping: bool = False
     cancel_error: str | None = None
     failure: str | None = None
-    local_published: bool = False
     gpu_deadline: float | None = None
     gpu_waiting: bool = False
     busy_owner: dict | None = None
@@ -119,14 +118,10 @@ class LiveVideoService:
         return hashlib.sha256(canonical_json(self.sources).encode()).hexdigest()[:16]
 
     def source(self, identifier, index, episode):
-        if getattr(self.live, "archive", None) is not None:
-            status = self.reviews.status(identifier, index)
-            if status["state"] != "READY":
-                raise ValueError("Load and validate the recording before preparing video")
-            review = status["summary"]
-        else:
-            path = self.reviews.artifact(identifier, index, "review.json")
-            review = json.loads(path.read_text())
+        status = self.reviews.status(identifier, index)
+        if status["state"] != "READY":
+            raise ValueError("Load and validate the recording before preparing video")
+        review = status["summary"]
         if not 0 <= episode < len(review["episodes"]):
             raise KeyError("Demonstration not found")
         job, remote = self.reviews.source(identifier, index)
@@ -165,7 +160,7 @@ class LiveVideoService:
                         result,
                         detail=f"Waiting to prepare video… (queue position {self.queue.index(key) + 1})",
                     )
-        if result["state"] == "READY" and not result.get("remote_artifact") and not (directory / "video.mp4").is_file():
+        if result["state"] == "READY" and not result.get("remote_artifact"):
             return {"state": "NOT_PREPARED"}
         if (
             result["state"] == "READY"
@@ -234,9 +229,6 @@ class LiveVideoService:
         if self.generations.get(key) is not generation:
             return
         if generation.finished and generation.remote_stopped and not generation.stopping:
-            (directory / f"download.{generation.token}.part").unlink(missing_ok=True)
-            if generation.local_published:
-                (directory / "video.mp4").unlink(missing_ok=True)
             self.publish(directory, state="CANCELLED" if not generation.failure else "FAILED",
                          generation=generation.token, can_cancel=False,
                          detail="Video preparation cancelled.",
@@ -303,7 +295,7 @@ class LiveVideoService:
                     prefix = job["root"] + f"/output/review-videos/{review['sha256']}/{episode}/"
                     suffix = f"/attempts/{token}"
                     cluster_root = f"{WORK_ROOT}/jobs/runs/{token}"
-                    if root == cluster_root and getattr(self.live, "archive", None) is not None:
+                    if root == cluster_root:
                         profile = self.cluster_profile(job)
                         recovered_remote = (self.live.archive.cluster, dict(job, profile=profile, gateway=DEFAULT_GATEWAY), root)
                     elif not re.fullmatch(re.escape(prefix) + r"[a-f0-9]{16}" + re.escape(suffix), root):
@@ -440,48 +432,6 @@ class LiveVideoService:
             + " End collection or wait for the other video job, then retry."
         )
 
-    def download(self, transport, host, remote, metadata, directory, generation=None, key=None):
-        if not re.fullmatch(r"[a-f0-9]{64}", str(metadata.get("sha256", ""))):
-            raise ValueError("Video is missing its saved checksum")
-        host, size = transport.file_size(remote, host)
-        if not 0 < size <= MAX_BYTES or size != metadata.get("size_bytes"):
-            raise ValueError("Video is empty, oversized, or changed since saving")
-        if generation and generation.cancel.is_set():
-            raise VideoCancelled()
-        temp = directory / (f"download.{generation.token}.part" if generation else "download.part")
-        try:
-            received = 0
-            digest = hashlib.sha256()
-            with temp.open("wb") as stream:
-                for block in transport.stream_file_range(
-                    remote, host, start=0, end=size - 1,
-                    **({"cancel_event": generation.cancel} if generation else {}),
-                ):
-                    if generation and generation.cancel.is_set():
-                        raise VideoCancelled()
-                    received += len(block)
-                    if received > size:
-                        raise ValueError("Video size changed during download")
-                    digest.update(block)
-                    stream.write(block)
-            if generation and generation.cancel.is_set():
-                raise VideoCancelled()
-            if received != size or digest.hexdigest() != metadata["sha256"]:
-                raise ValueError(
-                    "Video download is incomplete or its checksum differs. Retry to download again."
-                )
-            with temp.open("rb") as stream:
-                if stream.read(12)[4:8] != b"ftyp":
-                    raise ValueError("The saved video is not a supported MP4 file")
-            with self.lock:
-                if generation and key is not None:
-                    self._check(key, generation)
-                temp.replace(directory / "video.mp4")
-                if generation:
-                    generation.local_published = True
-        finally:
-            temp.unlink(missing_ok=True)
-
     @guarded_recording
     def prepare(self, identifier, index, episode, generation=None):
         directory = None
@@ -503,8 +453,7 @@ class LiveVideoService:
             capture = self.capture_source(job, index, metadata)
             if capture:
                 metadata = dict(metadata, kind="capture")
-                if getattr(self.live, "archive", None) is not None:
-                    transport, host, capture = self.live.archive.resolve(job, metadata["path"])
+                transport, host, capture = self.live.archive.resolve(job, metadata["path"])
             else:
                 self._publish(key, generation, directory, state="STARTING", detail="Starting video renderer…")
                 generation.gpu_deadline = time.monotonic() + GPU_WAIT_SECONDS
@@ -532,22 +481,14 @@ class LiveVideoService:
                 capture = metadata["path"]
                 if generation.remote:
                     transport = generation.remote[0]
-            if getattr(self.live, "archive", None) is not None:
-                host = (generation.remote[1]["gateway"] if generation.remote else
-                        self.live.archive.resolve(job, metadata["path"])[1])
-                self._publish(key, generation, directory, state="PREPARING", detail="Verifying video…")
-                self.verify_remote_video(transport, host, capture, metadata)
-                self._publish(key, generation, directory, state="READY", kind=metadata["kind"],
-                              fps=metadata["fps"], frames=metadata["frames"], size_bytes=metadata["size_bytes"],
-                              sha256=metadata["sha256"], renderer_version=metadata.get("renderer_version"),
-                              remote_artifact={"gateway": host, "path": capture}, capture_error=capture_error)
-                return
-            self._publish(key, generation, directory, state="PREPARING", detail="Downloading video…")
-            self.download(transport, job["gateway"], capture, metadata, directory, generation, key)
+            host = (generation.remote[1]["gateway"] if generation.remote else
+                    self.live.archive.resolve(job, metadata["path"])[1])
+            self._publish(key, generation, directory, state="PREPARING", detail="Verifying video…")
+            self.verify_remote_video(transport, host, capture, metadata)
             self._publish(key, generation, directory, state="READY", kind=metadata["kind"],
                           fps=metadata["fps"], frames=metadata["frames"], size_bytes=metadata["size_bytes"],
                           sha256=metadata["sha256"], renderer_version=metadata.get("renderer_version"),
-                          capture_error=capture_error)
+                          remote_artifact={"gateway": host, "path": capture}, capture_error=capture_error)
         except VideoCancelled:
             generation.cancel.set()
         except Exception as exc:
@@ -575,26 +516,23 @@ class LiveVideoService:
         result = self.status(identifier, index, episode)
         if result["state"] != "READY":
             raise ValueError("Video is not ready yet")
-        if result.get("remote_artifact"):
-            job = self.live.get(identifier)
-            remote = result["remote_artifact"]
-            # Only the saved path is used; routing comes from where it resolves now.
-            path = remote["path"]
-            original_prefix = job["root"] + "/output/"
-            archive = getattr(self.live, "archive", None)
-            archived_prefix = (job.get("archive") or {}).get("root", "")
-            if path.startswith(original_prefix) and getattr(self.live, "archive", None) is not None:
-                transport, gateway, path = self.live.archive.resolve(job, path[len(original_prefix):])
-            elif archive is not None and archived_prefix and path.startswith(archived_prefix + "/"):
-                transport, gateway, path = archive.resolve(job, path[len(archived_prefix) + 1:])
-            elif re.fullmatch(r"[a-f0-9]{32}", result.get("generation", "")) and path.startswith(WORK_ROOT + "/jobs/runs/" + result["generation"] + "/"):
-                transport, gateway = self.live.archive.cluster, DEFAULT_GATEWAY
-            elif getattr(self.live, "archive", None) is not None and path.startswith(self.live.archive.derived_root(job) + "/"):
-                transport, gateway = self.live.archive.cluster, DEFAULT_GATEWAY
-            else:
-                raise ValueError("The video location does not belong to this recording")
-            return RemoteArtifact(transport, gateway, path, MAX_BYTES)
-        return self.source(identifier, index, episode)[3] / "video.mp4"
+        job = self.live.get(identifier)
+        archive = self.live.archive
+        # Only the saved path is used; routing comes from where it resolves now.
+        path = result["remote_artifact"]["path"]
+        original_prefix = job["root"] + "/output/"
+        archived_prefix = (job.get("archive") or {}).get("root", "")
+        if path.startswith(original_prefix):
+            transport, gateway, path = archive.resolve(job, path[len(original_prefix):])
+        elif archived_prefix and path.startswith(archived_prefix + "/"):
+            transport, gateway, path = archive.resolve(job, path[len(archived_prefix) + 1:])
+        elif re.fullmatch(r"[a-f0-9]{32}", result.get("generation", "")) and path.startswith(WORK_ROOT + "/jobs/runs/" + result["generation"] + "/"):
+            transport, gateway = archive.cluster, DEFAULT_GATEWAY
+        elif path.startswith(archive.derived_root(job) + "/"):
+            transport, gateway = archive.cluster, DEFAULT_GATEWAY
+        else:
+            raise ValueError("The video location does not belong to this recording")
+        return RemoteArtifact(transport, gateway, path, MAX_BYTES)
 
     @staticmethod
     def verify_remote_video(transport, gateway, path, metadata):

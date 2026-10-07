@@ -18,6 +18,7 @@ from .live_xr_catalog import selection
 from .remote_artifacts import RemoteArtifact
 
 MAX_BYTES = 100 * 1024 * 1024
+MAX_REVIEW_BYTES = 50 * 1024 * 1024
 MAX_PREVIEW_FRAMES = 2000
 SCHEMA = "skynet.live-review/v1"
 
@@ -227,10 +228,7 @@ class LiveReviewService:
             or path.suffix != ".pkl"
         ):
             raise ValueError("Invalid saved recording path")
-        archive = getattr(self.live, "archive", None)
-        if archive is not None:
-            return job, archive.resolve(job, str(path))[2]
-        return job, job["root"] + "/output/" + str(path)
+        return job, self.live.archive.resolve(job, str(path))[2]
 
     @staticmethod
     def slot(job, index):
@@ -253,38 +251,21 @@ class LiveReviewService:
             if path.exists()
             else {"state": "NOT_DOWNLOADED"}
         )
-        if (
-            result["state"] == "READY"
-            and getattr(self.live, "archive", None) is not None
+        if result["state"] == "READY" and (
+            result.get("storage_path")
+            != self.remote_location(identifier, index, "review.json").path
         ):
-            if (
-                result.get("storage_path")
-                != self.remote_location(identifier, index, "review.json").path
-            ):
-                return {"state": "NOT_DOWNLOADED"}
+            return {"state": "NOT_DOWNLOADED"}
         if result["state"] == "DOWNLOADING" and (identifier, index) not in self.active:
             return {
                 "state": "FAILED",
                 "error": "Download was interrupted. Retry to resume review.",
             }
-        if (
-            result["state"] == "READY"
-            and result.get("storage") != "remote"
-            and not all(
-                (directory / name).is_file()
-                for name in ("review.json", "summary.json", "recording.pkl")
-            )
-        ):
-            return {
-                "state": "FAILED",
-                "error": "The local copy is missing a file. Retry to download it again.",
-            }
         if result["state"] == "READY":
-            job, source_path = self.source(identifier, index)
-            gateway = job["gateway"]
-            archive = getattr(self.live, "archive", None)
-            if archive is not None:
-                _, gateway, source_path = archive.resolve(job, job["recordings"][index])
+            job, _ = self.source(identifier, index)
+            _, gateway, source_path = self.live.archive.resolve(
+                job, job["recordings"][index]
+            )
             result = dict(result, recording_source={"path": source_path, "gateway": gateway})
         return result
 
@@ -313,35 +294,6 @@ class LiveReviewService:
             self.executor.submit(self.prepare, identifier, index)
             return {"state": "DOWNLOADING"}
 
-    def store(self, identifier, index, path):
-        """Validate before atomically publishing the local review and original."""
-        job, _ = self.source(identifier, index)
-        result = inspect(path, job["profile"])
-        expected = job.get("recording_checksums", {}).get(job["recordings"][index])
-        if not expected and len(job["recordings"]) == 1:
-            expected = (job.get("recording_summary") or {}).get("sha256")
-        if expected and result["sha256"] != expected:
-            raise ValueError(
-                "The recording checksum differs from its saved validation report"
-            )
-        directory = self.directory(identifier, index)
-        directory.mkdir(parents=True, exist_ok=True)
-        text = canonical_json(result)
-        if len(text.encode()) > 50 * 1024 * 1024:
-            raise ValueError("Recording preview exceeds the 50 MB review limit")
-        (directory / "review.tmp").write_text(text)
-        (directory / "review.tmp").replace(directory / "review.json")
-        if path != directory / "recording.pkl":
-            (directory / "recording.tmp").write_bytes(path.read_bytes())
-            (directory / "recording.tmp").replace(directory / "recording.pkl")
-        summary = {k: v for k, v in result.items() if k != "episodes"}
-        summary["episodes"] = [
-            {k: v for k, v in ep.items() if k != "frames"} for ep in result["episodes"]
-        ]
-        (directory / "summary.json").write_text(canonical_json(summary))
-        self.publish(directory, state="READY", summary=summary)
-        return summary
-
     def remote_location(self, identifier, index, name, *, job=None):
         if job is None:
             job, _ = self.source(identifier, index)
@@ -362,7 +314,7 @@ class LiveReviewService:
             transport, gateway = self.live.transport(job), job["gateway"]
             root = job["root"] + "/output"
         return RemoteArtifact(
-            transport, gateway, f"{root}/reviews/{self.slot(job, index)}/{name}", 50 * 1024 * 1024
+            transport, gateway, f"{root}/reviews/{self.slot(job, index)}/{name}", MAX_REVIEW_BYTES
         )
 
     def prepare_remote(self, identifier, index):
@@ -378,7 +330,7 @@ class LiveReviewService:
                 "The recording checksum differs from its saved validation report"
             )
         text = canonical_json(result)
-        if len(text.encode()) > 50 * 1024 * 1024:
+        if len(text.encode()) > MAX_REVIEW_BYTES:
             raise ValueError("Recording preview exceeds the 50 MB review limit")
         summary = {k: v for k, v in result.items() if k != "episodes"}
         summary["episodes"] = [
@@ -425,36 +377,11 @@ class LiveReviewService:
     @guarded_recording
     def prepare(self, identifier, index):
         directory = self.directory(identifier, index)
-        temp = directory / "download.part"
         try:
-            if getattr(self.live, "archive", None) is not None:
-                self.prepare_remote(identifier, index)
-                return
-            job, remote = self.source(identifier, index)
-            transport = self.live.transport(job)
-            host, size = transport.file_size(remote, job["gateway"])
-            if not 0 < size <= MAX_BYTES:
-                raise ValueError(
-                    "Review supports native recordings from 1 byte to 100 MB"
-                )
-            received = 0
-            with temp.open("wb") as stream:
-                for block in transport.stream_file_range(
-                    remote, host, start=0, end=size - 1
-                ):
-                    received += len(block)
-                    if received > size:
-                        raise ValueError("Recording size changed during download")
-                    stream.write(block)
-            if received != size:
-                raise ValueError(
-                    "Recording download was incomplete; retry when the host is reachable"
-                )
-            self.store(identifier, index, temp)
+            self.prepare_remote(identifier, index)
         except Exception as exc:
             self.publish(directory, state="FAILED", error=str(exc))
         finally:
-            temp.unlink(missing_ok=True)
             with self.lock:
                 self.active.discard((identifier, index))
 
@@ -465,11 +392,4 @@ class LiveReviewService:
             raise ValueError(
                 "Download and validate the recording before opening its review"
             )
-        if getattr(self.live, "archive", None) is not None:
-            return self.remote_location(identifier, index, name)
-        path = self.directory(identifier, index) / name
-        if not path.is_file():
-            raise KeyError(
-                "Local review file is missing; the original remains on the execution host"
-            )
-        return path
+        return self.remote_location(identifier, index, name)

@@ -29,7 +29,7 @@ def setup(tmp_path, monkeypatch):
         created_at="2026-09-08", profile=dict(display_name="Test hand", task="test-task", robot="floating_shadow_hand"),
         recordings=recordings, recording_checksums={name: "a" * 64 for name in recordings}, recording_images={},
     )
-    live = SimpleNamespace(root=Path(__file__).resolve().parents[1], database=Database(tmp_path / "db.store"),
+    live = SimpleNamespace(archive=SimpleNamespace(resolve=lambda job, path: (None, "test", path)), root=Path(__file__).resolve().parents[1], database=Database(tmp_path / "db.store"),
                            get=lambda _: session, list=lambda **_: [session])
     service = PolicyExportService(LiveReviewService(live, root=tmp_path / "reviews"), root=tmp_path / "exports")
     monkeypatch.setattr(service, "dispatch", lambda _: None)

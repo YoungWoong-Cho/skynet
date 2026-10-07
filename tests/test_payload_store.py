@@ -494,8 +494,9 @@ def test_offloaded_evaluation_targets_are_found_and_repaired_without_body_reads(
     train = db.create_stage(run['id'], stage_type='TRAIN', name='train')
     attempt = db.create_job_attempt(train['id'], status='RUNNING',
                                     execution_snapshot_json={'plan': {'native_config': {'initial_checkpoint': '/saved.ckpt'}}, 'code': 'x' * 200000})
-    monkeypatch.setattr(db.payload_store.objects, 'truthy_paths', lambda *_: pytest.fail('the list must not inspect snapshots'))
+    projected_paths.clear()
     assert db.run_progress_evidence([run['id']])[run['id']]['attempts'][0]['has_initial_checkpoint'] is True
+    assert projected_paths == [] and reads == [], 'the list must not inspect snapshots'
     with db.transaction() as c:
         c.execute("DELETE FROM document_projections WHERE table_name='job_attempts' AND record_id=?", (attempt['id'],))
     with pytest.raises(ValueError, match='incomplete'):

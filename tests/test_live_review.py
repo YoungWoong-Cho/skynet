@@ -1,10 +1,14 @@
 import json
+from pathlib import Path
 import pickle
+import shlex
+import subprocess
 from types import SimpleNamespace
 import numpy as np
 import pytest
 from skynet_app.live_xr_review import LiveReviewService, inspect
 from skynet_app.live_xr_catalog import selection
+from skynet_app.remote_artifacts import RemoteArtifact
 
 
 @pytest.fixture
@@ -38,43 +42,69 @@ def payload():
     }
 
 
+class Files:
+    """Serve local files through the transport surface the review services use."""
+
+    def file_size(self, path, gateway):
+        return gateway, Path(path).stat().st_size
+
+    def stream_file_range(self, path, gateway, *, start, end):
+        yield Path(path).read_bytes()[start : end + 1]
+
+    def run_with_fallback(self, command, gateway, *, stdin=None, **budget):
+        return "answering-host", subprocess.run(
+            shlex.split(command), input=stdin, text=True, capture_output=True, check=True
+        ).stdout
+
+
 @pytest.fixture
 def review(tmp_path, payload):
+    """A captured workstation session whose files are reached through the archive resolver."""
+    root = tmp_path / "workspace/sessions/session"
     job = {
         "id": "session",
         "state": "CAPTURED",
         "gateway": "test-host",
-        "root": "/workspace/sessions/session",
+        "root": str(root),
         "profile": {"task": payload["task"], "robot": payload["robot_type"]},
         "recordings": ["recordings/live/demo.pkl"],
     }
-    remote = pickle.dumps(payload)
-    calls = []
-    transport = SimpleNamespace(
-        file_size=lambda *args: ("test-host", len(remote)),
-        stream_file_range=lambda *args, **kw: iter([remote]),
+    recording = root / "output/recordings/live/demo.pkl"
+    recording.parent.mkdir(parents=True)
+    recording.write_bytes(pickle.dumps(payload))
+    files = Files()
+    archive = SimpleNamespace(
+        cluster=files,
+        resolve=lambda session, relative: (
+            files,
+            session["gateway"],
+            session["root"] + "/output/" + relative,
+        ),
+        derived_root=lambda session: str(tmp_path / "derived"),
     )
     live = SimpleNamespace(
-        root=tmp_path,
-        get=lambda _: job,
-        transport=lambda _: calls.append("download") or transport,
+        root=tmp_path, get=lambda _: job, transport=lambda _: files, archive=archive
     )
     service = LiveReviewService(live)
-    return service, job, calls
+    return service, job, files
 
 
-def test_review_download_is_cached_and_has_correct_state_action_alignment(review):
-    service, job, calls = review
-    directory = service.directory("session", 0)
-    directory.mkdir(parents=True)
+def test_review_is_published_beside_the_recording_with_correct_state_action_alignment(review):
+    service, job, _ = review
     service.prepare("session", 0)
     status = service.status("session")
     assert status["state"] == "READY"
     assert status["recording_source"] == {
-        "path": "/workspace/sessions/session/output/recordings/live/demo.pkl",
+        "path": job["root"] + "/output/recordings/live/demo.pkl",
         "gateway": "test-host",
     }
-    result = json.loads(service.artifact("session", 0, "review.json").read_text())
+    reviews = Path(job["root"]) / "output/reviews/0"
+    assert status["storage_path"] == str(reviews / "review.json")
+    assert sorted(p.name for p in reviews.iterdir()) == ["review.json", "summary.json"]
+    assert [p.name for p in service.root.rglob("*") if p.is_file()] == ["status.json"]
+    artifact = service.artifact("session", 0, "review.json")
+    assert isinstance(artifact, RemoteArtifact)
+    result = json.loads(artifact.read_text())
     episode = result["episodes"][0]
     assert episode["frames"][0]["action"] is None
     assert episode["frames"][1]["action_index"] == 0
@@ -83,9 +113,6 @@ def test_review_download_is_cached_and_has_correct_state_action_alignment(review
     assert episode["duration_seconds"] == 3 / 60
     assert not episode["sampled"]
     assert service.create("session")["state"] == "READY"
-    assert calls == [
-        "download"
-    ]  # No scheduler, simulator, training or evaluation calls.
 
 
 def test_review_rejects_nonfinite_scene_state(tmp_path, payload):
@@ -121,7 +148,7 @@ def test_session_mismatch_and_path_escape_are_rejected(tmp_path, payload, review
 
 
 def test_interrupted_and_failed_downloads_can_retry(review):
-    service, job, calls = review
+    service, job, _ = review
     directory = service.directory("session", 0)
     service.publish(directory, state="DOWNLOADING")
     assert service.status("session")["state"] == "FAILED"
@@ -137,15 +164,13 @@ def test_saved_episode_can_be_reviewed_while_collection_continues(review):
     assert service.source("session", 0)[0]["state"] == "COLLECTING"
 
 
-def test_checksum_mismatch_does_not_publish_download(review):
+def test_checksum_mismatch_does_not_publish_review(review):
     service, job, _ = review
     job["recording_summary"] = {"sha256": "0" * 64}
-    directory = service.directory("session", 0)
-    directory.mkdir(parents=True)
     service.prepare("session", 0)
     assert service.status("session")["state"] == "FAILED"
     assert "checksum" in service.status("session")["error"]
-    assert not (directory / "recording.pkl").exists()
+    assert not (Path(job["root"]) / "output/reviews").exists()
 
 
 def test_catalog_rejects_unknown_or_model_only_hands():
@@ -159,15 +184,11 @@ def test_catalog_rejects_unknown_or_model_only_hands():
         selection("Dexverse-PickCube-v0", "floating_shadow_left")
 
 
-def test_capture_video_download_is_verified_cached_and_never_uses_gpu(review):
+def test_capture_video_is_verified_in_place_and_never_uses_gpu(review, payload):
     from skynet_app.live_xr_video import LiveVideoService
     import hashlib
 
-    reviews, job, calls = review
-    reviews.directory("session", 0).mkdir(parents=True)
-    reviews.prepare("session", 0)
-    path = reviews.artifact("session", 0, "review.json")
-    document = json.loads(path.read_text())
+    reviews, job, files = review
     raw = b"\x00\x00\x00\x18ftypisom" + b"video payload"
     metadata = dict(
         state="READY",
@@ -177,21 +198,26 @@ def test_capture_video_download_is_verified_cached_and_never_uses_gpu(review):
         fps=30,
         frames=2,
     )
-    document["episodes"][0]["video"] = metadata
-    path.write_text(json.dumps(document))
+    payload["episodes"][0]["skynet_video"] = metadata
+    recording = Path(reviews.source("session", 0)[1])
+    recording.write_bytes(pickle.dumps(payload))
+    recording.with_suffix(".mp4").write_bytes(raw)
+    reviews.prepare("session", 0)
     videos = LiveVideoService(reviews)
-    reviews.live.transport = lambda _: SimpleNamespace(
-        file_size=lambda *a: ("test-host", len(raw)),
-        stream_file_range=lambda *a, **k: iter([raw[:5], raw[5:]]),
-    )
     videos.render = lambda *a: pytest.fail(
         "A captured video must not launch a GPU render"
     )
     videos.prepare("session", 0, 0)
-    assert videos.status("session", 0)["state"] == "READY"
-    assert videos.status("session", 0)["kind"] == "capture"
-    assert videos.artifact("session", 0).read_bytes() == raw
-    reviews.live.transport = lambda _: pytest.fail("Cached video must work offline")
+    status = videos.status("session", 0)
+    assert status["state"] == "READY" and status["kind"] == "capture"
+    assert status["remote_artifact"] == {
+        "gateway": "test-host",
+        "path": str(recording.with_suffix(".mp4")),
+    }
+    artifact = videos.artifact("session", 0)
+    assert isinstance(artifact, RemoteArtifact) and artifact.transport is files
+    assert artifact.read_bytes() == raw
+    assert [p.name for p in videos.source("session", 0, 0)[3].iterdir()] == ["status.json"]
     assert videos.create("session", 0)["state"] == "READY"
     metadata["path"] = "recordings/../../secret.mp4"
     with pytest.raises(ValueError, match="does not match"):
@@ -227,7 +253,7 @@ def test_cancelled_video_queue_task_cannot_run_after_a_retry(review):
 def test_video_failure_and_interrupted_preparation_are_explicit_and_retryable(review):
     from skynet_app.live_xr_video import LiveVideoService
 
-    reviews, job, calls = review
+    reviews, job, _ = review
     reviews.directory("session", 0).mkdir(parents=True)
     reviews.prepare("session", 0)
     videos = LiveVideoService(reviews)
@@ -240,7 +266,6 @@ def test_video_failure_and_interrupted_preparation_are_explicit_and_retryable(re
     }
     videos.prepare("session", 0, 0)
     assert "GPU is busy" in videos.status("session", 0)["error"]
-    assert not (directory / "video.mp4").exists()
     queued = []
     videos.executor.submit = lambda *a: queued.append(a)
     assert videos.create("session", 0)["state"] == "QUEUED"
@@ -294,7 +319,7 @@ def test_video_waits_for_gpu_then_finishes_or_reports_bounded_failure(
     )
     renders = iter([{"state": "WAITING_GPU"}, ready])
     videos.render = lambda *a: next(renders)
-    videos.download = lambda *a: (directory / "video.mp4").write_bytes(b"cached video")
+    videos.verify_remote_video = lambda *a: None
     waits = []
     generation = live_xr_video.VideoGeneration()
     monkeypatch.setattr(
@@ -304,10 +329,11 @@ def test_video_waits_for_gpu_then_finishes_or_reports_bounded_failure(
     videos.active.add(key)
     videos.prepare(*key)
     assert waits[0]["state"] == "WAITING_GPU"
-    assert videos.status(*key)["state"] == "READY"
+    result = videos.status(*key)
+    assert result["state"] == "READY"
+    assert result["remote_artifact"] == {"gateway": "test-host", "path": "/video.mp4"}
     assert not videos.active
 
-    (directory / "video.mp4").unlink()
     videos.render = lambda *a: {"state": "WAITING_GPU"}
     clock = iter([0, live_xr_video.GPU_WAIT_SECONDS + 1])
     monkeypatch.setattr(live_xr_video.time, "monotonic", lambda: next(clock))
@@ -345,47 +371,25 @@ def test_video_remote_lock_conflict_is_a_wait_state(review):
     assert calls[0][1]["generation"] == calls[1][1]["generation"]
 
 
-def test_video_checksum_or_incomplete_download_cannot_be_published(review):
+def test_video_with_changed_checksum_size_or_container_cannot_be_published(tmp_path):
     from skynet_app.live_xr_video import LiveVideoService
     import hashlib
 
-    reviews, _, _ = review
-    reviews.directory("session", 0).mkdir(parents=True)
-    reviews.prepare("session", 0)
-    videos = LiveVideoService(reviews)
-    directory = videos.source("session", 0, 0)[3]
-    directory.mkdir()
     raw = b"\x00\x00\x00\x18ftypisom"
     metadata = dict(sha256=hashlib.sha256(raw).hexdigest(), size_bytes=len(raw))
-    for received in [raw[:-1], b"bad bytes!!!"]:
-        transport = SimpleNamespace(
-            file_size=lambda *a: ("host", len(raw)),
-            stream_file_range=lambda *a, **k: iter([received]),
+    video = tmp_path / "video.mp4"
+    for stored in [raw[:-1], b"bad bytes!!!"]:
+        video.write_bytes(stored)
+        with pytest.raises(ValueError, match="differs"):
+            LiveVideoService.verify_remote_video(Files(), "host", str(video), metadata)
+    plain = b"not an mp4 file!"
+    video.write_bytes(plain)
+    with pytest.raises(ValueError, match="differs"):
+        LiveVideoService.verify_remote_video(
+            Files(), "host", str(video), dict(sha256=hashlib.sha256(plain).hexdigest(), size_bytes=len(plain))
         )
-        with pytest.raises(ValueError, match="incomplete|checksum"):
-            videos.download(transport, "host", "/video.mp4", metadata, directory)
-        assert not (directory / "video.mp4").exists()
-        assert not (directory / "download.part").exists()
-
-
-def test_browser_video_supports_byte_ranges(tmp_path, monkeypatch):
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-    from skynet_app import live_xr_api
-
-    p = tmp_path / "video.mp4"
-    p.write_bytes(b"\x00\x00\x00\x18ftypisom" + bytes(range(128)))
-    monkeypatch.setattr(live_xr_api, "videos", SimpleNamespace(artifact=lambda *a: p))
-    app = FastAPI()
-    app.include_router(live_xr_api.router)
-    response = TestClient(app).get(
-        "/api/collection/live/sessions/session/recordings/0/video.mp4",
-        headers={"Range": "bytes=0-11"},
-    )
-    assert response.status_code == 206
-    assert response.headers["content-type"] == "video/mp4"
-    assert response.headers["content-range"] == f"bytes 0-11/{p.stat().st_size}"
-    assert response.content == p.read_bytes()[:12]
+    video.write_bytes(raw)
+    LiveVideoService.verify_remote_video(Files(), "host", str(video), metadata)
 
 
 @pytest.fixture
@@ -444,46 +448,6 @@ def test_active_gpu_wait_cancel_is_prompt_and_stale_cancel_cannot_stop_retry(vid
     )
 
 
-def test_active_download_cancel_closes_stream_and_removes_partial(videos):
-    import hashlib
-    import threading
-
-    directory = videos.source("session", 0, 0)[3]
-    review_path = directory.parent / "review.json"
-    review = json.loads(review_path.read_text())
-    raw = b"\x00\x00\x00\x18ftypisom" + b"test payload"
-    review["episodes"][0]["video"] = dict(
-        state="READY",
-        path="recordings/live/demo.mp4",
-        size_bytes=len(raw),
-        sha256=hashlib.sha256(raw).hexdigest(),
-        fps=30,
-        frames=1,
-    )
-    review_path.write_text(json.dumps(review))
-    entered, closed = threading.Event(), threading.Event()
-
-    def stream(*args, cancel_event, **kwargs):
-        try:
-            yield raw[:12]
-            entered.set()
-            assert cancel_event.wait(2)
-        finally:
-            closed.set()
-
-    videos.live.transport = lambda _: SimpleNamespace(
-        file_size=lambda *a: ("test-host", len(raw)), stream_file_range=stream
-    )
-    videos.create("session", 0)
-    assert entered.wait(2)
-    assert list(directory.glob("download.*.part"))
-    videos.cancel("session", 0)
-    wait_video(videos, "CANCELLED")
-    assert closed.is_set()
-    assert not list(directory.glob("*.part"))
-    assert not (directory / "video.mp4").exists()
-
-
 def test_cancel_during_remote_launch_cannot_publish_late_ready(videos):
     import threading
 
@@ -511,7 +475,6 @@ def test_cancel_during_remote_launch_cannot_publish_late_ready(videos):
     release.set()
     wait_video(videos, "CANCELLED")
     assert len({call[1] for call in calls}) == 1
-    assert not (videos.source("session", 0, 0)[3] / "video.mp4").exists()
 
 
 def test_failed_remote_stop_remains_cancelling_and_can_be_retried_after_restart(videos):
@@ -547,27 +510,26 @@ def test_failed_remote_stop_remains_cancelling_and_can_be_retried_after_restart(
     assert len(calls) == 2
 
 
-def test_cancel_between_verified_download_and_ready_removes_own_local_copy(videos):
+def test_cancel_between_remote_verification_and_ready_cannot_publish_ready(videos):
     import threading
 
-    downloaded, release = threading.Event(), threading.Event()
-    directory = videos.source("session", 0, 0)[3]
-    videos.render = lambda *a: dict(state="READY", kind="replay", path="/video.mp4")
+    verified, release = threading.Event(), threading.Event()
+    videos.render = lambda *a: dict(
+        state="READY", kind="replay", path="/video.mp4", fps=30, frames=2,
+        size_bytes=24, sha256="a" * 64, renderer_version=videos.version,
+    )
 
-    def download(*args):
-        generation = args[-2]
-        (directory / "video.mp4").write_bytes(b"verified video")
-        generation.local_published = True
-        downloaded.set()
+    def verify(*args):
+        verified.set()
         assert release.wait(2)
 
-    videos.download = download
+    videos.verify_remote_video = verify
     videos.create("session", 0)
-    assert downloaded.wait(2)
+    assert verified.wait(2)
     assert videos.cancel("session", 0)["state"] == "CANCELLING"
     release.set()
     wait_video(videos, "CANCELLED")
-    assert not (directory / "video.mp4").exists()
+    assert not videos.active
 
 
 @pytest.fixture
@@ -697,6 +659,10 @@ def test_invalid_recovered_video_owner_cannot_poison_active_state(videos):
 
 
 def test_recovered_video_transport_validation_failure_can_be_retried(videos):
+    # A verified archive serves the review, so cancelling an older workstation
+    # attempt is the first step that resolves the saved workstation runtime.
+    videos.live.get("session")["archive"] = {"state": "READY", "gateway": "sky2"}
+    videos.reviews.prepare("session", 0)
     job, _, review, directory = videos.source("session", 0, 0)
     token = "a" * 32
     root = (

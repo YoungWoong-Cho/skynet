@@ -695,10 +695,9 @@ print(json.dumps(value))
     def logs(self, identifier):
         job = self.get(identifier)
         transport, gateway, root = self.transport(job), job["gateway"], job["root"]
-        archive = getattr(self, "archive", None)
-        if archive is not None and archive.is_archived(job):
-            transport, gateway = archive.cluster, DEFAULT_GATEWAY
-            root = archive.session_root(job)
+        if self.archive.is_archived(job):
+            transport, gateway = self.archive.cluster, DEFAULT_GATEWAY
+            root = self.archive.session_root(job)
         parts = []
         for name in (
             "stderr.log",
