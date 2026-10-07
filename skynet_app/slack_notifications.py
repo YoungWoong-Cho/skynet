@@ -19,9 +19,44 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .credential_store import CredentialStore, CredentialStoreError
 from .database import Database
+from .tracking import backoff_seconds
 
-EVENTS = ("submitted", "running", "cancelled", "failed", "completed")
+# Notification categories in lifecycle order: (category, message verb, connect-message noun).
+EVENT_TABLE = (
+    ("submitted", "submitted", "submission"),
+    ("running", "started running", "running"),
+    ("cancelled", "cancelled", "cancellation"),
+    ("failed", "failed", "failure"),
+    ("completed", "completed", "completion"),
+)
+EVENTS = tuple(category for category, _, _ in EVENT_TABLE)
+EVENT_VERBS = {category: verb for category, verb, _ in EVENT_TABLE}
+# A later lifecycle message waits for the earlier ones of the same attempt; the
+# terminal categories share one rank because an attempt reaches only one of them.
+TERMINAL_RANK = 2
+EVENT_RANKS = {category: min(index, TERMINAL_RANK) for index, category in enumerate(EVENTS)}
+_RANK_CASE = "(CASE {column} " + " ".join(
+    f"WHEN '{category}' THEN {rank}" for category, rank in EVENT_RANKS.items() if rank < TERMINAL_RANK
+) + f" ELSE {TERMINAL_RANK} END)"
+CONNECT_MESSAGE = ("Skynet connected. You’ll receive job "
+                   + ", ".join(noun for _, _, noun in EVENT_TABLE[:-1]) + f" and {EVENT_TABLE[-1][2]}"
+                   + " notifications here.")
+
 MAX_ATTEMPTS = 6
+HTTP_TIMEOUT_SECONDS = 5
+# A 429 without a usable Retry-After waits this long; a stated one is clamped to the cap.
+RATE_LIMIT_DEFAULT_RETRY_SECONDS = 30
+RATE_LIMIT_MAX_RETRY_SECONDS = 3600
+TRANSIENT_RETRY_SECONDS = 15
+CREDENTIAL_RETRY_SECONDS = 60
+# A sending row stays leased this long before another worker may take it over.
+LEASE_SECONDS = 30
+BACKOFF_BASE_SECONDS = 15
+BACKOFF_CAP_SECONDS = 900
+
+
+def default_app_url() -> str:
+    return os.environ.get("SKYNET_PUBLIC_URL", "")
 
 
 def now_iso() -> str:
@@ -77,7 +112,7 @@ def post_to_slack(webhook: str, payload: dict) -> None:
         method="POST",
     )
     try:
-        with build_opener(NoRedirect()).open(request, timeout=5) as response:
+        with build_opener(NoRedirect()).open(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
             if response.status != 200 or response.read(256).strip() != b"ok":
                 raise DeliveryError(
                     "Slack returned an unexpected response. Check the webhook."
@@ -85,15 +120,16 @@ def post_to_slack(webhook: str, payload: dict) -> None:
     except HTTPError as error:
         if error.code == 429:
             try:
-                delay = max(1, min(3600, int(error.headers.get("Retry-After", "30"))))
+                delay = max(1, min(RATE_LIMIT_MAX_RETRY_SECONDS,
+                                   int(error.headers.get("Retry-After", str(RATE_LIMIT_DEFAULT_RETRY_SECONDS)))))
             except (ValueError, TypeError):
-                delay = 30
+                delay = RATE_LIMIT_DEFAULT_RETRY_SECONDS
             raise DeliveryError(
                 "Slack rate limit reached; retry scheduled.", retry_after=delay
             ) from None
         if error.code >= 500:
             raise DeliveryError(
-                "Slack is temporarily unavailable; retry scheduled.", retry_after=15
+                "Slack is temporarily unavailable; retry scheduled.", retry_after=TRANSIENT_RETRY_SECONDS
             ) from None
         raise DeliveryError(
             f"Slack rejected the notification (HTTP {error.code}). Check the webhook and channel permissions."
@@ -101,7 +137,7 @@ def post_to_slack(webhook: str, payload: dict) -> None:
     except (URLError, TimeoutError, OSError):
         # Never expose exception strings: urllib errors may include the secret URL.
         raise DeliveryError(
-            "Could not reach Slack; retry scheduled.", retry_after=15
+            "Could not reach Slack; retry scheduled.", retry_after=TRANSIENT_RETRY_SECONDS
         ) from None
 
 
@@ -151,9 +187,7 @@ class SlackNotifications:
             "configured": configured,
             "enabled": bool(config and config["enabled"]),
             "events": json.loads(config["events_json"]) if config else list(EVENTS),
-            "app_url": config["app_url"]
-            if config
-            else os.environ.get("SKYNET_PUBLIC_URL", ""),
+            "app_url": config["app_url"] if config else default_app_url(),
             "last_error": store_error or (config["last_error"] if config else None),
             "last_sent_at": config["last_sent_at"] if config else None,
             "pending_count": counts.get("pending", 0) + counts.get("sending", 0),
@@ -252,14 +286,8 @@ class SlackNotifications:
                 return current
             # Slack incoming webhooks have no read-only validation endpoint.
             # Connect sends this confirmation before saving or enabling delivery.
-            self.sender(webhook, {
-                "text": "Skynet connected. You’ll receive job submission, running, cancellation, failure and completion notifications here.",
-                "mrkdwn": False,
-            })
-            return self.configure(
-                webhook_url=webhook, enabled=True, events=EVENTS,
-                app_url=os.environ.get("SKYNET_PUBLIC_URL", ""),
-            )
+            self.sender(webhook, {"text": CONNECT_MESSAGE, "mrkdwn": False})
+            return self.configure(webhook_url=webhook, enabled=True, events=EVENTS, app_url=default_app_url())
 
     def _payload(self, connection, item, config):
         row = connection.execute(
@@ -282,14 +310,7 @@ class SlackNotifications:
             if row["stage_type"] == "TRAIN"
             else row["stage_type"].replace("_", " ").title()
         )
-        verb = {
-            "submitted": "submitted",
-            "running": "started running",
-            "cancelled": "cancelled",
-            "failed": "failed",
-            "completed": "completed",
-        }[item["category"]]
-        title = f"{kind} {verb}: {row['experiment_name']}"[:250]
+        title = f"{kind} {EVENT_VERBS[item['category']]}: {row['experiment_name']}"[:250]
         description = f"Adapter: {row['adapter_name']}\n"
         description += (
             f"Slurm job: {row['slurm_job_id']} · Attempt {row['attempt_number']}"
@@ -342,12 +363,12 @@ class SlackNotifications:
                 if not config or not config["enabled"]:
                     return False
                 row = connection.execute(
-                    """SELECT n.* FROM notification_outbox n WHERE n.owner_id=? AND n.status IN ('pending','sending')
+                    f"""SELECT n.* FROM notification_outbox n WHERE n.owner_id=? AND n.status IN ('pending','sending')
                     AND NOT EXISTS (SELECT 1 FROM notification_outbox earlier
                         WHERE earlier.owner_id=n.owner_id AND earlier.stage_id=n.stage_id
                             AND earlier.attempt_key=n.attempt_key AND earlier.status IN ('pending','sending')
-                            AND (CASE earlier.category WHEN 'submitted' THEN 0 WHEN 'running' THEN 1 ELSE 2 END)
-                              < (CASE n.category WHEN 'submitted' THEN 0 WHEN 'running' THEN 1 ELSE 2 END))
+                            AND {_RANK_CASE.format(column='earlier.category')}
+                              < {_RANK_CASE.format(column='n.category')})
                     ORDER BY n.id LIMIT 1""",
                     (self.owner,),
                 ).fetchone()
@@ -368,7 +389,7 @@ class SlackNotifications:
                 payload = self._payload(connection, item, config)
                 connection.execute(
                     "UPDATE notification_outbox SET status='sending',lease_token=?,due_at=?,attempts=attempts+1 WHERE id=? AND owner_id=?",
-                    (token, timestamp + 30, item["id"], self.owner),
+                    (token, timestamp + LEASE_SECONDS, item["id"], self.owner),
                 )
             error = None
             try:
@@ -376,14 +397,14 @@ class SlackNotifications:
                 if not record:
                     raise DeliveryError(
                         "Saved Slack webhook is unavailable. Reconnect in Settings.",
-                        retry_after=60,
+                        retry_after=CREDENTIAL_RETRY_SECONDS,
                     )
                 if payload:
                     self.sender(record.credentials["webhook_url"], payload)
             except CredentialStoreError:
                 error = DeliveryError(
                     "Server credential store is unavailable; retry scheduled.",
-                    retry_after=60,
+                    retry_after=CREDENTIAL_RETRY_SECONDS,
                 )
             except DeliveryError as caught:
                 error = caught
@@ -403,7 +424,8 @@ class SlackNotifications:
                 else "skipped"
             )
             due = (
-                timestamp + max(error.retry_after, min(900, 15 * 2 ** (attempts - 1)))
+                timestamp + max(error.retry_after,
+                                backoff_seconds(attempts, base=BACKOFF_BASE_SECONDS, cap=BACKOFF_CAP_SECONDS))
                 if retry
                 else 0
             )

@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
+from . import __version__
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - the application runs on Linux/macOS.
@@ -36,9 +38,22 @@ WANDB_ENQUEUE_BATCH_SIZE = 1000
 WANDB_TAG_MAX_LENGTH = 64
 WANDB_TAG_HASH_LENGTH = 12
 WANDB_TAG_METADATA_CONFIG_KEY = "skynet_tag_metadata"
-USER_AGENT = "skynet-slurm-console/0.2"
+USER_AGENT = f"skynet-slurm-console/{__version__}"
+# Providers the console delivers to and their display names; migration 001 checks the same keys.
+TRACKING_PROVIDERS = {"mlflow": "MLflow", "wandb": "Weights & Biases"}
+WANDB_DEFAULT_BASE_URL = "https://api.wandb.ai"
+# Public web front for a hosted API endpoint; self-hosted servers serve both from one host.
+WANDB_WEB_HOSTS = {"api.wandb.ai": "https://wandb.ai"}
+# Retry-after growth for a busy remote: doubles from ``base`` up to ``cap``.
+RATE_LIMIT_BACKOFF_SECONDS = 60
+RATE_LIMIT_BACKOFF_CAP_SECONDS = 900
 # Parsed spools shared by the per-call bridge instances, bounded by their serialized size.
 SPOOL_CACHE_BYTES = 32 * 1024 * 1024
+
+
+def backoff_seconds(attempt: int, *, base: float, cap: float) -> float:
+    """Exponential retry delay: ``base`` on the first attempt, doubling, never above ``cap``."""
+    return min(cap, base * 2 ** (attempt - 1))
 
 
 def compact_tracking_parameters(values: Mapping[str, Any]) -> dict[str, Any]:
@@ -1238,7 +1253,7 @@ SESSION_CREDENTIALS = SessionCredentialStore()
 
 @dataclass(frozen=True)
 class WandBSettings:
-    base_url: str = "https://api.wandb.ai"
+    base_url: str = WANDB_DEFAULT_BASE_URL
     api_key: str | None = field(default=None, repr=False)
     entity: str | None = None
     timeout_seconds: float = 8.0
@@ -1255,7 +1270,7 @@ class WandBSettings:
         except ValueError:
             timeout = 8.0
         return cls(
-            base_url=(environment.get("WANDB_BASE_URL") or "https://api.wandb.ai").rstrip("/"),
+            base_url=(environment.get("WANDB_BASE_URL") or WANDB_DEFAULT_BASE_URL).rstrip("/"),
             api_key=environment.get("WANDB_API_KEY") or None,
             entity=environment.get("WANDB_ENTITY") or None,
             timeout_seconds=timeout,
@@ -1319,8 +1334,8 @@ def wandb_tag_label(key: Any, value: Any) -> str:
 def wandb_web_base(base_url: str) -> str:
     parsed = urllib.parse.urlsplit(base_url.rstrip("/"))
     hostname = (parsed.hostname or "").lower()
-    if hostname == "api.wandb.ai":
-        return "https://wandb.ai"
+    if hostname in WANDB_WEB_HOSTS:
+        return WANDB_WEB_HOSTS[hostname]
     path = re.sub(r"/api/?$", "", parsed.path.rstrip("/"))
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", "")).rstrip("/")
 
@@ -1589,7 +1604,9 @@ class WandBBridge(_SpoolBridge):
                     message = self._safe_error(error)
                     if isinstance(error, TrackingRequestError) and error.status_code == 429:
                         retries = int(state.get("rate_limit_retries", 0)) + 1
-                        delay = max(error.retry_after or 0, min(900, 60 * 2 ** min(retries - 1, 4)))
+                        delay = max(error.retry_after or 0,
+                                    backoff_seconds(retries, base=RATE_LIMIT_BACKOFF_SECONDS,
+                                                    cap=RATE_LIMIT_BACKOFF_CAP_SECONDS))
                         state.update(retry_not_before=time.time() + delay, rate_limit_retries=retries)
                         self._write_state_unlocked(state)
                         message = "W&B is busy. Saved metrics will sync automatically."

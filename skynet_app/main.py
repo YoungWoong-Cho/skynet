@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import __version__
 from .availability import ClusterApplication, unavailable_response
 from .cluster_config import CLUSTER
 from .cluster_runtime import ClusterClient, ClusterError
@@ -57,6 +58,9 @@ printf '\n__SKYNET_IDLE_QUOTAS__\n'
 printf '%s\n' "$skynet_dashboard_usage" | LC_ALL=C timeout {CLUSTER.ssh.operations.dashboard_probe_seconds}s python3 -c {shlex.quote(IDLE_QUOTA_PROGRAM)} {shlex.quote(json.dumps(NORMAL_ACCOUNT_QUEUES))} 2>/dev/null || printf '[]\n'
 '''
 
+APP_TITLE = "Skynet Slurm Console"
+
+
 def _create_cluster_application():
     # These imports construct services and connect to the central database.
     # Defer the entire dependency graph so the local page can open offline.
@@ -82,7 +86,7 @@ def _create_cluster_application():
     def stop_services():
         stop_background_services((live_archive, policy_exports, pipeline_service))
 
-    api = FastAPI(title="Skynet Slurm Console", version="0.2.0", docs_url="/api/docs", redoc_url=None)
+    api = FastAPI(title=APP_TITLE, version=__version__, docs_url="/api/docs", redoc_url=None)
     api.add_middleware(WorkspaceMiddleware, services=pipeline_service)
     api.add_api_route("/api/cluster", cluster, methods=["GET"])
     api.include_router(session_router(pipeline_service.directory))
@@ -118,8 +122,8 @@ async def lifespan(application: FastAPI):
 
 
 app = FastAPI(
-    title="Skynet Slurm Console",
-    version="0.2.0",
+    title=APP_TITLE,
+    version=__version__,
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
