@@ -57,16 +57,11 @@ separate relocation. Database import/export and synchronization UI remain deferr
 
 ## Existing database relocation
 
-Stop application writers, take a verified PostgreSQL backup, then run:
-
-```sh
-python -m skynet_app.payload_migration
-```
-
-Relocation uploads and independently reads back all bodies before replacing any
-SQL contents. Original receipt hashes remain immutable. The transaction is atomic
-and repeatable. Install the same code version on every app host before restarting
-an app; an old client cannot decode the new object references.
+The one-time relocation command (`skynet_app.payload_migration`) no longer ships.
+Large bodies are stored through `skynet_app/payload_store.py` (the tables listed in
+its `FIELDS`, plus tracking journals) as object references whose receipt hashes
+remain immutable. Install the same code version on every app host before restarting
+an app; an old client cannot decode the object references.
 
 ## Registry removal
 

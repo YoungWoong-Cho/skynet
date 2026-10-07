@@ -23,7 +23,7 @@ create `config/database.json` (ignored by Git):
 The host needs working SSH access to the selected cluster user. The database listens only on the cluster host’s loopback interface. No database
 port is exposed to the network. Put the DB connection password in
 `config/database-password` with permission `0600`; this file is ignored by Git. Each app creates a private Unix-socket SSH tunnel and closes it
-on exit; its connect timeout and keepalives come from the cluster profile's `ssh.tunnel` section, sized to ride out a slow login node. The original `ssh-unix` transport remains available for SSH servers that
+on exit; its connect timeout and keepalives come from the cluster profile's `ssh.tunnel` section, sized to ride out a slow login node (`ssh.command` covers one-shot commands and transfers, and `ssh.operations` holds the per-operation budgets and Slurm deadlines; see the README's "Operator cluster profile" section). The original `ssh-unix` transport remains available for SSH servers that
 support forwarding to the private PostgreSQL Unix socket. A direct PostgreSQL connection can instead be provided using
 `SKYNET_DATABASE_URL`; supporting file storage still requires the SSH endpoint
 configuration. The obsolete `SKYNET_DATABASE_PATH` setting is no longer used.
@@ -123,8 +123,10 @@ before restoring a verified PostgreSQL backup.
 ## Regression tests
 
 Set `SKYNET_TEST_POSTGRES_ADMIN` to a disposable PostgreSQL server with permission
-to create test databases, then run `pytest`. The default test harness creates and
-drops isolated databases, including module initialization, and stubs cluster file
+to create test databases, then run `pytest`. The default test harness
+(`tests/postgres_backend_plugin.py`) migrates one template database per session,
+clones every test's isolated databases from it, including the bootstrap database that
+isolates module initialization, drops them afterwards, and stubs cluster file
 transfers. It never selects the app's configured production database and never
 submits real training/evaluation jobs. Tests fail early if the test server is not
 configured. Browser-only tests continue to run through the npm scripts.
