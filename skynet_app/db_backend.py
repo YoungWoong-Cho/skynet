@@ -151,6 +151,20 @@ def lock_key(name: str) -> int:
     )
 
 
+MIGRATIONS_ROOT = Path(__file__).parent / "migrations" / "postgresql"
+
+
+def migrations():
+    """Every schema migration in version order as (version, content, checksum)."""
+    for path in sorted(MIGRATIONS_ROOT.glob("*.sql")):
+        content = path.read_text()
+        yield (
+            int(path.name.split("_", 1)[0]),
+            content,
+            hashlib.sha256(content.encode()).hexdigest(),
+        )
+
+
 # Opening a connection through the tunnel costs a few hundred milliseconds and
 # a query a few, so closed connections return to a per-database pool. A returned
 # connection is reset to its startup state (RESET ALL restores the -c options
@@ -285,12 +299,7 @@ class PostgresBackend:
                 connection.execute(
                     "CREATE TABLE IF NOT EXISTS skynet_schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL)"
                 )
-                for path in sorted(
-                    (Path(__file__).parent / "migrations" / "postgresql").glob("*.sql")
-                ):
-                    version = int(path.name.split("_", 1)[0])
-                    content = path.read_text()
-                    checksum = hashlib.sha256(content.encode()).hexdigest()
+                for version, content, checksum in migrations():
                     row = connection.execute(
                         "SELECT checksum FROM skynet_schema_migrations WHERE version=?",
                         (version,),

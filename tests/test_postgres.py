@@ -5,35 +5,29 @@ import json
 import os
 import threading
 import time
-import uuid
 
 import psycopg
 import pytest
-from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
 from skynet_app.background_owner import BackgroundOwner
 from skynet_app.database import Database
 from skynet_app.db_backend import close_pools, INTEGRITY_ERRORS, lock_key
+from tests.postgres_backend_plugin import clone_database, drop_databases
 
 
 @pytest.fixture
-def pg(tmp_path):
+def pg(request, tmp_path):
     admin = os.environ.get("SKYNET_TEST_POSTGRES_ADMIN")
     if not admin:
         pytest.skip("Set SKYNET_TEST_POSTGRES_ADMIN to run real PostgreSQL checks")
-    name = "skynet_test_" + uuid.uuid4().hex
-    with psycopg.connect(admin, autocommit=True) as c:
-        c.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    name = clone_database(request.config)
     url = make_conninfo(admin, dbname=name)
     try:
         yield Database(url=url, data_root=tmp_path), url
     finally:
         close_pools()
-        with psycopg.connect(admin, autocommit=True) as c:
-            c.execute(
-                sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name))
-            )
+        drop_databases(name)
 
 
 def test_postgres_workspace_visibility_and_write_guards(pg):
