@@ -17,7 +17,7 @@
 | # | 단계 | 어디서 | 필요한 것 |
 |---|---|---|---|
 | 1 | 외부 코드를 40자 commit으로 고정 | Experiments → Submit → **1. Algorithm and code** | 브라우저. 학습 job이 그 commit을 직접 clone한다. Commit은 고른 **Branch**의 최신 50개 commit 중에서만 고를 수 있다(§5-1) |
-| 2 | Python 환경 준비. 공유 checkout은 profile 검증, Convert, evaluator에 쓸 때만 | 클러스터 `paths.environments`, `paths.shared_repositories` | 클러스터 작업(owner) |
+| 2 | Python 환경 준비. 공유 checkout은 profile 검증, Convert, evaluator에 쓸 때만 | 클러스터 `paths.environments`, `{paths.repositories}/shared` | 클러스터 작업(owner) |
 | 3 | runtime profile 선언 | `config/clusters/skynet.json` `runtime_profiles` | 설정 변경과 앱 재시작 |
 | 4 | 어댑터 | Experiments → **Adapters**(선언형), 또는 `skynet_app/adapters/<x>_manifest.py`(built-in) | 선언형은 브라우저만. built-in은 코드 변경과 앱 재시작 |
 | 5 | 데이터 | Data → **Collect** / **Recordings** → **Convert**, 또는 Data → **Datasets** → **New**(HF import 또는 Add files) | 브라우저. 학습 데이터는 Datasets 탭에 등록한 것만 고를 수 있다(§4-1) |
@@ -61,7 +61,7 @@
 | 종류 | 경로 | 누가 만드나 | 쓰는 곳 |
 |---|---|---|---|
 | (a) 학습 job의 source cache | `{work_root}/repos/{name}-{sha256(repo_url)[:8]}/{40자 commit}`(`slurm.py:1152-1164`) | job이 compute node에서 직접 만든다 | `SKYNET_SOURCE_DIR`, `SKYNET_PROJECT_DIR`. 학습 job(generic 포함)의 코드는 항상 이 경로에서 나온다. argv는 `cwd=project_dir`에서 돈다(`slurm.py:961`) |
-| (b) 운영자가 고정한 checkout | 보통 `{paths.shared_repositories}/<Name>/<sha 또는 tag>`. profile이 (a) 경로를 가리켜도 된다(EgoVerse가 그렇다, 아래) | owner(또는 앞선 job) | runtime profile의 `source_prerequisites`만 참조한다. 학습에는 안 쓰고, 아래 네 곳에서만 쓴다: Convert의 loader 검증, evaluator `source_dir`, readiness CLI, profile 검증 probe(`source_prerequisites`를 읽는 코드는 `cluster_config.py`, `experiments.py`, `pipeline_api.py`, `policy_exports_cluster.py`, `runtime_readiness.py`뿐이고 `slurm.py`에는 없다) |
+| (b) 운영자가 고정한 checkout | 보통 `{paths.repositories}/shared/<Name>/<sha 또는 tag>`. profile이 (a) 경로를 가리켜도 된다(EgoVerse가 그렇다, 아래) | owner(또는 앞선 job) | runtime profile의 `source_prerequisites`만 참조한다. 학습에는 안 쓰고, 아래 네 곳에서만 쓴다: Convert의 loader 검증, evaluator `source_dir`, readiness CLI, profile 검증 probe(`source_prerequisites`를 읽는 코드는 `cluster_config.py`, `experiments.py`, `pipeline_api.py`, `policy_exports_cluster.py`, `runtime_readiness.py`뿐이고 `slurm.py`에는 없다) |
 | (c) 디렉터리 prerequisite | 예: `/coc/flash7/ycho420/repos/skynet-dexverse/30cc673e…` (`kind: "directory"`) | owner | Isaac evaluator profile |
 
 (a) source cache 규칙:
@@ -86,7 +86,7 @@
 (b) 운영자 checkout 규칙:
 
 - sky1의 `repos/shared`에는 `diffusion_policy/5ba07ac…`, `human-policy/2d9d73cc…`, `IsaacLab/{v2.2.0,v2.3.2}`, `IsaacLabEvalTasks/460f287…`, `XPolicyLab/9c98a3a…`가 있다.
-- 설정 키 `paths.shared_repositories`(`skynet.json:27`)는 이름 규칙일 뿐이다. 이 키를 읽는 코드는 없다.
+- `repos/shared`는 이름 규칙일 뿐이다. 이를 가리키는 설정 키는 없다(`paths.shared_repositories`는 읽는 코드가 없어 제거했다); runtime profile의 `source_prerequisites[].path`가 절대 경로를 적는다.
 - `egoverse-native`와 `egoverse-pi`는 `repos/shared`가 아니라 (a) cache 경로 `/coc/flash7/ycho420/repos/EgoVerse-f7f08862/e17cf98…`를 `git_checkout` prerequisite로 쓴다(`skynet.json:295-302, 358-371`).
   - `egoverse-native`의 `environment_path`는 `<그 cache>/.venv`다. sky1의 `pyvenv.cfg`는 `uv = 0.8.14`, `prompt = egomimic`이고 checkout에 `uv.lock`이 있다. 즉 앞선 uv job이 만든 환경을 `existing` 환경으로 다시 쓴다.
   - 따라서 이 cache 디렉터리는 지우지 않는다.
@@ -240,7 +240,7 @@ profile이 실험에 들어가는 방식(`pipeline_api.py:2648-2800`):
       --run-id <stable-id> [--gateway auto] [--gpu-type ... --queue-policy ... --memory-gb ... --time-limit ... --node ...]
   ```
   - `--run-id`와 `--gateway`(기본 `auto`)는 `submit-sbatch`에만 있다. 같은 `--run-id`로 다시 내면 중복 없이 복구한다.
-  - CPU는 `--cpus-per-task`와 무관하게 GPU당 8개다(`runtime_readiness.py:285-286`).
+  - CPU는 설정의 `cpus_per_gpu`(GPU당 8개)를 따른다; readiness CLI에 CPU 옵션은 없다.
   - Isaac suite는 job 안에서 `OMNI_KIT_ACCEPT_EULA`가 `YES`가 아니면 exit 2로 끝난다(`runtime_readiness.py:357-360`). CLI 프로세스 자신의 환경에서 이 변수 하나만 넘긴다(`cluster_runtime.py:105-115`).
 - evaluator profile 요건(`build_readiness_contract`, `runtime_readiness.py:133-191`):
   - `verification.compute_attestation_path`
@@ -1260,7 +1260,7 @@ AGENTS.md 규칙:
 
 - 호스트를 하드코딩하지 않는다.
   - gateway는 설정 `gateways`(`sky1`, `sky2`)와 헤더 **Cluster gateway**를 쓴다.
-  - 경로는 `skynet.json` `paths.*`(`work_root`, `repositories`, `shared_repositories`, `environments`, `datasets`, `logs`, `jobs`)를 기준으로 쓴다. 개인 경로(`work_root`, `workspace`, `repositories`, `artifacts`, `logs`, `jobs` 등)는 workspace base path로 rebase된다(`workspace_storage.py:17-48`). 기존 run의 경로는 `runs.run_directory`를 본다.
+  - 경로는 `skynet.json` `paths.*`(`work_root`, `repositories`, `environments`, `datasets`, `logs`, `jobs`)를 기준으로 쓴다. 개인 경로(`work_root`, `workspace`, `repositories`, `artifacts`, `logs`, `jobs` 등)는 workspace base path로 rebase된다(`workspace_storage.py:17-48`). 기존 run의 경로는 `runs.run_directory`를 본다.
 - 중앙 PostgreSQL을 직접 고치지 않는다. 읽기도 읽기 전용 연결로만 한다. 쓰기는 앱 API/브라우저로 하고, 그것으로 안 되는 행 수정은 owner가 한다.
 - job cache 경로 `repos/<name>-<sha8>/<sha>`를 손으로 만들거나 고치지 않는다(exit 65). Repository URL 철자를 앞선 run과 똑같이 쓴다(다르면 cache가 새로 생긴다, §2-1).
 - 브랜치 이름이나 짧은 sha로 제출하지 않는다. 40자 commit만 받는다.

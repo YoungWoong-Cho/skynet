@@ -21,7 +21,6 @@ class ClusterPaths(ProfileModel):
     work_root: str
     workspace: str
     repositories: str
-    shared_repositories: str
     environments: str
     datasets: str
     artifacts: str

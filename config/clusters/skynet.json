@@ -28,7 +28,6 @@
     "work_root": "/coc/flash7/ycho420",
     "workspace": "/coc/flash7/ycho420/workspace",
     "repositories": "/coc/flash7/ycho420/repos",
-    "shared_repositories": "/coc/flash7/ycho420/repos/shared",
     "environments": "/coc/flash7/ycho420/envs",
     "datasets": "/coc/flash7/ycho420/datasets",
     "artifacts": "/coc/flash7/ycho420/artifacts",

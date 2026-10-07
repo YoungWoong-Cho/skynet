@@ -63,7 +63,9 @@ def cluster_fact_patterns() -> dict[str, re.Pattern[str]]:
 def scanned_files() -> list[str]:
     listed = subprocess.run(["git", "ls-files", "-co", "--exclude-standard", *SCANNED], cwd=ROOT,
                             capture_output=True, text=True, check=True).stdout.split()
-    return [path for path in listed if path.endswith(SUFFIXES) and not path.startswith(SKIPPED) and path not in GENERATED]
+    # A tracked file already deleted from the working tree is not shipped; skip it until the deletion is staged.
+    return [path for path in listed if path.endswith(SUFFIXES) and not path.startswith(SKIPPED)
+            and path not in GENERATED and (ROOT / path).is_file()]
 
 
 def test_configured_cluster_facts_do_not_appear_in_code_pages_or_shipped_configuration():

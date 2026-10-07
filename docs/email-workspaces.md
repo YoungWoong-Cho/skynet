@@ -24,17 +24,11 @@ Saving a preference does not change another email workspace’s preference. Simu
 
 ## Installation owner
 
-The installation owner is stored in the central PostgreSQL workspace. For a new
-installation, configure `SKYNET_LEGACY_OWNER_EMAIL` before the first sign-in, or run:
-
-```bash
-python -m skynet_app.workspaces --legacy-owner you@example.com
-```
-
-This uses the configured central database. It preserves record IDs, ownership and
-cluster locations; a different previously assigned owner is rejected. Optional
-`--data-root` selects the directory containing endpoint configuration, and
-`--prepare-owner` writes only its owner preference for the next startup.
+Records created before email workspaces existed belong to the `legacy` workspace
+in the central PostgreSQL database; its owner email was assigned once when email
+workspaces were introduced, and signing in with that email opens the legacy
+workspace with its record IDs, ownership and cluster locations intact. A new
+installation has no legacy records, so nothing needs assigning.
 
 All app hosts use the same central endpoint. The shared database lock permits
 only one background coordinator; no workspace database is copied between hosts.

@@ -1030,10 +1030,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "h5py" },
     { name = "httpx" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pytest" },
 ]
 
@@ -1054,9 +1051,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "h5py", specifier = ">=3.11,<4" },
     { name = "httpx", specifier = ">=0.27,<1" },
-    { name = "numpy", specifier = ">=1.26,<3" },
     { name = "pytest", specifier = ">=8,<9" },
 ]
 

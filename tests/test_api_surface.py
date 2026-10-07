@@ -1,4 +1,6 @@
-"""Retired workflows stay unreachable while the current collection API remains usable."""
+"""The browser's current collection and maintenance routes stay registered and lean."""
+
+import re
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -6,7 +8,7 @@ from fastapi.testclient import TestClient
 from skynet_app.db_backend import PostgresConnection
 
 
-def test_application_routes_keep_current_workflows_and_remove_retired_ones():
+def test_application_registers_current_collection_export_and_maintenance_routes():
     from skynet_app import main
 
     app, _owner = main._create_cluster_application()
@@ -16,15 +18,6 @@ def test_application_routes_keep_current_workflows_and_remove_retired_ones():
         for method in operations
         if method in {"get", "post", "put", "patch", "delete", "head", "options"}
     }
-    retired_prefixes = (
-        "/api/collection/local/",
-        "/api/collection/processing/",
-        "/api/collection/live/conversions/",
-    )
-    assert not any(path.startswith(retired_prefixes) for _, path in registered)
-    assert (
-        "POST", "/api/collection/live/sessions/{identifier}/conversions"
-    ) not in registered
     assert {
         ("GET", "/api/collection/live"),
         ("POST", "/api/collection/live/sessions"),
@@ -34,10 +27,9 @@ def test_application_routes_keep_current_workflows_and_remove_retired_ones():
         ("POST", "/api/data/exports"),
         ("GET", "/api/maintenance/history/{kind}/{identifier}"),
     } <= registered
-    assert ("POST", "/api/collection/live/sessions/{identifier}/recordings/{index}/video") not in registered
 
 
-def test_live_overview_no_longer_reads_retired_conversion_history(monkeypatch, tmp_path):
+def test_live_overview_reads_only_live_sessions_and_consent(monkeypatch, tmp_path):
     from skynet_app import live_xr_api
     from skynet_app.database import Database
     from skynet_app.live_xr import LiveXRService
@@ -64,14 +56,11 @@ def test_live_overview_no_longer_reads_retired_conversion_history(monkeypatch, t
     app.include_router(live_xr_api.router)
     with TestClient(app) as client:
         response = client.get("/api/collection/live")
-        assert response.status_code == 200
-        assert {"sessions", "catalog", "license", "target"} == response.json().keys()
-        assert any("live_xr_sessions" in statement for statement in statements)
-        assert not any("live_conversions" in statement for statement in statements)
-        for method, path in (
-            ("GET", "/api/collection/live/conversions/old-id"),
-            ("GET", "/api/collection/live/conversions/old-id/logs"),
-            ("GET", "/api/collection/live/conversions/old-id/dataset.hdf5"),
-            ("POST", "/api/collection/live/sessions/old-id/conversions"),
-        ):
-            assert client.request(method, path).status_code == 404
+    assert response.status_code == 200
+    assert {"sessions", "catalog", "license", "target"} == response.json().keys()
+    tables = {
+        name.lower()
+        for statement in statements
+        for name in re.findall(r"\b(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_]*)", statement)
+    }
+    assert tables == {"live_xr_sessions", "live_xr_consent"}

@@ -205,15 +205,13 @@ The active, non-secret profile is returned by `GET /api/settings`. Do not put cr
 
 The application seeds the built-in experiment adapters into PostgreSQL, then treats adapters as database records rather than UI hardcoding. An adapter manifest declares repository matching metadata, allowed and recommended runtimes, capabilities, defaults, a structured training command template, checkpoint/resume behavior, evaluation metadata, warnings, and TODOs.
 
-The DexVerse experiment adapter is retired and existing seeded records are archived on startup. Its historical manifest handler remains available for saved experiments. DexVerse simulation and the separate `dexverse-cloudxr` collection registry are unaffected.
-
 Registry lifecycle semantics are:
 
 - **Create** starts an independent adapter at version 1.
 - **Edit** appends a new immutable version; it never mutates an older version. `expected_latest_version` provides optimistic conflict detection.
 - **Clone** copies any selected version into a new adapter at version 1 and records its origin.
 - **Validate** schema-checks the manifest and may inspect a selected exact repository commit. Validation does not execute repository code or launch training.
-- **Archive** hides the adapter from normal selection while retaining every version and historical reference. The legacy adapter `DELETE` route remains an archive alias. **Delete** in the UI uses the shared dependency preview to permanently remove an unused lineage.
+- **Archive** hides the adapter from normal selection while retaining every version and historical reference. `DELETE /api/adapters/{id}` archives. **Delete** in the UI uses the shared dependency preview to permanently remove an unused lineage.
 - **Restore** makes an archived adapter selectable again.
 
 Created experiment revisions embed the selected manifest and its SHA-256. Later registry edits or archival therefore cannot change an existing experiment or submitted run.
@@ -318,9 +316,9 @@ The UI uses the same JSON API exposed to automation:
 - `GET /api/settings` returns the workspace settings, runtime profiles, and cluster profile used by the browser.
 - Operations use the browser-backed API routes only; retired bundle CRUD, manual reconcile, and legacy initialization/connection aliases are removed.
 - `GET /api/adapters?include_archived=true` lists registry entries; `POST /api/adapters` creates one.
-- `GET /api/adapters/{id}` returns version history; `PUT` or `PATCH` appends a version.
-- `POST /api/adapters/{id}/clone`, `/archive`, and `/restore` implement lifecycle operations; `DELETE /api/adapters/{id}` also archives.
-- `POST /api/adapters/validate` validates an unsaved manifest. `POST /api/adapters/{id}/validate` records validation for a stored version, and `GET /api/adapters/{id}/validations` returns its reports.
+- `GET /api/adapters/{id}` returns version history; `PUT /api/adapters/{id}` appends a version.
+- `POST /api/adapters/{id}/clone` and `POST /api/adapters/{id}/restore` implement lifecycle operations; `DELETE /api/adapters/{id}` archives.
+- `POST /api/adapters/validate` validates an unsaved manifest; `POST /api/adapters/{id}/validate` records validation for a stored version.
 - `GET /api/source/branches`, `/api/source/commits`, and `/api/source/inspect` expose exact repository discovery and runtime evidence.
 - `GET /api/evaluation-suites` lists installed evaluation catalogs.
 - `POST /api/experiments/preview` resolves and validates variants without submission.
@@ -613,10 +611,3 @@ For a read-only metadata and file-presence check, run `python skynet_app/adapter
 - Statistical reproducibility may be the strongest available guarantee for nondeterministic frameworks and simulators.
 
 Policy-aware dataset preparation and management are described in [Dataset preparation](docs/policy-data-exports.md). One dataset groups original revisions, prepared formats, verified local/cluster copies and experiment usage. ACT supports training and evaluation through the pinned XPolicyLab adapters. All entry points use the same preparation workflow.
-
-
-## Retired collection workflows
-
-The old state-only conversion routes under `/api/collection/live/conversions`, their creation endpoint, and the `/api/collection/local` and `/api/collection/processing` routers have been removed. Current recording conversion uses `/api/data/exports`. The removed code no longer starts its conversion monitor or adds conversion-history reads to the live collection overview.
-
-Stored recordings, datasets, files, and historical database rows are preserved. Current video rendering, archive/deletion guards, binary uploads, and Slurm helpers remain supported. Details: [retired conversion routes](docs/collection-conversion.md), [retired offline experiment](docs/dexverse-recording-pipeline.md).

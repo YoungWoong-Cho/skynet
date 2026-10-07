@@ -43,6 +43,9 @@ registered cluster locations. App-side working files are disposable caches.
 Credentials remain in each app host's credential store; they are not migrated or
 shared by this database feature. The background owner needs its own configured
 credentials to deliver notifications and tracking events.
+Historical `live_conversions` rows from the retired state-only conversion workflow
+stay in this database; `skynet_app/recording_deletion.py` still accounts for them
+when it previews and deletes recordings.
 
 Experiment notes (Markdown, folders and attachments) are workspace-owned rows in
 this database, written only through the Notes API that the browser uses.
