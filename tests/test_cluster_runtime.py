@@ -544,7 +544,7 @@ def test_gateway_that_refused_its_connection_goes_last_and_reserves_no_time(monk
     assert client.run_with_fallback("true", timeout=20) == ("sky1", "ready")
     assert attempts == [("sky1", 20)], "the only reachable gateway takes the whole budget"
     assert client.run_with_fallback("true", "sky2", timeout=20) == ("sky1", "ready")
-    clock[0] += cluster_runtime.GATEWAY_UNREACHABLE_SECONDS
+    clock[0] += cluster_runtime.TIMEOUTS.unreachable_gateway_seconds
     attempts.clear()
     client.with_storage(None).run_with_fallback("true", timeout=40)
     assert attempts[0] == ("sky1", 20), "the gateway is trusted again after a while"

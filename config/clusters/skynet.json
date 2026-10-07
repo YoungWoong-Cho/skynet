@@ -21,7 +21,23 @@
   ],
   "ssh": {
     "command": {"connect_timeout_seconds": 20, "server_alive_interval_seconds": 5, "server_alive_count_max": 1},
-    "tunnel": {"connect_timeout_seconds": 30, "server_alive_interval_seconds": 10, "server_alive_count_max": 2}
+    "tunnel": {"connect_timeout_seconds": 30, "server_alive_interval_seconds": 10, "server_alive_count_max": 2},
+    "operations": {
+      "command_seconds": 30,
+      "short_command_seconds": 15,
+      "read_seconds": 20,
+      "capsule_upload_seconds": 120,
+      "validation_seconds": 25,
+      "validation_tool_seconds": 10,
+      "submission_seconds": 45,
+      "submission_receipt_wait_seconds": 30,
+      "recovery_lookup_seconds": 20,
+      "job_status_seconds": 40,
+      "slurm_tool_seconds": 8,
+      "dashboard_seconds": 20,
+      "dashboard_probe_seconds": 10,
+      "unreachable_gateway_seconds": 600
+    }
   },
   "paths": {
     "home_root": "/nethome/ycho420",

@@ -1,10 +1,13 @@
-"""Every SSH connection takes its timeouts and keepalives from the cluster profile."""
+"""Every SSH connection takes its timeouts, keepalives and operation budgets from the cluster profile."""
 import re
 import subprocess
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from skynet_app import cluster_runtime, database_endpoint, live_xr_archive
-from skynet_app.cluster_config import CLUSTER, SshProfile
+from skynet_app.cluster_config import CLUSTER, SshOperationTimeouts, SshProfile
 
 COMMAND = SshProfile(connect_timeout_seconds=123, server_alive_interval_seconds=45, server_alive_count_max=6)
 TUNNEL = SshProfile(connect_timeout_seconds=234, server_alive_interval_seconds=56, server_alive_count_max=7)
@@ -57,3 +60,20 @@ def test_no_module_spells_its_own_ssh_timeouts():
                  if path.name != "cluster_config.py"
                  and re.search(r"ConnectTimeout=|ServerAliveInterval=|ServerAliveCountMax=|connect_timeout=\d", path.read_text())]
     assert offenders == []
+
+
+def test_the_cluster_client_and_dashboard_take_their_operation_budgets_from_the_profile():
+    assert cluster_runtime.TIMEOUTS is CLUSTER.ssh.operations
+    for name in ("cluster_runtime.py", "main.py"):
+        text = Path("skynet_app", name).read_text()
+        assert not re.search(r"timeout=\d|timeout \d+s|\d+ days ago|SECONDS \+ \d", text), name
+
+
+def test_an_operation_budget_must_outlast_the_remote_deadline_inside_it():
+    operations = CLUSTER.ssh.operations
+    assert operations.job_status_seconds > 2 * operations.slurm_tool_seconds
+    for budget, deadline in (("submission_seconds", "submission_receipt_wait_seconds"),
+                             ("validation_seconds", "validation_tool_seconds")):
+        too_short = {**operations.model_dump(), budget: getattr(operations, deadline)}
+        with pytest.raises(ValidationError, match=budget):
+            SshOperationTimeouts.model_validate(too_short)

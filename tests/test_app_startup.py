@@ -286,6 +286,7 @@ def test_real_loader_builds_session_protected_api_and_docs(request, monkeypatch)
 def test_both_gateway_failures_return_friendly_cluster_error(monkeypatch, timeout):
     from skynet_app import main
 
+    monkeypatch.setattr(main, "CLUSTER_CLIENT", main.ClusterClient(main.SSH_HOSTS))
     attempted = []
 
     def offline(arguments, **kwargs):
@@ -346,7 +347,7 @@ def test_cluster_query_uses_sky2_when_sky1_is_unavailable(monkeypatch):
     from skynet_app import main
 
     attempted = []
-    monkeypatch.setattr(main, "SSH_HOSTS", ("sky1", "sky2"))
+    monkeypatch.setattr(main, "CLUSTER_CLIENT", main.ClusterClient(("sky1", "sky2")))
 
     def fallback(self, host, command, **kwargs):
         attempted.append(host)
@@ -360,6 +361,25 @@ def test_cluster_query_uses_sky2_when_sky1_is_unavailable(monkeypatch):
     assert result["gateway"] == "sky2"
     assert result["jobs"] == []
     assert result["account_usage"] == []
+
+
+def test_dashboard_remembers_a_refused_gateway_between_requests(monkeypatch):
+    from skynet_app import main
+    from skynet_app.cluster_runtime import GatewayUnreachable
+
+    monkeypatch.setattr(main, "CLUSTER_CLIENT", main.ClusterClient(("sky1", "sky2")))
+    attempted = []
+
+    def refused(self, host, command, **kwargs):
+        attempted.append(host)
+        if host == "sky1":
+            raise GatewayUnreachable("sky1: Connection closed")
+        return "\n__SKYNET_JOBS__\n\n__SKYNET_USAGE__\n\n__SKYNET_USER_USAGE__\n"
+
+    monkeypatch.setattr(main.ClusterClient, "ssh", refused)
+    assert main.cluster("auto")["gateway"] == "sky2"
+    assert main.cluster("auto")["gateway"] == "sky2"
+    assert attempted == ["sky1", "sky2", "sky2"], "the refused gateway goes last on the next request"
 
 
 def test_unknown_gateway_is_rejected_before_ssh(monkeypatch):

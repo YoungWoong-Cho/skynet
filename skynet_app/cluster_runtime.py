@@ -26,6 +26,8 @@ WORK_ROOT = CLUSTER.paths.work_root
 SLURM_BIN = CLUSTER.commands.slurm_bin
 # How cluster work is routed when nothing chose a gateway: "auto" or one configured host.
 DEFAULT_GATEWAY = CLUSTER.defaults.gateway
+# Whole-operation budgets and the Slurm tool deadlines inside them, by purpose.
+TIMEOUTS = CLUSTER.ssh.operations
 
 
 def ssh_argv(host: str, command: str, *options: str) -> list[str]:
@@ -50,8 +52,13 @@ _CONTROLLER_STATES = {
     "REQUEUE_HOLD": "PENDING", "REQUEUE_FED": "PENDING", "RESV_DEL_HOLD": "PENDING",
     "SIGNALING": "RUNNING", "STAGE_OUT": "COMPLETING", "STOPPED": "SUSPENDED",
 }
-# How long a gateway that refused its connection is tried last and reserves no time.
-GATEWAY_UNREACHABLE_SECONDS = 600
+# Engineering choices of the client, not cluster policy.
+_NODE_INVENTORY_TTL_SECONDS = 60  # How long one gateway's node list is reused.
+_ACCOUNTING_LOOKBACK_DAYS = 7  # How far back accounting is searched for a lost submission's token.
+_RECEIPT_POLL_SECONDS = 0.2  # How often the submitting shell looks for the detached worker's receipt.
+_RECOVERY_RETRY_DELAYS = (0, 1, 2)  # Seconds before each recovery lookup after a lost sbatch response.
+_STREAM_CLOSE_SECONDS = 10  # How long a finished file stream may take to close.
+_PROCESS_EXIT_SECONDS = 2  # How long a terminated ssh process may take to exit.
 _ACCOUNTING_FIELDS = (
     ("JobIDRaw", "JobIDRaw"),
     ("State", "State%64"),
@@ -269,7 +276,7 @@ class ClusterClient:
         command: str,
         *,
         stdin: str | None = None,
-        timeout: float = 30,
+        timeout: float = TIMEOUTS.command_seconds,
     ) -> str:
         try:
             process = subprocess.run(
@@ -299,7 +306,7 @@ class ClusterClient:
         gateway: str = "auto",
         *,
         stdin: str | None = None,
-        timeout: float = 30,
+        timeout: float = TIMEOUTS.command_seconds,
         attempt_timeout: float | None = None,
     ) -> tuple[str, str]:
         """Run on the first gateway that answers.
@@ -339,7 +346,7 @@ class ClusterClient:
             try:
                 output = self.ssh(host, command, stdin=stdin, timeout=allowed)
             except GatewayUnreachable as error:
-                self._unreachable_until[host] = time.monotonic() + GATEWAY_UNREACHABLE_SECONDS
+                self._unreachable_until[host] = time.monotonic() + TIMEOUTS.unreachable_gateway_seconds
                 errors.append(str(error))
             except ClusterError as error:
                 errors.append(str(error))
@@ -354,7 +361,7 @@ class ClusterClient:
             "command -v sbatch >/dev/null && command -v squeue >/dev/null && "
             "command -v sacct >/dev/null"
         )
-        host, _ = self.run_with_fallback(command, gateway, timeout=30)
+        host, _ = self.run_with_fallback(command, gateway)
         return host
 
     def initialize_personal_workspace(self, root: str, owner_id: str, gateway: str = "auto") -> str:
@@ -363,7 +370,7 @@ class ClusterClient:
         root = validate_work_root(root)
         script = Path(__file__).with_name("workspace_storage_remote.py").read_text()
         command = f"python3 - {shlex.quote(root)} {shlex.quote(owner_id)}"
-        host, output = self.run_with_fallback(command, gateway, stdin=script, timeout=30)
+        host, output = self.run_with_fallback(command, gateway, stdin=script)
         try:
             result = json.loads(output)
             if result != {"work_root": root, "owner_id": owner_id, "ready": True}:
@@ -407,7 +414,7 @@ class ClusterClient:
             "trap 'rm -f \"$tmp\"' EXIT; cat > \"$tmp\"; "
             f"mv \"$tmp\" {destination_q}; trap - EXIT"
         )
-        host, _ = self.run_with_fallback(command, gateway, stdin=content, timeout=30)
+        host, _ = self.run_with_fallback(command, gateway, stdin=content)
         return host, destination
 
     def write_capsule_files(
@@ -480,7 +487,8 @@ print(json.dumps(receipts))
 """
         host, output = self.run_with_fallback(
             shlex.join(["python3", "-c", script]), gateway,
-            stdin=json.dumps({"root": root, "files": contents, "immutable": immutable}), timeout=120,
+            stdin=json.dumps({"root": root, "files": contents, "immutable": immutable}),
+            timeout=TIMEOUTS.capsule_upload_seconds,
         )
         try:
             if json.loads(output) != expected:
@@ -501,16 +509,17 @@ print(json.dumps(receipts))
         host, _ = self.run_with_fallback(
             f"set -eu; rm -f -- {shlex.quote(destination)}",
             gateway,
-            timeout=15,
+            timeout=TIMEOUTS.short_command_seconds,
         )
         return host, destination
 
     def node_names(self, gateway: str = "auto") -> list[str]:
         cached = self._node_inventory_cache.get(gateway)
-        if cached and time.monotonic() - cached[0] < 60:
+        if cached and time.monotonic() - cached[0] < _NODE_INVENTORY_TTL_SECONDS:
             return list(cached[1])
         _, output = self.run_with_fallback(
-            f"export PATH={SLURM_BIN}:$PATH; sinfo -N -h -o '%N'", gateway, timeout=15,
+            f"export PATH={SLURM_BIN}:$PATH; sinfo -N -h -o '%N'", gateway,
+            timeout=TIMEOUTS.short_command_seconds,
         )
         names = sorted(set(output.split()))
         if not names or any(not re.fullmatch(r"[A-Za-z0-9_.-]+", name) for name in names):
@@ -519,13 +528,14 @@ print(json.dumps(receipts))
         return names
 
     def test_script(self, script: str, gateway: str = "auto") -> tuple[str, str]:
+        deadline = TIMEOUTS.validation_tool_seconds
         command = (
             f"set -eu; export PATH={SLURM_BIN}:$PATH; umask 077; "
             "tmp=$(mktemp /tmp/skynet-test-XXXXXX.sbatch); "
             "trap 'rm -f \"$tmp\"' EXIT; cat > \"$tmp\"; bash -n \"$tmp\"; "
             "if command -v timeout >/dev/null 2>&1; then "
-            "set +e; output=$(timeout 10s sbatch --test-only \"$tmp\" 2>&1); rc=$?; set -e; "
-            "if test $rc -eq 124; then printf '%s\\n' 'Slurm validation timed out after 10s. No job was submitted; retry when the controller responds.' >&2; exit 124; "
+            f"set +e; output=$(timeout {deadline}s sbatch --test-only \"$tmp\" 2>&1); rc=$?; set -e; "
+            f"if test $rc -eq 124; then printf '%s\\n' 'Slurm validation timed out after {deadline}s. No job was submitted; retry when the controller responds.' >&2; exit 124; "
             "elif test $rc -ne 0; then "
             "case \"$output\" in "
             "*'allocation failure: Zero Bytes were transmitted or received'*) "
@@ -534,7 +544,7 @@ print(json.dumps(receipts))
             "else printf '%s\\n' \"$output\"; fi; "
             "else sbatch --test-only \"$tmp\"; fi"
         )
-        return self.run_with_fallback(command, gateway, stdin=script, timeout=25)
+        return self.run_with_fallback(command, gateway, stdin=script, timeout=TIMEOUTS.validation_seconds)
 
     @classmethod
     def _submission_token(cls, submission_key: str) -> str:
@@ -568,7 +578,7 @@ print(json.dumps(receipts))
         host, receipt = self.run_with_fallback(
             f"if test -s {shlex.quote(receipt_path)}; then cat {shlex.quote(receipt_path)}; fi",
             gateway,
-            timeout=15,
+            timeout=TIMEOUTS.short_command_seconds,
         )
         job_id: str | None = None
         raw_job_id: str | None = None
@@ -582,12 +592,12 @@ print(json.dumps(receipts))
             lookup = f'''set -eu
 export PATH={SLURM_BIN}:$PATH
 token={shlex.quote(token)}
-since=$(date -d '7 days ago' +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
+since=$(date -d '{_ACCOUNTING_LOOKBACK_DAYS} days ago' +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
 LC_ALL=C squeue -h -u "$USER" -o '%i|%k'
-LC_ALL=C timeout 8s sacct -X -n -P -S "$since" -o JobIDRaw,Comment%128 \
+LC_ALL=C timeout {TIMEOUTS.slurm_tool_seconds}s sacct -X -n -P -S "$since" -o JobIDRaw,Comment%128 \
   || printf '%s\n' {ACCOUNTING_UNAVAILABLE_MARKER}
 '''
-            host, output = self.run_with_fallback(lookup, gateway, timeout=20)
+            host, output = self.run_with_fallback(lookup, gateway, timeout=TIMEOUTS.recovery_lookup_seconds)
             matches: dict[str, str] = {}
             for line in output.splitlines():
                 candidate, separator, comment = line.partition("|")
@@ -621,7 +631,7 @@ LC_ALL=C timeout 8s sacct -X -n -P -S "$since" -o JobIDRaw,Comment%128 \
                 f"set -eu; mkdir -p {shlex.quote(str(PurePosixPath(archived_script_path).parent))}; "
                 f"test -f {shlex.quote(archived_script_path)} || "
                 f"cp -f {shlex.quote(script_path)} {shlex.quote(archived_script_path)}",
-                timeout=15,
+                timeout=TIMEOUTS.short_command_seconds,
             )
         except ClusterError:
             archived_script_path = script_path
@@ -750,7 +760,7 @@ else
   nohup /bin/bash "$worker_tmp" </dev/null >/dev/null 2>&1 &
 fi
 worker_tmp=
-deadline=$((SECONDS + 30))
+deadline=$((SECONDS + {TIMEOUTS.submission_receipt_wait_seconds}))
 while true; do
   if test -s {shlex.quote(receipt_path)}; then
     cat {shlex.quote(receipt_path)}
@@ -764,11 +774,11 @@ while true; do
     printf '%s\n' '__SKYNET_SUBMISSION_PENDING__' >&2
     exit 75
   fi
-  sleep 0.2
+  sleep {_RECEIPT_POLL_SECONDS}
 done
 '''
         try:
-            output = self.ssh(host, command, stdin=script, timeout=45)
+            output = self.ssh(host, command, stdin=script, timeout=TIMEOUTS.submission_seconds)
             job_id, raw_job_id = self._submission_job_id(output)
         except ClusterError as error:
             if "__SKYNET_SUBMISSION_CONFLICT__" in str(error):
@@ -776,7 +786,7 @@ done
                     "__SKYNET_SUBMISSION_CONFLICT__", ""
                 ).strip()
                 raise ClusterError(message) from error
-            for delay in (0, 1, 2):
+            for delay in _RECOVERY_RETRY_DELAYS:
                 if delay:
                     time.sleep(delay)
                 try:
@@ -823,9 +833,9 @@ done
         accounting_format = ",".join(spec for _, spec in _ACCOUNTING_FIELDS)
         controller_format = ",".join(f"{spec}:|" for _, spec in _CONTROLLER_FIELDS)
         command = f'''export PATH={SLURM_BIN}:$PATH
-accounting=$(LC_ALL=C SLURM_TIME_FORMAT=%s timeout 8s sacct -X -n -P -j {jobs} -o {accounting_format} 2>&1)
+accounting=$(LC_ALL=C SLURM_TIME_FORMAT=%s timeout {TIMEOUTS.slurm_tool_seconds}s sacct -X -n -P -j {jobs} -o {accounting_format} 2>&1)
 accounting_rc=$?
-controller=$(LC_ALL=C SLURM_TIME_FORMAT=%s timeout 8s squeue -h --states=all -j {jobs} -O {shlex.quote(controller_format)} 2>&1)
+controller=$(LC_ALL=C SLURM_TIME_FORMAT=%s timeout {TIMEOUTS.slurm_tool_seconds}s squeue -h --states=all -j {jobs} -O {shlex.quote(controller_format)} 2>&1)
 controller_rc=$?
 # Asked about a single job it has forgotten, squeue fails; that is an answer.
 if test "$controller_rc" -ne 0; then
@@ -837,7 +847,7 @@ if test "$accounting_rc" -ne 0 && test "$controller_rc" -ne 0; then
 fi
 printf '%s %s\\n%s\\n' {_ACCOUNTING_MARKER} "$accounting_rc" "$accounting" {_CONTROLLER_MARKER} "$controller_rc" "$controller"
 '''
-        host, output = self.run_with_fallback(command, gateway, timeout=40)
+        host, output = self.run_with_fallback(command, gateway, timeout=TIMEOUTS.job_status_seconds)
         accounting_text, separator, controller_text = output.partition(_CONTROLLER_MARKER)
         accounting_header, _, accounting_body = accounting_text.partition("\n")
         controller_header, _, controller_body = controller_text.partition("\n")
@@ -956,7 +966,7 @@ printf '%s %s\\n%s\\n' {_ACCOUNTING_MARKER} "$accounting_rc" "$accounting" {_CON
             f"test \"$size\" -le {max_bytes} || {{ echo 'file exceeds read limit' >&2; exit 45; }}; "
             f"cat {path_q}"
         )
-        return self.run_with_fallback(command, gateway, timeout=30)
+        return self.run_with_fallback(command, gateway)
 
     def read_optional_file(
         self,
@@ -981,7 +991,7 @@ printf '%s %s\\n%s\\n' {_ACCOUNTING_MARKER} "$accounting_rc" "$accounting" {_CON
             f"cat {path_q}; "
             "else printf '%s\\n' SKYNET_FILE_MISSING; fi"
         )
-        host, output = self.run_with_fallback(command, gateway, timeout=30)
+        host, output = self.run_with_fallback(command, gateway)
         header, separator, content = output.partition("\n")
         if separator and header == "SKYNET_FILE_PRESENT":
             return host, content
@@ -997,7 +1007,7 @@ printf '%s %s\\n%s\\n' {_ACCOUNTING_MARKER} "$accounting_rc" "$accounting" {_CON
         host, output = self.run_with_fallback(
             f"test -f {path_q} || exit 44; stat -c %s {path_q}",
             gateway,
-            timeout=20,
+            timeout=TIMEOUTS.read_seconds,
         )
         try:
             size = int(output.strip())
@@ -1053,13 +1063,13 @@ printf '%s %s\\n%s\\n' {_ACCOUNTING_MARKER} "$accounting_rc" "$accounting" {_CON
                 remaining -= len(block)
                 yield block
             if cancel_event is not None:
-                deadline = time.monotonic() + 10
+                deadline = time.monotonic() + _STREAM_CLOSE_SECONDS
                 while process.poll() is None:
                     if cancel_event.wait(0.1):
                         return
                     if time.monotonic() >= deadline:
                         raise ClusterError(f"{host}: remote video stream did not close")
-            return_code = process.wait(timeout=10)
+            return_code = process.wait(timeout=_STREAM_CLOSE_SECONDS)
             completed = True
             if return_code != 0 or remaining:
                 raise ClusterError(f"{host}: remote video stream ended unexpectedly")
@@ -1068,10 +1078,10 @@ printf '%s %s\\n%s\\n' {_ACCOUNTING_MARKER} "$accounting_rc" "$accounting" {_CON
             if not completed and process.poll() is None:
                 process.terminate()
                 try:
-                    process.wait(timeout=2)
+                    process.wait(timeout=_PROCESS_EXIT_SECONDS)
                 except subprocess.TimeoutExpired:
                     process.kill()
-                    process.wait(timeout=2)
+                    process.wait(timeout=_PROCESS_EXIT_SECONDS)
 
     def read_log(
         self,
@@ -1095,7 +1105,7 @@ printf '%s %s\\n%s\\n' {_ACCOUNTING_MARKER} "$accounting_rc" "$accounting" {_CON
                          "max_bytes": max_bytes, "contains": contains}
             script = Path(__file__).with_name("training_progress_log.py").read_text()
             command = "python3 -c " + shlex.quote(script) + " " + shlex.quote(json.dumps(arguments))
-            return self.run_with_fallback(command, gateway, timeout=20)
+            return self.run_with_fallback(command, gateway, timeout=TIMEOUTS.read_seconds)
         reader = f"tail -n {lines} {shlex.quote(path)}"
         if contains is not None:
             if any(char in contains for char in ("\x00", "\n", "\r")):
@@ -1106,7 +1116,7 @@ printf '%s %s\\n%s\\n' {_ACCOUNTING_MARKER} "$accounting_rc" "$accounting" {_CON
             f"{reader} | tail -c {max_bytes}; "
             "else printf '%s\\n' SKYNET_LOG_NOT_READY >&2; exit 44; fi"
         )
-        return self.run_with_fallback(command, gateway, timeout=20)
+        return self.run_with_fallback(command, gateway, timeout=TIMEOUTS.read_seconds)
 
 
 __all__ = [
@@ -1120,5 +1130,6 @@ __all__ = [
     "SLURM_BIN",
     "Submission",
     "SubmissionOutcomeUnknown",
+    "TIMEOUTS",
     "WORK_ROOT",
 ]

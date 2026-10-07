@@ -28,7 +28,9 @@ SLURM_BIN = CLUSTER.commands.slurm_bin
 GPU_USAGE_LONG_COMMAND = CLUSTER.commands.gpu_usage_shell_command("-l")
 GPU_USAGE_USER_COMMAND = CLUSTER.commands.gpu_usage_shell_command("-u")
 SSH_HOSTS = tuple(CLUSTER.gateways)
-DASHBOARD_TIMEOUT = 20  # Seconds allowed for each gateway's dashboard query.
+DASHBOARD_TIMEOUT = CLUSTER.ssh.operations.dashboard_seconds  # Allowed for each gateway's dashboard query.
+# One client for every dashboard request, so a refused gateway is remembered between them.
+CLUSTER_CLIENT = ClusterClient(SSH_HOSTS)
 GPU_USAGE_COLUMNS = tuple(CLUSTER.dashboard.gpu_usage_columns)
 OVERFLOW_PARTITIONS = frozenset(CLUSTER.dashboard.overflow_partitions)
 OVERFLOW_ACCOUNT = CLUSTER.dashboard.overflow_account_label
@@ -52,7 +54,7 @@ printf '%s\n' "$skynet_dashboard_usage"
 printf '\n__SKYNET_USER_USAGE__\n'
 LC_ALL=C {GPU_USAGE_USER_COMMAND} 2>/dev/null || true
 printf '\n__SKYNET_IDLE_QUOTAS__\n'
-printf '%s\n' "$skynet_dashboard_usage" | LC_ALL=C timeout 10s python3 -c {shlex.quote(IDLE_QUOTA_PROGRAM)} {shlex.quote(json.dumps(NORMAL_ACCOUNT_QUEUES))} 2>/dev/null || printf '[]\n'
+printf '%s\n' "$skynet_dashboard_usage" | LC_ALL=C timeout {CLUSTER.ssh.operations.dashboard_probe_seconds}s python3 -c {shlex.quote(IDLE_QUOTA_PROGRAM)} {shlex.quote(json.dumps(NORMAL_ACCOUNT_QUEUES))} 2>/dev/null || printf '[]\n'
 '''
 
 def _create_cluster_application():
@@ -450,13 +452,12 @@ def _parse_snapshot(output: str, gateway: str) -> dict[str, object]:
 
 
 def cluster(gateway: str = Query(default="auto")) -> dict[str, object]:
-    client = ClusterClient(SSH_HOSTS)
     try:
-        client.candidates(gateway)
+        CLUSTER_CLIENT.candidates(gateway)
     except ValueError as error:
         raise HTTPException(status_code=422, detail="Unknown SSH gateway") from error
     try:
-        active_gateway, output = client.run_with_fallback(
+        active_gateway, output = CLUSTER_CLIENT.run_with_fallback(
             QUERY_COMMAND, gateway, attempt_timeout=DASHBOARD_TIMEOUT
         )
         return _parse_snapshot(output, active_gateway)

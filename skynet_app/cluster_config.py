@@ -7,7 +7,7 @@ import re
 import shlex
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -366,9 +366,51 @@ class SshProfile(ProfileModel):
         ]
 
 
+OperationSeconds = Annotated[int, Field(ge=1, le=3600)]
+
+
+class SshOperationTimeouts(ProfileModel):
+    """How long each kind of cluster round trip may take, by purpose.
+
+    A ``*_seconds`` budget bounds one SSH operation end to end. The ``*_tool``
+    and receipt-wait deadlines run inside the remote shell and must end first,
+    or a slow Slurm answer is lost instead of being reported.
+    """
+
+    command_seconds: OperationSeconds  # A one-shot command: gateway resolution, workspace setup, single-file writes and reads.
+    short_command_seconds: OperationSeconds  # A removal, the node inventory, a receipt read, a script archive copy.
+    read_seconds: OperationSeconds  # File sizes and log tails.
+    capsule_upload_seconds: OperationSeconds  # A verified multi-file capsule upload.
+    validation_seconds: OperationSeconds  # The sbatch --test-only round trip.
+    validation_tool_seconds: OperationSeconds  # The remote `timeout` on sbatch --test-only.
+    submission_seconds: OperationSeconds  # The sbatch round trip.
+    submission_receipt_wait_seconds: OperationSeconds  # How long the remote shell waits for the detached worker's receipt.
+    recovery_lookup_seconds: OperationSeconds  # Finding a lost submission by its token in squeue and sacct.
+    job_status_seconds: OperationSeconds  # The combined sacct and squeue status query.
+    slurm_tool_seconds: OperationSeconds  # The remote `timeout` on each sacct and squeue call.
+    dashboard_seconds: OperationSeconds  # Each gateway's dashboard query.
+    dashboard_probe_seconds: OperationSeconds  # The remote `timeout` on the dashboard's idle-quota probe.
+    unreachable_gateway_seconds: OperationSeconds  # How long a gateway that refused its connection is tried last and reserves no time.
+
+    @model_validator(mode="after")
+    def budgets_outlast_their_remote_deadlines(self) -> "SshOperationTimeouts":
+        nested = (
+            ("validation_seconds", "validation_tool_seconds", 1),
+            ("submission_seconds", "submission_receipt_wait_seconds", 1),
+            ("recovery_lookup_seconds", "slurm_tool_seconds", 1),
+            ("job_status_seconds", "slurm_tool_seconds", 2),  # sacct, then squeue.
+            ("dashboard_seconds", "dashboard_probe_seconds", 1),
+        )
+        for budget, deadline, calls in nested:
+            if getattr(self, budget) <= calls * getattr(self, deadline):
+                raise ValueError(f"ssh.operations.{budget} must outlast {calls} x {deadline}")
+        return self
+
+
 class ClusterSsh(ProfileModel):
     command: SshProfile  # One-shot commands, uploads and object transfers.
     tunnel: SshProfile  # The long-lived central database tunnel.
+    operations: SshOperationTimeouts  # Whole-operation budgets and the Slurm deadlines inside them.
 
 
 class ClusterProfile(ProfileModel):
