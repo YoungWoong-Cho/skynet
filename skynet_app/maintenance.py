@@ -60,6 +60,14 @@ JSON_PATH_COLUMNS = {
     "policy_exports": "payload_json",
     "data_bundles": "manifest_json",
 }
+# Bulk children whose deletion plan reads only identities and file paths. A
+# long run has tens of thousands of samples; their evidence never enters the
+# plan, so it is neither transferred nor part of the graph fingerprint.
+GRAPH_COLUMNS = {
+    "training_progress_samples": ("id",),
+    "metrics": ("id",),
+    "evaluation_episodes": ("id", *PATH_COLUMNS["evaluation_episodes"]),
+}
 
 
 _REFERENCE_CACHE = OrderedDict()
@@ -96,17 +104,18 @@ def fingerprint(value):
     return hashlib.sha256(canonical_json(value).encode()).hexdigest()
 
 
-def rows(connection, table, condition="1=1", params=(), *, raw_payloads=False):
+def rows(connection, table, condition="1=1", params=(), *, raw_payloads=False, columns=None, order_by=None):
+    suffix = f" ORDER BY {order_by}" if order_by else ""
     if raw_payloads:
         # Immutable payload references already carry the body's SHA-256. Retain
         # them in the deletion fingerprint without fetching the remote body.
         return [row["record"] for row in connection.execute(
-            f"SELECT to_jsonb(t) AS record FROM {table} t WHERE {condition}", params
+            f"SELECT to_jsonb(t) AS record FROM {table} t WHERE {condition}{suffix}", params
         ).fetchall()]
     return [
         dict(row)
         for row in connection.execute(
-            f"SELECT * FROM {table} WHERE {condition}", params
+            f"SELECT {', '.join(columns) if columns else '*'} FROM {table} WHERE {condition}{suffix}", params
         ).fetchall()
     ]
 
@@ -171,7 +180,8 @@ class Maintenance:
         def add(table, column, values):
             query, params = in_ids(column, values)
             graph[table] = rows(c, table, query, params,
-                                raw_payloads=table in {"workflow_stages", "job_attempts"})
+                                raw_payloads=table in {"workflow_stages", "job_attempts"},
+                                columns=GRAPH_COLUMNS.get(table))
             return [row["id"] for row in graph[table]]
 
         def block(kind, record, reason):

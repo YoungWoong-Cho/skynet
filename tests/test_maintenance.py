@@ -121,6 +121,10 @@ def history(tmp_path):
     train_attempt = db.create_job_attempt(
         train["id"], status="SUCCEEDED", slurm_job_id="123"
     )
+    db.record_training_progress_sample(
+        run["id"], train_attempt["id"], restart_count=0, completed=4, total=8,
+        source_kind="log", evidence={"line": "step 4/8"},
+    )
     checkpoint = db.create_checkpoint(
         run["id"],
         path=str(run_dir / "checkpoint.pt"),
@@ -219,6 +223,12 @@ def test_dependencies_then_complete_delete_and_idempotent_retry(history):
         service.preview("experiment", experiment["id"])["blockers"][0]["id"]
         == run["id"]
     )
+    # Bulk children enter the plan as identities plus the paths the file plan reads.
+    with db.connection() as c:
+        _, run_graph, _ = service._graph(c, "run", run["id"])
+        _, evaluation_graph, _ = service._graph(c, "evaluation", evaluation["id"])
+    assert [set(row) for row in run_graph["training_progress_samples"]] == [{"id"}]
+    assert [set(row) for row in evaluation_graph["evaluation_episodes"]] == [{"id", "video_path", "raw_result_path"}]
     assert erase(service, "evaluation", evaluation["id"])["deleted"]
     assert not Path(evaluation["result_path"]).parent.exists()
     assert Path(run["run_directory"]).exists()
@@ -241,6 +251,7 @@ def test_dependencies_then_complete_delete_and_idempotent_retry(history):
             "events",
             "metrics",
             "evaluation_episodes",
+            "training_progress_samples",
             "maintenance_operations",
         ):
             assert c.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0, table

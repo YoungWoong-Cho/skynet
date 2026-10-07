@@ -138,13 +138,20 @@ def test_dataset_dependency_uses_exact_output_recording_membership(recording):
         resource["id"], revision="second", format="skynet.recording-dataset/v1", path="/prepared/second",
         manifest_sha256="b" * 64, metadata={"sources": [{"session_id": "another-recording"}]},
     )
+    # A source's recording_session_id takes precedence over the session it was cut from.
+    third = service.db.create_data_resource_version(
+        resource["id"], revision="third", format="skynet.recording-dataset/v1", path="/prepared/third",
+        manifest_sha256="c" * 64,
+        metadata={"sources": [{"session_id": job["id"], "recording_session_id": "another-recording"}]},
+    )
     service.db.update_dataset(first["id"], display_name="Renamed dataset", archived=True)
     plan = service.preview("recording", job["id"])
     assert any(
         x["id"] == first["id"] and x["kind"] == "dataset" and x["label"] == "Renamed dataset"
         for x in plan["blockers"]
     )
-    assert not any(x["id"] in {resource["id"], second["id"]} for x in plan["blockers"])
+    assert not any(x["id"] in {resource["id"], second["id"], third["id"]} for x in plan["blockers"])
+    assert "data_resources" not in plan["records"]
     assert not plan["files"]
     with pytest.raises(ValueError, match="dependencies"):
         service.delete("recording", job["id"], plan["token"])
@@ -202,7 +209,7 @@ def test_unused_raw_provenance_is_removed_with_original_recording(recording):
     assert service.db.get_data_resource(resource["id"]) is None
 
 
-@pytest.mark.parametrize("consumer", ["experiment", "bundle", "preparation"])
+@pytest.mark.parametrize("consumer", ["experiment", "bundle", "preparation", "preparation-path"])
 def test_raw_provenance_consumers_still_block_recording_removal(recording, consumer):
     service, _, job, folder, _, _ = recording
     _, version = raw_source(service, job)
@@ -212,10 +219,13 @@ def test_raw_provenance_consumers_still_block_recording_removal(recording, consu
         service.db.create_data_bundle(name="Pinned source", version="1",
             assignments=[{"role": "training_data", "version_id": version["id"]}])
     else:
+        # A conversion names its source by version, or only through a recording path segment.
+        reference = ({"source_version_id": version["id"]} if consumer == "preparation"
+                     else {"sources": [{"path": f"raw/dexverse-live/{job['id']}/output/recordings/one.pkl"}]})
         identifier = str(uuid4())
         with service.db.transaction() as c:
             c.execute("INSERT INTO policy_exports VALUES (?,?)", (identifier, canonical_json(
-                dict(id=identifier, state="FAILED", source_version_id=version["id"], name="Failed conversion"))))
+                dict(id=identifier, state="FAILED", name="Failed conversion", **reference))))
     plan = service.preview("recording", job["id"])
     assert plan["blockers"]
     assert not plan["files"]
@@ -352,7 +362,12 @@ def test_recording_deletion_api_uses_shared_preview_and_confirm(recording, monke
     assert not folder.exists()
 
 
-def test_pinned_variant_blocks_recording_deletion_with_preset_name(recording):
+@pytest.mark.parametrize("reference, blocked", [
+    ("{id}", True),
+    ("/work/datasets/raw/dexverse-live/{id}/output", True),  # the recording as a path segment
+    ("{id}-copy", False),  # a longer identifier merely containing the recording's
+])
+def test_pinned_variant_blocks_recording_deletion_with_preset_name(recording, reference, blocked):
     service, _, job, folder, _, _ = recording
     project = service.db.create_project("Project")
     experiment = service.db.create_experiment(
@@ -362,7 +377,7 @@ def test_pinned_variant_blocks_recording_deletion_with_preset_name(recording):
         experiment["latest_revision"]["id"],
         name="Variant",
         parameters={},
-        resolved_spec={"recording_id": job["id"]},
+        resolved_spec={"recording_id": reference.format(id=job["id"])},
     )
     plan = service.preview("recording", job["id"])
     assert any(
@@ -370,7 +385,7 @@ def test_pinned_variant_blocks_recording_deletion_with_preset_name(recording):
         and item["id"] == experiment["id"]
         and item["label"] == "Cube preset"
         for item in plan["blockers"]
-    )
+    ) is blocked
     assert folder.exists()
 
 

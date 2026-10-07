@@ -30,6 +30,35 @@ def canonical_source_id(row):
     return canonical_json([row["artifact_key"], row["session_id"], row["recording_path"]])
 
 
+def document_filter(identifier, needles=()):
+    """A jsonpath accepting every string value mentions() or references() can match.
+
+    The database selects candidate rows with it and the Python predicates still
+    decide, so a rejected document could never have matched: recording_ids()
+    returns values stored in the documents it reads, mentions() needs the
+    identifier as a whole value or path segment, references() a needle or a
+    child of an absolute needle path.
+    """
+    clauses = ["@ like_regex " + json.dumps("(^|/)" + re.escape(identifier) + "(/|$)")]
+    variables = {}
+    if needles:
+        variables["needles"] = sorted(needles)
+        clauses.append("@ == $needles[*]")
+    for index, prefix in enumerate(sorted({path.rstrip("/") + "/" for path in needles if path.startswith("/")})):
+        variables[f"prefix{index}"] = prefix
+        clauses.append(f"@ starts with $prefix{index}")
+    return 'lax $.** ? (@.type() == "string" && (' + " || ".join(clauses) + "))", json.dumps(variables)
+
+
+# Every non-empty *_json column of a row, as the snapshot scan reads them. The
+# CASE keeps the cast off non-document columns whatever the planner's order.
+DOCUMENT_COLUMNS = (
+    "EXISTS (SELECT 1 FROM jsonb_each_text(to_jsonb({table})) AS document WHERE jsonb_path_exists("
+    "CASE WHEN right(document.key, 5) = '_json' AND document.value <> '' THEN document.value::jsonb END, "
+    "?::jsonpath, ?::jsonb))"
+)
+
+
 class RecordingMaintenance(Maintenance):
     def __init__(self, database, live, reviews, videos, previews, *, conversion_root=None):
         super().__init__(database, live.archive.cluster)
@@ -116,10 +145,8 @@ class RecordingMaintenance(Maintenance):
                 "Wait for active recording processing to finish",
             )
         source_references = self._dataset_graph(c, identifier, graph, block)
-        for record in rows(c, "live_conversions"):
+        for record in rows(c, "live_conversions", "payload_json::jsonb->>'session_id'=?", (identifier,), order_by="id"):
             conversion = json.loads(record["payload_json"])
-            if conversion.get("session_id") != identifier:
-                continue
             graph["live_conversions"].append(record)
             if conversion.get("state") not in {"READY", "FAILED", "CANCELLED"}:
                 block(
@@ -128,22 +155,27 @@ class RecordingMaintenance(Maintenance):
                     conversion.get("name") or "Dataset conversion",
                     "Wait for this dataset conversion to finish",
                 )
-        for record in rows(c, "live_xr_sessions", "id<>?", (identifier,)):
-            if mentions(json.loads(record["payload_json"]), identifier):
-                child = json.loads(record["payload_json"])
+        path, variables = document_filter(identifier)
+        for record in rows(c, "live_xr_sessions", "id<>? AND jsonb_path_exists(payload_json::jsonb, ?::jsonpath, ?::jsonb)",
+                           (identifier, path, variables), order_by="id"):
+            child = json.loads(record["payload_json"])
+            if mentions(child, identifier):
                 block(
                     "recording",
                     record["id"],
                     child.get("profile", {}).get("task_name") or record["id"],
                     "Delete this dependent recording first",
                 )
-        # Experiment and evaluation snapshots embed dataset sources that name recordings.
+        # Experiment and evaluation snapshots embed dataset sources that name
+        # recordings. Their documents stay in SQL (payload_store.FIELDS offloads
+        # none of these tables), so the database reads them and only candidates travel.
+        path, variables = document_filter(identifier, source_references)
         for table, kind, parent in (
             ("experiment_revisions", "experiment", "experiment_id"),
             ("variants", "experiment", "experiment_id"),
             ("evaluations", "evaluation", "id"),
         ):
-            for record in rows(c, table):
+            for record in rows(c, table, DOCUMENT_COLUMNS.format(table=table), (path, variables), order_by="id"):
                 if any(
                     mentions(json.loads(v), identifier) or references(json.loads(v), source_references)
                     for k, v in record.items()
@@ -175,73 +207,97 @@ class RecordingMaintenance(Maintenance):
 
     def _dataset_graph(self, c, identifier, graph, block):
         """Block on output versions; collect only unused internal source metadata."""
-        resources = {row["id"]: row for row in rows(c, "data_resources")}
-        versions = {row["id"]: row for row in rows(c, "data_resource_versions")}
-        labels = {row["version_id"]: row["display_name"]
-                  for row in rows(c, "data_dataset_presentations")}
-        for resource in resources.values():
-            resource["metadata"] = json.loads(resource["metadata_json"])
-        for version in versions.values():
-            version["metadata"] = json.loads(version["metadata_json"])
+        def label(version_id, default):
+            row = c.execute("SELECT display_name FROM data_dataset_presentations WHERE version_id=?",
+                            (version_id,)).fetchone()
+            return row[0] if row else default
+
+        def documents(records):
+            for record in records:
+                record["metadata"] = json.loads(record["metadata_json"])
+            return records
+
+        # recording_ids() reads a version's metadata, its resource's and its
+        # source version's; a recording named in none of them is not a member.
+        member, member_variables = document_filter(identifier)
+        candidates = documents([dict(row) for row in c.execute(
+            "SELECT v.* FROM data_resource_versions v JOIN data_resources r ON r.id=v.resource_id "
+            "LEFT JOIN data_resource_versions s ON s.id=v.metadata_json::jsonb->>'source_version_id' "
+            "WHERE r.category='dataset' AND (jsonb_path_exists(v.metadata_json::jsonb, ?::jsonpath, ?::jsonb) "
+            "OR jsonb_path_exists(r.metadata_json::jsonb, ?::jsonpath, ?::jsonb) "
+            "OR jsonb_path_exists(s.metadata_json::jsonb, ?::jsonpath, ?::jsonb)) ORDER BY v.id",
+            (member, member_variables) * 3,
+        ).fetchall()])
+        resources = {row["id"]: row for row in documents(rows(
+            c, "data_resources", "id = ANY(?)", (sorted({v["resource_id"] for v in candidates}),)))} if candidates else {}
+        source_keys = sorted({v["metadata"].get("source_version_id") for v in candidates
+                              if isinstance(v["metadata"].get("source_version_id"), str)})
+        sources = {row["id"]: row for row in documents(rows(
+            c, "data_resource_versions", "id = ANY(?)", (source_keys,)))} if source_keys else {}
         source_versions = []
-        for version in versions.values():
+        for version in candidates:
             resource = resources[version["resource_id"]]
-            if resource["category"] != "dataset":
-                continue
-            source = versions.get(version["metadata"].get("source_version_id"))
+            source = sources.get(version["metadata"].get("source_version_id"))
             if identifier not in recording_ids(resource, version, source):
                 continue
             if version["format"] != "skynet.episodes/v1":
-                block("dataset", version["id"], labels.get(version["id"], resource["display_name"]),
+                block("dataset", version["id"], label(version["id"], resource["display_name"]),
                       "Delete this dataset first")
             elif (resource["provider"], resource["namespace"]) == ("collection", "datasets"):
                 source_versions.append(version)
             else:
                 block("storage", None, resource["display_name"],
                       "A retained source registration references this recording; remove that dependency first")
-        source_ids = {version["id"] for version in source_versions}
-        locations = [row for row in rows(c, "data_locations") if row["version_id"] in source_ids]
+        source_ids = sorted(version["id"] for version in source_versions)
+        locations = rows(c, "data_locations", "version_id = ANY(?)", (source_ids,), order_by="id") if source_ids else []
         needles = {value for version in source_versions
                    for value in (version["id"], version["manifest_sha256"], version["path"])}
         needles.update(row["path"] for row in locations)
-        # These rows have real foreign keys or immutable JSON receipts. A raw
-        # source can be hidden from the catalog and still have retained consumers.
-        derivations = {row["id"]: row for row in rows(c, "data_derivations")}
-        for row in rows(c, "data_derivation_inputs"):
-            if row["input_version_id"] in source_ids:
-                output = derivations[row["derivation_id"]]["output_version_id"]
-                block("dataset", output, labels.get(output, "Derived dataset"), "Delete this dataset first")
-        for table, columns in (
-            ("data_bundle_assignments", ("version_id",)),
-            ("data_derivations", ("output_version_id",)),
-            ("collection_sessions", ("registered_version_id",)),
-            ("data_imports", ("version_id",)),
-            ("data_version_retirements", ("version_id", "replacement_version_id")),
-        ):
-            if any(any(row.get(column) in source_ids for column in columns) for row in rows(c, table)):
-                block("storage", None, "Recording source metadata",
-                      "A retained registry item references this recording source; remove that dependency first")
-        for row in rows(c, "policy_exports"):
-            export = json.loads(row["payload_json"])
-            if mentions(export, identifier) or references(export, needles):
-                if export.get("version_id") in versions:
-                    output = export["version_id"]
-                    block("dataset", output, labels.get(output, export.get("name", "Dataset")),
-                          "Delete this dataset first")
-                else:
-                    block("prepared", row["id"], export.get("name", "Dataset conversion"),
-                          "Delete this conversion attempt first")
+        if source_ids:
+            # These rows have real foreign keys or immutable JSON receipts. A raw
+            # source can be hidden from the catalog and still have retained consumers.
+            for row in c.execute(
+                "SELECT d.output_version_id FROM data_derivation_inputs i JOIN data_derivations d ON d.id=i.derivation_id "
+                "WHERE i.input_version_id = ANY(?) ORDER BY d.output_version_id", (source_ids,),
+            ).fetchall():
+                block("dataset", row[0], label(row[0], "Derived dataset"), "Delete this dataset first")
+            for table, columns in (
+                ("data_bundle_assignments", ("version_id",)),
+                ("data_derivations", ("output_version_id",)),
+                ("collection_sessions", ("registered_version_id",)),
+                ("data_imports", ("version_id",)),
+                ("data_version_retirements", ("version_id", "replacement_version_id")),
+            ):
+                if c.execute(f"SELECT 1 FROM {table} WHERE " + " OR ".join(f"{column} = ANY(?)" for column in columns)
+                             + " LIMIT 1", (source_ids,) * len(columns)).fetchone():
+                    block("storage", None, "Recording source metadata",
+                          "A retained registry item references this recording source; remove that dependency first")
+        path, variables = document_filter(identifier, needles)
+        exports = [(row["id"], json.loads(row["payload_json"])) for row in rows(
+            c, "policy_exports", "jsonb_path_exists(payload_json::jsonb, ?::jsonpath, ?::jsonb)", (path, variables), order_by="id")]
+        exports = [(key, export) for key, export in exports if mentions(export, identifier) or references(export, needles)]
+        output_keys = sorted({export["version_id"] for _, export in exports if isinstance(export.get("version_id"), str)})
+        outputs = {row[0] for row in c.execute(
+            "SELECT id FROM data_resource_versions WHERE id = ANY(?)", (output_keys,)).fetchall()} if output_keys else set()
+        for key, export in exports:
+            if export.get("version_id") in outputs:
+                output = export["version_id"]
+                block("dataset", output, label(output, export.get("name", "Dataset")), "Delete this dataset first")
+            else:
+                block("prepared", key, export.get("name", "Dataset conversion"), "Delete this conversion attempt first")
         if source_versions:
             graph["data_resource_versions"] = source_versions
             graph["data_locations"] = locations
         # Keep groups used by any other versions or import/collection records.
-        retained_resources = {row["resource_id"] for row in versions.values() if row["id"] not in source_ids}
-        retained_resources.update(row["resource_id"] for row in rows(c, "data_imports"))
-        retained_resources.update(row["registered_resource_id"] for row in rows(c, "collection_sessions"))
-        removable = [resource for resource in resources.values()
-                     if (resource["provider"], resource["namespace"], resource["category"]) == ("collection", "datasets", "dataset")
-                     and resource["id"] not in retained_resources
-                     and identifier in recording_ids(resource, {})]
+        removable = [resource for resource in documents(rows(
+            c, "data_resources",
+            "provider='collection' AND namespace='datasets' AND category='dataset' "
+            "AND jsonb_path_exists(metadata_json::jsonb, ?::jsonpath, ?::jsonb) "
+            "AND NOT EXISTS (SELECT 1 FROM data_resource_versions v WHERE v.resource_id=data_resources.id AND NOT (v.id = ANY(?::text[]))) "
+            "AND NOT EXISTS (SELECT 1 FROM data_imports i WHERE i.resource_id=data_resources.id) "
+            "AND NOT EXISTS (SELECT 1 FROM collection_sessions s WHERE s.registered_resource_id=data_resources.id)",
+            (member, member_variables, source_ids), order_by="id"))
+            if identifier in recording_ids(resource, {})]
         if removable:
             graph["data_resources"] = removable
             needles.update(resource["id"] for resource in removable)
@@ -249,37 +305,45 @@ class RecordingMaintenance(Maintenance):
 
     def _observation_graph(self, c, job, selected_path, graph, blockers):
         """Plan observation ownership before any remote bytes can be removed."""
-        sources = rows(c, "observation_sources")
-        selected = [row for row in sources if row["session_id"] == job["id"]
-                    and (selected_path is None or row["recording_path"] == selected_path)]
+        detached = "session_id=? AND (?::text IS NULL OR recording_path=?)"
+        identity = (job["id"], selected_path, selected_path)
+        selected = rows(c, "observation_sources", detached, identity)
         if not selected:
             return
-        affected = {row["artifact_key"] for row in selected}
-        detached = {(row["artifact_key"], row["session_id"], row["recording_path"]) for row in selected}
-        shared = {row["artifact_key"] for row in sources
-                  if (row["artifact_key"], row["session_id"], row["recording_path"]) not in detached}
-        candidates = affected - shared
-        artifacts = {row["artifact_key"]: row for row in rows(c, "observation_artifacts")}
-        inputs = rows(c, "observation_artifact_inputs")
+        affected = sorted({row["artifact_key"] for row in selected})
+        # An artifact another source edge still names keeps its bytes.
+        shared = {row[0] for row in c.execute(
+            f"SELECT DISTINCT artifact_key FROM observation_sources WHERE artifact_key = ANY(?) AND NOT ({detached})",
+            (affected, *identity)).fetchall()}
+        candidates = set(affected) - shared
+        keys = sorted(candidates)
+        artifacts = {row["artifact_key"]: row for row in rows(c, "observation_artifacts", "artifact_key = ANY(?)", (affected,))}
+        inputs = rows(c, "observation_artifact_inputs", "artifact_key = ANY(?) OR input_key = ANY(?)", (keys, keys),
+                      order_by="artifact_key, input_key") if keys else []
         removed_versions = {row["id"] for row in graph.get("data_resource_versions", [])}
-        consumers = [("dataset version", row["version_id"], row["artifact_key"])
-                     for row in rows(c, "observation_version_inputs") if row["version_id"] not in removed_versions]
-        consumers += [("dataset preparation", row["job_id"], row["artifact_key"])
-                      for row in rows(c, "observation_job_inputs")]
-        producers = {row["id"]: row for row in rows(c, "observation_producers")}
+        consumers = []
+        if keys:
+            consumers = [("dataset version", row["version_id"], row["artifact_key"])
+                         for row in rows(c, "observation_version_inputs", "artifact_key = ANY(?)", (keys,),
+                                         order_by="version_id, artifact_key")
+                         if row["version_id"] not in removed_versions]
+            consumers += [("dataset preparation", row["job_id"], row["artifact_key"])
+                          for row in rows(c, "observation_job_inputs", "artifact_key = ANY(?)", (keys,),
+                                          order_by="job_id, artifact_key")]
+        producer_ids = sorted({row["producer_id"] for row in artifacts.values() if row.get("producer_id")})
+        producers = {row["id"]: row for row in rows(c, "observation_producers", "id = ANY(?)", (producer_ids,))} if producer_ids else {}
         def block(identifier, label, reason):
             entry = dict(kind="observation", id=identifier, label=label, reason=reason)
             if entry not in blockers:
                 blockers.append(entry)
-        for key in sorted(affected):
+        for key in affected:
             producer = producers.get(artifacts[key].get("producer_id"))
             if producer and producer["state"] not in {"READY", "FAILED"}:
                 block(producer["id"], "Observation preparation",
                       "Wait for the shared observation producer to finish before deleting its recording")
         for kind, identifier, key in consumers:
-            if key in candidates:
-                block(identifier, "Shared " + kind,
-                      "Delete this observation consumer before deleting its only source recording")
+            block(identifier, "Shared " + kind,
+                  "Delete this observation consumer before deleting its only source recording")
         for edge in inputs:
             if edge["input_key"] in candidates and edge["artifact_key"] not in candidates:
                 block(edge["artifact_key"], "Derived observations",
@@ -301,20 +365,33 @@ class RecordingMaintenance(Maintenance):
                     ordered.append(item)
                 remaining.difference_update(leaves)
             graph["observation_artifacts"] = ordered
-            removable_producers = []
-            for producer in producers.values():
-                if producer["state"] not in {"READY", "FAILED"}:
-                    continue
-                owned = {key for key, artifact in artifacts.items() if artifact.get("producer_id") == producer["id"]}
-                # Retried failures may no longer own the artifact FK; keep their
-                # original request keys in the lifetime check too.
+            # Retried failures may no longer own the artifact FK; keep their
+            # original request keys in the lifetime check too.
+            terminal = rows(
+                c, "observation_producers",
+                "state IN ('READY','FAILED') AND (EXISTS (SELECT 1 FROM observation_artifacts a "
+                "WHERE a.producer_id=observation_producers.id AND a.artifact_key = ANY(?)) "
+                "OR jsonb_path_exists(payload_json::jsonb, ?::jsonpath, ?::jsonb))",
+                (keys, "lax $.request.requests[*].artifact_key ? (@ == $keys[*])", json.dumps({"keys": keys})),
+                order_by="id")
+            owned, requested = {}, {}
+            if terminal:
+                for row in c.execute("SELECT producer_id, artifact_key FROM observation_artifacts WHERE producer_id = ANY(?)",
+                                     ([producer["id"] for producer in terminal],)).fetchall():
+                    owned.setdefault(row[0], set()).add(row[1])
+            for producer in terminal:
                 payload = json.loads(producer["payload_json"])
-                requested = {node["artifact_key"] for node in payload.get("request", {}).get("requests", [])}
-                related = owned | (requested & artifacts.keys())
+                requested[producer["id"]] = {node["artifact_key"] for node in payload.get("request", {}).get("requests", [])}
+            requested_keys = sorted(set().union(*requested.values())) if requested else []
+            existing = {row[0] for row in c.execute("SELECT artifact_key FROM observation_artifacts WHERE artifact_key = ANY(?)",
+                                                    (requested_keys,)).fetchall()} if requested_keys else set()
+            removable_producers = []
+            for producer in terminal:
+                related = owned.get(producer["id"], set()) | (requested[producer["id"]] & existing)
                 if related & candidates and related <= candidates:
                     removable_producers.append(producer)
             if removable_producers:
-                graph["observation_producers"] = sorted(removable_producers, key=lambda row: row["id"])
+                graph["observation_producers"] = removable_producers
 
     @staticmethod
     def _observation_producer_path(producer):

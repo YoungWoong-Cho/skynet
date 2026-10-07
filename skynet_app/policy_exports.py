@@ -23,6 +23,10 @@ from . import dataset_cleanup
 from .dataset_formats import catalog, resolve_adapter
 
 DATASET_FORMAT = "skynet.recording-dataset/v1"
+# States after which the background monitor never dispatches a preparation.
+FINISHED_STATES = frozenset({"READY", "FAILED", "DELETE_FAILED"})
+# The monitor refreshes observation producers and pending preparations this often.
+DATASET_PREPARATION_POLL_SECONDS = 2.0
 from .live_xr import TERMINAL
 from .live_xr_review import ArrayUnpickler
 from .cluster_config import CLUSTER
@@ -89,7 +93,7 @@ class PolicyExportService(ClusterPolicyPreparation):
         self.stopping = False
         self.monitor_stop = threading.Event()
         self.monitor_thread = None
-        self.monitor_interval = 2.0
+        self.monitor_interval = DATASET_PREPARATION_POLL_SECONDS
 
     def list(self):
         with self.database.connection() as c:
@@ -101,6 +105,21 @@ class PolicyExportService(ClusterPolicyPreparation):
                 key=lambda j: j["created_at"],
                 reverse=True,
             )
+
+    def pending(self):
+        """Unfinished collection-dataset preparations, newest first.
+
+        The monitor calls this every pass; finished rows are filtered in SQL so
+        a long history is never transferred or parsed just to find open work.
+        """
+        states = ",".join("?" for _ in FINISHED_STATES)
+        with self.database.connection() as c:
+            return [json.loads(r[0]) for r in c.execute(
+                "SELECT payload_json FROM policy_exports WHERE payload_json::jsonb->>'format'=? "
+                f"AND payload_json::jsonb->>'state' NOT IN ({states}) "
+                "ORDER BY payload_json::jsonb->>'created_at' COLLATE \"C\" DESC, id",
+                (DATASET_FORMAT, *sorted(FINISHED_STATES)),
+            )]
 
     def get(self, identifier):
         with self.database.connection() as c:
@@ -142,11 +161,10 @@ class PolicyExportService(ClusterPolicyPreparation):
             logging.getLogger(__name__).exception("Dataset preparation recovery will retry")
 
     def _dispatch_pending(self):
-        for job in self.list():
+        for job in self.pending():
             if self.monitor_stop.is_set():
                 break
-            if job.get("format") == DATASET_FORMAT and job["state"] not in {"READY", "FAILED", "DELETE_FAILED"}:
-                self.dispatch(job["id"])
+            self.dispatch(job["id"])
 
     def _monitor(self):
         while not self.monitor_stop.wait(self.monitor_interval):

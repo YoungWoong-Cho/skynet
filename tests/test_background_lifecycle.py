@@ -65,7 +65,7 @@ def test_policy_monitor_recovers_independent_failures_and_restarts_without_db_lo
         raise ConnectionError("Independent observation job failure")
 
     monkeypatch.setattr(service, "lock", unavailable_lock())
-    monkeypatch.setattr(service, "list", scan)
+    monkeypatch.setattr(service, "pending", scan)
     monkeypatch.setattr(service.observations, "tick", observation_failure)
     monkeypatch.setattr(service, "_prepare_cluster", lambda _: prepared.set())
     try:

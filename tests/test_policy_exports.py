@@ -9,7 +9,7 @@ import h5py
 import numpy as np
 import pytest
 
-from skynet_app.database import Database
+from skynet_app.database import Database, canonical_json
 from skynet_app.live_xr_review import LiveReviewService
 from skynet_app.policy_exports import PolicyExportService, digest, conversion_failure
 from skynet_app.adapters import builtin_adapter_manifests
@@ -196,7 +196,15 @@ def test_checksum_failure_does_not_register_a_version_and_can_retry(setup):
     service.prepare(job["id"])
     assert service.get(job["id"])["state"] == "FAILED"
     assert all(v["format"] == "skynet.episodes/v1" for r in service.database.list_data_resources() for v in service.database.get_data_resource(r["id"])["versions"])
-    assert create(service, session["id"], "fixture-rgb", "Retry")["id"] != job["id"]
+    assert service.pending() == []
+    retry = create(service, session["id"], "fixture-rgb", "Retry")
+    assert retry["id"] != job["id"]
+    # The monitor's pending scan skips finished and legacy rows and lists newest first.
+    with service.database.transaction() as c:
+        for row in (dict(id="legacy", format="legacy", state="QUEUED", created_at="2999-01-01T00:00:00.000Z"),
+                    dict(id="older", format=retry["format"], state="PENDING", created_at="2000-01-01T00:00:00.000Z")):
+            c.execute("INSERT INTO policy_exports VALUES (?,?)", (row["id"], canonical_json(row)))
+    assert [j["id"] for j in service.pending()] == [retry["id"], "older"]
 
 def test_shared_preparation_redacts_other_workspace_experiment_details(setup, monkeypatch):
     from skynet_app.workspaces import WorkspaceDirectory
