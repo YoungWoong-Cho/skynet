@@ -1,4 +1,5 @@
 """Use the shared deletion dialog for prepared data and its exact dependencies."""
+from .cluster_config import run_root
 from .database import content_sha256
 
 
@@ -39,7 +40,7 @@ def preview(service, workspace, kind, identifier):
     for job in (graph or {}).get("jobs", []):
         paths.add(str(service.root / job["id"]))
         if job.get("version_id") and job.get("target")=="cluster":
-            paths.add(f"{WORK_ROOT}/jobs/runs/{job['id']}")
+            paths.add(run_root(WORK_ROOT, job["id"]))
     plan = dict(label=label,
                 blockers=blockers, counts={"prepared_results": sum(v["format"] != "skynet.episodes/v1" for v in versions)},
                 files=[dict(path=path, size_bytes=None, exists=None) for path in sorted(paths)],

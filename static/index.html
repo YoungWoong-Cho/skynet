@@ -1391,7 +1391,7 @@ trainer.deterministic=true"
                         />
                         <span
                           >Auto-resume train/eval as a new attempt on the same
-                          run; retain the latest 3 resumable checkpoints</span
+                          run; retain the latest <!-- default-checkpoint-keep-last --> resumable checkpoints</span
                         >
                       </label>
                       <div class="field span-4">
@@ -4418,6 +4418,7 @@ Select a session.</pre
               id="settings-view-connections"
               data-settings-view="connections"
               data-tracking-providers="<!-- tracking-providers -->"
+              data-tracking-short-labels="<!-- tracking-short-labels -->"
               role="tabpanel"
               aria-labelledby="settings-tab-connections"
               class="tracking-settings-grid"

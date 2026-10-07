@@ -28,6 +28,12 @@ EXCEPTIONS = {
     "ops/datasets/observation_render.py": "a docstring shipped inside conversion capsules; changing it changes conversion identity",
 }
 COMMENT = re.compile(r"^\s*(#|//|/\*|\*|<!--|--)")
+# The run-directory layout lives in cluster_config (RUN_ROOTS, run_root, jobs_run_root); these
+# files run on the cluster from their own source text, so they cannot import it.
+STANDALONE_RUN_LAYOUT = {
+    "skynet_app/storage_files.py": "shipped as the remote storage helper's source",
+    "skynet_app/dataset_cleanup.py": "shipped as the remote dataset cleanup script's source",
+}
 
 
 def token(value: str, *, flags: int = 0) -> re.Pattern[str]:
@@ -96,3 +102,13 @@ def test_forms_take_cluster_numbers_from_rendered_placeholders():
         literal = re.findall(r'\b(?:value|max)="(\d[\d:]*)"', tag.group(0))
         assert literal in ([], ["1"]), f"{element} carries a literal {literal}"
     assert not re.search(r"CPUS_PER_GPU\s*=\s*\d", (ROOT / "static/app.js").read_text())
+
+
+def test_run_directory_layout_is_spelled_once():
+    layout = re.compile(r"jobs\}?/runs\b")
+    found = [f"{path}:{number}" for path in scanned_files() if path.startswith("skynet_app/") and path not in STANDALONE_RUN_LAYOUT
+             for number, line in enumerate((ROOT / path).read_text(errors="ignore").splitlines(), 1)
+             if not COMMENT.match(line) and layout.search(line)]
+    assert not found, "Build run directories with cluster_config.run_root or jobs_run_root:\n" + "\n".join(found)
+    for path in STANDALONE_RUN_LAYOUT:
+        assert layout.search((ROOT / path).read_text()), f"{path} no longer spells the layout; drop its exception"

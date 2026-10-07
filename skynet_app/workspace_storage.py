@@ -7,7 +7,7 @@ import threading
 from pathlib import PurePosixPath
 from typing import Any
 
-from .cluster_config import CLUSTER, ClusterPaths
+from .cluster_config import CLUSTER, ClusterPaths, jobs_run_root, run_root_owner
 from .database import Database
 from .workspace_schema import visible_sql
 
@@ -186,14 +186,13 @@ class WorkspaceStorage:
                 (run_id,),
             ).fetchone()
         # Non-personal utility jobs keep using the shared deployment root.
-        return row[0] if row and row[0] else f"{CLUSTER.paths.jobs}/runs/{run_id}"
+        return row[0] if row and row[0] else jobs_run_root(CLUSTER.paths.jobs, run_id)
 
     def root_for_run(self, run_id: str) -> str:
-        directory = self.run_directory(run_id)
-        suffix = f"/jobs/runs/{run_id}"
-        if not directory.endswith(suffix):
+        root = run_root_owner(self.run_directory(run_id), run_id)
+        if root is None:
             raise ValueError("The saved run directory does not match its run ID")
-        return validate_work_root(directory.removesuffix(suffix))
+        return validate_work_root(root)
 
     def allowed_roots(self) -> set[str]:
         roots = {CLUSTER.paths.work_root}
@@ -205,7 +204,7 @@ class WorkspaceStorage:
                 f"SELECT id,run_directory FROM runs WHERE {visible_sql('runs')}"
             ).fetchall()
         for row in rows:
-            suffix = f"/jobs/runs/{row['id']}"
-            if row["run_directory"] and row["run_directory"].endswith(suffix):
-                roots.add(validate_work_root(row["run_directory"].removesuffix(suffix)))
+            owner = run_root_owner(row["run_directory"], row["id"]) if row["run_directory"] else None
+            if owner is not None:
+                roots.add(validate_work_root(owner))
         return roots

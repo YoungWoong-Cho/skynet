@@ -16,7 +16,7 @@ from skynet_app.adapters import (
     resolve_gpu_type,
     resolve_training_progress_contract,
 )
-from skynet_app.cluster_config import CLUSTER
+from skynet_app.cluster_config import CLUSTER, run_root
 from skynet_app.cluster_runtime import SLURM_BIN
 from skynet_app.experiments import CanonicalModel, ExperimentSpec, canonical_sha256
 from skynet_app.gpu_preflight import (
@@ -1475,10 +1475,10 @@ def compile_sbatch(
             ],
         }
     )
-    run_root = f"{work_root}/jobs/runs/{run_id}"
+    run_home = run_root(work_root, run_id)
     evaluation_key = canonical_evaluation.get("execution_key") if stage == "eval" and isinstance(canonical_evaluation, Mapping) else None
     try:
-        run_directory = evaluation_execution_directory(run_root, evaluation_key)
+        run_directory = evaluation_execution_directory(run_home, evaluation_key)
     except ValueError as error:
         raise SlurmCompileError(str(error)) from error
     source_directory = f"{source_cache_directory(work_root, spec.source.repository)}/{spec.source.revision}"
@@ -1514,7 +1514,7 @@ def compile_sbatch(
         native_tracking_run_ids=native_tracking_run_ids,
         native_tracking_resume=native_tracking_resume,
     )
-    materializers = _capsule_materializers(run_root, files, execution_directory=run_directory)
+    materializers = _capsule_materializers(run_home, files, execution_directory=run_directory)
     attempt_archivers = [
         f"install -D -m 600 {_shell(f'{run_directory}/{name}')} \"$SKYNET_CAPSULE_DIR/{name}\""
         for name in sorted(files)
@@ -1547,7 +1547,7 @@ def compile_sbatch(
     exports = {
         **workspace_exports(paths),
         "SKYNET_RUN_ID": run_id,
-        "SKYNET_RUN_ROOT": run_root,
+        "SKYNET_RUN_ROOT": run_home,
         "SKYNET_RUN_DIR": run_directory,
         "SKYNET_SOURCE_DIR": source_directory,
         "SKYNET_PROJECT_DIR": project_directory,

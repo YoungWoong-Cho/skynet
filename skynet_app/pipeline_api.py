@@ -59,7 +59,7 @@ from .gpu_preflight import (
 from .gpu_quota import account_gpu_quota, idle_partition_quota
 from .preparation_states import ATTEMPT_FAILURE_STATES, EXECUTING_STATES, TRANSIENT_STATES
 from .workflow_states import ACTIVE_STAGE_STATES, CANCELLABLE_STAGE_STATES, SLURM_BOUND_ATTEMPT_STATES, sql_list
-from .cluster_config import CLUSTER
+from .cluster_config import CLUSTER, RUN_ROOTS, run_root
 from .evaluation_placement import resolve_evaluation_resources, uses_isaac_sim
 from .evaluation_compatibility import inspect_compatibility, compose_evaluator, declaration_matches, policy_loader, dataset_metadata
 from .cluster_runtime import (
@@ -131,6 +131,7 @@ from .tracking import (
     SESSION_CREDENTIALS,
     SessionCredentialStore,
     TRACKING_PROVIDERS,
+    TRACKING_SHORT_LABELS,
     TrackingRequestError,
     TrackingSettings,
     WandBBridge,
@@ -3661,11 +3662,11 @@ class PipelineService:
                 adapter_version=str(resolved.resolved_spec.source.adapter_version),
                 source_commit=resolved.resolved_spec.source.revision,
                 runtime_profile=resolved.resolved_spec.runtime.profile,
-                run_directory=f"{work_root}/jobs/runs/pending",
+                run_directory=run_root(work_root, "pending"),
                 status="DRAFT",
             )
             self.database.update_run(
-                run["id"], run_directory=f"{work_root}/jobs/runs/{run['id']}"
+                run["id"], run_directory=run_root(work_root, run["id"])
             )
             plan = resolve_adapter_plan(resolved.resolved_spec)
             self.database.create_stage(
@@ -4086,7 +4087,7 @@ class PipelineService:
                 }
             )
         self.database.materialize_empty_revision_runs(
-            revision["id"], planned_runs, run_directory_root=f"{self.work_root}/jobs/runs"
+            revision["id"], planned_runs, run_directory_root=f"{self.work_root}/{RUN_ROOTS}"
         )
 
     def submit_experiment(self, experiment_id: str, gateway: str = "auto") -> dict[str, Any]:
@@ -5783,9 +5784,8 @@ class PipelineService:
             for item in run.get("tracking_links") or []
             if item.get("remote_id") and item.get("url")
         }
-        labels = {"wandb": "W&B", "mlflow": "MLflow"}
         actions: dict[str, dict[str, Any]] = {}
-        for provider, label in labels.items():
+        for provider, label in TRACKING_SHORT_LABELS.items():
             connection = current_connections.get(provider) or {}
             if provider in linked or not (
                 connection.get("connected") is True
@@ -9108,13 +9108,13 @@ class PipelineService:
                 adapter_version=str(source["adapter_version"]),
                 source_commit=source.get("source_commit"),
                 runtime_profile=source.get("runtime_profile"),
-                run_directory=f"{self.work_root}/jobs/runs/pending",
+                run_directory=run_root(self.work_root, "pending"),
                 status="PENDING",
                 restarted_from_run_id=run_id,
             )
             self.database.update_run(
                 rerun["id"],
-                run_directory=f"{self.work_root}/jobs/runs/{rerun['id']}",
+                run_directory=run_root(self.work_root, rerun["id"]),
             )
             rerun_stage = self.database.create_stage(
                 rerun["id"],

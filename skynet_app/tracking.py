@@ -45,6 +45,8 @@ WANDB_TAG_METADATA_CONFIG_KEY = "skynet_tag_metadata"
 USER_AGENT = f"skynet-slurm-console/{__version__}"
 # Providers the console delivers to and their display names; migration 001 checks the same keys.
 TRACKING_PROVIDERS = {"wandb": "Weights & Biases", "mlflow": "MLflow"}
+# The same providers' short names, for links and buttons.
+TRACKING_SHORT_LABELS = {"wandb": "W&B", "mlflow": "MLflow"}
 WANDB_DEFAULT_BASE_URL = "https://api.wandb.ai"
 # Public web front for a hosted API endpoint; self-hosted servers serve both from one host.
 WANDB_WEB_HOSTS = {"api.wandb.ai": "https://wandb.ai"}

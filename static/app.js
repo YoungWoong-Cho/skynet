@@ -2579,9 +2579,12 @@ function resolvedExperimentGpuCount() {
 const CPUS_PER_GPU = Number(elements.resourceCpus.dataset.cpusPerGpu);
 if (!Number.isInteger(CPUS_PER_GPU) || CPUS_PER_GPU < 1)
   throw new Error("The page carries no CPUs-per-GPU policy");
-// Tracking provider names, rendered by the server from its tracking provider registry.
+// Tracking provider names and their short forms, rendered by the server from its tracking provider registry.
 const TRACKING_PROVIDER_LABELS = JSON.parse(
   document.querySelector("#settings-view-connections").dataset.trackingProviders,
+);
+const TRACKING_SHORT_LABELS = JSON.parse(
+  document.querySelector("#settings-view-connections").dataset.trackingShortLabels,
 );
 // Sweep values the experiment form leaves implicit, rendered by the server from its sweep model.
 const SWEEP_DEFAULTS = JSON.parse(elements.sweepDefinition.dataset.sweepDefaults);
@@ -19563,7 +19566,9 @@ function trackingLinksHtml(entity, { compact = false } = {}) {
     .map((item) => {
       const provider = trackingProviderLabel(item.provider);
       const url = validTrackingUrl(item.url);
-      const label = item.provider === "wandb" ? "W&B" : item.label || provider;
+      const label = Object.hasOwn(TRACKING_SHORT_LABELS, item.provider)
+        ? TRACKING_SHORT_LABELS[item.provider]
+        : item.label || provider;
       const identity = url
         ? `<a class="tracking-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="Open ${escapeHtml(provider)}">${escapeHtml(label)}</a>`
         : `<span class="secondary" title="${escapeHtml(provider)}">${escapeHtml(label)} · ${escapeHtml(
@@ -19841,7 +19846,7 @@ function renderTrackingNamePreview() {
       experimentName ||
       "Enter an experiment name";
     previews.push(
-      `<div><strong>W&amp;B</strong><span>${escapeHtml(connection.entity || "No verified workspace")} / ${escapeHtml(project)}</span><small>${escapeHtml(elements.wandbRunName.value.trim() || "No run name template")}</small></div>`,
+      `<div><strong>${escapeHtml(TRACKING_SHORT_LABELS.wandb)}</strong><span>${escapeHtml(connection.entity || "No verified workspace")} / ${escapeHtml(project)}</span><small>${escapeHtml(elements.wandbRunName.value.trim() || "No run name template")}</small></div>`,
     );
   }
   if (elements.mlflowEnabled.checked) {
@@ -19850,7 +19855,7 @@ function renderTrackingNamePreview() {
       experimentName ||
       "Enter an experiment name";
     previews.push(
-      `<div><strong>MLflow</strong><span>${escapeHtml(experiment)}</span><small>${escapeHtml(elements.mlflowRunName.value.trim() || "No run name template")}</small></div>`,
+      `<div><strong>${escapeHtml(TRACKING_SHORT_LABELS.mlflow)}</strong><span>${escapeHtml(experiment)}</span><small>${escapeHtml(elements.mlflowRunName.value.trim() || "No run name template")}</small></div>`,
     );
   }
   elements.wandbProject.placeholder = experimentName

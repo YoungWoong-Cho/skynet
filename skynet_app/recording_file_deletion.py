@@ -7,6 +7,7 @@ import re
 from pathlib import PurePosixPath
 from uuid import UUID
 
+from .cluster_config import RUN_ROOTS
 from .cluster_runtime import DEFAULT_GATEWAY
 from .database import canonical_json, utc_now
 from .maintenance import Maintenance, fingerprint, in_ids
@@ -154,7 +155,7 @@ class RecordingFileMaintenance(RecordingMaintenance):
             groups[key] = [
                 path
                 for path in paths
-                if not re.search(r"/jobs/runs/[a-f0-9]{32}$", path)
+                if not re.search(re.escape(f"/{RUN_ROOTS}/") + r"[a-f0-9]{32}$", path)
                 or path in selected_videos
             ]
         return groups

@@ -6,7 +6,7 @@ from pathlib import Path
 import shlex
 from time import time
 
-from .cluster_config import CLUSTER, cpus_for_gpus
+from .cluster_config import CLUSTER, cpus_for_gpus, run_root
 from .cluster_runtime import DEFAULT_GATEWAY, WORK_ROOT, ClusterError, SubmissionOutcomeUnknown
 from .database import canonical_json
 from .live_xr_review import ArrayUnpickler
@@ -231,7 +231,7 @@ class ObservationPreparation:
         request = dict(producer['request'])
         files = request.pop('worker_files')
         identifier, token = producer['id'], producer['attempt_token']
-        root = f'{WORK_ROOT}/jobs/runs/{identifier}/observations/{token}'
+        root = f'{run_root(WORK_ROOT, identifier)}/observations/{token}'
         request['result_path'] = root + '/result.json'
         request['receipt_path'] = root + '/result.json'
         request['staging_root'] = root + '/staging'

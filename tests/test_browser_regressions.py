@@ -163,7 +163,7 @@ def test_homepage_offers_the_configured_gateways_queues_gpus_and_defaults(monkey
     from skynet_app.hands_api import Pose
     from skynet_app.live_xr_archive import TERMINAL_STATES
     from skynet_app.policy_exports_api import ExportRequest
-    from skynet_app.tracking import TRACKING_PROVIDERS
+    from skynet_app.tracking import TRACKING_PROVIDERS, TRACKING_SHORT_LABELS
     from skynet_app.workspaces import EmailRequest
     def attributes(element_id):
         tag = re.search(rf'<\w+\b[^>]*\bid="{element_id}"[^>]*>', page).group(0)
@@ -194,6 +194,10 @@ def test_homepage_offers_the_configured_gateways_queues_gpus_and_defaults(monkey
     assert options(page, 'live-xr-retargeter') == [
         (retargeting.DEFAULT, next(method['name'] for method in retargeting.METHODS if method['key'] == retargeting.DEFAULT))]
     assert json.loads(attributes('settings-view-connections')['data-tracking-providers']) == TRACKING_PROVIDERS
+    assert json.loads(attributes('settings-view-connections')['data-tracking-short-labels']) == TRACKING_SHORT_LABELS
+    assert TRACKING_SHORT_LABELS.keys() == TRACKING_PROVIDERS.keys()
+    # The resume note states the checkpoint retention a submitted form applies.
+    assert f'retain the latest {CLUSTER.defaults.checkpoint_keep_last} resumable checkpoints' in page
     # The list follows the configuration, and configured names are escaped.
     def configured(**changes):
         monkeypatch.setattr(page_markup, 'CLUSTER', CLUSTER.model_copy(update=changes))

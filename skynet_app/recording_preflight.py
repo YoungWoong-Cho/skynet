@@ -5,7 +5,7 @@ from pathlib import Path
 import shlex
 from uuid import uuid4
 
-from .cluster_config import CLUSTER
+from .cluster_config import CLUSTER, run_root
 from .sbatch import SHEBANG, cpu_thread_exports, sbatch_header, shell_prelude
 from .cluster_runtime import DEFAULT_GATEWAY, WORK_ROOT, ClusterError
 from .database import canonical_json
@@ -25,7 +25,7 @@ class RecordingPreflight:
             if not job.get("preflight_script"):
                 token = str(uuid4())
                 relative = "preflight/" + token
-                root = f"{WORK_ROOT}/jobs/runs/{job['id']}/{relative}"
+                root = f"{run_root(WORK_ROOT, job['id'])}/{relative}"
                 worker = self.root / job["id"] / "worker"
                 files = {relative + "/worker/" + p.relative_to(worker).as_posix(): p.read_text()
                          for p in sorted(worker.rglob("*")) if p.is_file() and "__pycache__" not in p.parts}

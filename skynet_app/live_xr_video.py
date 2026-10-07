@@ -21,6 +21,7 @@ from .live_xr_review import ArrayUnpickler
 from .live_xr_video_worker import control
 from .live_xr_video_cluster import control_cluster
 from .remote_artifacts import RemoteArtifact
+from .cluster_config import run_root
 from .cluster_runtime import DEFAULT_GATEWAY, TIMEOUTS, WORK_ROOT
 from .dexverse_versions import environment_profile
 from .simulation_hands import upload as upload_hand
@@ -291,11 +292,11 @@ class LiveVideoService:
                 if not re.fullmatch(r"[a-f0-9]{32}", token):
                     raise ValueError("This older preparation has no safely cancellable process identity")
                 root = current.get("remote_root")
+                cluster_root = run_root(WORK_ROOT, token)
                 recovered_remote = None
                 if root:
                     prefix = job["root"] + f"/output/review-videos/{review['sha256']}/{episode}/"
                     suffix = f"/attempts/{token}"
-                    cluster_root = f"{WORK_ROOT}/jobs/runs/{token}"
                     if root == cluster_root:
                         profile = self.cluster_profile(job)
                         recovered_remote = (self.live.archive.cluster, dict(job, profile=profile, gateway=DEFAULT_GATEWAY), root)
@@ -306,7 +307,7 @@ class LiveVideoService:
                 generation = self.generations[key] = VideoGeneration(
                     token=token, finished=True, remote=recovered_remote,
                     remote_stopped=recovered_remote is None,
-                    cluster_submission_started=current.get("cluster_submission_started", bool(root and root == f"{WORK_ROOT}/jobs/runs/{token}")),
+                    cluster_submission_started=current.get("cluster_submission_started", bool(root and root == cluster_root)),
                     cluster_job_id=current.get("cluster_job_id"),
                 )
                 self.active.add(key)
@@ -359,7 +360,7 @@ class LiveVideoService:
         root = (job["root"] + f"/output/review-videos/{review['sha256']}/{episode}/{self.version}"
                 + f"/attempts/{generation.token}")
         if archived:
-            root = f"{WORK_ROOT}/jobs/runs/{generation.token}"
+            root = run_root(WORK_ROOT, generation.token)
         with self.lock:
             if key is not None:
                 self._check(key, generation)
@@ -527,7 +528,7 @@ class LiveVideoService:
             transport, gateway, path = archive.resolve(job, path[len(original_prefix):])
         elif archived_prefix and path.startswith(archived_prefix + "/"):
             transport, gateway, path = archive.resolve(job, path[len(archived_prefix) + 1:])
-        elif re.fullmatch(r"[a-f0-9]{32}", result.get("generation", "")) and path.startswith(WORK_ROOT + "/jobs/runs/" + result["generation"] + "/"):
+        elif re.fullmatch(r"[a-f0-9]{32}", result.get("generation", "")) and path.startswith(run_root(WORK_ROOT, result["generation"]) + "/"):
             transport, gateway = archive.cluster, DEFAULT_GATEWAY
         elif path.startswith(archive.derived_root(job) + "/"):
             transport, gateway = archive.cluster, DEFAULT_GATEWAY

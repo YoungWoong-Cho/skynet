@@ -20,7 +20,7 @@ from .cluster_runtime import (
     WORK_ROOT,
 )
 from .database import canonical_json, utc_now
-from .cluster_config import CLUSTER, format_slurm_duration
+from .cluster_config import CLUSTER, format_slurm_duration, run_root
 from .dexverse_release import TASK, ROBOT, REVISION
 from .live_xr_archive import TERMINAL_STATES
 from .live_xr_catalog import selection
@@ -292,7 +292,7 @@ class LiveXRService:
                 worker_sha256=hashlib.sha256(worker.encode()).hexdigest(),
                 root=f"{profile['work_root']}/sessions/{identifier}"
                 if profile["execution"] == "workstation"
-                else f"{WORK_ROOT}/jobs/runs/{identifier}",
+                else run_root(WORK_ROOT, identifier),
                 gateway=profile["gateway"],
                 created_at=utc_now(),
                 updated_at=utc_now(),

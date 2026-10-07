@@ -17,7 +17,7 @@ from .hands_api import Pose
 from .live_xr_archive import TERMINAL_STATES as LIVE_XR_TERMINAL_STATES
 from .policy_exports import DEFAULT_SPLIT_SEED, DEFAULT_VALIDATION_PERCENT, MAX_VALIDATION_PERCENT, SPLIT_SEED_LIMIT
 from . import retargeting
-from .tracking import TRACKING_PROVIDERS
+from .tracking import TRACKING_PROVIDERS, TRACKING_SHORT_LABELS
 from .workspaces import EmailRequest
 
 
@@ -61,6 +61,7 @@ def cluster_markup() -> dict[str, str]:
         "<!-- default-time-limit -->": escape(defaults.time_limit),
         "<!-- default-memory-gb -->": str(defaults.memory_gb),
         "<!-- default-max-attempts -->": str(defaults.max_attempts),
+        "<!-- default-checkpoint-keep-last -->": str(defaults.checkpoint_keep_last),
         "<!-- cpus-per-gpu -->": str(defaults.cpus_per_gpu),
         "<!-- max-memory-gb -->": str(limits.max_memory_gb),
         "<!-- max-cpus-per-task -->": str(limits.max_cpus_per_task),
@@ -93,6 +94,7 @@ def cluster_markup() -> dict[str, str]:
         "<!-- default-retargeter-option -->": _option(
             retargeting.DEFAULT, next(method["name"] for method in retargeting.METHODS if method["key"] == retargeting.DEFAULT)),
         "<!-- tracking-providers -->": escape(json.dumps(TRACKING_PROVIDERS)),
+        "<!-- tracking-short-labels -->": escape(json.dumps(TRACKING_SHORT_LABELS)),
         "<!-- artifacts-path-example -->": escape(f"{CLUSTER.paths.artifacts}/.../last.ckpt"),
         "<!-- collection-output-example -->": escape(f"{CLUSTER.paths.datasets}/.staging/collection/..."),
         "<!-- data-version-path-example -->": escape(f"{CLUSTER.paths.datasets}/resources/..."),

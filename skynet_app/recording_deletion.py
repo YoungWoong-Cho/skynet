@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from uuid import UUID
 
-from .cluster_config import CLUSTER
+from .cluster_config import CLUSTER, run_root
 from .cluster_runtime import DEFAULT_GATEWAY, WORK_ROOT
 from .dataset_catalog import recording_ids
 from .live_xr_archive import archive_descriptor, TERMINAL_STATES
@@ -398,7 +398,7 @@ class RecordingMaintenance(Maintenance):
         identifier = producer["id"]
         if str(UUID(identifier)) != identifier:
             raise ValueError("Invalid observation producer ID")
-        root = f"{WORK_ROOT}/jobs/runs/{identifier}"
+        root = run_root(WORK_ROOT, identifier)
         payload = json.loads(producer["payload_json"])
         remote = payload.get("root")
         if remote is not None and remote != root + "/observations/" + producer["attempt_token"]:
@@ -505,7 +505,7 @@ class RecordingMaintenance(Maintenance):
             item = json.loads(record["payload_json"])
             key = str(UUID(item["id"]))
             paths = [
-                f"{WORK_ROOT}/jobs/runs/{key}",
+                run_root(WORK_ROOT, key),
                 f"{WORK_ROOT}/datasets/derivatives/dexverse-live/{job['id']}/{key}",
             ]
             if (
@@ -540,7 +540,7 @@ class RecordingMaintenance(Maintenance):
             generation = value.get("generation", "")
             if (
                 not re.fullmatch(r"[a-f0-9]{32}", generation)
-                or remote != f"{WORK_ROOT}/jobs/runs/{generation}"
+                or remote != run_root(WORK_ROOT, generation)
             ):
                 raise ValueError(
                     "Video storage does not match its immutable generation"

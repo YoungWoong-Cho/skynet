@@ -19,6 +19,7 @@ from . import history_journals, storage_files
 
 # The storage helper runs remotely from its source: one SSH exchange per operation.
 _STORAGE_SCRIPT = Path(storage_files.__file__).read_text()
+from .cluster_config import run_root_owner
 from .cluster_runtime import TIMEOUTS
 from .database import canonical_json, utc_now
 from .workspace_schema import LEGACY_WORKSPACE, visible_sql
@@ -450,10 +451,9 @@ class Maintenance:
                 ).fetchone()
             )
         )
-        suffix = "/jobs/runs/" + run["id"]
-        if not run["run_directory"].endswith(suffix):
+        root = run_root_owner(run["run_directory"], run["id"])
+        if root is None:
             raise ValueError("Run directory does not match its immutable run ID")
-        root = run["run_directory"].removesuffix(suffix)
         files = set()
         if kind == "run":
             files.add(run["run_directory"])

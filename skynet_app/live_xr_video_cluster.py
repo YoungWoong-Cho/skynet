@@ -6,7 +6,7 @@ import shlex
 
 from .isaac_job import compile_isaac_job
 from .cluster_runtime import TIMEOUTS, WORK_ROOT, ClusterError, SubmissionOutcomeUnknown
-from .cluster_config import CLUSTER
+from .cluster_config import CLUSTER, run_root
 from .gpu_preflight import GPU_MISSING_MESSAGE, gpu_missing_exit
 from .preparation_states import TERMINAL_FAILURE_STATES
 
@@ -14,7 +14,7 @@ TERMINAL = TERMINAL_FAILURE_STATES | {"COMPLETED", "PREEMPTED"}
 
 
 def control_cluster(transport, job, generation, root, operation, **value):
-    if root != f"{WORK_ROOT}/jobs/runs/{generation.token}":
+    if root != run_root(WORK_ROOT, generation.token):
         raise ValueError("Video capsule does not match its generation")
     # A cancellation cannot finish while a submission is still being made.
     with generation.control_lock:

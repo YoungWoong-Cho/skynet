@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Iterable, Mapping, Sequence
 
-from .cluster_config import CLUSTER
+from .cluster_config import CLUSTER, jobs_run_root
 
 
 if TYPE_CHECKING:
@@ -251,7 +251,7 @@ class ClusterClient:
 
     def run_directory(self, run_id: str) -> str:
         run_id = self._run_id(run_id)
-        return self.storage.run_directory(run_id) if self.storage else f"{CLUSTER.paths.jobs}/runs/{run_id}"
+        return self.storage.run_directory(run_id) if self.storage else jobs_run_root(CLUSTER.paths.jobs, run_id)
 
 
     def candidates(self, gateway: str) -> tuple[str, ...]:

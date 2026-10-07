@@ -12,7 +12,7 @@ from pathlib import PurePosixPath
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .cluster_config import CLUSTER, format_slurm_duration, parse_slurm_duration
+from .cluster_config import CLUSTER, format_slurm_duration, jobs_run_root, parse_slurm_duration
 from .sbatch import SHEBANG, sbatch_header, shell_prelude
 from .uv_bootstrap import UV_COMMAND, uv_locator_lines, workspace_prelude_lines
 
@@ -373,7 +373,7 @@ def build_huggingface_import_job(
     run_id = f"data-import-{import_id}"
     job_slug = re.sub(r"[^A-Za-z0-9_-]+", "-", str(resource["source_key"])).strip("-")[:30]
     job_name = f"hf-{job_slug}-{import_id[:8]}"
-    run_directory = f"{CLUSTER.paths.jobs}/runs/{run_id}"
+    run_directory = jobs_run_root(CLUSTER.paths.jobs, run_id)
     result_path = f"{run_directory}/import-result.json"
     # Keep the v1 wire identity stable for existing imports and their receipts.
     payload = {

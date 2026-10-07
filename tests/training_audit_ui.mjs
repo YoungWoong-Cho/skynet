@@ -123,6 +123,16 @@ try {
   // Provider names come from the server's tracking registry, rendered into the page.
   assert.match(w.trackingLinksHtml({tracking_links:[{provider:'wandb',status:'CONNECTED',url:'https://wandb.ai/team/project/runs/one'}]}), /title="Open Weights &amp; Biases"/);
   assert.equal(w.trackingProviderLabel('mlflow'), 'MLflow');
+  // Link text uses the server's short provider names; an unregistered provider keeps its own label.
+  assert.match(w.trackingLinksHtml({tracking_links:[{provider:'wandb',status:'CONNECTED',url:'https://wandb.ai/team/project/runs/one'}]}), />W&amp;B<\/a>/);
+  assert.match(w.trackingLinksHtml({tracking_links:[{provider:'mlflow',status:'CONNECTED',url:'https://mlflow.example/runs/one'}]}), />MLflow<\/a>/);
+  assert.match(w.trackingLinksHtml({tracking_links:[{provider:'neptune',label:'Neptune',status:'CONNECTED',url:'https://neptune.example/one'}]}), />Neptune<\/a>/);
+  const trackingChoices = [el('wandb-enabled').checked, el('mlflow-enabled').checked];
+  el('wandb-enabled').checked = el('mlflow-enabled').checked = true;
+  w.renderTrackingNamePreview();
+  assert.match(el('tracking-name-preview').innerHTML, /<strong>W&amp;B<\/strong>[\s\S]*<strong>MLflow<\/strong>/);
+  [el('wandb-enabled').checked, el('mlflow-enabled').checked] = trackingChoices;
+  w.renderTrackingNamePreview();
   assert.equal(w.trackingProviderLabel('constructor'), 'constructor', 'an unregistered provider keeps its own name');
 
   // Loading another run removes the previous external tracking destination immediately.

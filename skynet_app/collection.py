@@ -12,7 +12,7 @@ from .data_resource_policy import validate_resource_type
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .cluster_config import CLUSTER
+from .cluster_config import CLUSTER, jobs_run_root
 from .cluster_runtime import ClusterClient, WORK_ROOT
 from .database import Database, canonical_json, content_sha256, new_id, utc_now
 from .experiments import format_slurm_duration, parse_slurm_duration
@@ -1339,7 +1339,7 @@ def compile_collection_sbatch(session: Mapping[str, Any]) -> CompiledCollectionJ
 
     output_path = str(session["storage_snapshot"]["output_path"])
     paths = CLUSTER.paths
-    control_path = f"{paths.jobs}/runs/{session['id']}"
+    control_path = jobs_run_root(paths.jobs, session["id"])
     encoded_manifest = base64.b64encode(
         canonical_json(session["canonical_manifest"]).encode("utf-8")
     ).decode("ascii")

@@ -32,6 +32,29 @@ class ClusterPaths(ProfileModel):
     torch_cache: str
 
 
+# Each run, and each cluster job Skynet submits on its own behalf, owns one directory named by its ID:
+# <jobs>/runs/<id> below a jobs directory, which is <root>/jobs/runs/<id> below a work root.
+# storage_files.py and dataset_cleanup.py run remotely from their source and spell the layout themselves.
+RUNS_DIRECTORY = "runs"
+RUN_ROOTS = f"jobs/{RUNS_DIRECTORY}"
+
+
+def run_root(root: str, identifier: str) -> str:
+    """The directory of job ``identifier`` below the work root ``root``."""
+    return f"{root}/{RUN_ROOTS}/{identifier}"
+
+
+def jobs_run_root(jobs: str, identifier: str) -> str:
+    """The directory of job ``identifier`` below the jobs directory ``jobs``."""
+    return f"{jobs}/{RUNS_DIRECTORY}/{identifier}"
+
+
+def run_root_owner(directory: str, identifier: str) -> str | None:
+    """The work root ``directory`` belongs to when it is job ``identifier``'s directory, else None."""
+    suffix = run_root("", identifier)
+    return directory.removesuffix(suffix) if directory.endswith(suffix) else None
+
+
 class ClusterCommands(ProfileModel):
     slurm_bin: str
     gpu_usage: str

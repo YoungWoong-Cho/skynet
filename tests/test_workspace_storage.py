@@ -21,7 +21,7 @@ from test_pipeline import (
 from test_slurm import make_spec
 
 from skynet_app.adapters import resolve_adapter_plan
-from skynet_app.cluster_config import CLUSTER
+from skynet_app.cluster_config import CLUSTER, jobs_run_root, run_root, run_root_owner
 from skynet_app.cluster_runtime import ClusterClient
 from skynet_app.database import Database
 from skynet_app.pipeline_api import EvaluationRequest, PipelineService, router
@@ -92,6 +92,14 @@ def test_path_is_personal_persistent_and_does_not_rewrite_runs(services):
     with pytest.raises(ValueError, match="another tab"):
         configure(alice, "/new/path", old)
     assert alice.work_root == "/coc/flash7/alice/skynet"
+
+
+def test_run_directories_share_one_layout_below_work_and_jobs_roots():
+    assert run_root("/team/alice", "abc") == "/team/alice/jobs/runs/abc"
+    assert jobs_run_root(CLUSTER.paths.jobs, "abc") == run_root(CLUSTER.paths.work_root, "abc")
+    assert run_root_owner("/team/alice/jobs/runs/abc", "abc") == "/team/alice"
+    assert run_root_owner("/team/alice/jobs/runs/xabc", "abc") is None
+    assert run_root_owner("/team/alice/jobs/other/abc", "abc") is None
 
 
 def test_concurrent_saves_have_one_winner(services):

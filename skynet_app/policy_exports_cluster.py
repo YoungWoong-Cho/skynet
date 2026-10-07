@@ -7,7 +7,7 @@ import re
 import shlex
 from uuid import uuid4
 
-from .cluster_config import CLUSTER
+from .cluster_config import CLUSTER, run_root
 from .sbatch import SHEBANG, cpu_thread_exports, sbatch_header, shell_prelude
 from .uv_bootstrap import UV_COMMAND, uv_locator_lines, workspace_prelude_lines
 from .cluster_runtime import DEFAULT_GATEWAY, ClusterError, SubmissionOutcomeUnknown, WORK_ROOT
@@ -81,7 +81,7 @@ class ClusterPolicyPreparation(RecordingPreflight):
                     detail="Preparing shared recording data on the training cluster")
         attempt_id = str(uuid4())
         relative = f"preparation/{attempt_id}"
-        root = f"{WORK_ROOT}/jobs/runs/{job['id']}/{relative}"
+        root = f"{run_root(WORK_ROOT, job['id'])}/{relative}"
         worker = root + "/worker"
         local_worker = self.root / job["id"] / "worker"
         files = {f"{relative}/worker/{path.relative_to(local_worker)}": path.read_text()
