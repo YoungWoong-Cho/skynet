@@ -27,7 +27,7 @@ from skynet_app.adapters import (
     resolve_adapter_plan,
 )
 from skynet_app.database import Database, content_sha256
-from skynet_app.pipeline_api import EvaluationRequest, PipelineService, ResumeRequest, manual_run_actions
+from skynet_app.pipeline_api import EvaluationRequest, PipelineService, manual_run_actions
 from skynet_app.source_validation import (
     CACHE_KIND as REPOSITORY_ARGUMENT_VALIDATION_CACHE_KIND,
     repository_argument_validation_cache_parameters,
@@ -758,7 +758,6 @@ def test_failed_wandb_binding_reopens_exact_same_run(monkeypatch):
         service._start_tracking(
             spec,
             run,
-            root / "capsules" / run_id,
             "3752691",
             providers=list(spec.tracking.providers),
             continuation_attempt_number=2,
@@ -839,7 +838,6 @@ def test_wandb_retry_recovers_missing_binding(monkeypatch, missing):
         service._start_tracking(
             spec,
             run,
-            root / "capsules" / run_id,
             "3752691",
             providers=list(spec.tracking.providers),
             continuation_attempt_number=2,
@@ -1769,7 +1767,7 @@ def test_manual_resume_submits_the_registered_resumable_checkpoint(monkeypatch):
             is_resumable=True,
         )
 
-        result = service.retry_run(run_id, "resume", "auto")
+        result = service.retry_run(run_id, "auto")
 
         assert result["status"] == "SUBMITTED"
         execution = submitted_execution(cluster)
@@ -1804,7 +1802,7 @@ def test_cancelled_run_resumes_from_valid_checkpoint_in_same_run(monkeypatch):
         )
 
         action = service.run_manual_actions(cancelled)["resume"]
-        result = service.retry_run(run_id, "resume", "auto")
+        result = service.retry_run(run_id, "auto")
 
         assert action["enabled"]
         assert "checkpoint" in str(action["reason"]).lower()
@@ -1890,7 +1888,7 @@ def test_cancelled_run_without_checkpoint_replays_immutable_initial_execution(mo
         cancelled, _, _ = _mark_training_run_cancelled(database, run_id)
 
         action = service.run_manual_actions(cancelled)["resume"]
-        result = service.retry_run(run_id, "resume", "auto")
+        result = service.retry_run(run_id, "auto")
 
         assert action["enabled"]
         assert "initial" in str(action["reason"]).lower()
@@ -2055,7 +2053,7 @@ def test_active_attempt_blocks_manual_resume_despite_exhausted_automatic_budget(
         assert not action["enabled"]
         assert "active" in str(action["reason"]).lower()
         with pytest.raises(ValueError, match="[Aa]ctive"):
-            service.retry_run(run_id, "resume", "auto")
+            service.retry_run(run_id, "auto")
         assert len(database.get_run(run_id)["attempts"]) == 2
         assert cluster.submit_count == 1
 
@@ -2115,33 +2113,8 @@ def test_cancelled_run_without_checkpoint_blocks_invalid_pinned_evidence(
         assert "snapshot" in str(action["reason"]).lower()
         assert reason_fragment in str(action["reason"]).lower()
         with pytest.raises(ValueError, match=reason_fragment):
-            service.retry_run(run_id, "resume", "auto")
+            service.retry_run(run_id, "auto")
         assert len(database.get_run(run_id)["attempts"]) == 1
-        assert cluster.submit_count == 0
-
-
-def test_manual_retry_mode_is_rejected_in_favor_of_rerun(monkeypatch):
-    try:
-        ResumeRequest(mode="invalid")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("invalid manual retry mode was accepted")
-
-    with tempfile.TemporaryDirectory() as directory:
-        database = Database(Path(directory) / "skynet.db")
-        cluster = FakeCluster()
-        service = make_pipeline_service(database, cluster)
-        monkeypatch.setattr("skynet_app.pipeline_api.LOCAL_CAPSULE_ROOT", Path(directory) / "capsules")
-        experiment = service.create_experiment(canonical_spec())
-        run_id = experiment["runs"][0]["id"]
-
-        try:
-            service.retry_run(run_id, "retry", "auto")
-        except ValueError as error:
-            assert "rerun" in str(error)
-        else:
-            raise AssertionError("deprecated retry mode was accepted")
         assert cluster.submit_count == 0
 
 

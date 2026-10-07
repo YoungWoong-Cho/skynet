@@ -17,7 +17,7 @@ def test_recovered_receipt_also_repairs_tracking_without_resubmission(tmp_path, 
     service.submit_experiment(experiment['id'])
     run_id = experiment['runs'][0]['id']
     calls = []
-    def start(spec, run, capsule, job_id, **kwargs):
+    def start(spec, run, job_id, **kwargs):
         calls.append(job_id)
         if tracking_outage:
             raise ConnectionError('temporary tracking outage')

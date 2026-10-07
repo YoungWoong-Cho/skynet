@@ -804,19 +804,6 @@ class TrackingConnectionRequest(BaseModel):
     remember: bool = True
 
 
-class ResumeRequest(GatewayRequest):
-    mode: str = "resume"
-
-    @field_validator("mode")
-    @classmethod
-    def validate_mode(cls, value: str) -> str:
-        if value != "resume":
-            raise ValueError(
-                "mode='retry' is deprecated; use POST /api/runs/{run_id}/rerun"
-            )
-        return value
-
-
 class ExperimentRevisionRequest(GatewayRequest):
     spec: dict[str, Any]
     submit: bool = False
@@ -4971,7 +4958,6 @@ class PipelineService:
                 self._start_tracking(
                     spec,
                     run,
-                    LOCAL_CAPSULE_ROOT / run_id,
                     "",
                     attempt_snapshot=attempt_snapshot,
                     continuation_attempt_number=(
@@ -4981,8 +4967,6 @@ class PipelineService:
                     ),
                 )
                 self._require_native_tracking_bindings(run_id, native_providers)
-            # Logical journal identity; actual capsule files are submitted to the cluster.
-            capsule = LOCAL_CAPSULE_ROOT / run_id
             self._save_submission_script(run_id, attempt["id"], compiled.script)
             # Keep scheduler scripts small regardless of dataset count. Files
             # are pinned by their checksum manifest and verified before sbatch.
@@ -5230,7 +5214,6 @@ class PipelineService:
             self._start_tracking(
                 spec,
                 run,
-                capsule,
                 submission.job_id,
                 attempt_snapshot=attempt_snapshot,
                 continuation_attempt_number=(
@@ -6355,7 +6338,6 @@ class PipelineService:
         self,
         spec: ExperimentSpec,
         run: Mapping[str, Any],
-        capsule: Path,
         job_id: str,
         *,
         attempt_snapshot: Mapping[str, Any] | None = None,
@@ -6363,7 +6345,6 @@ class PipelineService:
         continuation_attempt_number: int | None = None,
         auto_flush: bool | None = None,
     ) -> None:
-        del capsule
         local_run_id = str(run["id"])
         tags = self._tracking_tags(spec, run, job_id)
         if continuation_attempt_number is not None:
@@ -6924,7 +6905,6 @@ class PipelineService:
                 self._start_tracking(
                     spec,
                     run,
-                    LOCAL_CAPSULE_ROOT / run_id,
                     str(attempt["slurm_job_id"]),
                     attempt_snapshot=snapshot if isinstance(snapshot, Mapping) else None,
                     providers=missing,
@@ -8871,7 +8851,6 @@ class PipelineService:
         self._start_tracking(
             spec,
             run,
-            LOCAL_CAPSULE_ROOT / run_id,
             latest_job_id,
             providers=providers,
             auto_flush=False,
@@ -9027,11 +9006,7 @@ class PipelineService:
             is_selected_for_inference=False, status="AVAILABLE", metadata=payload,
         )
 
-    def retry_run(self, run_id: str, mode: str, gateway: str) -> dict[str, Any]:
-        if mode != "resume":
-            raise ValueError(
-                "clean retry is deprecated; use POST /api/runs/{run_id}/rerun"
-            )
+    def retry_run(self, run_id: str, gateway: str) -> dict[str, Any]:
         with self._reconcile_lock:
             run = self.database.get_run(run_id)
             if not run:
@@ -12053,9 +12028,9 @@ def recover_run_submission(run_id: str, request: GatewayRequest) -> dict[str, An
 
 
 @router.post("/runs/{run_id}/resume")
-def resume_run(run_id: str, request: ResumeRequest) -> dict[str, Any]:
+def resume_run(run_id: str, request: GatewayRequest) -> dict[str, Any]:
     try:
-        return service.retry_run(run_id, request.mode, request.gateway)
+        return service.retry_run(run_id, request.gateway)
     except Exception as error:
         raise _http_error(error) from error
 

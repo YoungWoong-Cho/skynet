@@ -74,7 +74,7 @@ def test_training_script_runs_the_preflight_after_its_traps_and_before_any_work(
 def test_every_other_gpu_builder_runs_the_preflight_and_cpu_builders_do_not():
     root = CLUSTER.paths.work_root
     default = CLUSTER.queue(CLUSTER.defaults.queue_policy)
-    profile = {"account": default.account, "partition": default.partition, "runtime": f"{root}/env",
+    profile = {"partition": default.partition, "runtime": f"{root}/env",
                "repository": f"{root}/repo", "gpu_type": "any"}
     isaac = isaac_job.compile_isaac_job(profile, f"{root}/jobs/probe", "probe", ["true"], checks=["verify_source"])
     assert isaac.count(PREFLIGHT) == 1 and isaac.index("umask 077") < isaac.index(PREFLIGHT) < isaac.index("verify_source")

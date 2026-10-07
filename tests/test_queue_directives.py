@@ -32,5 +32,5 @@ def test_every_job_builder_uses_the_queue_directives(monkeypatch):
     compiled = slurm.compile_sbatch(spec, resolve_adapter_plan(spec), run_id="qos")
     assert f"#SBATCH --qos={configured.queue_for_partition(spec.resources.partition).qos}" in compiled.script
     root = configured.paths.work_root
-    profile = {"account": default.account, "partition": default.partition, "runtime": f"{root}/env", "repository": f"{root}/repo", "gpu_type": "any"}
+    profile = {"partition": default.partition, "runtime": f"{root}/env", "repository": f"{root}/repo", "gpu_type": "any"}
     assert f"#SBATCH --qos={default.qos}" in isaac_job.compile_isaac_job(profile, f"{root}/jobs/probe", "probe", ["true"])

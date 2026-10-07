@@ -161,7 +161,7 @@ class LiveXRService:
                     raise ValueError(
                         "Live runtime paths must be inside the configured cluster workspace"
                     )
-            for key in ("account", "partition", "gpu_type"):
+            for key in ("partition", "gpu_type"):
                 if not re.fullmatch(r"[A-Za-z0-9_-]+", profile[key]):
                     raise ValueError(f"Invalid live profile {key}")
         else:

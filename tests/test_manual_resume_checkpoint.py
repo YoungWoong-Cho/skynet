@@ -277,7 +277,7 @@ def test_manual_resume_recovers_unregistered_checkpoint_idempotently(cancelled_t
     assert first["metadata_json"] == receipt
     assert len(service.database.get_run(run["id"])["checkpoints"]) == 1
     probe_count = sum("SKYNET_MANUAL_RESUME_CHECKPOINT" in cmd for cmd in cluster.run_commands)
-    result = service.retry_run(run["id"], "resume", "sky2")
+    result = service.retry_run(run["id"], "sky2")
     assert result["status"] == "SUBMITTED"
     assert sum("SKYNET_MANUAL_RESUME_CHECKPOINT" in cmd for cmd in cluster.run_commands) == probe_count
     assert submitted_execution(cluster)["initial_checkpoint"] == str(target)
@@ -287,7 +287,7 @@ def test_manual_resume_recovers_unregistered_checkpoint_idempotently(cancelled_t
 def test_manual_resume_imports_before_submitting(cancelled_training):
     service, cluster, run, _, _, target, _ = cancelled_training
     assert service.database.get_run(run["id"])["checkpoints"] == []
-    result = service.retry_run(run["id"], "resume", "sky2")
+    result = service.retry_run(run["id"], "sky2")
     refreshed = service.database.get_run(run["id"])
     assert result["status"] == "SUBMITTED"
     assert len(refreshed["checkpoints"]) == 1
@@ -299,7 +299,7 @@ def test_manual_resume_corruption_does_not_submit_or_replay(cancelled_training):
     service, cluster, run, _, _, target, _ = cancelled_training
     target.write_bytes(b"partial checkpoint")
     with pytest.raises(ValueError, match="Cannot verify manual resume checkpoint"):
-        service.retry_run(run["id"], "resume", "sky2")
+        service.retry_run(run["id"], "sky2")
     refreshed = service.database.get_run(run["id"])
     assert refreshed["status"] == "CANCELLED"
     assert len(refreshed["attempts"]) == cluster.submit_count == 1
@@ -312,7 +312,7 @@ def test_manual_resume_unreadable_candidates_do_not_submit_or_replay(cancelled_t
     monkeypatch.setattr(pipeline_api, "_MANUAL_RESUME_CHECKPOINT_PROBE",
                         _scandir_failure(target.parent) + pipeline_api._MANUAL_RESUME_CHECKPOINT_PROBE)
     with pytest.raises(ValueError, match="Cannot verify manual resume checkpoint"):
-        service.retry_run(run["id"], "resume", "sky2")
+        service.retry_run(run["id"], "sky2")
     refreshed = service.database.get_run(run["id"])
     assert refreshed["status"] == "CANCELLED"
     assert len(refreshed["attempts"]) == cluster.submit_count == 1

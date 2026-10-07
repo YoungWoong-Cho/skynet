@@ -99,7 +99,7 @@ def test_old_run_submission_resume_and_rerun_fail_before_any_mutation(migration,
     before=m.db.get_run(m.run['id'])
     for call in (
         lambda:service._submit_stage(m.run['id'],m.stage['id'],'auto'),
-        lambda:service.retry_run(m.run['id'],'resume','auto'),
+        lambda:service.retry_run(m.run['id'],'auto'),
         lambda:service.rerun_run(m.run['id'],'auto'),
     ):
         with pytest.raises(ValueError,match='retired'):

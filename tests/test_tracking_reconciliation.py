@@ -152,7 +152,7 @@ def completed_tracking(tmp_path, monkeypatch, *, native=False, initialize=True):
     if initialize:
         service._start_tracking(
             ExperimentSpec.model_validate(run['resolved_spec_json']), run,
-            tmp_path / 'capsules' / run_id, run['attempts'][0]['slurm_job_id'],
+            run['attempts'][0]['slurm_job_id'],
             providers=providers,
         )
         assert db.list_tracking_bindings('run', run_id)[0]['status'] == 'CONNECTED'

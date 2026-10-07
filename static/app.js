@@ -12675,7 +12675,7 @@ async function resumeRun(id, reason = "") {
     }
     const result = await api(`/api/runs/${encodeURIComponent(id)}/resume`, {
       method: "POST",
-      body: JSON.stringify({ mode: "resume", gateway: elements.gateway.value }),
+      body: JSON.stringify({ gateway: elements.gateway.value }),
     });
     submitted = true;
     clearNotificationScope(scope);

@@ -36,7 +36,7 @@ def test_builders_start_with_the_shared_shebang_and_configured_shapes():
     assert training.startswith(SHEBANG + "\n") and "#SBATCH --export=NIL" in training
     root = CLUSTER.paths.work_root
     default = CLUSTER.queue(CLUSTER.defaults.queue_policy)
-    profile = {"account": default.account, "partition": default.partition, "runtime": f"{root}/env", "repository": f"{root}/repo", "gpu_type": "any"}
+    profile = {"partition": default.partition, "runtime": f"{root}/env", "repository": f"{root}/repo", "gpu_type": "any"}
     replay = isaac_job.compile_isaac_job(profile, f"{root}/jobs/probe", "probe", ["true"])
     assert replay.startswith(SHEBANG + "\n")
     assert f"#SBATCH --mem={JOBS.isaac_replay.memory_gb}G\n" in replay and f"#SBATCH --time={JOBS.isaac_replay.time_limit}\n" in replay
