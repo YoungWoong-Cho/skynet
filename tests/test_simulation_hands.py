@@ -241,6 +241,9 @@ def test_catalog_exposes_thirteen_imported_variants_and_missing_mesh_reason():
                 assert selection(task["key"], hand["key"])[1] == hand
     with pytest.raises(ValueError, match="missing thumb mesh"):
         selection(catalog()["default_task"], "skynet_allegro_v4_left")
+    # The default hand comes from the same cluster-profile release as the default task.
+    from skynet_app.cluster_config import CLUSTER
+    assert catalog()["default_robot"] == CLUSTER.defaults.live_collection.robot
 
 
 def test_visual_names_are_valid_usd_identifiers(source):

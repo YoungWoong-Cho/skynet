@@ -19,9 +19,8 @@ import numpy as np
 from .cluster_runtime import TIMEOUTS
 from .database import canonical_json
 from .mesh_assets import bake_gltf_nodes
-from .hands import HandLibrary, ROOT, parse_urdf, joint_metadata
+from .hands import HandLibrary, ROOT, hand_asset_url, parse_urdf, joint_metadata
 
-DEFAULT_ROBOT = "skynet_shadow_right"
 _BUILD_LOCK = threading.RLock()
 WRIST_JOINTS = [
     "skynet_x",
@@ -255,7 +254,7 @@ def build(robot, library=None, output_root=None):
         for item in xml.findall(".//material"):
             if item.get("name"):
                 item.set("name", safe_name(item.get("name")))
-        prefix = f"/api/hands/{spec['key']}/{spec['side']}/assets/"
+        prefix = hand_asset_url(spec["key"], spec["side"])
         asset_names = {name: "assets/" + name for name in model["files"]}
         for mesh in xml.findall(".//mesh"):
             url = mesh.get("filename", "")

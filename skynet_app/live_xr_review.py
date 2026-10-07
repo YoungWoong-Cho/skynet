@@ -14,6 +14,7 @@ import numpy as np
 from .recording_guard import guarded_recording
 from .cluster_runtime import DEFAULT_GATEWAY, TIMEOUTS
 from .database import canonical_json, utc_now
+from .live_xr_archive import is_archived
 from .live_xr_catalog import selection
 from .remote_artifacts import RemoteArtifact
 
@@ -303,11 +304,7 @@ class LiveReviewService:
             return RemoteArtifact(transport, gateway, path, MAX_BYTES)
         if name not in {"review.json", "summary.json"}:
             raise KeyError("Review file not found")
-        if (job.get("archive") or {}).get("state") in {
-            "VERIFIED",
-            "CLEANUP_PENDING",
-            "READY",
-        }:
+        if is_archived(job):
             root = archive.derived_root(job)
             transport, gateway = archive.cluster, DEFAULT_GATEWAY
         else:

@@ -4,6 +4,7 @@ from copy import deepcopy
 
 from . import data_selection
 from .adapters.dataset_inputs import resolve_data_selections
+from .training_contracts import RECORDING_DATASET_FORMAT
 
 
 def evaluation_target_contract(spec):
@@ -37,7 +38,7 @@ def validate_evaluation_target(spec, target, unseen_embodiment=False):
     metadata = target.get("metadata") or {}
     if metadata.get("contract") != evaluation_target_contract(spec):
         raise ValueError("The evaluation target must be a prepared HAT RGB dataset")
-    if metadata.get("format") != "skynet.recording-dataset/v1" or (metadata.get("validation") or {}).get("status") != "PASSED":
+    if metadata.get("format") != RECORDING_DATASET_FORMAT or (metadata.get("validation") or {}).get("status") != "PASSED":
         raise ValueError("The evaluation dataset must pass shared recording-format validation")
     hands = embodiment_ids(metadata)
     if len(hands) != 1:

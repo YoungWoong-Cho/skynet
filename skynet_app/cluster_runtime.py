@@ -251,7 +251,7 @@ class ClusterClient:
 
     def run_directory(self, run_id: str) -> str:
         run_id = self._run_id(run_id)
-        return self.storage.run_directory(run_id) if self.storage else f"{WORK_ROOT}/jobs/runs/{run_id}"
+        return self.storage.run_directory(run_id) if self.storage else f"{CLUSTER.paths.jobs}/runs/{run_id}"
 
 
     def candidates(self, gateway: str) -> tuple[str, ...]:

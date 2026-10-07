@@ -13,7 +13,7 @@ from .data_resource_policy import validate_resource_type
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .cluster_config import CLUSTER
-from .cluster_runtime import ClusterClient, ClusterError, WORK_ROOT
+from .cluster_runtime import ClusterClient, WORK_ROOT
 from .database import Database, canonical_json, content_sha256, new_id, utc_now
 from .experiments import format_slurm_duration, parse_slurm_duration
 from .gpu_preflight import GPU_MISSING_MESSAGE, gpu_missing_exit, gpu_preflight_lines

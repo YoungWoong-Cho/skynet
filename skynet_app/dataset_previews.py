@@ -132,8 +132,7 @@ class DatasetPreviews:
                 plan = self.plans.get(identity, {})
             request = dict(path=path, sha256=sha, episode_index=episode_index, start=start, count=count,
                            allowed_roots=list(allowed_roots), **plan)
-            runtime = next((p.environment_path for p in CLUSTER.runtime_profiles.values()
-                            if 'isaac_lab' in p.versions and p.environment_path), None)
+            runtime = CLUSTER.runtime_profiles[CLUSTER.defaults.rendering_runtime_profile].environment_path
             if not runtime:
                 raise ValueError('No configured Python environment can read saved dataset arrays')
             code = self.program + '\nprint(json.dumps(read_frames(' + repr(request) + '), separators=(",", ":"), allow_nan=False))\n'

@@ -2,10 +2,10 @@ import json
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, StrictFloat
-from .hands import HandLibrary
+from .hands import HANDS_ROUTE, POSE_NAME_MAX_LENGTH, HandLibrary
 from .hand_bundles import definitions
 
-router = APIRouter(prefix="/api/hands", tags=["Hands"])
+router = APIRouter(prefix=HANDS_ROUTE, tags=["Hands"])
 library = HandLibrary()
 
 
@@ -54,7 +54,7 @@ def asset(key: str, side: str, path: str):
 
 
 class Pose(BaseModel):
-    name: str = Field(min_length=1, max_length=80)
+    name: str = Field(min_length=1, max_length=POSE_NAME_MAX_LENGTH)
     revision: str
     joints: dict[str, StrictFloat]
 
@@ -70,7 +70,7 @@ def save_pose(key: str, side: str, pose: Pose):
 
 
 class PoseName(BaseModel):
-    name: str = Field(min_length=1, max_length=80)
+    name: str = Field(min_length=1, max_length=POSE_NAME_MAX_LENGTH)
 
 
 @router.patch("/{key}/{side}/poses/{pose_id}")

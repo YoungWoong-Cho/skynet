@@ -22,6 +22,8 @@ ROOT = Path(__file__).resolve().parent.parent
 # The HTTP route that serves installed hands (the prefix of hands_api's router).
 # Installed URDFs and models store URLs below it, so changing it orphans them.
 HANDS_ROUTE = "/api/hands"
+# The longest pose name a save or rename accepts.
+POSE_NAME_MAX_LENGTH = 80
 
 
 def hand_url(key, side):
@@ -396,8 +398,8 @@ class HandLibrary:
 
     def validate_pose_name(self, key, side, name, exclude_id=None):
         name = name.strip()
-        if not name or len(name) > 80:
-            raise ValueError("Give the pose a name of 1–80 characters")
+        if not name or len(name) > POSE_NAME_MAX_LENGTH:
+            raise ValueError(f"Give the pose a name of 1–{POSE_NAME_MAX_LENGTH} characters")
         if any(p["id"] != exclude_id and p["name"].casefold() == name.casefold()
                for p in self.poses(key, side)):
             raise ValueError("A pose with this name already exists for this hand and side. Choose a different name.")

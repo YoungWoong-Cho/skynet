@@ -17,6 +17,12 @@ from skynet_app.cluster_runtime import (
 )
 
 
+def local_work_root(monkeypatch, root):
+    """Point the deployment root, and the jobs directory that holds unowned run directories, at ``root``."""
+    monkeypatch.setattr(cluster_runtime, "WORK_ROOT", root)
+    monkeypatch.setattr(cluster_runtime.CLUSTER.paths, "jobs", f"{root}/jobs")
+
+
 class RecordingClusterClient(ClusterClient):
     def __init__(self) -> None:
         super().__init__(("sky1", "sky2"))
@@ -38,6 +44,8 @@ def test_submission_archives_script_by_slurm_job_id() -> None:
     assert submission.job_id == "4815162342"
     assert submission.gateway == "sky2"
     assert submission.script_path.endswith("/run-123/attempts/4815162342/job.sbatch")
+    # Without workspace storage the run lives under the configured jobs directory.
+    assert submission.run_directory == f"{cluster_runtime.CLUSTER.paths.jobs}/runs/run-123"
     host, command, stdin = client.commands[0]
     assert host == "sky2"
     assert "sbatch --parsable" in command
@@ -116,7 +124,7 @@ def test_pinned_explicit_gateway_is_prompt_and_ambiguous_retry_submits_once(
         command = bin_root / command_name
         command.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
         command.chmod(0o755)
-    monkeypatch.setattr(cluster_runtime, "WORK_ROOT", str(work_root))
+    local_work_root(monkeypatch, str(work_root))
     monkeypatch.setattr(cluster_runtime, "SLURM_BIN", str(bin_root))
     monkeypatch.setenv("SKYNET_TEST_SBATCH_COUNTER", str(counter))
 
@@ -604,7 +612,7 @@ def test_named_gateway_is_a_preference_with_the_others_as_fallback():
 
 
 def test_recovery_never_reports_no_job_while_accounting_is_unavailable(tmp_path, monkeypatch):
-    monkeypatch.setattr(cluster_runtime, "WORK_ROOT", str(tmp_path / "work"))
+    local_work_root(monkeypatch, str(tmp_path / "work"))
     token = ClusterClient._submission_token("attempt-1")
     client = _fake_scheduler(tmp_path, monkeypatch, sacct="exit 1", squeue="true")
     with pytest.raises(ClusterError, match="accounting is unavailable"):
@@ -682,7 +690,7 @@ def test_file_stream_without_cancellation_preserves_original_contract(monkeypatc
 
 def test_capsule_batch_transfers_exact_files_in_one_verified_connection(tmp_path, monkeypatch):
     root = tmp_path.resolve() / "work"
-    monkeypatch.setattr(cluster_runtime, "WORK_ROOT", str(root))
+    local_work_root(monkeypatch, str(root))
     client = ClusterClient(("sky2",))
     calls = []
     def local(host, command, *, stdin=None, timeout=30):
@@ -721,7 +729,7 @@ def test_capsule_batch_rejects_invalid_paths_and_unverified_receipts(monkeypatch
 def test_capsule_batch_preserves_symlink_targets(tmp_path, monkeypatch):
     import pytest
     root = tmp_path.resolve() / "work"
-    monkeypatch.setattr(cluster_runtime, "WORK_ROOT", str(root))
+    local_work_root(monkeypatch, str(root))
     destination = root / "jobs/runs/batch-1/worker"
     destination.mkdir(parents=True)
     protected = tmp_path.resolve() / "protected"
@@ -742,7 +750,7 @@ def test_capsule_batch_preserves_symlink_targets(tmp_path, monkeypatch):
 def test_immutable_capsule_upload_reuses_identical_content_and_rejects_replacement(tmp_path, monkeypatch):
     import pytest
     root = tmp_path.resolve() / "work"
-    monkeypatch.setattr(cluster_runtime, "WORK_ROOT", str(root))
+    local_work_root(monkeypatch, str(root))
     client = ClusterClient(("sky2",))
     def local(host, command, *, stdin=None, timeout=30):
         result = subprocess.run(command, shell=True, input=stdin, text=True, capture_output=True)

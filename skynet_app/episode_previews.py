@@ -129,8 +129,7 @@ class EpisodePreviews:
                 raise ValueError("Recording and legacy metadata are not on the same storage host")
             images = dict(image, path=image_path)
         profile = job["profile"]
-        runtime = next((p.environment_path for p in CLUSTER.runtime_profiles.values()
-                        if "isaac_lab" in p.versions and p.environment_path), None)
+        runtime = CLUSTER.runtime_profiles[CLUSTER.defaults.rendering_runtime_profile].environment_path
         if not runtime:
             raise ValueError("No configured Python environment can read recorded arrays")
         if transport is archive.cluster:

@@ -28,8 +28,8 @@ def enrich_demonstration(database, cluster, spec, viewer, gateway, *, duration=0
         sources = recorded_episode_sources(database, cluster, spec)
     except ValueError:
         return viewer
-    runtime = next((p for p in CLUSTER.runtime_profiles.values() if "isaac_lab" in p.versions and p.environment_path), None)
-    if runtime is None:
+    runtime = CLUSTER.runtime_profiles[CLUSTER.defaults.rendering_runtime_profile].environment_path
+    if not runtime:
         return viewer
     repository = str(PurePosixPath(CLUSTER.paths.repositories) / "skynet-dexverse" / str(capture.get("source_revision", "")))
     if capture.get("source_revision") == V1_REVISION:
@@ -38,7 +38,7 @@ def enrich_demonstration(database, cluster, spec, viewer, gateway, *, duration=0
     program = (Path(episode_geometry.__file__).read_text() + "\nimport pickle,io,json,hashlib\n"
                + inspect.getsource(ArrayUnpickler) + "\n" + inspect.getsource(validate_identity) + "\n" + inspect.getsource(attach_demonstration)
                + "\nprint(json.dumps(attach_demonstration(" + repr(request) + "),allow_nan=False))\n")
-    _, output = cluster.run_with_fallback(shlex.quote(runtime.environment_path + "/bin/python") + " -", gateway, stdin=program, timeout=TIMEOUTS.rollout_preview_seconds)
+    _, output = cluster.run_with_fallback(shlex.quote(runtime + "/bin/python") + " -", gateway, stdin=program, timeout=TIMEOUTS.rollout_preview_seconds)
     return json.loads(output)
 
 

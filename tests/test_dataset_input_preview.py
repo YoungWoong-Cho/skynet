@@ -167,9 +167,14 @@ def test_chunk_cache_is_content_and_workspace_scoped_bounded_and_rechecks_availa
         calls = 0
         def run_with_fallback(self, *args, **kwargs):
             self.calls += 1
+            self.command = args[0]
             return 'test', json.dumps(result)
     cluster = Cluster(); db = SimpleNamespace(workspace_id='first')
     first = cache.frames(db, cluster, dataset, 0, 0, 2)
+    # Saved arrays are read with the configured rendering (Isaac Lab) environment.
+    from skynet_app.cluster_config import CLUSTER
+    rendering = CLUSTER.runtime_profiles[CLUSTER.defaults.rendering_runtime_profile]
+    assert cluster.command == f"{rendering.environment_path}/bin/python -"
     assert cache.frames(db, cluster, dataset, 0, 0, 2) == first
     assert cluster.calls == 1
     cache.frames(SimpleNamespace(workspace_id='second'), cluster, dataset, 0, 0, 2)
@@ -191,7 +196,7 @@ def test_registered_old_dataset_and_streams_remain_readable_after_work_root_chan
     new_root = str(tmp_path / 'new-personal-root')
     roots = {new_root, old_root} if source_root == 'historical' else {new_root}
     config = SimpleNamespace(paths=SimpleNamespace(datasets=old_root if source_root == 'shared' else '/registered/shared/datasets'),
-                             runtime_profiles=module.CLUSTER.runtime_profiles)
+                             runtime_profiles=module.CLUSTER.runtime_profiles, defaults=module.CLUSTER.defaults)
     monkeypatch.setattr(module, 'CLUSTER', config)
     class Cluster:
         work_root = new_root

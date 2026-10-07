@@ -1,8 +1,7 @@
 """Live choices audited against one pinned DexVerse release; no simulator imports."""
 
 from copy import deepcopy
-from .dexverse_release import REVISION, TASK
-from .hand_bundles import DEFAULT_ROBOT as ROBOT
+from .dexverse_release import REVISION, ROBOT, TASK
 from .hand_bundles import definitions
 from .retargeting import choices, DEFAULT
 from .dexverse_versions import collection_tasks

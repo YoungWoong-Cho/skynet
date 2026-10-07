@@ -12,12 +12,13 @@ from skynet_app import cluster_runtime
 from skynet_app.adapters import resolve_adapter_plan
 from skynet_app.cluster_runtime import ClusterClient, ClusterError
 from skynet_app.slurm import _capsule_materializers, compile_sbatch
+from test_cluster_runtime import local_work_root
 from test_slurm import make_spec
 
 
 def local_client(tmp_path, monkeypatch):
     root = tmp_path.resolve() / "cluster"
-    monkeypatch.setattr(cluster_runtime, "WORK_ROOT", str(root))
+    local_work_root(monkeypatch, str(root))
     client = ClusterClient(("sky2",))
 
     def local_ssh(host, command, *, stdin=None, timeout=30):

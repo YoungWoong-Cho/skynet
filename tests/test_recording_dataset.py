@@ -82,6 +82,12 @@ def request(tmp_path, sources, name='a', rgb=False):
         observation_requirements={'streams':streams}, source_revision='test-v1')
 
 
+def test_standalone_format_matches_the_training_contract():
+    # Capsules ship this reader without the app package, so it keeps its own copy of the format.
+    from skynet_app.training_contracts import RECORDING_DATASET_FORMAT
+    assert FORMAT == RECORDING_DATASET_FORMAT
+
+
 def test_two_adapter_manifests_share_exact_state_file_and_no_payload_copy(tmp_path):
     src, actions, states = source(tmp_path)
     first = prepare(request(tmp_path,[src]))
