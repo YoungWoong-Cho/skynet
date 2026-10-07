@@ -14,9 +14,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from collections import OrderedDict
+from collections import ChainMap, OrderedDict
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
@@ -312,34 +312,61 @@ def _serialize_events(events: Sequence[Mapping[str, Any]]) -> bytes:
     return b"".join(_event_line(event) for event in events)
 
 
+@dataclass(frozen=True)
+class _SpoolSnapshot:
+    """Parsed spool events and the queue identity an append extends, shared read-only.
+
+    ``dirty`` marks events normalised in memory that the stored bytes do not
+    reflect yet. ``sequence`` is the highest queued sequence and ``by_key`` maps
+    each (operation, idempotency key) to its latest event, so an append extends
+    both instead of rescanning the whole queue.
+    """
+
+    events: list[dict[str, Any]]
+    dirty: bool = False
+    sequence: int = 0
+    by_key: Mapping[tuple[Any, Any], dict[str, Any]] = field(default_factory=dict)
+
+    def extended(self, events: Sequence[dict[str, Any]], dirty: bool) -> "_SpoolSnapshot":
+        """This queue followed by ``events``; the shared index is copied, never mutated."""
+        by_key = dict(self.by_key)
+        sequence = self.sequence
+        for event in events:
+            sequence = max(sequence, int(event["sequence"]))
+            payload = event.get("payload")
+            if isinstance(payload, Mapping) and payload.get("idempotency_key"):
+                by_key[(event.get("operation"), payload["idempotency_key"])] = event
+        return _SpoolSnapshot([*self.events, *events], dirty, sequence, by_key)
+
+
 class _SpoolCache:
     """Parsed spools keyed by content digest; bridges are rebuilt on every call."""
 
     def __init__(self, budget_bytes: int) -> None:
         self._budget = budget_bytes
         self._lock = threading.Lock()
-        self._entries: OrderedDict[tuple[str, str], tuple[list[dict[str, Any]], bool, int]] = OrderedDict()
+        self._entries: OrderedDict[tuple[str, str], tuple[_SpoolSnapshot, int]] = OrderedDict()
         self._size = 0
 
-    def get(self, key: tuple[str, str]) -> tuple[list[dict[str, Any]], bool] | None:
+    def get(self, key: tuple[str, str]) -> _SpoolSnapshot | None:
         with self._lock:
             entry = self._entries.get(key)
             if entry is None:
                 return None
             self._entries.move_to_end(key)
-            return entry[0], entry[1]
+            return entry[0]
 
-    def put(self, key: tuple[str, str], events: list[dict[str, Any]], dirty: bool, size: int) -> None:
+    def put(self, key: tuple[str, str], snapshot: _SpoolSnapshot, size: int) -> None:
         with self._lock:
             previous = self._entries.pop(key, None)
             if previous is not None:
-                self._size -= previous[2]
+                self._size -= previous[1]
             if size > self._budget:
                 return
-            self._entries[key] = (events, dirty, size)
+            self._entries[key] = (snapshot, size)
             self._size += size
             while self._size > self._budget:
-                _, (_, _, evicted) = self._entries.popitem(last=False)
+                _, (_, evicted) = self._entries.popitem(last=False)
                 self._size -= evicted
 
 
@@ -382,7 +409,7 @@ class _SpoolBridge:
             self.run_capsule.mkdir(parents=True, exist_ok=True)
         with self._locked():
             if not self.spool_path.exists():
-                self._write_spool_unlocked(b"", [])
+                self._write_spool_unlocked(b"", _SpoolSnapshot([]))
             if not self.state_path.exists():
                 self._write_state_unlocked(self._empty_state())
 
@@ -487,43 +514,42 @@ class _SpoolBridge:
         """Migrate legacy queued events in place; True when the spool must be rewritten."""
         return False
 
-    def _spool_snapshot(self) -> tuple[list[dict[str, Any]], bool, bytes | None]:
-        """Parsed spool events, memoised on their content digest.
+    def _spool_snapshot(self) -> tuple[_SpoolSnapshot, bytes | None]:
+        """The parsed spool memoised on its content digest, with the bytes when they were read.
 
-        Returns (events, dirty, payload): ``dirty`` marks events normalised in
-        memory that the stored bytes do not reflect yet, and ``payload`` carries
-        the bytes when they had to be read. A journal records its digest, so an
-        unchanged journal spool is served without fetching its chunks. Callers
-        share the list and never mutate it.
+        A journal records its digest, so an unchanged journal spool is served
+        without fetching its chunks. Legacy events are normalised once per
+        distinct content, when it is parsed. Callers share the snapshot and
+        never mutate it.
         """
         try:
             if self._journal:
                 cached = _SPOOL_CACHE.get(self._cache_key(self.spool_path.sha256()))
                 if cached is not None:
-                    return (*cached, None)
+                    return cached, None
             payload = self.spool_path.read_bytes()
         except FileNotFoundError:
-            return [], False, None
+            return _SpoolSnapshot([]), None
         key = self._cache_key(hashlib.sha256(payload).hexdigest())
         cached = _SPOOL_CACHE.get(key)
         if cached is None:
             events = self._parse_events(payload)
-            cached = (events, self._normalize_events(events))
-            _SPOOL_CACHE.put(key, *cached, len(payload))
-        return (*cached, payload)
+            cached = _SpoolSnapshot([]).extended(events, self._normalize_events(events))
+            _SPOOL_CACHE.put(key, cached, len(payload))
+        return cached, payload
 
     def _events_unlocked(self) -> list[dict[str, Any]]:
-        return self._spool_snapshot()[0]
+        return self._spool_snapshot()[0].events
 
-    def _write_spool_unlocked(self, payload: bytes, events: list[dict[str, Any]], dirty: bool = False) -> None:
+    def _write_spool_unlocked(self, payload: bytes, snapshot: _SpoolSnapshot) -> None:
         self._atomic_write(self.spool_path, payload)
-        _SPOOL_CACHE.put(self._cache_key(hashlib.sha256(payload).hexdigest()), events, dirty, len(payload))
+        _SPOOL_CACHE.put(self._cache_key(hashlib.sha256(payload).hexdigest()), snapshot, len(payload))
 
     def _persisted_events_unlocked(self) -> list[dict[str, Any]]:
-        events, dirty, _ = self._spool_snapshot()
-        if dirty:
-            self._write_spool_unlocked(_serialize_events(events), events)
-        return events
+        snapshot, _ = self._spool_snapshot()
+        if snapshot.dirty:
+            self._write_spool_unlocked(_serialize_events(snapshot.events), replace(snapshot, dirty=False))
+        return snapshot.events
 
     def _idempotency_key(
         self,
@@ -559,18 +585,14 @@ class _SpoolBridge:
             for operation, payload in requests
         ]
         with self._locked():
-            events, dirty, existing = self._spool_snapshot()
-            by_key = {
-                (item.get("operation"), item["payload"]["idempotency_key"]): item
-                for item in events
-                if isinstance(item.get("payload"), Mapping)
-                and item["payload"].get("idempotency_key")
-            }
-            sequence = max((int(item["sequence"]) for item in events), default=0)
+            snapshot, existing = self._spool_snapshot()
+            # Keys appended here shadow the shared index, which a failed write leaves untouched.
+            by_key = ChainMap({}, snapshot.by_key)
+            sequence = snapshot.sequence
             selected: list[dict[str, Any]] = []
             appended: list[dict[str, Any]] = []
             for operation, safe_payload in safe_requests:
-                key = self._idempotency_key(operation, safe_payload, events, selected)
+                key = self._idempotency_key(operation, safe_payload, snapshot.events, selected)
                 event = by_key.get((operation, key)) if key else None
                 if event is None:
                     sequence += 1
@@ -586,16 +608,18 @@ class _SpoolBridge:
                     if key:
                         by_key[(operation, key)] = event
                 selected.append(event)
-            if appended or dirty:
-                if dirty:
-                    existing = _serialize_events(events)
+            if appended or snapshot.dirty:
+                if snapshot.dirty:
+                    existing = _serialize_events(snapshot.events)
                 elif existing is None:
                     existing = self.spool_path.read_bytes() if self.spool_path.exists() else b""
                 # The shared journal and filesystem both atomically publish the
                 # append. No caller advances its source cursor before this succeeds.
                 payload = existing + _serialize_events(appended)
                 # Events are queued as sanitized; legacy shapes migrate on the next pass.
-                self._write_spool_unlocked(payload, [*events, *appended], self._normalize_events(appended))
+                self._write_spool_unlocked(
+                    payload, snapshot.extended(appended, self._normalize_events(appended))
+                )
         report = self.drain_spool() if self.settings.auto_flush else None
         error = report.errors[0] if report and report.errors else None
         with self._locked():
@@ -619,12 +643,11 @@ class _SpoolBridge:
             return sum(int(event["sequence"]) > acknowledged for event in self._events_unlocked())
 
     def _keyed_metric_payloads(self, operations: frozenset[str]) -> list[tuple[str, Mapping[str, Any]]]:
+        """The latest queued payload per idempotency key, read from the shared index."""
         return [
-            (str(payload["idempotency_key"]), payload)
-            for event in self._events_unlocked()
-            if event.get("operation") in operations
-            and isinstance((payload := event.get("payload")), Mapping)
-            and payload.get("idempotency_key")
+            (str(key), event["payload"])
+            for (operation, key), event in self._spool_snapshot()[0].by_key.items()
+            if operation in operations
         ]
 
     def metric_idempotency_keys(self) -> set[str]:

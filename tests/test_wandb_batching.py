@@ -7,7 +7,7 @@ from email.message import Message
 import pytest
 
 from test_tracking import FakeWandBBridge
-from skynet_app.tracking import WandBBridge, WandBSettings
+from skynet_app.tracking import WandBBridge, WandBSettings, _SpoolSnapshot
 
 
 class WireBridge(FakeWandBBridge):
@@ -190,6 +190,19 @@ def test_unchanged_spool_is_parsed_once_across_reads_and_bridges(tmp_path, monke
     assert client.pending_count() == 1
     assert other.pending_count() == 1
     assert [event["id"] for event in client._events_unlocked()][-1] == "injected"
+    assert len(parses) == 1
+    # An append extends the shared sequence and key index instead of rescanning the queue;
+    # the latest event under a key, even one written from outside, keeps answering for it.
+    extensions = []
+    extend = _SpoolSnapshot.extended
+    monkeypatch.setattr(_SpoolSnapshot, "extended",
+                        lambda self, events, dirty: extensions.append(len(events)) or extend(self, events, dirty))
+    appended = client.log_metrics("run", {"loss": 0.75}, step=2, idempotency_key="sample-2")
+    assert appended.sequence == 100
+    assert client.log_metrics("run", {"loss": 0.75}, step=2, idempotency_key="sample-2").event_id == appended.event_id
+    assert client.log_metrics("run", {"loss": 0.5}, step=1, idempotency_key="sample-1").event_id == "injected"
+    assert extensions == [1]
+    assert client.metric_names_by_idempotency_key() == {"sample-1": {"loss"}, "sample-2": {"loss"}}
     assert len(parses) == 1
 
 
