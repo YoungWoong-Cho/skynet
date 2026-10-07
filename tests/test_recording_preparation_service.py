@@ -109,7 +109,7 @@ def test_camera_preparation_skips_imported_rgb(preparation,monkeypatch):
           for stream in job['observation_contract']['streams']}
     source=dict(job['sources'][0],shared_image_streams=refs)
     monkeypatch.setattr(service.observations,'profile',lambda _:pytest.fail('Unneeded simulator profile'))
-    monkeypatch.setattr(service.observations,'tick',lambda:None)
+    monkeypatch.setattr(service.observations,'tick',lambda statuses=None:None)
     assert service.observations.ensure(job,[source])[0]['shared_image_streams']==refs
     assert service.get(job['id'])['observation_progress']['reused']==3
 

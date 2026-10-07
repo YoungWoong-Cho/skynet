@@ -204,12 +204,9 @@ class ObservationPreparation:
                         max_sources=MAX_DERIVE_BATCH_SOURCES if mode == 'derive' else MAX_BATCH_SOURCES):
                     self.store.claim(batch, dict(schema=PREPARE_SCHEMA, mode=mode,
                         sources=batch_sources, worker_files=files))
-        # A monitor pass shares its scheduler read; a one-off conversion lets
-        # the tick read the producers' status for itself.
-        if statuses is None:
-            self.tick()
-        else:
-            self.tick(statuses)
+        # A monitor pass shares its scheduler read; without one the tick reads
+        # the producers' status for itself.
+        self.tick(statuses)
         existing = self.store.for_job(job['id'])
         failed = next((a for a in existing.values() if a['state'] == 'FAILED'), None)
         if failed:
