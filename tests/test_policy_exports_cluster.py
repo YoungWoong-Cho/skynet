@@ -133,6 +133,10 @@ def test_all_formats_use_resumable_cpu_job_and_only_remote_payloads(setup, forma
     assert f"#SBATCH --cpus-per-task={CLUSTER.defaults.background_jobs.recording_preparation.cpus_per_task}" in script
     assert "#SBATCH --gres" not in script and "export CUDA_VISIBLE_DEVICES=" in script
     assert "#SBATCH --account=rl2-lab" in script
+    # The shared workspace prelude exports the roots the uv locator and caches resolve against.
+    for key, value in (("WORK_ROOT", CLUSTER.paths.work_root), ("UV_CACHE_DIR", CLUSTER.paths.uv_cache), ("HF_HOME", CLUSTER.paths.huggingface_cache)):
+        assert f"export {key}={value}\n" in script
+    assert "UV_BIN=" not in script, "no conversion dependency, so the worker runs on the profile interpreter alone"
     request = json.loads(service.cluster.files[pending["cluster_root"] + "/request.json"])
     if format == "egoverse":
         assert pending["cluster_root"] + "/worker/egoverse_models.py" in service.cluster.files
@@ -236,6 +240,26 @@ def test_failed_cpu_job_retry_creates_one_new_attempt(setup):
     second = service.get(job["id"])
     assert second["attempt_id"] != first["attempt_id"]
     assert service.cluster.submissions[0][2] != service.cluster.submissions[1][2]
+
+def test_conversion_dependencies_run_the_worker_through_the_shared_uv_locator(setup):
+    service, session, _, _, _ = setup
+    adapter = service.test_adapters["egoverse-hpt"]
+    manifest = adapter["latest_version"]["manifest"]
+    preset = next(p for p in manifest["train"]["data_requirements"]["recording_conversion"]["presets"] if p["id"] == "hpt_joints")
+    preset["conversion_dependencies"] = ["egoverse-converter==1.2.3"]
+    service.test_adapters["egoverse-hpt"] = service.database.edit_adapter(adapter["id"], manifest=manifest)
+    job = create(service, session["id"], "egoverse", "Pinned converter")
+    service.prepare(job["id"])
+    script = service.get(job["id"])["cluster_script"]
+    locator = script.index("UV_BIN=")
+    assert script.index(f"export UV_CACHE_DIR={CLUSTER.paths.uv_cache}\n") < locator
+    assert f'UV_BOOTSTRAP_ROOT="$UV_CACHE_DIR"/bootstrap-{CLUSTER.defaults.uv_version}' in script
+    assert '"$WORK_ROOT/.local/bin/uv"' in script and "command -v uv" in script and "python3 -m uv" in script
+    assert "-m venv" not in script, "preparation jobs never bootstrap uv"
+    launch = script.rstrip("\n").splitlines()[-1]
+    assert launch.startswith("skynet_uv run --no-project --python ")
+    assert " --with egoverse-converter==1.2.3 python " in launch and launch.endswith("/request.json")
+
 
 def test_bootstrap_failure_surfaces_the_actual_slurm_log(setup):
     service, session, _, _, _ = setup

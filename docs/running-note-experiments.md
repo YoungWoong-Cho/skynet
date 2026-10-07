@@ -192,7 +192,7 @@ backend별 실행 방식(`slurm.py:1289-1375`):
 | `existing` | `[[ -r <env>/bin/activate ]]`를 먼저 보고 없으면 exit 69("preflight: existing environment activation script missing"). 그다음 `source <env>/bin/activate`, `python3 runtime-wrapper.py`(`slurm.py:1366-1374`). 따라서 venv 형태(`bin/activate`가 있는) prefix만 된다. 경로가 없으면 node의 시스템 `python3`가 돈다 |
 | `conda` | `conda run -p <env>`. `lock_file`이 있으면 `conda-lock install`. conda prefix(예: sky1 `envs/isaacsim-5.1.0_isaaclab-2.3.2_py311`에는 `bin/activate`가 없다)는 이 backend를 쓴다 |
 | `apptainer` | `apptainer exec --nv <image>` |
-| `uv` | `uv run --frozen --project $SKYNET_PROJECT_DIR`. repo에 `uv.lock`이 있어야 한다. uv는 `runtime.uv_executable`, `$WORK_ROOT/.local/bin/uv`, `$HOME/.local/bin/uv`, `PATH`, `python3 -m uv` 순으로 찾는다(`slurm.py:1295-1302`). 못 찾으면 profile에 `bootstrap_uv: true`일 때만 `$WORK_ROOT/.cache/uv/bootstrap-<runtime.uv_version>`에 고정 버전(기본 0.8.14)을 설치한다(1304-1314). 아니면 exit 69 |
+| `uv` | `uv run --frozen --project $SKYNET_PROJECT_DIR`. repo에 `uv.lock`이 있어야 한다. uv는 모든 job 스크립트가 공유하는 `skynet_app/uv_bootstrap.py`의 순서로 찾는다: `runtime.uv_executable` → `$UV_CACHE_DIR/bootstrap-<runtime.uv_version>/bin/uv` → `$WORK_ROOT/.local/bin/uv` → `$HOME/.local/bin/uv` → `PATH` → `python3 -m uv`. 못 찾으면 profile에 `bootstrap_uv: true`일 때만 그 bootstrap 디렉터리에 고정 버전(`defaults.uv_version`)을 설치한다. 아니면 exit 69 |
 
 profile이 실험에 들어가는 방식(`pipeline_api.py:2648-2800`):
 

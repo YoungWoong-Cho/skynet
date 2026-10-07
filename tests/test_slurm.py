@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from skynet_app.adapters import PreparationStep, resolve_adapter_plan
+from skynet_app.cluster_config import CLUSTER
 from skynet_app.experiments import ExperimentSpec
 from skynet_app.slurm import (
     GITHUB_SSH_TO_HTTPS,
@@ -23,6 +24,7 @@ from skynet_app.slurm import (
     resolve_slurm_log_path,
     resolve_slurm_log_paths_from_sbatch,
 )
+from skynet_app.workspace_storage import personal_directories
 
 
 COMMIT = "c" * 40
@@ -133,8 +135,14 @@ echo ready
 def test_compiler_exports_and_creates_shared_xdg_cache_root():
     spec = make_spec()
     script = compile_sbatch(spec, resolve_adapter_plan(spec), run_id="cache-001").script
-    assert "export XDG_CACHE_HOME=/coc/flash7/ycho420/.cache" in script
-    assert 'mkdir -p "$XDG_CACHE_HOME" "$WORK_ROOT"/.cache/{uv,huggingface,torch}' in script
+    root = CLUSTER.paths.work_root
+    assert f"export XDG_CACHE_HOME={root}/.cache" in script
+    for key in ("UV_CACHE_DIR", "HF_HOME", "TORCH_HOME"):
+        assert f"export {key}={root}/.cache/" in script
+    # One mkdir derives the layout from the configured paths instead of spelling it by hand.
+    created = next(line for line in script.splitlines() if line.startswith('mkdir -p "$XDG_CACHE_HOME" ')).split()[3:]
+    assert created == [f"{root}/{directory}" for directory in personal_directories(root)]
+    assert {CLUSTER.paths.uv_cache, CLUSTER.paths.huggingface_cache, CLUSTER.paths.torch_cache, CLUSTER.paths.datasets} <= set(created)
 
 
 def _exports(script: str, key: str) -> list[str]:
@@ -262,6 +270,16 @@ def test_uv_runtime_has_fallback_and_pinned_bootstrap():
     assert "python3 -m uv" in compiled.script
     assert "uv==0.8.14" in compiled.script
     assert "--frozen" in compiled.script
+    # The shared locator searches the pinned bootstrap first and installs it under UV_CACHE_DIR.
+    assert 'UV_BOOTSTRAP_ROOT="$UV_CACHE_DIR"/bootstrap-0.8.14' in compiled.script
+    order = ['"$UV_BOOTSTRAP_ROOT/bin/uv"', '"$WORK_ROOT/.local/bin/uv"', '"$HOME/.local/bin/uv"', "command -v uv", "python3 -m uv", "-m venv"]
+    positions = [compiled.script.index(token) for token in order]
+    assert positions == sorted(positions)
+    assert 'skynet_uv run --frozen --project "$SKYNET_PROJECT_DIR"' in compiled.script
+    explicit = make_spec(runtime={"backend": "uv", "bootstrap_uv": False, "uv_executable": "/opt/uv/bin/uv"})
+    script = compile_sbatch(explicit, resolve_adapter_plan(explicit), run_id="uv-002").script
+    assert "if [[ -x /opt/uv/bin/uv ]]; then UV_BIN=/opt/uv/bin/uv; fi" in script
+    assert "-m venv" not in script
 
 
 def test_blocked_adapter_cannot_compile():

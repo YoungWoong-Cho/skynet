@@ -48,6 +48,34 @@ def paths_for_root(work_root: str) -> ClusterPaths:
     return ClusterPaths.model_validate(paths)
 
 
+# Pre-created below the configured evaluation root; evaluation workers write
+# into these without creating them first.
+EVALUATION_SUBDIRECTORIES = ("catalogs", "datasets", "assets", "runs")
+
+
+def personal_directories(work_root: str) -> tuple[str, ...]:
+    """Every directory a workspace root carries, relative to it, from the configured paths.
+
+    A personal root yields only the rebased :data:`PERSONAL_PATHS`; the shared
+    deployment root additionally keeps the data and runtime directories that
+    stay registered there.
+    """
+    paths = paths_for_root(work_root)
+    root = PurePosixPath(paths.work_root)
+    directories: list[str] = []
+    for key, value in paths.model_dump().items():
+        try:
+            relative = PurePosixPath(value).relative_to(root)
+        except ValueError:
+            continue
+        if not relative.parts:
+            continue
+        directories.append(str(relative))
+        if key == "evaluation":
+            directories.extend(str(relative / name) for name in EVALUATION_SUBDIRECTORIES)
+    return tuple(directories)
+
+
 def evaluation_execution_directory(run_directory: str, execution_key: str | None) -> str:
     """Scope new evaluations without moving pinned historical executions."""
     if execution_key is None:

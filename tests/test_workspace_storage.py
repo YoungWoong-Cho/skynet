@@ -32,6 +32,7 @@ from skynet_app.slurm import (
 from skynet_app.workspace_storage import (
     WorkspaceStorage,
     paths_for_root,
+    personal_directories,
     validate_work_root,
 )
 from skynet_app.workspaces import WorkspaceMiddleware, WorkspaceServices, session_router
@@ -143,6 +144,12 @@ def test_compiler_routes_every_job_path_but_preserves_runtime_and_data():
     paths = paths_for_root(root)
     assert paths.datasets == CLUSTER.paths.datasets
     assert paths.environments == CLUSTER.paths.environments
+    # The job creates the personal layout only; shared data and runtimes stay at the deployment root.
+    created = next(line for line in compiled.script.splitlines() if line.startswith('mkdir -p "$XDG_CACHE_HOME" ')).split()[3:]
+    assert created == [f"{root}/{directory}" for directory in personal_directories(root)]
+    assert {"workspace", "repos", "logs", "jobs", "eval", "eval/runs", ".cache/uv"} <= set(personal_directories(root))
+    assert set(personal_directories(CLUSTER.paths.work_root)) - set(personal_directories(root)) == {"datasets", "envs"}
+    assert root + "/datasets" not in compiled.script and root + "/envs" not in compiled.script
 
 
 def test_transport_keeps_receipts_secrets_and_log_reads_at_original_root(services):

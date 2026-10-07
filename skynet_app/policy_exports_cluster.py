@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from .cluster_config import CLUSTER
 from .sbatch import SHEBANG, cpu_thread_exports, sbatch_header, shell_prelude
+from .uv_bootstrap import UV_COMMAND, uv_locator_lines, workspace_prelude_lines
 from .cluster_runtime import DEFAULT_GATEWAY, ClusterError, SubmissionOutcomeUnknown, WORK_ROOT
 from .database import canonical_json
 from .training_contracts import RECORDING_DATASET_FORMAT as DATASET_FORMAT
@@ -101,12 +102,7 @@ class ClusterPolicyPreparation(RecordingPreflight):
         dependencies = job.get("conversion_dependencies") or []
         setup = []
         if dependencies:
-            uv_bootstrap = shlex.quote(f"{CLUSTER.paths.uv_cache}/bootstrap-{CLUSTER.defaults.uv_version}/bin/uv")
-            setup = ['UV_BIN=$(command -v uv || true)',
-                     f'if [[ -z "$UV_BIN" && -x {uv_bootstrap} ]]; then UV_BIN={uv_bootstrap}; fi',
-                     f'if [[ -z "$UV_BIN" && -x {shlex.quote(str(WORK_ROOT) + "/.local/bin/uv")} ]]; then UV_BIN={shlex.quote(str(WORK_ROOT) + "/.local/bin/uv")}; fi',
-                     'if [[ -z "$UV_BIN" && -x "$HOME/.local/bin/uv" ]]; then UV_BIN="$HOME/.local/bin/uv"; fi',
-                     'test -n "$UV_BIN" || { echo "uv is required for recording preparation" >&2; exit 69; }']
+            setup = uv_locator_lines(uv_version=CLUSTER.defaults.uv_version, bootstrap=False)
             interpreter = ["run", "--no-project", "--python", interpreter[0]]
             for package in dependencies:
                 interpreter.extend(["--with", package])
@@ -119,8 +115,8 @@ class ClusterPolicyPreparation(RecordingPreflight):
             cpu_thread_exports(shape.cpus_per_task),
             "export PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1",
             f"export TMPDIR={shlex.quote(root + '/tmp')}", 'mkdir -p "$TMPDIR"',
-            f"export UV_CACHE_DIR={shlex.quote(CLUSTER.paths.uv_cache)}", *setup,
-            (('"$UV_BIN" ' if dependencies else "") + shlex.join([*interpreter, worker + "/cluster_worker.py", root + "/request.json"])), ""])
+            *workspace_prelude_lines(CLUSTER.paths), *setup,
+            ((UV_COMMAND + " " if dependencies else "") + shlex.join([*interpreter, worker + "/cluster_worker.py", root + "/request.json"])), ""])
         return self.update(job["id"], execution="cluster", attempt_id=attempt_id,
                            cluster_root=root, cluster_script=script, cluster_job_id=None,
                            state="SUBMITTING", stage="SUBMITTING", error=None,

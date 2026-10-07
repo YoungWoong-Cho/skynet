@@ -59,7 +59,7 @@ TEXT_INSPECTION_FILES = {
     "requirements-dev.txt",
 }
 CHOICE_MAX_FILES = 16
-CHOICE_MAX_FILE_BYTES = 262_144
+MAX_BLOB_BYTES = 262_144
 CHOICE_MAX_TOTAL_BYTES = 2_097_152
 CHOICE_MAX_AST_DEPTH = 8
 YAML_CATALOG_MAX_FILES = 128
@@ -71,6 +71,75 @@ def _bounded_environment_integer(name: str, default: int, minimum: int, maximum:
     except ValueError:
         value = default
     return max(minimum, min(value, maximum))
+
+
+def _strip_prefix(path: str, prefix: str) -> str:
+    return path[len(prefix):] if prefix and path.startswith(prefix) else path
+
+
+def _parse_blob_line(
+    fields: list[str],
+    prefix: str,
+    files: dict[str, dict[str, Any]],
+    contents: dict[str, bytes],
+    *,
+    label: str,
+    strict: bool,
+) -> str | None:
+    """Record one FILE or CONTENT transport line; undecodable content raises or returns a warning."""
+    if fields[0] == "FILE" and len(fields) == 4:
+        relative = _strip_prefix(fields[1], prefix)
+        files[relative] = {
+            "path": relative,
+            "size_bytes": int(fields[2]),
+            "sha256": fields[3].lower(),
+        }
+    elif fields[0] == "CONTENT" and len(fields) == 3:
+        relative = _strip_prefix(fields[1], prefix)
+        try:
+            contents[relative] = base64.b64decode(fields[2], validate=True)
+        except ValueError as error:
+            if strict:
+                raise ClusterError(f"{label} returned invalid content for {relative}") from error
+            return f"{label} has invalid transport encoding: {relative}"
+    return None
+
+
+def _shallow_fetch_preamble(repository: str, ref: str, *, tag: str, depth: int) -> str:
+    """Fetch one ref of a repository, without blobs, into a throwaway clone at ``$tmp``."""
+    return (
+        "set -eu\n"
+        "export GIT_TERMINAL_PROMPT=0\n"
+        f'tmp=$(mktemp -d "${{TMPDIR:-/tmp}}/skynet-{tag}-XXXXXX")\n'
+        "trap 'rm -rf \"$tmp\"' EXIT\n"
+        'git -C "$tmp" init -q\n'
+        'git -C "$tmp" -c credential.interactive=never -c protocol.version=2 fetch -q '
+        f"--no-tags --depth={depth} --filter=blob:none {shlex.quote(repository)} {shlex.quote(ref)}\n"
+    )
+
+
+def _shallow_blob_preamble(repository: str, commit: str, tag: str) -> str:
+    """Pin FETCH_HEAD to ``commit``, report it, and define ``emit_blob``.
+
+    ``emit_blob OBJECT PATH SIZE [WITH_CONTENT]`` prints the FILE line and, unless
+    WITH_CONTENT is 0, the base64 CONTENT line the parsers expect.
+    """
+    return (
+        _shallow_fetch_preamble(repository, commit, tag=tag, depth=1)
+        + 'actual=$(git -C "$tmp" rev-parse FETCH_HEAD^{commit})\n'
+        f'test "$actual" = {shlex.quote(commit)}\n'
+        "printf 'COMMIT\\t%s\\n' \"$actual\"\n"
+        "emit_blob() {\n"
+        '  object="$1"; path="$2"; size="$3"; with_content="${4:-1}"\n'
+        "  sha=$(git -C \"$tmp\" show \"$object\" | sha256sum | awk '{print $1}')\n"
+        "  printf 'FILE\\t%s\\t%s\\t%s\\n' \"$path\" \"$size\" \"$sha\"\n"
+        '  if test "$with_content" = 1; then\n'
+        "    printf 'CONTENT\\t%s\\t' \"$path\"\n"
+        '    git -C "$tmp" show "$object" | base64 -w0\n'
+        "    printf '\\n'\n"
+        "  fi\n"
+        "}\n"
+    )
 
 
 class _StaticRegistryEvaluator:
@@ -1150,16 +1219,9 @@ class SourceDiscovery:
         if cached := self._get_cached(key):
             return cached
 
-        repository_q = shlex.quote(repository)
-        ref_q = shlex.quote(f"refs/heads/{branch}")
-        command = f'''set -eu
-export GIT_TERMINAL_PROMPT=0
-tmp=$(mktemp -d "${{TMPDIR:-/tmp}}/skynet-git-XXXXXX")
-trap 'rm -rf "$tmp"' EXIT
-git -C "$tmp" init -q
-git -C "$tmp" -c credential.interactive=never -c protocol.version=2 fetch -q \
-  --no-tags --depth={limit} --filter=blob:none {repository_q} {ref_q}
-git -C "$tmp" log -n {limit} \
+        command = _shallow_fetch_preamble(
+            repository, f"refs/heads/{branch}", tag="git", depth=limit
+        ) + f'''git -C "$tmp" log -n {limit} \
   --format='%H%x1f%h%x1f%s%x1f%an%x1f%cI%x1e' FETCH_HEAD
 '''
         host, output = self.cluster.run_with_fallback(command, gateway, timeout=45)
@@ -1252,9 +1314,7 @@ git -C "$tmp" log -n {limit} \
         project_subdirectory: str,
     ) -> dict[str, Any]:
         repository = self.repository_url(repo_url)
-        commit = revision.lower()
-        if not FULL_COMMIT_RE.fullmatch(commit):
-            commit = self.resolve_revision(repository, revision, gateway)
+        commit = self.resolve_revision(repository, revision, gateway)
         subdirectory = self.project_subdirectory(project_subdirectory)
         if not 1 <= len(paths) <= CHOICE_MAX_FILES:
             raise ValueError(f"repository choice discovery supports 1-{CHOICE_MAX_FILES} files")
@@ -1281,36 +1341,22 @@ git -C "$tmp" log -n {limit} \
         prefix = "" if subdirectory == "." else subdirectory.rstrip("/") + "/"
         requested = [prefix + path for path in normalized_paths]
         path_words = " ".join(shlex.quote(path) for path in requested)
-        command = f'''set -eu
-export GIT_TERMINAL_PROMPT=0
-tmp=$(mktemp -d "${{TMPDIR:-/tmp}}/skynet-choices-XXXXXX")
-trap 'rm -rf "$tmp"' EXIT
-git -C "$tmp" init -q
-git -C "$tmp" -c credential.interactive=never -c protocol.version=2 fetch -q \
-  --no-tags --depth=1 --filter=blob:none {shlex.quote(repository)} {shlex.quote(commit)}
-actual=$(git -C "$tmp" rev-parse FETCH_HEAD^{{commit}})
-test "$actual" = {shlex.quote(commit)}
-printf 'COMMIT\t%s\n' "$actual"
-total=0
+        command = _shallow_blob_preamble(repository, commit, "choices") + f'''total=0
 for path in {path_words}; do
   object="$actual:$path"
   object_type=$(git -C "$tmp" cat-file -t "$object" 2>/dev/null || true)
   if test "$object_type" != blob; then
-    printf 'MISSING\t%s\n' "$path"
+    printf 'MISSING\\t%s\\n' "$path"
     continue
   fi
   size=$(git -C "$tmp" cat-file -s "$object")
   next_total=$((total + size))
-  if test "$size" -gt {CHOICE_MAX_FILE_BYTES} || test "$next_total" -gt {CHOICE_MAX_TOTAL_BYTES}; then
-    printf 'TOO_LARGE\t%s\t%s\n' "$path" "$size"
+  if test "$size" -gt {MAX_BLOB_BYTES} || test "$next_total" -gt {CHOICE_MAX_TOTAL_BYTES}; then
+    printf 'TOO_LARGE\\t%s\\t%s\\n' "$path" "$size"
     continue
   fi
   total=$next_total
-  sha=$(git -C "$tmp" show "$object" | sha256sum | awk '{{print $1}}')
-  printf 'FILE\t%s\t%s\t%s\n' "$path" "$size" "$sha"
-  printf 'CONTENT\t%s\t' "$path"
-  git -C "$tmp" show "$object" | base64 -w0
-  printf '\n'
+  emit_blob "$object" "$path" "$size"
 done
 '''
         host, output = self.cluster.run_with_fallback(command, gateway, timeout=60)
@@ -1322,25 +1368,18 @@ done
             fields = line.split("\t")
             if fields[0] == "COMMIT" and len(fields) == 2:
                 actual_commit = fields[1].lower()
-            elif fields[0] == "FILE" and len(fields) == 4:
-                relative = fields[1][len(prefix):] if prefix and fields[1].startswith(prefix) else fields[1]
-                files[relative] = {
-                    "path": relative,
-                    "size_bytes": int(fields[2]),
-                    "sha256": fields[3].lower(),
-                }
-            elif fields[0] == "CONTENT" and len(fields) == 3:
-                relative = fields[1][len(prefix):] if prefix and fields[1].startswith(prefix) else fields[1]
-                try:
-                    contents[relative] = base64.b64decode(fields[2], validate=True)
-                except ValueError:
-                    warnings.append(f"repository choice file has invalid transport encoding: {relative}")
             elif fields[0] == "MISSING" and len(fields) == 2:
-                relative = fields[1][len(prefix):] if prefix and fields[1].startswith(prefix) else fields[1]
-                warnings.append(f"repository choice file is missing: {relative}")
+                warnings.append(
+                    f"repository choice file is missing: {_strip_prefix(fields[1], prefix)}"
+                )
             elif fields[0] == "TOO_LARGE" and len(fields) == 3:
-                relative = fields[1][len(prefix):] if prefix and fields[1].startswith(prefix) else fields[1]
-                warnings.append(f"repository choice file exceeds inspection bounds: {relative}")
+                warnings.append(
+                    f"repository choice file exceeds inspection bounds: {_strip_prefix(fields[1], prefix)}"
+                )
+            elif warning := _parse_blob_line(
+                fields, prefix, files, contents, label="repository choice file", strict=False
+            ):
+                warnings.append(warning)
         if actual_commit != commit:
             raise ClusterError("repository choice inspection returned a different commit")
         for path in normalized_paths:
@@ -1368,9 +1407,7 @@ done
         project_subdirectory: str,
     ) -> dict[str, Any]:
         repository = self.repository_url(repo_url)
-        commit = revision.lower()
-        if not FULL_COMMIT_RE.fullmatch(commit):
-            commit = self.resolve_revision(repository, revision, gateway)
+        commit = self.resolve_revision(repository, revision, gateway)
         subdirectory = self.project_subdirectory(project_subdirectory)
         catalog_directory = self.project_subdirectory(directory)
         if catalog_directory == ".":
@@ -1388,17 +1425,7 @@ done
 
         prefix = "" if subdirectory == "." else subdirectory.rstrip("/") + "/"
         requested_directory = prefix + catalog_directory
-        command = f'''set -eu
-export GIT_TERMINAL_PROMPT=0
-tmp=$(mktemp -d "${{TMPDIR:-/tmp}}/skynet-yaml-catalog-XXXXXX")
-trap 'rm -rf "$tmp"' EXIT
-git -C "$tmp" init -q
-git -C "$tmp" -c credential.interactive=never -c protocol.version=2 fetch -q \
-  --no-tags --depth=1 --filter=blob:none {shlex.quote(repository)} {shlex.quote(commit)}
-actual=$(git -C "$tmp" rev-parse FETCH_HEAD^{{commit}})
-test "$actual" = {shlex.quote(commit)}
-printf 'COMMIT\t%s\n' "$actual"
-git -C "$tmp" ls-tree -r --name-only "$actual" -- {shlex.quote(requested_directory)} > "$tmp/catalog-paths"
+        command = _shallow_blob_preamble(repository, commit, "yaml-catalog") + f'''git -C "$tmp" ls-tree -r --name-only "$actual" -- {shlex.quote(requested_directory)} > "$tmp/catalog-paths"
 count=0
 total=0
 while IFS= read -r path; do
@@ -1408,22 +1435,18 @@ while IFS= read -r path; do
   esac
   count=$((count + 1))
   if test "$count" -gt {YAML_CATALOG_MAX_FILES}; then
-    printf 'TOO_MANY\t%s\n' "$count"
+    printf 'TOO_MANY\\t%s\\n' "$count"
     break
   fi
   object="$actual:$path"
   size=$(git -C "$tmp" cat-file -s "$object")
   next_total=$((total + size))
-  if test "$size" -gt {CHOICE_MAX_FILE_BYTES} || test "$next_total" -gt {CHOICE_MAX_TOTAL_BYTES}; then
-    printf 'TOO_LARGE\t%s\t%s\n' "$path" "$size"
+  if test "$size" -gt {MAX_BLOB_BYTES} || test "$next_total" -gt {CHOICE_MAX_TOTAL_BYTES}; then
+    printf 'TOO_LARGE\\t%s\\t%s\\n' "$path" "$size"
     continue
   fi
   total=$next_total
-  sha=$(git -C "$tmp" show "$object" | sha256sum | awk '{{print $1}}')
-  printf 'FILE\t%s\t%s\t%s\n' "$path" "$size" "$sha"
-  printf 'CONTENT\t%s\t' "$path"
-  git -C "$tmp" show "$object" | base64 -w0
-  printf '\n'
+  emit_blob "$object" "$path" "$size"
 done < "$tmp/catalog-paths"
 '''
         host, output = self.cluster.run_with_fallback(command, gateway, timeout=60)
@@ -1444,11 +1467,7 @@ done < "$tmp/catalog-paths"
                 continue
             if fields[0] not in {"FILE", "CONTENT", "TOO_LARGE"} or len(fields) < 2:
                 continue
-            relative = (
-                fields[1][len(prefix):]
-                if prefix and fields[1].startswith(prefix)
-                else fields[1]
-            )
+            relative = _strip_prefix(fields[1], prefix)
             path = PurePosixPath(relative)
             if (
                 path.suffix not in {".yaml", ".yml"}
@@ -1457,23 +1476,14 @@ done < "$tmp/catalog-paths"
             ):
                 warnings.append(f"repository YAML catalog returned unsafe path: {relative}")
                 continue
-            if fields[0] == "FILE" and len(fields) == 4:
-                files[relative] = {
-                    "path": relative,
-                    "size_bytes": int(fields[2]),
-                    "sha256": fields[3].lower(),
-                }
-            elif fields[0] == "CONTENT" and len(fields) == 3:
-                try:
-                    contents[relative] = base64.b64decode(fields[2], validate=True)
-                except ValueError:
-                    warnings.append(
-                        f"repository YAML catalog file has invalid transport encoding: {relative}"
-                    )
-            elif fields[0] == "TOO_LARGE" and len(fields) == 3:
+            if fields[0] == "TOO_LARGE" and len(fields) == 3:
                 warnings.append(
                     f"repository YAML catalog file exceeds inspection bounds: {relative}"
                 )
+            elif warning := _parse_blob_line(
+                fields, prefix, files, contents, label="repository YAML catalog file", strict=False
+            ):
+                warnings.append(warning)
         if actual_commit != commit:
             raise ClusterError("repository YAML catalog inspection returned a different commit")
         if not contents and not warnings:
@@ -1500,9 +1510,7 @@ done < "$tmp/catalog-paths"
         project_subdirectory: str = ".",
     ) -> dict[str, Any]:
         repository = self.repository_url(repo_url)
-        commit = revision.lower()
-        if not FULL_COMMIT_RE.fullmatch(commit):
-            commit = self.resolve_revision(repository, revision, gateway)
+        commit = self.resolve_revision(repository, revision, gateway)
         options: dict[str, Any] = {}
         for field in input_fields:
             raw_rule = field.get("choice_source")
@@ -1582,9 +1590,7 @@ done < "$tmp/catalog-paths"
         project_subdirectory: str = ".",
     ) -> dict[str, Any]:
         repository = self.repository_url(repo_url)
-        commit = revision.lower()
-        if not FULL_COMMIT_RE.fullmatch(commit):
-            commit = self.resolve_revision(repository, revision, gateway)
+        commit = self.resolve_revision(repository, revision, gateway)
         subdirectory = self.project_subdirectory(project_subdirectory)
         key = ("inspection", gateway, repository, commit, subdirectory)
         if cached := self._get_cached(key):
@@ -1595,32 +1601,16 @@ done < "$tmp/catalog-paths"
         content_paths = {prefix + name for name in TEXT_INSPECTION_FILES}
         path_words = " ".join(shlex.quote(path) for path in paths)
         content_case = "|".join(shlex.quote(path) for path in sorted(content_paths))
-        command = f'''set -eu
-export GIT_TERMINAL_PROMPT=0
-tmp=$(mktemp -d "${{TMPDIR:-/tmp}}/skynet-inspect-XXXXXX")
-trap 'rm -rf "$tmp"' EXIT
-git -C "$tmp" init -q
-git -C "$tmp" -c credential.interactive=never -c protocol.version=2 fetch -q \
-  --no-tags --depth=1 --filter=blob:none {shlex.quote(repository)} {shlex.quote(commit)}
-actual=$(git -C "$tmp" rev-parse FETCH_HEAD^{{commit}})
-test "$actual" = {shlex.quote(commit)}
-printf 'COMMIT\\t%s\\n' "$actual"
-for path in {path_words}; do
+        command = _shallow_blob_preamble(repository, commit, "inspect") + f'''for path in {path_words}; do
   object="$actual:$path"
   object_type=$(git -C "$tmp" cat-file -t "$object" 2>/dev/null || true)
   if test "$object_type" = blob; then
     size=$(git -C "$tmp" cat-file -s "$object")
-    sha=$(git -C "$tmp" show "$object" | sha256sum | awk '{{print $1}}')
-    printf 'FILE\\t%s\\t%s\\t%s\\n' "$path" "$size" "$sha"
+    with_content=0
     case "$path" in
-      {content_case})
-        if test "$size" -le 262144; then
-          printf 'CONTENT\\t%s\\t' "$path"
-          git -C "$tmp" show "$object" | base64 -w0
-          printf '\\n'
-        fi
-        ;;
+      {content_case}) if test "$size" -le {MAX_BLOB_BYTES}; then with_content=1; fi ;;
     esac
+    emit_blob "$object" "$path" "$size" "$with_content"
   fi
 done
 '''
@@ -1632,19 +1622,10 @@ done
             fields = line.split("\t")
             if fields[0] == "COMMIT" and len(fields) == 2:
                 actual_commit = fields[1].lower()
-            elif fields[0] == "FILE" and len(fields) == 4:
-                relative = fields[1][len(prefix):] if prefix and fields[1].startswith(prefix) else fields[1]
-                files[relative] = {
-                    "path": relative,
-                    "size_bytes": int(fields[2]),
-                    "sha256": fields[3].lower(),
-                }
-            elif fields[0] == "CONTENT" and len(fields) == 3:
-                relative = fields[1][len(prefix):] if prefix and fields[1].startswith(prefix) else fields[1]
-                try:
-                    contents[relative] = base64.b64decode(fields[2], validate=True)
-                except ValueError as error:
-                    raise ClusterError(f"repository inspection returned invalid content for {relative}") from error
+            else:
+                _parse_blob_line(
+                    fields, prefix, files, contents, label="repository inspection", strict=True
+                )
         if actual_commit != commit:
             raise ClusterError("repository inspection returned a different commit")
 

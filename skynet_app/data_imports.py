@@ -14,10 +14,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .cluster_config import CLUSTER, format_slurm_duration, parse_slurm_duration
 from .sbatch import SHEBANG, sbatch_header, shell_prelude
+from .uv_bootstrap import UV_COMMAND, uv_locator_lines, workspace_prelude_lines
 
-
-UV_VERSION = "0.12.8"
-UV_ARCHIVE_SHA256 = "2e2b37e9811e17675a9e70bed5e1a58fc8c0388be63d751d72cc735188c149ff"
 
 class HuggingFaceImportRequest(BaseModel):
     revision: str = Field(pattern=r"^[0-9a-fA-F]{40}$")
@@ -411,40 +409,24 @@ def build_huggingface_import_job(
         output=f"{CLUSTER.paths.logs}/%x-%j.out", error=f"{CLUSTER.paths.logs}/%x-%j.err",
         single_task=True, chdir=CLUSTER.paths.workspace, extra=["#SBATCH --requeue"],
     )])
-    prelude = "\n        ".join(shell_prelude(umask="0027"))
+    prelude = "\n        ".join([*shell_prelude(umask="0027"), *workspace_prelude_lines(CLUSTER.paths)])
+    uv_locator = "\n        ".join(uv_locator_lines(
+        uv_version=CLUSTER.defaults.uv_version, bootstrap=True, python=CLUSTER.commands.host_python,
+    ))
     script = dedent(
         f"""\
         {header}
 
         {prelude}
-        export HOME={shlex.quote(CLUSTER.paths.home_root)}
-        export WORK_ROOT={shlex.quote(CLUSTER.paths.work_root)}
-        export UV_CACHE_DIR={shlex.quote(CLUSTER.paths.uv_cache)}
-        export HF_HOME={shlex.quote(CLUSTER.paths.huggingface_cache)}
-        export XDG_CACHE_HOME="$WORK_ROOT/.cache"
         RUN_DIR={shlex.quote(run_directory)}
         RESULT_PATH={shlex.quote(result_path)}
-        UV_VERSION={UV_VERSION}
-        UV_ROOT="$WORK_ROOT/tools/uv/$UV_VERSION"
-        UV="$UV_ROOT/uv"
-        UV_ARCHIVE="$UV_ROOT/uv-x86_64-unknown-linux-gnu.tar.gz"
         PYTHON={shlex.quote(CLUSTER.commands.host_python)}
-        mkdir -p "$RUN_DIR" "$WORK_ROOT/logs" "$WORK_ROOT/tmp/$SLURM_JOB_ID" \
-          "$WORK_ROOT/.cache/uv" "$WORK_ROOT/.cache/huggingface" "$UV_ROOT"
+        mkdir -p "$RUN_DIR" "$WORK_ROOT/tmp/$SLURM_JOB_ID"
         export TMPDIR="$WORK_ROOT/tmp/$SLURM_JOB_ID"
         printf %s {shlex.quote(request_b64)} | base64 --decode > "$RUN_DIR/import-request.json"
         printf %s {shlex.quote(program_b64)} | base64 --decode > "$RUN_DIR/import-huggingface.py"
-        if [[ ! -x "$UV" ]]; then
-          curl --fail --location --retry 8 --retry-delay 5 --retry-all-errors \
-            --output "$UV_ARCHIVE.part" \
-            "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-x86_64-unknown-linux-gnu.tar.gz"
-          printf '%s  %s\\n' {UV_ARCHIVE_SHA256} "$UV_ARCHIVE.part" | sha256sum -c -
-          mv "$UV_ARCHIVE.part" "$UV_ARCHIVE"
-          tar -xzf "$UV_ARCHIVE" --strip-components=1 -C "$UV_ROOT" \
-            uv-x86_64-unknown-linux-gnu/uv uv-x86_64-unknown-linux-gnu/uvx
-        fi
-        "$UV" --version | grep -F "uv $UV_VERSION"
-        "$UV" run --python "$PYTHON" --with "huggingface-hub=={HUGGINGFACE_HUB_VERSION}" \
+        {uv_locator}
+        {UV_COMMAND} run --python "$PYTHON" --with "huggingface-hub=={HUGGINGFACE_HUB_VERSION}" \
           python "$RUN_DIR/import-huggingface.py" "$RUN_DIR/import-request.json" "$RESULT_PATH"
         """
     )

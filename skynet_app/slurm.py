@@ -17,10 +17,17 @@ from skynet_app.adapters import (
     resolve_training_progress_contract,
 )
 from skynet_app.cluster_config import CLUSTER
-from skynet_app.cluster_runtime import HOME_ROOT, SLURM_BIN
+from skynet_app.cluster_runtime import SLURM_BIN
 from skynet_app.experiments import CanonicalModel, ExperimentSpec, canonical_sha256
 from skynet_app.gpu_preflight import gpu_preflight_lines
 from skynet_app.sbatch import SHEBANG, sbatch_header, shell_prelude
+from skynet_app.uv_bootstrap import (
+    UV_COMMAND,
+    uv_locator_lines,
+    uv_module_command,
+    workspace_directories_line,
+    workspace_exports,
+)
 from skynet_app.evaluation_placement import resolve_evaluation_resources
 from skynet_app.workspace_storage import paths_for_root, evaluation_execution_directory
 
@@ -1291,44 +1298,21 @@ def _runtime_launch(spec: ExperimentSpec, wrapper_path: str, execution_path: str
     wrapper = _shell(wrapper_path)
     execution = _shell(execution_path)
     if runtime.backend == "uv":
-        explicit = _shell(runtime.uv_executable) if runtime.uv_executable else "''"
-        lines = [
-            f"UV_EXPLICIT={explicit}",
-            "UV_BIN=",
-            'if [[ -n "$UV_EXPLICIT" && -x "$UV_EXPLICIT" ]]; then UV_BIN="$UV_EXPLICIT"; fi',
-            'if [[ -z "$UV_BIN" && -x "$WORK_ROOT/.local/bin/uv" ]]; then UV_BIN="$WORK_ROOT/.local/bin/uv"; fi',
-            'if [[ -z "$UV_BIN" && -x "$HOME/.local/bin/uv" ]]; then UV_BIN="$HOME/.local/bin/uv"; fi',
-            'if [[ -z "$UV_BIN" ]] && command -v uv >/dev/null 2>&1; then UV_BIN="$(command -v uv)"; fi',
-            'if [[ -z "$UV_BIN" ]] && python3 -c "import uv" >/dev/null 2>&1; then UV_BIN="python3 -m uv"; fi',
+        module = _shell(uv_module_command())
+        return [
+            *uv_locator_lines(
+                uv_version=runtime.uv_version,
+                bootstrap=runtime.bootstrap_uv,
+                explicit=runtime.uv_executable,
+            ),
+            f'if [[ "$UV_BIN" != {module} ]]; then',
+            '  export SKYNET_UV_EXECUTABLE="$UV_BIN"',
+            '  export PATH="$(dirname "$UV_BIN"):$PATH"',
+            "else",
+            "  unset SKYNET_UV_EXECUTABLE",
+            "fi",
+            f"{UV_COMMAND} run --frozen --project \"$SKYNET_PROJECT_DIR\" python3 {wrapper} {execution}",
         ]
-        if runtime.bootstrap_uv:
-            lines.extend(
-                [
-                    'if [[ -z "$UV_BIN" ]]; then',
-                    '  UV_BOOTSTRAP_ROOT="$WORK_ROOT/.cache/uv/bootstrap-' + runtime.uv_version + '"',
-                    '  python3 -m venv "$UV_BOOTSTRAP_ROOT" || { echo "TODO/preflight: python venv unavailable for uv bootstrap" >&2; exit 69; }',
-                    f'  "$UV_BOOTSTRAP_ROOT/bin/python" -m pip install --disable-pip-version-check --no-input "uv=={runtime.uv_version}" || {{ echo "TODO/preflight: pinned uv bootstrap failed" >&2; exit 69; }}',
-                    '  UV_BIN="$UV_BOOTSTRAP_ROOT/bin/uv"',
-                    "fi",
-                ]
-            )
-        lines.extend(
-            [
-                'if [[ -z "$UV_BIN" ]]; then echo "TODO/preflight: uv not found; configure runtime.uv_executable, an existing env, or a container" >&2; exit 69; fi',
-                'if [[ "$UV_BIN" != "python3 -m uv" ]]; then',
-                '  export SKYNET_UV_EXECUTABLE="$UV_BIN"',
-                '  export PATH="$(dirname "$UV_BIN"):$PATH"',
-                "else",
-                '  unset SKYNET_UV_EXECUTABLE',
-                "fi",
-                'if [[ "$UV_BIN" == "python3 -m uv" ]]; then',
-                f"  python3 -m uv run --frozen --project \"$SKYNET_PROJECT_DIR\" python3 {wrapper} {execution}",
-                "else",
-                f"  \"$UV_BIN\" run --frozen --project \"$SKYNET_PROJECT_DIR\" python3 {wrapper} {execution}",
-                "fi",
-            ]
-        )
-        return lines
     if runtime.backend == "conda":
         assert runtime.environment_path is not None
         if runtime.lock_file:
@@ -1535,12 +1519,7 @@ def compile_sbatch(
         directives.append("#SBATCH --requeue")
 
     exports = {
-        "HOME": HOME_ROOT,
-        "WORK_ROOT": work_root,
-        "XDG_CACHE_HOME": f"{work_root}/.cache",
-        "UV_CACHE_DIR": paths.uv_cache,
-        "HF_HOME": paths.huggingface_cache,
-        "TORCH_HOME": paths.torch_cache,
+        **workspace_exports(paths),
         "SKYNET_RUN_ID": run_id,
         "SKYNET_RUN_ROOT": run_root,
         "SKYNET_RUN_DIR": run_directory,
@@ -1602,9 +1581,7 @@ def compile_sbatch(
     )
     source_setup = dedent(
         f"""\
-        mkdir -p "$WORK_ROOT"/{{workspace,repos,datasets,artifacts,logs,jobs}}
-        mkdir -p "$XDG_CACHE_HOME" "$WORK_ROOT"/.cache/{{uv,huggingface,torch}}
-        mkdir -p "$WORK_ROOT"/eval/{{catalogs,datasets,assets,runs}}
+        {workspace_directories_line(paths)}
         mkdir -p "$SKYNET_RUN_DIR"/{{artifacts,checkpoints,eval,state,attempts}}
         if [[ -n "${{SKYNET_EVAL_RESULT_PATH:-}}" ]]; then
           mkdir -p "$(dirname "$SKYNET_EVAL_RESULT_PATH")"
