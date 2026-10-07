@@ -13,6 +13,8 @@ from skynet_app.database import Database
 from skynet_app.experiments import ExperimentSpec
 from skynet_app.tracking import WandBBridge, WandBSettings
 
+from factories import make_run_chain
+
 
 def spec():
     return ExperimentSpec.model_validate(
@@ -129,24 +131,17 @@ def test_epoch_eta_uses_completed_work_and_excludes_step_checkpoints():
 
 def test_epoch_ingestion_and_wandb_publication_are_idempotent(tmp_path, monkeypatch):
     db = Database(tmp_path / "test.db")
-    project = db.create_project("test")
-    experiment = db.create_experiment(
-        project_id=project["id"], name="progress", requested_spec=spec()
-    )
-    variant = db.create_variant(
-        experiment["latest_revision"]["id"],
-        name="test",
-        parameters={},
-        resolved_spec=spec(),
-    )
-    run = db.create_run(
-        variant["id"],
+    run = make_run_chain(
+        db,
+        project_name="test",
+        experiment_name="progress",
+        requested_spec=spec(),
+        variant_name="test",
         seed=42,
         adapter_name="xpolicylab-act",
-        adapter_version="1",
         run_directory="/cluster/run",
         status="RUNNING",
-    )
+    ).run
     stage = db.create_stage(run["id"], stage_type="TRAIN", name="train")
     db.create_job_attempt(stage["id"], status="SUBMISSION_FAILED")
     attempt = db.create_job_attempt(

@@ -14,17 +14,16 @@ from skynet_app.database import Database
 from skynet_app.training_progress_log import read_execution_log
 from skynet_app.cluster_runtime import JobStatusSnapshot
 
+from factories import make_run_chain
+
 
 @pytest.fixture
 def progress(tmp_path):
     database = Database(tmp_path / "restart.db")
     spec = {"source": {"adapter_manifest": canonical_adapter_manifest(act_manifest())},
             "native": {"config": {"epochs": 10}}}
-    project = database.create_project("restart")
-    experiment = database.create_experiment(project_id=project["id"], name="progress", requested_spec=spec)
-    variant = database.create_variant(experiment["latest_revision"]["id"], name="one", parameters={}, resolved_spec=spec)
-    run = database.create_run(variant["id"], seed=0, adapter_name="xpolicylab-act", adapter_version="1",
-                              run_directory="/synthetic/run", status="RUNNING")
+    run = make_run_chain(database, project_name="restart", experiment_name="progress", requested_spec=spec, seed=0,
+                         adapter_name="xpolicylab-act", run_directory="/synthetic/run", status="RUNNING").run
     stage = database.create_stage(run["id"], stage_type="TRAIN", name="train", status="RUNNING")
     attempt = database.create_job_attempt(stage["id"], status="RUNNING", gateway="synthetic",
                                           slurm_job_id="123", started_at="2026-01-01T00:00:00Z")

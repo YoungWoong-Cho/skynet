@@ -8,6 +8,8 @@ import pytest
 from skynet_app.database import Database, canonical_json
 from skynet_app.training_contracts import RECORDING_DATASET_FORMAT
 
+from factories import make_run_chain
+
 
 @pytest.fixture
 def migration(tmp_path):
@@ -31,10 +33,11 @@ def migration(tmp_path):
             sources=[{'sha256':source_sha}],converter_sha256='c'*64,training_ready=True,
             manifest_sha256=version['manifest_sha256'],loader_validation={'manifest_sha256':version['manifest_sha256']})
         with db.transaction() as c:c.execute('INSERT INTO policy_exports VALUES (?,?)',(identifier,canonical_json(job)))
-    experiment=db.create_experiment(name='Prior experiment',requested_spec={'native':{'config':{'dataset_manifest_sha256':old['manifest_sha256'],'dataset_path':old['path']}}})
-    revision=experiment['latest_revision']
-    variant=db.create_variant(revision['id'],name='variant',parameters={},resolved_spec={'version_id':old['id']})
-    run=db.create_run(variant['id'],seed=42,adapter_name='EgoVerse',adapter_version='1',run_directory=str(tmp_path/'run'),status='COMPLETED')
+    chain=make_run_chain(db,project_name=None,experiment_name='Prior experiment',
+        requested_spec={'native':{'config':{'dataset_manifest_sha256':old['manifest_sha256'],'dataset_path':old['path']}}},
+        variant_name='variant',resolved_spec={'version_id':old['id']},seed=42,adapter_name='EgoVerse',
+        run_directory=str(tmp_path/'run'),status='COMPLETED')
+    experiment,run=chain.experiment,chain.run
     stage=db.create_stage(run['id'],stage_type='TRAIN',name='train',status='COMPLETED')
     attempt=db.create_job_attempt(stage['id'],status='COMPLETED')
     checkpoint=db.create_checkpoint(run['id'],checkpoint_type='last',path=str(tmp_path/'model.ckpt'),produced_by_attempt_id=attempt['id'])

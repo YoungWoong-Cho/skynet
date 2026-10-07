@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from factories import make_run_chain
 from test_cluster_runtime import RecordingClusterClient
 from test_pipeline import (
     FakeCluster,
@@ -58,10 +59,8 @@ def configure(service, root, expected):
 
 def create_run(service, root, name="run"):
     db = service.database
-    project = db.create_project(name)
-    experiment = db.create_experiment(project_id=project["id"], name=name, requested_spec={})
-    variant = db.create_variant(experiment["latest_revision"]["id"], name=name, parameters={}, resolved_spec={})
-    run = db.create_run(variant["id"], seed=42, adapter_name="generic", adapter_version="1", run_directory=root + "/jobs/runs/pending")
+    run = make_run_chain(db, project_name=name, experiment_name=name, variant_name=name, seed=42,
+                         run_directory=root + "/jobs/runs/pending").run
     db.update_run(run["id"], run_directory=f"{root}/jobs/runs/{run['id']}")
     return run["id"]
 

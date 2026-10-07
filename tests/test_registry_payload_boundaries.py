@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from factories import make_run_chain
 from test_payload_store import object_db
 from test_postgres import pg
 
@@ -81,10 +82,7 @@ def test_registry_dependency_preserved_without_downloading_execution_body(object
     target = (db.upsert_seed_adapter(seed_key="policy", name="Policy", manifest={"slug": "policy"})
               if kind == "adapter" else db.register_evaluation_suite(evaluator_adapter="isaac_lab", evaluator_version="1",
                   name="cube", suite_version="1", config={"tasks": ["cube"]}))
-    project = db.create_project("References")
-    experiment = db.create_experiment(project_id=project["id"], name="Consumer", requested_spec={})
-    variant = db.create_variant(experiment["latest_revision"]["id"], name="one", parameters={}, resolved_spec={})
-    run = db.create_run(variant["id"], seed=1, adapter_name="other", adapter_version="1", run_directory="/fixture/run")
+    run = make_run_chain(db, project_name="References", experiment_name="Consumer", adapter_name="other").run
     document = {"code": "unrelated code\n" * 200000, "deep": [{"pinned_identifier": target["id"]}]}
     stage = db.create_stage(run["id"], stage_type="TRAIN", name="train", resolved_config=document if location == "stage" else {})
     db.create_job_attempt(stage["id"], execution_snapshot_json=document if location == "attempt" else {})

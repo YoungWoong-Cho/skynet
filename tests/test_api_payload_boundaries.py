@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
+from factories import make_run_chain
 from test_payload_store import object_db
 from test_postgres import pg
 from skynet_app.db_backend import lock_key
@@ -11,18 +12,14 @@ from skynet_app.payload_store import PayloadStore, _CACHE, _PROJECTIONS
 from skynet_app import pipeline_api
 
 
-def make_run(db):
-    project = db.create_project('payload boundaries')
-    experiment = db.create_experiment(project_id=project['id'], name='large', requested_spec={})
-    variant = db.create_variant(experiment['latest_revision']['id'], name='one', parameters={}, resolved_spec={})
-    run = db.create_run(variant['id'], seed=1, adapter_name='hat', adapter_version='fixed', run_directory='/run')
-    return experiment, run
+HAT_RUN = dict(project_name='payload boundaries', experiment_name='large', adapter_name='hat',
+               adapter_version='fixed', run_directory='/run')
 
 
 def test_evaluation_lists_never_read_execution_bodies(object_db, monkeypatch):
     db, _ = object_db
     db.payload_store = PayloadStore(db)
-    _, run = make_run(db)
+    run = make_run_chain(db, **HAT_RUN).run
     stage = db.create_stage(run['id'], stage_type='EVALUATE', name='eval', resolved_config={
         'resources': {'gpu': {'count': 1}}, 'unused': 'x' * 2_000_000})
     attempt = db.create_job_attempt(stage['id'], execution_snapshot_json={'code': 'y' * 2_000_000})
@@ -48,7 +45,7 @@ def test_evaluation_lists_never_read_execution_bodies(object_db, monkeypatch):
 def test_status_writes_never_read_unchanged_execution_bodies(object_db, monkeypatch, operation):
     db, _ = object_db
     db.payload_store = PayloadStore(db)
-    _, run = make_run(db)
+    run = make_run_chain(db, **HAT_RUN).run
     stage = db.create_stage(run['id'], stage_type='TRAIN', name='train', resolved_config={'body': 'x' * 200_000})
     attempt = db.create_job_attempt(stage['id'], execution_snapshot_json={'body': 'y' * 200_000})
     _CACHE.clear()
@@ -82,7 +79,7 @@ def test_status_writes_never_read_unchanged_execution_bodies(object_db, monkeypa
 
 def test_experiments_summary_does_not_load_run_lists(object_db, monkeypatch):
     db, _ = object_db
-    experiment, run = make_run(db)
+    experiment = make_run_chain(db, **HAT_RUN).experiment
     monkeypatch.setattr(pipeline_api, 'service', SimpleNamespace(database=db))
     monkeypatch.setattr(db, 'list_runs', lambda **kw: pytest.fail('N+1 run listing'))
     row = pipeline_api.list_experiments()['experiments'][0]
@@ -110,7 +107,7 @@ def test_display_projection_keeps_identity_schema_and_original_receipt():
 def test_capsule_upload_does_not_hold_repository_write_lock(object_db, monkeypatch):
     db, _ = object_db
     db.payload_store = PayloadStore(db)
-    _, run = make_run(db)
+    run = make_run_chain(db, **HAT_RUN).run
     original = db.payload_store.objects.put_many
     uploads = []
     def upload(contents):
@@ -129,7 +126,7 @@ def test_capsule_upload_does_not_hold_repository_write_lock(object_db, monkeypat
 def test_failed_preupload_cannot_claim_submission(object_db, monkeypatch):
     db, _ = object_db
     db.payload_store = PayloadStore(db)
-    _, run = make_run(db)
+    run = make_run_chain(db, **HAT_RUN).run
     stage = db.create_stage(run['id'], stage_type='TRAIN', name='train')
     monkeypatch.setattr(db.payload_store.objects, 'put_many', lambda *_: (_ for _ in ()).throw(ConnectionError('offline')))
     with pytest.raises(ConnectionError):
@@ -160,7 +157,7 @@ def test_registry_body_reads_are_outside_write_lock(object_db, monkeypatch, oper
 def test_evaluation_planning_and_dispatch_read_only_required_execution_bodies(object_db, monkeypatch):
     db, _ = object_db
     db.payload_store = PayloadStore(db)
-    _, run = make_run(db)
+    run = make_run_chain(db, **HAT_RUN).run
     old = db.create_stage(run['id'], stage_type='EVALUATE', name='old', status='SUBMITTED', stage_id='old-evaluation',
         resolved_config={'context': {'execution_key': 'old-evaluation'}, 'large': 'x' * 300_000})
     db.create_job_attempt(old['id'], execution_snapshot_json={'large': 'y' * 300_000})

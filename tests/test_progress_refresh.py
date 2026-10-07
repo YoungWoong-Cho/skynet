@@ -14,6 +14,8 @@ from skynet_app.cluster_runtime import ClusterError
 from skynet_app.database import Database
 from skynet_app.tracking import SessionCredentialStore
 
+from factories import make_run_chain
+
 
 @pytest.fixture
 def service(tmp_path, monkeypatch):
@@ -36,16 +38,11 @@ def wait_until_idle(service):
     raise AssertionError("Progress worker did not settle")
 
 
-def create_run(database):
-    project = database.create_project("progress")
-    experiment = database.create_experiment(project_id=project["id"], name="list", requested_spec={})
-    variant = database.create_variant(experiment["latest_revision"]["id"], name="one", parameters={}, resolved_spec={})
-    return database.create_run(variant["id"], seed=0, adapter_name="generic", adapter_version="1",
-                               run_directory="/fixture/run", status="RUNNING")
+RUNNING_RUN = dict(project_name="progress", experiment_name="list", seed=0, status="RUNNING")
 
 
 def test_lists_respond_while_progress_is_blocked_and_do_not_cache_status(service, monkeypatch):
-    run = create_run(service.database)
+    run = make_run_chain(service.database, **RUNNING_RUN).run
     evaluation = service.database.create_evaluation(run["id"], evaluator_adapter="generic", evaluator_version="1",
         suite_name="fixture", suite_version="1", tasks=["task"], seeds=[0], episodes_per_task=1, status="RUNNING")
     release = threading.Event()
@@ -158,7 +155,7 @@ def test_missing_terminal_progress_has_bounded_retry_without_hiding_new_attempts
 
 @pytest.mark.parametrize("cancel_during", ["read", "upsert"])
 def test_late_evaluation_progress_cannot_reopen_a_cancelled_episode(service, monkeypatch, cancel_during):
-    run = create_run(service.database)
+    run = make_run_chain(service.database, **RUNNING_RUN).run
     stage = service.database.create_stage(run["id"], stage_type="EVAL", name="evaluate")
     service.database.create_job_attempt(stage["id"], status="RUNNING", gateway="fixture", slurm_job_id="123")
     evaluation = service.database.create_evaluation(run["id"], stage_id=stage["id"], evaluator_adapter="generic", evaluator_version="1",

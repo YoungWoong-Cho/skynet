@@ -6,32 +6,27 @@ from pathlib import Path
 
 from skynet_app.database import Database
 
+from factories import make_run_chain
+
 
 class WorkflowTransitionTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.database = Database(Path(self.temporary_directory.name) / "skynet.db")
-        project = self.database.create_project("workflow-transitions")
-        experiment = self.database.create_experiment(
-            project_id=project["id"],
-            name="atomic-state",
+        chain = make_run_chain(
+            self.database,
+            project_name="workflow-transitions",
+            experiment_name="atomic-state",
             requested_spec={"schema_version": "test"},
-        )
-        variant = self.database.create_variant(
-            experiment["latest_revision"]["id"],
-            name="variant",
-            parameters={},
+            variant_name="variant",
             resolved_spec={},
-        )
-        self.experiment_id = experiment["id"]
-        self.run = self.database.create_run(
-            variant["id"],
             seed=42,
             adapter_name="test",
-            adapter_version="1",
             run_directory="/tmp/atomic-state",
             status="PENDING",
         )
+        self.experiment_id = chain.experiment["id"]
+        self.run = chain.run
         self.stage = self.database.create_stage(
             self.run["id"],
             stage_type="TRAIN",

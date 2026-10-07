@@ -15,6 +15,8 @@ from skynet_app.maintenance import Maintenance
 from skynet_app.slurm import source_cache_directory
 from skynet_app.cluster_runtime import ClusterClient
 
+from factories import make_run_chain
+
 
 def test_storage_reference_index_preserves_parent_child_and_sibling_boundaries():
     references = ['/work/keep', '/work/keep/a', '/work/keep/zzz', '/work/a/model', '/work/another']
@@ -100,21 +102,15 @@ def build_history(tmp_path, *, offloaded=False):
 
         db.payload_store = PayloadStore(db)
     root = tmp_path / "cluster"
-    project = db.create_project("Testing")
-    experiment = db.create_experiment(
-        project_id=project["id"], name="Retain original recordings", requested_spec={}
-    )
-    variant = db.create_variant(
-        experiment["latest_revision"]["id"], name="one", parameters={}, resolved_spec={}
-    )
-    run = db.create_run(
-        variant["id"],
-        seed=1,
+    chain = make_run_chain(
+        db,
+        project_name="Testing",
+        experiment_name="Retain original recordings",
         adapter_name="hpt",
-        adapter_version="1",
         run_directory="unset",
         status="SUCCEEDED",
     )
+    experiment, run = chain.experiment, chain.run
     run_dir = root / "jobs/runs" / run["id"]
     run_dir.mkdir(parents=True)
     (run_dir / "checkpoint.pt").write_bytes(b"weights")

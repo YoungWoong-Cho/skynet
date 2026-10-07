@@ -5,6 +5,8 @@ import pytest
 from skynet_app import database
 from skynet_app.database import Database, canonical_json, utc_now
 
+from factories import make_run_chain
+
 RECORDED = ["SUCCEEDED", "FAILED", "TIMEOUT"]
 UNSETTLED = [*RECORDED, "RUNNING", "PENDING", "PENDING"]
 NOT_COMPLETED = [*RECORDED, "NOT_COMPLETED", "NOT_COMPLETED", "NOT_COMPLETED"]
@@ -12,10 +14,8 @@ NOT_COMPLETED = [*RECORDED, "NOT_COMPLETED", "NOT_COMPLETED", "NOT_COMPLETED"]
 
 def _created(db, name="episodes", *, stage_status="RUNNING", evaluation_status="RUNNING"):
     """Return a six-episode evaluation and its stage, created with its ledger."""
-    project = db.create_project(name)
-    experiment = db.create_experiment(project_id=project["id"], name="episodes", requested_spec={})
-    variant = db.create_variant(experiment["latest_revision"]["id"], name="v", parameters={}, resolved_spec={})
-    run = db.create_run(variant["id"], seed=0, adapter_name="generic", adapter_version="1", run_directory="/tmp/episodes")
+    run = make_run_chain(db, project_name=name, experiment_name="episodes", variant_name="v", seed=0,
+                         run_directory="/tmp/episodes").run
     stage = db.create_stage(run["id"], stage_type="EVALUATE", name="evaluate", status=stage_status)
     evaluation = db.create_evaluation(
         run["id"], evaluator_adapter="generic", evaluator_version="1", suite_name="test", suite_version="1",

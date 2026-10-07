@@ -15,6 +15,8 @@ from skynet_app.experiments import ExperimentSpec
 from skynet_app.tracking import WandBBridge, WandBSettings
 from skynet_app.tracking_journal import TrackingJournal
 
+from factories import make_run_chain
+
 
 JSONL_ADAPTERS = [
     adapter for adapter in builtin_adapter_manifests()
@@ -196,13 +198,10 @@ def forwarding_service(tmp_path, monkeypatch):
         }]},
     }).model_dump(mode="json")
     database = Database(tmp_path / "metrics.db")
-    project = database.create_project("metric-test")
-    experiment = database.create_experiment(project_id=project["id"], name="all-scalars", requested_spec=spec)
-    variant = database.create_variant(experiment["latest_revision"]["id"], name="one", parameters={}, resolved_spec=spec)
-    run = database.create_run(
-        variant["id"], seed=0, adapter_name="xpolicylab-act", adapter_version="1",
-        run_directory="/synthetic/run", status="RUNNING",
-    )
+    run = make_run_chain(
+        database, project_name="metric-test", experiment_name="all-scalars", requested_spec=spec, seed=0,
+        adapter_name="xpolicylab-act", run_directory="/synthetic/run", status="RUNNING",
+    ).run
     stage = database.create_stage(run["id"], stage_type="TRAIN", name="train")
     attempt = database.create_job_attempt(
         stage["id"], status="RUNNING", gateway="synthetic-host", slurm_job_id="123",

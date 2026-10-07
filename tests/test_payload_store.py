@@ -14,6 +14,8 @@ from skynet_app.metadata_objects import _REMOTE, MetadataObjects
 from skynet_app.payload_store import _CACHE, PayloadStore
 from skynet_app.tracking_journal import TrackingJournal
 
+from factories import make_run_chain
+
 
 def local_exchange(self, request):
     """Run the cluster-side metadata program locally instead of over SSH."""
@@ -64,8 +66,6 @@ def test_run_list_uses_compact_resume_evidence_and_preserves_details(object_db, 
     db, _ = object_db
     if external:
         db.payload_store = PayloadStore(db)
-    project = db.create_project("compact-list")
-    experiment = db.create_experiment(project_id=project["id"], name="compact", requested_spec={})
     spec = {"train": {"max_steps": 8000}, "resources": {"gpu": {"count": 1}},
             "source": {"adapter_manifest": {"train": {"capsule_files": {"code.py": "x" * 200000},
                 "progress": {"unit": "step", "total_path": "train.max_steps", "starts_at_zero": True,
@@ -73,9 +73,8 @@ def test_run_list_uses_compact_resume_evidence_and_preserves_details(object_db, 
             "data": {"bundle": {"name": "cube", "assignments": [{"role": "training_data",
                 "version": {"format": "fixture", "metadata": {"display_name": "Cube",
                     "episodes": [{"body": "x" * 20000}] * 51, "shared_artifacts": ["x" * 200000]}}}]}}}
-    variant = db.create_variant(experiment["latest_revision"]["id"], name="one", parameters={}, resolved_spec=spec)
-    run = db.create_run(variant["id"], seed=1, adapter_name="generic", adapter_version="1",
-                        run_directory="/fixture/run", status="RUNNING")
+    run = make_run_chain(db, project_name="compact-list", experiment_name="compact", resolved_spec=spec,
+                         status="RUNNING").run
     stage = db.create_stage(run["id"], stage_type="TRAIN", name="train")
     snapshot = {"plan": {"native_config": {"initial_checkpoint": "/saved.ckpt"}},
                 "code": "x" * 200000}
@@ -101,13 +100,11 @@ def test_reference_projection_keeps_nested_paths_without_loading_bodies(object_d
     from skynet_app.maintenance import Maintenance
     db, _ = object_db
     db.payload_store = PayloadStore(db)
-    project = db.create_project("references")
     spec = {"nested": [{"path": "/shared/cube"}, ["/shared/other", "relative", "/"]],
             "body": "x" * 200000}
-    experiment = db.create_experiment(project_id=project["id"], name="refs", requested_spec=spec)
-    variant = db.create_variant(experiment["latest_revision"]["id"], name="one", parameters={}, resolved_spec=spec)
-    run = db.create_run(variant["id"], seed=1, adapter_name="generic", adapter_version="1",
-                       run_directory="/fixture/run", status="SUCCEEDED")
+    chain = make_run_chain(db, project_name="references", experiment_name="refs", requested_spec=spec,
+                           status="SUCCEEDED")
+    experiment, variant, run = chain.experiment, chain.variant, chain.run
     stage = db.create_stage(run["id"], stage_type="TRAIN", name="train")
     attempt = db.create_job_attempt(stage["id"], execution_snapshot_json={"large": "x" * 200000},
                                    stdout_path="/shared/log.out")
@@ -197,21 +194,10 @@ def test_second_client_reads_offloaded_bodies_and_receipts_stay_immutable(object
     adapter = db.upsert_seed_adapter(
         seed_key="qa", name="QA", manifest={"large": "x" * 200000}
     )
-    project = db.create_project("p")
-    experiment = db.create_experiment(
-        project_id=project["id"], name="e", requested_spec={}
-    )
-    variant = db.create_variant(
-        experiment["latest_revision"]["id"], name="v", parameters={}, resolved_spec={}
-    )
-    run = db.create_run(
-        variant["id"],
-        seed=1,
-        adapter_name="qa",
-        adapter_version="1",
-        run_directory="/tmp/qa",
-        status="SUCCEEDED",
-    )
+    run = make_run_chain(
+        db, project_name="p", experiment_name="e", variant_name="v", adapter_name="qa",
+        run_directory="/tmp/qa", status="SUCCEEDED",
+    ).run
     stage = db.create_stage(
         run["id"],
         stage_type="TRAIN",
@@ -249,20 +235,9 @@ def test_second_client_reads_offloaded_bodies_and_receipts_stay_immutable(object
 def test_new_stage_writes_external_body_and_missing_or_changed_object_fails(object_db):
     db, _ = object_db
     db.payload_store = PayloadStore(db)
-    project = db.create_project("p")
-    experiment = db.create_experiment(
-        project_id=project["id"], name="e", requested_spec={}
-    )
-    variant = db.create_variant(
-        experiment["latest_revision"]["id"], name="v", parameters={}, resolved_spec={}
-    )
-    run = db.create_run(
-        variant["id"],
-        seed=1,
-        adapter_name="qa",
-        adapter_version="1",
-        run_directory="/tmp/qa",
-    )
+    run = make_run_chain(
+        db, project_name="p", experiment_name="e", variant_name="v", adapter_name="qa", run_directory="/tmp/qa"
+    ).run
     stage = db.create_stage(
         run["id"],
         stage_type="TRAIN",

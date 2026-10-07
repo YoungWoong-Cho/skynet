@@ -8,6 +8,7 @@ import pytest
 from skynet_app import data_selection, prepared_deletion
 from skynet_app.database import Database, canonical_json
 from skynet_app.workspaces import WorkspaceDirectory
+from factories import make_run_chain
 from test_data_version_retirement import insert_retirement, migration
 
 
@@ -21,10 +22,9 @@ def dataset(db):
 
 
 def evaluation_run(db, name='Evaluate held-out hand'):
-    experiment = db.create_experiment(name=name, requested_spec={})
-    variant = db.create_variant(experiment['latest_revision']['id'], name='run', parameters={}, resolved_spec={})
-    run = db.create_run(variant['id'], seed=1, adapter_name='human-policy-hat', adapter_version='1', run_directory='/run', status='COMPLETED')
-    return experiment, run
+    chain = make_run_chain(db, project_name=None, experiment_name=name, variant_name='run',
+                           adapter_name='human-policy-hat', run_directory='/run', status='COMPLETED')
+    return chain.experiment, chain.run
 
 
 def evaluation_reference(db, target, *, kind='context', name='Evaluate held-out hand'):

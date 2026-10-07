@@ -19,6 +19,8 @@ from skynet_app.pipeline_api import (
     _manifest_default, _sweep_from_frontend,
 )
 
+from factories import make_run_chain
+
 
 def spec(**changes):
     value = dict(
@@ -160,10 +162,8 @@ def test_preview_uses_same_live_queue_resolution_as_create():
 
 def test_terminal_evaluation_finalizes_only_unfinished_episodes_and_can_resume(tmp_path):
     db = Database(tmp_path / "episodes.db")
-    project = db.create_project("audit")
-    experiment = db.create_experiment(project_id=project["id"], name="test", requested_spec={})
-    variant = db.create_variant(experiment["latest_revision"]["id"], name="test", parameters={}, resolved_spec={})
-    run = db.create_run(variant["id"], seed=0, adapter_name="generic", adapter_version="1", run_directory="/tmp/audit")
+    run = make_run_chain(db, project_name="audit", experiment_name="test", variant_name="test", seed=0,
+                         run_directory="/tmp/audit").run
     evaluation = db.create_evaluation(run["id"], evaluator_adapter="generic", evaluator_version="1", suite_name="test", suite_version="1", tasks=["task"], seeds=[0], episodes_per_task=2)
     db.upsert_evaluation_episode(evaluation["id"], task="task", seed=0, episode_index=0, status="SUCCEEDED", success=True)
     db.upsert_evaluation_episode(evaluation["id"], task="task", seed=0, episode_index=1)

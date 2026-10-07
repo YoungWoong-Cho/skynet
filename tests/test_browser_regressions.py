@@ -1,24 +1,18 @@
+from factories import make_run_chain
 from skynet_app.database import Database
 from skynet_app.pipeline_api import _attach_run_progress_summaries
 
 
-def make_run(tmp_path):
-    database = Database(tmp_path / "test.db")
-    project = database.create_project("qa")
-    experiment = database.create_experiment(
-        project_id=project["id"], name="qa",
-        requested_spec={"source": {"revision": "a" * 40}},
-    )
-    variant = database.create_variant(
-        experiment["latest_revision"]["id"], name="one",
-        parameters={}, resolved_spec={"resources": {"gpu": {"count": 1, "type": "l40s"}}},
-    )
-    run = database.create_run(variant["id"], seed=0, adapter_name="groot", adapter_version="1", run_directory="/tmp/qa")
-    return database, run
+QA_RUN = dict(
+    project_name="qa", experiment_name="qa", requested_spec={"source": {"revision": "a" * 40}},
+    resolved_spec={"resources": {"gpu": {"count": 1, "type": "l40s"}}},
+    seed=0, adapter_name="groot", run_directory="/tmp/qa",
+)
 
 
 def test_run_summary_includes_latest_training_attempt_and_resources(tmp_path):
-    database, run = make_run(tmp_path)
+    database = Database(tmp_path / "test.db")
+    run = make_run_chain(database, **QA_RUN).run
     stage = database.create_stage(run["id"], stage_type="TRAIN", name="train")
     first = database.create_job_attempt(stage["id"], slurm_job_id="10")
     database.update_job_attempt(first["id"], status="FAILED")
@@ -35,7 +29,8 @@ def test_run_summary_includes_latest_training_attempt_and_resources(tmp_path):
 
 
 def test_evaluation_list_contains_result_before_opening_details(tmp_path):
-    database, run = make_run(tmp_path)
+    database = Database(tmp_path / "test.db")
+    run = make_run_chain(database, **QA_RUN).run
     evaluation = database.create_evaluation(
         run["id"], evaluator_adapter="groot", evaluator_version="1",
         suite_name="tabletop", suite_version="1", tasks=["task"], seeds=[0], episodes_per_task=1,
@@ -46,7 +41,8 @@ def test_evaluation_list_contains_result_before_opening_details(tmp_path):
 
 
 def test_experiment_list_exposes_pinned_revision(tmp_path):
-    database, _ = make_run(tmp_path)
+    database = Database(tmp_path / "test.db")
+    make_run_chain(database, **QA_RUN)
     assert database.list_experiments()[0]["git_revision"] == "a" * 40
 
 
@@ -92,7 +88,8 @@ def test_bundle_selection_is_consumed_or_rejected_explicitly():
 def test_evaluation_readiness_rejects_busy_run_before_expensive_probe(tmp_path):
     from types import SimpleNamespace
     from skynet_app.pipeline_api import PipelineService
-    database, run = make_run(tmp_path)
+    database = Database(tmp_path / "test.db")
+    run = make_run_chain(database, **QA_RUN).run
     database.create_checkpoint(run['id'], path='/tmp/checkpoint', checkpoint_type='INFERENCE',
         is_selected_for_inference=True)
     database.create_stage(run['id'], stage_type='EVALUATE', name='existing evaluation', status='RUNNING')

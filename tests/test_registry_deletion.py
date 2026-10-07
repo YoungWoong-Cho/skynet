@@ -11,6 +11,8 @@ from skynet_app.database import Database, canonical_json, utc_now
 from skynet_app.maintenance import Maintenance
 from skynet_app.pipeline_api import PipelineService
 
+from factories import make_run_chain
+
 
 class NoFiles:
     def resolve_gateway(self, gateway):
@@ -103,9 +105,8 @@ def test_suite_removes_all_versions_and_blocks_selected_experiment(registry):
 def test_suite_pinned_and_legacy_evaluation_dependencies(registry, use_fk):
     db, root, service = registry
     s = suite(root)
-    e = experiment(db, {})
-    v = db.create_variant(e['latest_revision']['id'], name='v', parameters={}, resolved_spec={})
-    run = db.create_run(v['id'], seed=1, adapter_name='test', adapter_version='1', run_directory='unset', status='SUCCEEDED')
+    run = make_run_chain(db, project_name='Project', experiment_name='Consumer', variant_name='v',
+                         adapter_name='test', run_directory='unset', status='SUCCEEDED').run
     evaluation = db.create_evaluation(run['id'], evaluator_adapter='isaac_lab', evaluator_version='1',
         suite_name='cube', suite_version='1', tasks=['cube'], seeds=[1], episodes_per_task=1,
         **({'evaluation_suite_id': s['id']} if use_fk else {}))
@@ -185,10 +186,8 @@ def test_suite_supported_capability_is_a_notice_not_a_dependency(registry):
     }]}
     a = db.create_adapter(name='HPT', manifest=manifest)
     spec = {'source': {'adapter_manifest': manifest}, 'evaluation': []}
-    e = experiment(db, spec)
-    v = db.create_variant(e['latest_revision']['id'], name='v', parameters={}, resolved_spec=spec)
-    run = db.create_run(v['id'], seed=1, adapter_name='hpt', adapter_version='1',
-                        run_directory='unset', status='SUCCEEDED')
+    run = make_run_chain(db, project_name='Project', experiment_name='Consumer', requested_spec=spec,
+                         variant_name='v', adapter_name='hpt', run_directory='unset', status='SUCCEEDED').run
     plan = service.preview('suite', s['id'])
     assert not plan['blockers']
     assert len(plan['notices']) == 1 and 'HPT' in plan['notices'][0]

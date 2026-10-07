@@ -24,6 +24,8 @@ from skynet_app.workspaces import (
     session_router,
 )
 
+from factories import make_run_chain
+
 WEBHOOK = "https://hooks.slack.com/services/TTEST/BTEST/secret_test_only"
 
 
@@ -59,20 +61,14 @@ def setup(tmp_path):
 
 
 def graph(database, *, stage_type="TRAIN"):
-    project = database.create_project("project")
-    experiment = database.create_experiment(
-        project_id=project["id"], name="Cube <@everyone>", requested_spec={}
-    )
-    variant = database.create_variant(
-        experiment["latest_revision"]["id"], name="v1", parameters={}, resolved_spec={}
-    )
-    run = database.create_run(
-        variant["id"],
-        seed=1,
+    run = make_run_chain(
+        database,
+        experiment_name="Cube <@everyone>",
+        variant_name="v1",
         adapter_name="egoverse-hpt",
         adapter_version="2",
         run_directory="/cluster/run",
-    )
+    ).run
     stage = database.create_stage(run["id"], stage_type=stage_type, name=stage_type)
     attempt = database.create_job_attempt(stage["id"], status="SUBMITTING")
     if stage_type == "EVALUATE":

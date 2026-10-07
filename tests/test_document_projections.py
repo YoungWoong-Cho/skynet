@@ -5,6 +5,7 @@ import pytest
 
 from skynet_app.database import Database
 from skynet_app.maintenance import Maintenance, _REFERENCE_CACHE
+from factories import make_run_chain
 from test_maintenance import history, LocalCluster
 
 
@@ -211,9 +212,8 @@ def test_display_projection_keeps_every_run_list_view_on_large_and_empty_specs(t
 
 def test_offloaded_bodies_are_skipped_by_the_trigger_and_projected_by_their_writer(tmp_path):
     db=Database(tmp_path/'projection.db')
-    experiment=db.create_experiment(name='stage',requested_spec={})
-    variant=db.create_variant(experiment['latest_revision']['id'],name='run',parameters={},resolved_spec={})
-    run=db.create_run(variant['id'],seed=1,adapter_name='x',adapter_version='1',run_directory='/run',status='COMPLETED')
+    run=make_run_chain(db,project_name=None,experiment_name='stage',variant_name='run',adapter_name='x',
+        run_directory='/run',status='COMPLETED').run
     target={'version_id':'v','manifest_sha256':'d'*64,'path':'/target'}
     marker=json.dumps({'$skynet_object_v1':{'sha256':'0'*64,'path':'/objects/0','size':1}})
     with db.transaction() as c:
@@ -234,9 +234,8 @@ def test_offloaded_bodies_are_skipped_by_the_trigger_and_projected_by_their_writ
 
 def test_022_projects_attempt_resume_pins_and_keeps_other_kinds_byte_identical(tmp_path):
     db=Database(tmp_path/'projection.db')
-    experiment=db.create_experiment(name='pins',requested_spec=LIST_SPEC)
-    variant=db.create_variant(experiment['latest_revision']['id'],name='run',parameters={},resolved_spec=LIST_SPEC)
-    run=db.create_run(variant['id'],seed=1,adapter_name='x',adapter_version='1',run_directory='/run',status='RUNNING')
+    run=make_run_chain(db,project_name=None,experiment_name='pins',requested_spec=LIST_SPEC,variant_name='run',
+        adapter_name='x',run_directory='/run',status='RUNNING').run
     stage=db.create_stage(run['id'],stage_type='TRAIN',name='train')
     snapshots={'pinned':{'plan':{'native_config':{'initial_checkpoint':'/saved.ckpt'}}},
                'provenance':{'migration_provenance':{'checkpoint':{'path':'/old.ckpt'}}},

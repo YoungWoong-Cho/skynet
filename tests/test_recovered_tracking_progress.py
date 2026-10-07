@@ -4,6 +4,7 @@ import pytest
 
 from skynet_app import pipeline_api
 from skynet_app.database import Database
+from factories import make_run_chain
 from test_pipeline import GatewayRecoveryCluster, canonical_spec, make_pipeline_service
 from test_tracking_reconciliation import completed_tracking, submitted
 
@@ -83,10 +84,10 @@ def test_batch_progress_is_atomic_idempotent_and_attempt_scoped(tmp_path, monkey
 
 def test_successful_empty_tail_is_retried_and_never_invents_final_progress(tmp_path):
     from types import SimpleNamespace
-    from test_progress_refresh import create_run
+    from test_progress_refresh import RUNNING_RUN
     from skynet_app.adapters.act_manifest import manifest
     db = Database(tmp_path / 'empty-final.db')
-    run = create_run(db)
+    run = make_run_chain(db, **RUNNING_RUN).run
     contract = manifest().train.progress.model_dump(mode='json')
     stage = db.create_stage(run['id'], stage_type='TRAIN', name='train',
                            resolved_config={'plan': {'progress': contract}})

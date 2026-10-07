@@ -5,21 +5,15 @@ import pytest
 
 from skynet_app.database import Database
 
+from factories import make_run_chain
+
 
 @pytest.fixture
 def sample(tmp_path):
     database = Database(tmp_path / "metrics.db")
-    project = database.create_project("metrics")
-    experiment = database.create_experiment(
-        project_id=project["id"], name="progress", requested_spec={}
-    )
-    variant = database.create_variant(
-        experiment["latest_revision"]["id"], name="one", parameters={}, resolved_spec={}
-    )
-    run = database.create_run(
-        variant["id"], seed=42, adapter_name="generic", adapter_version="1",
-        run_directory="/fixture/run", status="RUNNING",
-    )
+    run = make_run_chain(
+        database, project_name="metrics", experiment_name="progress", seed=42, status="RUNNING"
+    ).run
     stage = database.create_stage(run["id"], stage_type="TRAIN", name="train")
     attempt = database.create_job_attempt(stage["id"], status="RUNNING")
     recorded = database.record_training_progress_sample(
