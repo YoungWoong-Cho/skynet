@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "test:presets": "node tests/experiment_steps_ui.mjs && node tests/experiment_preset_ui.mjs",
-    "build:hands": "esbuild frontend/hands-viewer.js --bundle --format=esm --minify --legal-comments=linked --outfile=static/hands-viewer.js",
+    "build:viewers": "rm -f static/vendor/viewer-shared-*.js static/vendor/viewer-shared-*.js.LEGAL.txt && esbuild frontend/hands-viewer.js frontend/episode-scene.js --bundle --splitting --format=esm --minify --legal-comments=linked '--chunk-names=vendor/viewer-shared-[hash]' --outdir=static",
     "test:dataset-preview": "node tests/dataset_preview_ui.mjs && node tests/episode_models.mjs && node tests/episode_viewer_ui.mjs && node tests/episode_hand_sync_ui.mjs && node tests/scene_assets.mjs && node tests/urdf_mesh_frame.mjs",
     "test:hands": "node tests/hand_materials.mjs && node tests/hands_state_ui.mjs && node tests/hand_playback.mjs",
     "test:live": "node tests/live_xr_ui.mjs && node tests/live_review_ui.mjs && node tests/live_conversion_ui.mjs && node tests/recording_registry_ui.mjs && node tests/policy_exports_ui.mjs && node tests/dialogs_ui.mjs && node tests/registry_modals_ui.mjs && node tests/resource_naming_ui.mjs && node tests/attempt_modal_ui.mjs && node tests/model_io_ui.mjs && node tests/training_contracts_ui.mjs && node tests/evaluation_rollouts_ui.mjs && node tests/collection_lifecycle_ui.mjs && node tests/registry_settings_ui.mjs && node tests/training_audit_ui.mjs && node tests/recorded_episode_evaluation_ui.mjs",
@@ -11,8 +11,7 @@
     "test:workspaces": "node tests/email_workspaces_ui.mjs",
     "test:slack": "node tests/slack_settings_ui.mjs",
     "test:maintenance": "node tests/maintenance_ui.mjs && node tests/registry_deletion_ui.mjs",
-    "test:storage": "node tests/workspace_storage_ui.mjs",
-    "build:episodes": "esbuild frontend/episode-scene.js --bundle --format=esm --minify --legal-comments=linked --outfile=static/episode-scene.js"
+    "test:storage": "node tests/workspace_storage_ui.mjs"
   },
   "dependencies": {
     "three": "0.180.0",

@@ -18,7 +18,7 @@ To rebuild the committed browser bundle:
 
 ```sh
 npm ci
-npm run build:hands
+npm run build:viewers
 npm run test:hands
 .venv/bin/python -m pytest tests/test_hands.py
 ```
