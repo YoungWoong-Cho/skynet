@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 from . import __version__
+from .tracking_journal import SINGLE_OBJECT_FILE
 
 try:
     import fcntl
@@ -40,15 +41,27 @@ WANDB_TAG_HASH_LENGTH = 12
 WANDB_TAG_METADATA_CONFIG_KEY = "skynet_tag_metadata"
 USER_AGENT = f"skynet-slurm-console/{__version__}"
 # Providers the console delivers to and their display names; migration 001 checks the same keys.
-TRACKING_PROVIDERS = {"mlflow": "MLflow", "wandb": "Weights & Biases"}
+TRACKING_PROVIDERS = {"wandb": "Weights & Biases", "mlflow": "MLflow"}
 WANDB_DEFAULT_BASE_URL = "https://api.wandb.ai"
 # Public web front for a hosted API endpoint; self-hosted servers serve both from one host.
 WANDB_WEB_HOSTS = {"api.wandb.ai": "https://wandb.ai"}
 # Retry-after growth for a busy remote: doubles from ``base`` up to ``cap``.
 RATE_LIMIT_BACKOFF_SECONDS = 60
 RATE_LIMIT_BACKOFF_CAP_SECONDS = 900
+# HTTP request timeouts; MLFLOW_HTTP_REQUEST_TIMEOUT and WANDB_HTTP_TIMEOUT override them.
+MLFLOW_DEFAULT_TIMEOUT_SECONDS = 5.0
+WANDB_DEFAULT_TIMEOUT_SECONDS = 8.0
+MIN_HTTP_TIMEOUT_SECONDS = 0.1
 # Parsed spools shared by the per-call bridge instances, bounded by their serialized size.
 SPOOL_CACHE_BYTES = 32 * 1024 * 1024
+
+
+def _timeout_from_env(environment: Mapping[str, str], name: str, default: float) -> float:
+    """An HTTP timeout override from the environment, floored at MIN_HTTP_TIMEOUT_SECONDS."""
+    try:
+        return max(MIN_HTTP_TIMEOUT_SECONDS, float(environment.get(name, default)))
+    except ValueError:
+        return default
 
 
 def backoff_seconds(attempt: int, *, base: float, cap: float) -> float:
@@ -181,7 +194,7 @@ class TrackingSettings:
     token: str | None = field(default=None, repr=False)
     username: str | None = field(default=None, repr=False)
     password: str | None = field(default=None, repr=False)
-    timeout_seconds: float = 5.0
+    timeout_seconds: float = MLFLOW_DEFAULT_TIMEOUT_SECONDS
     enabled: bool = True
     auto_flush: bool = True
     verify_tls: bool = True
@@ -189,11 +202,7 @@ class TrackingSettings:
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "TrackingSettings":
         environment = os.environ if environ is None else environ
-        timeout_text = environment.get("MLFLOW_HTTP_REQUEST_TIMEOUT", "5")
-        try:
-            timeout = max(0.1, float(timeout_text))
-        except ValueError:
-            timeout = 5.0
+        timeout = _timeout_from_env(environment, "MLFLOW_HTTP_REQUEST_TIMEOUT", MLFLOW_DEFAULT_TIMEOUT_SECONDS)
         return cls(
             tracking_uri=environment.get("MLFLOW_TRACKING_URI") or None,
             token=environment.get("MLFLOW_TRACKING_TOKEN") or None,
@@ -1124,7 +1133,7 @@ class MLflowBridge(_SpoolBridge):
             "sha256": payload.get("sha256"),
             "metadata": payload.get("metadata", {}),
         }
-        manifest_path = self.sidecar("tracking-artifact-links.json")
+        manifest_path = self.sidecar(SINGLE_OBJECT_FILE)
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError, OSError):
@@ -1279,7 +1288,7 @@ class WandBSettings:
     base_url: str = WANDB_DEFAULT_BASE_URL
     api_key: str | None = field(default=None, repr=False)
     entity: str | None = None
-    timeout_seconds: float = 8.0
+    timeout_seconds: float = WANDB_DEFAULT_TIMEOUT_SECONDS
     enabled: bool = True
     auto_flush: bool = True
     verify_tls: bool = True
@@ -1287,11 +1296,7 @@ class WandBSettings:
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "WandBSettings":
         environment = os.environ if environ is None else environ
-        timeout_text = environment.get("WANDB_HTTP_TIMEOUT", "8")
-        try:
-            timeout = max(0.1, float(timeout_text))
-        except ValueError:
-            timeout = 8.0
+        timeout = _timeout_from_env(environment, "WANDB_HTTP_TIMEOUT", WANDB_DEFAULT_TIMEOUT_SECONDS)
         return cls(
             base_url=(environment.get("WANDB_BASE_URL") or WANDB_DEFAULT_BASE_URL).rstrip("/"),
             api_key=environment.get("WANDB_API_KEY") or None,

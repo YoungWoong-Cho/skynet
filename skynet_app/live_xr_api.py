@@ -6,6 +6,7 @@ from .collection_api import service as collection
 from .cluster_runtime import ClusterError
 from .live_xr import LiveXRService
 from .live_xr_catalog import catalog
+from .retargeting import DEFAULT as DEFAULT_RETARGETER
 from .live_xr_review import LiveReviewService
 from .live_xr_video import LiveVideoService
 from .live_xr_archive import LiveArchiveService
@@ -28,7 +29,7 @@ class StartRequest(BaseModel):
     accepted_license: bool = False
     task: str | None = None
     robot: str | None = None
-    retargeter: str = "dexpilot"
+    retargeter: str = DEFAULT_RETARGETER
 
 
 def checked(call, *args):

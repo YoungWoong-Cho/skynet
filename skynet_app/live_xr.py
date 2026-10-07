@@ -24,6 +24,7 @@ from .cluster_config import CLUSTER, format_slurm_duration
 from .dexverse_release import TASK, ROBOT, REVISION
 from .live_xr_archive import TERMINAL_STATES
 from .live_xr_catalog import selection
+from .retargeting import DEFAULT as DEFAULT_RETARGETER
 from .dexverse_versions import environment_profile
 from .simulation_hands import build as build_hand, upload as upload_hand
 from .live_xr_workstation import LaunchRejected, WorkstationClient, validate_profile
@@ -190,7 +191,7 @@ class LiveXRService:
         accepted_license=False,
         task=None,
         robot=None,
-        retargeter="dexpilot",
+        retargeter=DEFAULT_RETARGETER,
     ):
         if not self.consent(accepted_license)["accepted"]:
             raise ValueError(
@@ -252,7 +253,7 @@ class LiveXRService:
                             "A different live session is already running. Stop it before changing the hand or task."
                         )
                     if (
-                        job["profile"].get("retargeting", {}).get("key", "dexpilot")
+                        job["profile"].get("retargeting", {}).get("key", DEFAULT_RETARGETER)
                         != retargeter
                     ):
                         raise ValueError(

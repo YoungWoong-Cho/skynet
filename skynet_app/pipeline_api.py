@@ -133,6 +133,7 @@ from .tracking import (
     TrackingRequestError,
     TrackingSettings,
     WandBBridge,
+    WANDB_DEFAULT_BASE_URL,
     WandBSettings,
     compact_tracking_parameters,
     mlflow_experiment_url,
@@ -1855,7 +1856,7 @@ class PipelineService:
             return {"ok": True, "skipped": "already running"}
         try:
             reports = {}
-            for provider in ("wandb", "mlflow"):
+            for provider in TRACKING_PROVIDERS:
                 if self._stop.is_set():
                     break
                 reports[provider] = self._flush_tracking_provider(
@@ -5002,7 +5003,8 @@ class PipelineService:
             stderr_path=compiled.stderr_path_template,
         )
         if attempt is None:
-            current = next(item for item in self.database.list_stages(run_id) if item["id"] == stage_id)
+            current = next(item for item in self.database.list_stages(run_id, include_payloads=False)
+                           if item["id"] == stage_id)
             return {
                 "run_id": run_id,
                 "stage_id": stage_id,
@@ -5380,7 +5382,7 @@ class PipelineService:
             if self._credentials_restored:
                 return
             self._credentials_restored = True
-            for provider in ("wandb", "mlflow"):
+            for provider in TRACKING_PROVIDERS:
                 connection = (connections.get(provider) if connections is not None
                               else self.database.get_tracking_connection(provider))
                 if not connection or self.credentials.get(provider):
@@ -5586,7 +5588,7 @@ class PipelineService:
             connections = self.database.list_tracking_connections()
             self._ensure_tracking_credentials_restored(connections)
             results: dict[str, Any] = {}
-            for provider in ("wandb", "mlflow"):
+            for provider in TRACKING_PROVIDERS:
                 runtime = self.credentials.state(provider)
                 if provider == "wandb":
                     settings = self._wandb_settings(connections=connections)
@@ -5636,7 +5638,7 @@ class PipelineService:
                 raise ValueError("W&B connection accepts only api_key, base_url, entity, and verify_tls")
             saved_settings, saved_revision = self._tracking_connection_snapshot("wandb")
             base_url = self._validate_tracking_endpoint(
-                request.base_url or saved_settings.base_url or "https://api.wandb.ai", "W&B base URL"
+                request.base_url or saved_settings.base_url or WANDB_DEFAULT_BASE_URL, "W&B base URL"
             )
             submitted_key = request.api_key is not None
             if not submitted_key and base_url.rstrip("/") != saved_settings.base_url.rstrip("/"):
@@ -6123,7 +6125,8 @@ class PipelineService:
         bindings = [binding for binding in self.database.list_tracking_bindings_for_provider(
             provider, scope_type="run", statuses=("QUEUED", "ERROR")
         ) if run_ids is None or str(binding["scope_id"]) in run_ids][:limit]
-        # Experiment bindings are read once per flush, not once per run.
+        # Experiment ids and bindings are read once per flush, not once per run.
+        experiment_ids = self.database.run_experiment_ids([str(binding["scope_id"]) for binding in bindings])
         experiment_bindings = {
             str(item["scope_id"]): item
             for item in self.database.list_tracking_bindings_for_provider(provider, scope_type="experiment")
@@ -6167,8 +6170,7 @@ class PipelineService:
                 binding = bridge.binding(run_id)
                 remote_id = (binding or {}).get("remote_id")
                 remote_url = (binding or {}).get("url") or existing.get("remote_url")
-                run = self.database.get_run(run_id, include_details=False) or {}
-                experiment_scope_id = str(run.get("experiment_id") or "")
+                experiment_scope_id = experiment_ids.get(run_id, "")
                 experiment_binding = experiment_bindings.get(experiment_scope_id, {}) if experiment_scope_id else {}
                 experiment_metadata = dict(experiment_binding.get("metadata_json") or {})
                 experiment_remote_id = experiment_binding.get("remote_id")

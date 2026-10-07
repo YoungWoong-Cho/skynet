@@ -1020,7 +1020,7 @@ class ProviderFlushBindingTestCase(unittest.TestCase):
             ), patch.object(
                 service, "_wandb_settings", return_value=settings
             ), patch.object(
-                database, "get_run", return_value={"experiment_id": experiment_id}
+                database, "run_experiment_ids", return_value={run_id: experiment_id}
             ):
                 report = service._flush_tracking_provider("wandb")
 
@@ -1089,7 +1089,7 @@ class ProviderFlushBindingTestCase(unittest.TestCase):
             ), patch.object(
                 service, "_mlflow_settings", return_value=settings
             ), patch.object(
-                database, "get_run", return_value={"experiment_id": experiment_id}
+                database, "run_experiment_ids", return_value={run_id: experiment_id}
             ), patch.object(
                 database, "update_run"
             ):
