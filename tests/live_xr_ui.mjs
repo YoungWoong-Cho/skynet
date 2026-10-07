@@ -1,28 +1,19 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { JSDOM } from "jsdom";
-import { indexHtml } from "./index_page.cjs";
-const dom = new JSDOM(
-  indexHtml(),
-  {
-    runScripts: "outside-only",
-    pretendToBeVisual: true,
-    url: "http://localhost:8080/#collection",
-  },
-);
-const { window } = dom,
+import { pageWindow, byId, readStatic, apiError } from "./ui_harness.mjs";
+const window = pageWindow({ url: "http://localhost:8080/#collection" }),
   requests = [];
-window.fetch = (path, options) =>
+// The page calls app.js's api(); each request waits here until the test answers it.
+window.api = (path, options = {}) =>
   new Promise((resolve, reject) =>
     requests.push({
       path,
       options,
       reject,
-      resolve: (data, ok = true) => resolve({ ok, json: async () => data }),
+      resolve: (data, ok = true) => (ok ? resolve(data) : reject(apiError(data.detail))),
     }),
   );
 const flush = () => new Promise((resolve) => setImmediate(resolve));
-const get = (id) => window.document.getElementById(id);
+const get = byId(window);
 get("collection").hidden = false;
 get("collection-view-live").hidden = false;
 const catalog = {
@@ -82,7 +73,7 @@ const job = {
 };
 try {
   window.eval(
-    await readFile(new URL("../static/live-xr.js", import.meta.url), "utf8"),
+    await readStatic('live-xr.js'),
   );
   get("live-xr-start-form").dispatchEvent(
     new window.Event("submit", { cancelable: true }),

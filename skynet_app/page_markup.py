@@ -12,6 +12,7 @@ from pathlib import PurePosixPath
 from .cluster_config import CLUSTER, format_slurm_duration
 from .collection import CollectionResources
 from .data_imports import HuggingFaceImportRequest
+from .experiments import CheckpointPolicy
 
 
 def _option(value: str, label: str, *, selected: bool = False, **data: str) -> str:
@@ -66,6 +67,9 @@ def cluster_markup() -> dict[str, str]:
         "<!-- import-max-cpus -->": str(_bound(HuggingFaceImportRequest, "cpus", "le")),
         "<!-- import-memory-gb -->": str(_bound(HuggingFaceImportRequest, "memory_gb", "default")),
         "<!-- import-max-memory-gb -->": str(_bound(HuggingFaceImportRequest, "memory_gb", "le")),
+        "<!-- checkpoint-warning-seconds -->": str(_bound(CheckpointPolicy, "save_before_timeout_seconds", "default")),
+        "<!-- checkpoint-warning-min-seconds -->": str(_bound(CheckpointPolicy, "save_before_timeout_seconds", "ge")),
+        "<!-- checkpoint-warning-max-seconds -->": str(_bound(CheckpointPolicy, "save_before_timeout_seconds", "le")),
         "<!-- gpu-usage-colspan -->": str(1 + len(CLUSTER.dashboard.gpu_usage_columns)),
         "<!-- artifacts-path-example -->": escape(f"{CLUSTER.paths.artifacts}/.../last.ckpt"),
         "<!-- collection-output-example -->": escape(f"{CLUSTER.paths.datasets}/.staging/collection/..."),

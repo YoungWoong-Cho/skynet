@@ -2,6 +2,26 @@ const workspaceStorageKey = (key) =>
   window.SkynetWorkspace?.storageKey(key) || key;
 const SSH_GATEWAY_PREFERENCE_KEY = workspaceStorageKey("skynet:ssh-gateway");
 
+// Every poll cadence, debounce, deadline and retry delay the page uses.
+const UI_TIMING = Object.freeze({
+  POLL_MS: 5000, // run and evaluation lists and their open detail panels
+  PROGRESS_POLL_MS: 1500, // run list while a submission is still settling
+  FINAL_POLL_DELAY_MS: 2000, // one last detail read after a run finishes
+  POLL_RETRY_MS: 250, // re-check while the previous detail poll is in flight
+  CLUSTER_REFRESH_MS: 15000,
+  TOAST_MS: 5000,
+  DEBOUNCE_MS: 350, // evaluation target validation, suite reload after typing
+  MODEL_IO_DEBOUNCE_MS: 180,
+  TARGET_VALIDATION_FRESH_MS: 10000, // a recent validation is not repeated
+  READ_TIMEOUT_MS: 60000, // GET/HEAD deadline; mutations keep their response
+  TARGET_VALIDATION_TIMEOUT_MS: 30000,
+  CHANGE_STREAM_RETRY_MS: 1000, // first reconnect delay, doubled up to the maximum
+  CHANGE_STREAM_MAX_RETRY_MS: 30000,
+  TUTORIAL_PREFILL_RETRY_MS: 100,
+  TUTORIAL_BOUND_ROW_TIMEOUT_MS: 10000,
+  OBJECT_URL_REVOKE_MS: 1000,
+});
+
 const elements = {
   gateway: document.querySelector("#gateway"),
   connectionDot: document.querySelector("#connection-dot"),
@@ -102,6 +122,7 @@ const elements = {
     "#checkpoint-save-steps-default",
   ),
   checkpointMaxAttempts: document.querySelector("#checkpoint-max-attempts"),
+  checkpointWarningSeconds: document.querySelector("#checkpoint-warning-seconds"),
   checkpointAutoResume: document.querySelector("#checkpoint-auto-resume"),
   sweepDefinition: document.querySelector("#sweep-definition"),
   wandbEnabled: document.querySelector("#wandb-enabled"),
@@ -1213,7 +1234,7 @@ function connectWorkspaceChanges(workspaceId, handlers) {
   const shared = window.BroadcastChannel && window.navigator?.locks;
   const channel = shared ? new window.BroadcastChannel(key) : null;
   const abort = new AbortController();
-  let stream = null, retry = null, delay = 1000, stopped = false, release = null, connected = false;
+  let stream = null, retry = null, delay = UI_TIMING.CHANGE_STREAM_RETRY_MS, stopped = false, release = null, connected = false;
   const deliver = value => {
     if (stopped || !value || typeof value !== "object") return;
     if (value.type === "resync") { connected = true; handlers.connection(true); handlers.resync(); }
@@ -1235,12 +1256,12 @@ function connectWorkspaceChanges(workspaceId, handlers) {
     broadcast({ type: "connection", connected: false });
     if (stopped || retry !== null) return;
     retry = setTimeout(() => { retry = null; connect(); }, delay);
-    delay = Math.min(delay * 2, 30000);
+    delay = Math.min(delay * 2, UI_TIMING.CHANGE_STREAM_MAX_RETRY_MS);
   };
   const connect = () => {
     if (stopped) return;
     stream = new window.EventSource(`/api/changes?expected_workspace=${encodeURIComponent(workspaceId)}`);
-    stream.addEventListener("resync", () => { delay = 1000; broadcast({ type: "resync" }); });
+    stream.addEventListener("resync", () => { delay = UI_TIMING.CHANGE_STREAM_RETRY_MS; broadcast({ type: "resync" }); });
     stream.addEventListener("change", event => {
       try {
         const value = JSON.parse(event.data);
@@ -1527,7 +1548,7 @@ async function apiRequest(path, options = {}) {
   const readOnly = ["GET", "HEAD"].includes(
     String(options.method || "GET").toUpperCase(),
   );
-  const { timeoutMs = readOnly ? 60000 : 0, ...request } = options;
+  const { timeoutMs = readOnly ? UI_TIMING.READ_TIMEOUT_MS : 0, ...request } = options;
   const controller = timeoutMs > 0 ? new AbortController() : null;
   const forwardAbort = () => controller?.abort(request.signal?.reason);
   if (request.signal?.aborted) forwardAbort();
@@ -1571,7 +1592,9 @@ async function apiRequest(path, options = {}) {
     return payload;
   } catch (error) {
     if (controller?.signal.aborted && !request.signal?.aborted) {
-      throw new Error(timeoutMessage);
+      const failure = new Error(timeoutMessage);
+      failure.name = "TimeoutError"; // a caller can tell a deadline from a server failure
+      throw failure;
     }
     throw error;
   } finally {
@@ -1681,7 +1704,7 @@ function showToast(message, isError = false, { scope = "" } = {}) {
 
   elements.toast.append(toast);
   elements.toast.hidden = false;
-  if (!isError) window.setTimeout(() => dismissToast(toast), 5000);
+  if (!isError) window.setTimeout(() => dismissToast(toast), UI_TIMING.TOAST_MS);
 }
 
 function dismissNoticeItem(element, item) {
@@ -1743,8 +1766,16 @@ function clearNotice(element) {
   delete element.dataset.persistentError;
 }
 
-function emptyRow(columns, message) {
-  return `<tr class="empty-row"><td colspan="${columns}">${escapeHtml(message)}</td></tr>`;
+// The visible header cells of a body's table; a table whose header is rendered
+// later keeps the width of the placeholder row it already shows.
+function tableColumnCount(tbody) {
+  const header = tbody.closest("table")?.tHead?.rows[0];
+  if (header) return [...header.cells].filter((cell) => !cell.hidden).length;
+  return tbody.rows[0]?.cells[0]?.colSpan || 1;
+}
+
+function emptyRow(tbody, message) {
+  return `<tr class="empty-row"><td colspan="${tableColumnCount(tbody)}">${escapeHtml(message)}</td></tr>`;
 }
 
 function formatDate(value) {
@@ -1935,7 +1966,7 @@ function renderAccountUsage(rows) {
     (header) => header.dataset.gpuColumn,
   );
   if (!rows.length) {
-    elements.usageBody.innerHTML = emptyRow(columns.length + 1, "Account usage is unavailable.");
+    elements.usageBody.innerHTML = emptyRow(elements.usageBody, "Account usage is unavailable.");
     return;
   }
   elements.usageBody.innerHTML = rows
@@ -2086,7 +2117,7 @@ function renderJobs(jobs, totalJobs = jobs.length) {
     const message = totalJobs
       ? "No pending jobs match the selected filters."
       : "No pending jobs in the Slurm queue.";
-    elements.jobsBody.innerHTML = emptyRow(6, message);
+    elements.jobsBody.innerHTML = emptyRow(elements.jobsBody, message);
     elements.jobSummary.textContent = totalJobs
       ? `Showing 0 of ${totalJobs} pending jobs.`
       : "No pending jobs in the Slurm queue.";
@@ -2176,7 +2207,7 @@ function scheduleClusterAutoRefresh() {
   if (!clusterRefreshAllowed()) return;
   refreshTimer = window.setTimeout(
     () => refreshCluster({ background: true }),
-    15000,
+    UI_TIMING.CLUSTER_REFRESH_MS,
   );
 }
 
@@ -4465,9 +4496,9 @@ function applySelectedAdapter({
     elements.checkpointMaxAttempts,
     manifestDefault(manifest, "checkpoint", "max_attempts"),
   );
-  document.querySelector("#checkpoint-warning-seconds").value =
+  elements.checkpointWarningSeconds.value =
     manifestDefault(manifest, "checkpoint", "save_before_timeout_seconds") ??
-    300;
+    checkpointWarningSecondsDefault();
   configureCanonicalHyperparameterFields(manifest);
   setManifestCheckbox(
     elements.checkpointAutoResume,
@@ -4547,7 +4578,7 @@ function applySelectedAdapter({
 function renderAdapters() {
   if (!adapterRows.length) {
     elements.adaptersBody.innerHTML = emptyRow(
-      7,
+      elements.adaptersBody,
       "No adapters are registered.",
     );
     elements.adapterCount.textContent = "0 adapters";
@@ -4758,7 +4789,7 @@ function renderAdapterVersions(versions) {
       </tr>`,
         )
         .join("")
-    : emptyRow(4, "No version history was returned.");
+    : emptyRow(elements.adapterVersionsBody, "No version history was returned.");
 }
 
 function setAdapterEditorMode(mode) {
@@ -6048,7 +6079,8 @@ function openEvaluationSuite(id, launcher) {
   const description = document.getElementById("evaluation-suite-description");
   description.textContent = evaluationCatalogDescription(suite);
   description.hidden = !description.textContent;
-  document.getElementById("evaluation-suite-tasks").innerHTML = tasks.length
+  const taskBody = document.getElementById("evaluation-suite-tasks");
+  taskBody.innerHTML = tasks.length
     ? tasks
         .map(
           (task) =>
@@ -6056,7 +6088,7 @@ function openEvaluationSuite(id, launcher) {
         )
         .join("")
     : emptyRow(
-        2,
+        taskBody,
         evaluationSuiteConfig(suite).task_source === "training_dataset"
           ? "Tasks are resolved from the selected training dataset."
           : "No tasks registered.",
@@ -6088,7 +6120,8 @@ function renderEvaluationCatalog() {
   document.querySelector("#evaluation-suite-count").textContent = query
     ? `${rows.length} of ${evaluationCatalogRows.length} suites`
     : `${rows.length} suites`;
-  document.querySelector("#evaluation-suites-body").innerHTML =
+  const suiteBody = document.querySelector("#evaluation-suites-body");
+  suiteBody.innerHTML =
     rows
       .map((suite) => {
         const tasks = evaluationCatalogTasks(suite);
@@ -6108,7 +6141,7 @@ function renderEvaluationCatalog() {
       })
       .join("") ||
     emptyRow(
-      6,
+      suiteBody,
       query
         ? "No suites match the filter."
         : "No evaluation suites registered.",
@@ -6135,7 +6168,7 @@ async function loadEvaluationCatalog(force = false) {
     document.querySelector("#evaluation-suite-count").textContent =
       "Unavailable";
     document.querySelector("#evaluation-suites-body").innerHTML = emptyRow(
-      6,
+      document.querySelector("#evaluation-suites-body"),
       "Evaluation suites could not be loaded.",
     );
   } finally {
@@ -7275,9 +7308,7 @@ function experimentPayload() {
     checkpoint_save_steps: elements.checkpointSaveSteps.disabled
       ? null
       : numberOrNull(elements.checkpointSaveSteps),
-    checkpoint_warning_seconds: numberOrNull(
-      document.querySelector("#checkpoint-warning-seconds"),
-    ),
+    checkpoint_warning_seconds: numberOrNull(elements.checkpointWarningSeconds),
     checkpoint_keep_last: preservedCheckpoint.keep_last ?? null,
     checkpoint_final_selector: preservedCheckpoint.final_selector ?? null,
     remove_training_state_after_success:
@@ -8490,6 +8521,11 @@ function loadedCanonicalObject(value, label) {
   return value;
 }
 
+// The server renders the CheckpointPolicy default into the input's value attribute.
+function checkpointWarningSecondsDefault() {
+  return Number(elements.checkpointWarningSeconds.defaultValue);
+}
+
 function setLoadedControlValue(control, value) {
   control.value = value === null || value === undefined ? "" : String(value);
 }
@@ -9028,8 +9064,8 @@ async function hydrateExperimentConfiguration(spec, request) {
       : null,
   );
   setLoadedControlValue(
-    document.querySelector("#checkpoint-warning-seconds"),
-    checkpoint.save_before_timeout_seconds ?? 300,
+    elements.checkpointWarningSeconds,
+    checkpoint.save_before_timeout_seconds ?? checkpointWarningSecondsDefault(),
   );
   setLoadedControlValue(
     elements.checkpointMaxAttempts,
@@ -9254,7 +9290,7 @@ function renderExperiments() {
   elements.experimentCount.textContent = `${rows.length} of ${experimentRows.length} presets`;
   if (!rows.length) {
     elements.experimentsBody.innerHTML = emptyRow(
-      9,
+      elements.experimentsBody,
       query
         ? "No experiment presets match the filter."
         : "No presets yet. Choose New to create one.",
@@ -9341,7 +9377,7 @@ async function loadExperiments(force = false) {
   } catch (error) {
     experimentRows = [];
     elements.experimentsBody.innerHTML = emptyRow(
-      8,
+      elements.experimentsBody,
       "Experiment data could not be loaded.",
     );
     elements.experimentCount.textContent = "Unavailable";
@@ -9398,7 +9434,7 @@ function renderVariants(payload, launcher = null) {
   });
   if (!variants.length) {
     elements.variantsBody.innerHTML = emptyRow(
-      5,
+      elements.variantsBody,
       "No expanded variants were returned.",
     );
     return;
@@ -9669,7 +9705,7 @@ function requestModelIO(section, manifest, values = {}, bundleId = null) {
       if (modelIORequests.get(section) === request)
         renderModelIO(section, null, `Sizes unavailable: ${error.message}`);
     }
-  }, 180);
+  }, UI_TIMING.MODEL_IO_DEBOUNCE_MS);
 }
 
 function refreshAdapterModelIO() {
@@ -9905,7 +9941,7 @@ function renderRuns({ background = false } = {}) {
         row.className = "empty-row";
         patchTableRow(row, [
           {
-            colSpan: 12,
+            colSpan: tableColumnCount(elements.runsBody),
             html: escapeHtml(
               runRows.length
                 ? "No Training Runs match the filters."
@@ -9946,7 +9982,7 @@ function scheduleRunProgressRefresh() {
           progressOnly: runProgressRefreshPending,
         }).catch(() => {});
     },
-    runProgressRefreshPending ? 1500 : 5000,
+    runProgressRefreshPending ? UI_TIMING.PROGRESS_POLL_MS : UI_TIMING.POLL_MS,
   );
 }
 
@@ -9963,7 +9999,7 @@ async function loadRuns(
     elements.refreshRuns.disabled = true;
     if (!loadedTabs.has("runs")) {
       elements.runCount.textContent = "Loading…";
-      elements.runsBody.innerHTML = emptyRow(12, "Loading training runs…");
+      elements.runsBody.innerHTML = emptyRow(elements.runsBody, "Loading training runs…");
     }
   }
   try {
@@ -9986,7 +10022,7 @@ async function loadRuns(
     }
     runRows = [];
     elements.runsBody.innerHTML = emptyRow(
-      12,
+      elements.runsBody,
       "Training Run data could not be loaded.",
     );
     elements.runCount.textContent = "Unavailable";
@@ -10876,8 +10912,6 @@ const RUN_DETAIL_ACTIVE_STATES = new Set([
   "RETRY_PENDING",
   "CANCELLING",
 ]);
-const RUN_DETAIL_POLL_INTERVAL_MS = 5000;
-const RUN_DETAIL_FINAL_POLL_DELAY_MS = 2000;
 let runDetailLatestAttemptId = null;
 let runDetailFollowLatest = true;
 let runDetailAttemptDismissed = false;
@@ -11440,7 +11474,7 @@ function renderRunDetailContent(payload, id, { preserveAttempt = false } = {}) {
     );
   } else {
     const template = document.createElement("template");
-    template.innerHTML = emptyRow(8, "No attempt records were returned.");
+    template.innerHTML = emptyRow(elements.attemptsBody, "No attempt records were returned.");
     elements.attemptsBody.append(template.content);
   }
   const latestRecord = attempts.length
@@ -11546,7 +11580,7 @@ async function viewRun(id, launcher = null) {
   elements.runDetailMeta.innerHTML = keyValueHtml([
     ["Status", "Loading run..."],
   ]);
-  elements.attemptsBody.innerHTML = emptyRow(8, "Loading attempts...");
+  elements.attemptsBody.innerHTML = emptyRow(elements.attemptsBody, "Loading attempts...");
   revealPanel(elements.runDetail, {
     focusTarget: elements.runDetailTitle,
     launcher: revealLauncher,
@@ -11569,7 +11603,7 @@ async function viewRun(id, launcher = null) {
         ["Detail error", error.message],
       ]);
       elements.attemptsBody.innerHTML = emptyRow(
-        8,
+        elements.attemptsBody,
         "Training Run detail could not be rendered.",
       );
       showToast(`Training Run detail failed: ${error.message}`, true, {
@@ -11581,11 +11615,11 @@ async function viewRun(id, launcher = null) {
       ["Detail error", detailResult.reason.message],
     ]);
     elements.attemptsBody.innerHTML = emptyRow(
-      8,
+      elements.attemptsBody,
       "Training Run detail unavailable.",
     );
     startRunDetailPolling(id, null, {
-      initialDelay: RUN_DETAIL_POLL_INTERVAL_MS,
+      initialDelay: UI_TIMING.POLL_MS,
     });
   }
 }
@@ -11684,7 +11718,7 @@ function startRunDetailPolling(
     state === null || RUN_DETAIL_ACTIVE_STATES.has(String(state).toUpperCase());
   const delay =
     initialDelay ??
-    (active ? RUN_DETAIL_POLL_INTERVAL_MS : RUN_DETAIL_FINAL_POLL_DELAY_MS);
+    (active ? UI_TIMING.POLL_MS : UI_TIMING.FINAL_POLL_DELAY_MS);
   scheduleRunDetailPoll(delay, { finalCycle: !active, includeList });
 }
 
@@ -11701,7 +11735,7 @@ async function pollRunDetail(
     runDetailPollInFlight.generation === generation &&
     runDetailPollInFlight.runId === String(runId)
   ) {
-    scheduleRunDetailPoll(250, { finalCycle, includeList });
+    scheduleRunDetailPoll(UI_TIMING.POLL_RETRY_MS, { finalCycle, includeList });
     return;
   }
   const pollOwner = { generation, runId: String(runId) };
@@ -11720,7 +11754,7 @@ async function pollRunDetail(
         `Live run update failed; displayed data may be stale: ${detailResult.reason.message}. Retrying automatically.`,
         { scope },
       );
-      scheduleRunDetailPoll(RUN_DETAIL_POLL_INTERVAL_MS, { includeList: true });
+      scheduleRunDetailPoll(UI_TIMING.POLL_MS, { includeList: true });
       return;
     }
     clearNotificationScope(scope);
@@ -11769,9 +11803,9 @@ async function pollRunDetail(
       return;
     const active = RUN_DETAIL_ACTIVE_STATES.has(detail.state);
     if (active) {
-      scheduleRunDetailPoll(RUN_DETAIL_POLL_INTERVAL_MS, { includeList: true });
+      scheduleRunDetailPoll(UI_TIMING.POLL_MS, { includeList: true });
     } else if (!finalCycle) {
-      scheduleRunDetailPoll(RUN_DETAIL_FINAL_POLL_DELAY_MS, {
+      scheduleRunDetailPoll(UI_TIMING.FINAL_POLL_DELAY_MS, {
         finalCycle: true,
         includeList: true,
       });
@@ -12314,7 +12348,7 @@ async function validateEvaluationTarget(request, signature) {
   try {
     const result = await api("/api/evaluations/validate-target", {
       method: "POST",
-      timeoutMs: 30000,
+      timeoutMs: UI_TIMING.TARGET_VALIDATION_TIMEOUT_MS,
       body: JSON.stringify({
         run_id: runId,
         checkpoint_path: checkpointPath || null,
@@ -12473,7 +12507,7 @@ function scheduleEvaluationTargetValidation({ immediate = false } = {}) {
     !immediate &&
     evaluationTargetValidationState.valid &&
     evaluationTargetValidationState.signature === signature &&
-    Date.now() - evaluationLastValidatedAt < 10000
+    Date.now() - evaluationLastValidatedAt < UI_TIMING.TARGET_VALIDATION_FRESH_MS
   )
     return;
   const request = ++evaluationTargetValidationRequest;
@@ -12537,7 +12571,7 @@ function scheduleEvaluationTargetValidation({ immediate = false } = {}) {
   updateEvaluationSubmitState();
   evaluationTargetValidationTimer = window.setTimeout(
     () => validateEvaluationTarget(request, signature),
-    immediate ? 0 : 350,
+    immediate ? 0 : UI_TIMING.DEBOUNCE_MS,
   );
 }
 
@@ -13077,7 +13111,7 @@ function renderEvaluations({ background = false } = {}) {
         const row = document.createElement("tr");
         row.className = "empty-row";
         patchTableRow(row, [
-          { colSpan: 10, html: "No evaluations match the filters." },
+          { colSpan: tableColumnCount(elements.evaluationsBody), html: "No evaluations match the filters." },
         ]);
         elements.evaluationsBody.append(row);
         return;
@@ -13124,8 +13158,6 @@ function updateEvaluationRow(evaluation, { background = false } = {}) {
   return true;
 }
 
-const EVALUATION_LIST_POLL_INTERVAL_MS = 5000;
-
 function revalidateFinishedEvaluation(previous, next) {
   const runId = elements.evaluationRunId.value.trim();
   if (
@@ -13167,7 +13199,7 @@ function evaluationListPollEligible() {
 }
 
 function scheduleEvaluationListPolling(
-  delay = EVALUATION_LIST_POLL_INTERVAL_MS,
+  delay = UI_TIMING.POLL_MS,
 ) {
   stopEvaluationListPolling();
   if (!evaluationListPollEligible()) return;
@@ -13249,7 +13281,7 @@ async function loadEvaluations(force = false) {
   } catch (error) {
     evaluationRows = [];
     elements.evaluationsBody.innerHTML = emptyRow(
-      9,
+      elements.evaluationsBody,
       "Evaluation data could not be loaded.",
     );
     elements.evaluationCount.textContent = "Unavailable";
@@ -13506,7 +13538,7 @@ function renderEvaluationAttempt(attempt) {
     `<table><thead><tr>${headings.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>` +
       (values.length
         ? `<tr>${values.map((v) => `<td>${v}</td>`).join("")}</tr>`
-        : '<tr><td colspan="8">No Slurm attempt recorded.</td></tr>') +
+        : `<tr><td colspan="${headings.length}">No Slurm attempt recorded.</td></tr>`) +
       "</tbody></table>",
   );
 }
@@ -13676,7 +13708,7 @@ function renderEvaluationRollouts(evaluation) {
     });
     body.replaceChildren(...ordered);
     if (!episodes.length)
-      body.innerHTML = `<tr><td colspan="5">${Array.isArray(evaluation.episodes) ? "No rollouts recorded." : "Loading rollouts…"}</td></tr>`;
+      body.innerHTML = `<tr><td colspan="${tableColumnCount(body)}">${Array.isArray(evaluation.episodes) ? "No rollouts recorded." : "Loading rollouts…"}</td></tr>`;
   }
   body.onclick = (event) => {
     const button = event.target.closest("[data-rollout-detail]");
@@ -13725,7 +13757,7 @@ function scheduleEvaluationDetailPolling(id) {
         ? activeDisclosure.launcher
         : null;
     await viewEvaluation(expectedId, launcher, { polling: true });
-  }, 5000);
+  }, UI_TIMING.POLL_MS);
 }
 
 function renderEvaluationDetail(evaluation) {
@@ -14509,7 +14541,7 @@ function renderDataResources() {
       <td>${escapeHtml(formatDate(datasets ? resource.created_at : resource.updated_at || resource.created_at))}</td>
       <td class="row-actions data-resource-row-actions"><button type="button" data-resource-action="${viewAction}" data-id="${escapedId}">View</button>${useAction}${sourceActions}<button type="button" data-resource-action="edit" data-id="${escapedId}">Edit</button><button type="button" data-resource-action="${resource.archived_at ? "restore" : "archive"}" data-id="${escapedId}">${resource.archived_at ? "Restore" : "Archive"}</button>${datasets ? `<button type="button" data-delete-kind="dataset" data-delete-id="${escapedId}">Delete</button>` : ""}</td>
     </tr>`;
-  }).join("") : emptyRow(datasets ? 8 : 6,
+  }).join("") : emptyRow(elements.dataResourcesBody,
     query || recordingId || datasetIds ? `No ${datasets ? "datasets" : "file sets"} match your filter.`
       : datasets ? "No datasets have been prepared. Convert a recording or register dataset files." : "No file sets have been registered.");
 }
@@ -14527,7 +14559,7 @@ window.SkynetJobHistory = {
     const body = table.tBodies[0] || table.createTBody();
     if (bodyId) body.id = bodyId;
     if (!rows.length) {
-      setHtmlIfChanged(body, emptyRow(columns.length, empty));
+      setHtmlIfChanged(body, emptyRow(body, empty));
       return body;
     }
     const existing = new Map([...body.rows].map(row => [row.dataset.historyId, row]));
@@ -14823,7 +14855,7 @@ function renderDataVersions() {
     </tr>`,
         )
         .join("")
-    : emptyRow(7, "No files have been registered.");
+    : emptyRow(elements.dataVersionsBody, "No files have been registered.");
 
   const formats = new Set(
     inspectedVersions()
@@ -14896,7 +14928,7 @@ function renderDataDerivations() {
       </tr>`;
         })
         .join("")
-    : emptyRow(5, "No derived lineage has been recorded.");
+    : emptyRow(elements.dataDerivationsBody, "No derived lineage has been recorded.");
 }
 
 let dataRegistryGeneration = 0;
@@ -14953,19 +14985,19 @@ async function loadDataRegistry(force = false) {
     dataResourceCatalogState = "unavailable";
     notifyRecordingRegistryChanged();
     elements.dataResourcesBody.innerHTML = emptyRow(
-      dataCatalogView === "files" ? 6 : 8,
+      elements.dataResourcesBody,
       "Dataset registry could not be loaded.",
     );
     elements.dataImportsBody.innerHTML = emptyRow(
-      7,
+      elements.dataImportsBody,
       "Dataset import jobs could not be loaded.",
     );
     elements.dataVersionsBody.innerHTML = emptyRow(
-      7,
+      elements.dataVersionsBody,
       "Dataset registry could not be loaded.",
     );
     elements.dataDerivationsBody.innerHTML = emptyRow(
-      5,
+      elements.dataDerivationsBody,
       "Dataset registry could not be loaded.",
     );
 
@@ -15517,7 +15549,7 @@ function renderCollectionAdapters() {
       </tr>`;
         })
         .join("")
-    : emptyRow(5, "No collection adapters are registered.");
+    : emptyRow(elements.collectionAdaptersBody, "No collection adapters are registered.");
   populateCollectionAdapterSelect(elements.collectionSessionAdapter.value);
 }
 
@@ -15563,7 +15595,7 @@ function renderCollectionSessions() {
       </tr>`;
         })
         .join("")
-    : emptyRow(8, "No collection sessions have been created.");
+    : emptyRow(elements.collectionSessionsBody, "No collection sessions have been created.");
 }
 
 async function loadCollection(force = false) {
@@ -15583,11 +15615,11 @@ async function loadCollection(force = false) {
     loadedTabs.add("collection");
   } catch (error) {
     elements.collectionAdaptersBody.innerHTML = emptyRow(
-      5,
+      elements.collectionAdaptersBody,
       "Collection adapters could not be loaded.",
     );
     elements.collectionSessionsBody.innerHTML = emptyRow(
-      8,
+      elements.collectionSessionsBody,
       "Collection sessions could not be loaded.",
     );
     showNotice(
@@ -16039,7 +16071,7 @@ function renderCollectionSessionDetail(session, launcher = null) {
   </tr>`,
         )
         .join("")
-    : emptyRow(4, "No lifecycle events recorded.");
+    : emptyRow(elements.collectionEventsBody, "No lifecycle events recorded.");
   revealPanel(elements.collectionSessionDetail, {
     focusTarget: elements.collectionSessionDetailTitle,
     launcher,
@@ -17663,7 +17695,7 @@ function scheduleTutorialFieldGateEvaluation(step) {
       return;
     }
     if (attempts-- > 0)
-      tutorialState.prefillTimer = window.setTimeout(evaluate, 100);
+      tutorialState.prefillTimer = window.setTimeout(evaluate, UI_TIMING.TUTORIAL_PREFILL_RETRY_MS);
   };
   tutorialState.prefillTimer = window.setTimeout(evaluate, 0);
 }
@@ -17991,7 +18023,7 @@ function waitForTutorialRender(selector, snapshot) {
       tutorialSetError(
         "The API succeeded, but the bound row has not appeared yet. Refresh the page and resume this tutorial.",
       );
-  }, 10000);
+  }, UI_TIMING.TUTORIAL_BOUND_ROW_TIMEOUT_MS);
 }
 
 function tutorialObserveApiSuccess(claim, payload) {
@@ -19866,7 +19898,7 @@ function renderSettings(payload) {
       </tr>`,
         )
         .join("")
-    : emptyRow(2, "No settings were returned.");
+    : emptyRow(elements.settingsBody, "No settings were returned.");
 }
 
 async function refreshResolvedSettings() {
@@ -19875,7 +19907,7 @@ async function refreshResolvedSettings() {
     clearNotificationScope("settings:resolved");
   } catch (error) {
     elements.settingsBody.innerHTML = emptyRow(
-      2,
+      elements.settingsBody,
       "Settings could not be loaded.",
     );
     showNotice(elements.settingsError, `Settings: ${error.message}`, {
@@ -19898,7 +19930,7 @@ async function loadSettings(force = false) {
       clearNotificationScope("settings:resolved");
     } else {
       elements.settingsBody.innerHTML = emptyRow(
-        2,
+        elements.settingsBody,
         "Settings could not be loaded.",
       );
       showNotice(
@@ -19917,7 +19949,7 @@ async function loadSettings(force = false) {
     loadedTabs.add("settings");
   } catch (error) {
     elements.settingsBody.innerHTML = emptyRow(
-      2,
+      elements.settingsBody,
       "Settings could not be loaded.",
     );
     showNotice(
@@ -20197,7 +20229,7 @@ document
     link.href = url;
     link.download = `variant-${index + 1}.sbatch`;
     link.click();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    window.setTimeout(() => URL.revokeObjectURL(url), UI_TIMING.OBJECT_URL_REVOKE_MS);
   });
 elements.experimentAdapter.addEventListener("change", () => {
   const selectedId = elements.experimentAdapter.value;
@@ -20436,7 +20468,7 @@ elements.evaluationRunId.addEventListener("input", () => {
     await loadEvaluationSuites(false, runId);
     if (elements.evaluationRunId.value.trim() === runId)
       pendingEvaluationSuiteId = "";
-  }, 350);
+  }, UI_TIMING.DEBOUNCE_MS);
 });
 for (const control of [elements.evaluationTargetDataset, elements.evaluationUnseenHand]) {
   control?.addEventListener("change", async () => {

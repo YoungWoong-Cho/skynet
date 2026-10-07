@@ -1,18 +1,13 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {JSDOM} from 'jsdom';
-import {indexHtml} from './index_page.cjs';
-const w = new JSDOM(indexHtml(), {runScripts:'outside-only', pretendToBeVisual:true, url:'http://localhost:8080/#settings'}).window;
-const observers=[];const NativeObserver=w.MutationObserver;w.MutationObserver=class extends NativeObserver{constructor(cb){super(cb);observers.push(this);}};
-const el = id => w.document.getElementById(id);
-const flush = async () => {for (let i=0;i<3;i++) await new Promise(r=>setImmediate(r));};
-w.fetch=()=>new Promise(()=>{});
-w.scrollTo=w.HTMLElement.prototype.scrollIntoView=()=>{};
-w.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
-w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
-w.HTMLDialogElement.prototype.close=function(value=''){if(this.open){this.returnValue=value;this.open=false;this.dispatchEvent(new w.Event('close'));}};
+import {pageWindow, byId, flusher, spyMutationObservers, stubBrowserApis, polyfillDialogs, readStatic} from './ui_harness.mjs';
+const w = pageWindow({url:'http://localhost:8080/#settings'});
+const observers = spyMutationObservers(w);
+const el = byId(w);
+const flush = flusher(3);
+stubBrowserApis(w);
+polyfillDialogs(w);
 try {
-  for (const name of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js']) w.eval((await readFile(new URL('../static/'+name,import.meta.url),'utf8')) + (name === 'app.js' ? `window.registryFixture=(versions,resources=[])=>{dataVersionRows=versions;dataResourceRows=resources;renderDataVersions();renderDataResources();};
+  for (const name of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js']) w.eval((await readStatic(name)) + (name === 'app.js' ? `window.registryFixture=(versions,resources=[])=>{dataVersionRows=versions;dataResourceRows=resources;renderDataVersions();renderDataResources();};
     window.trackingFixture=provider=>trackingConnections.get(provider);
     window.missingTutorialFixture=()=>{tutorialState.active=true;tutorialState.page='collection';tutorialState.session=newTutorialSession('collection');tutorialState.sessionGeneration=tutorialState.session.sessionGeneration;showTutorialUnavailableStep(tutorialTours.collection.steps[7],7);};
     window.tutorialBackFixture=()=>{

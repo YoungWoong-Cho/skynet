@@ -1359,10 +1359,10 @@ trainer.deterministic=true"
                         <input
                           id="checkpoint-warning-seconds"
                           type="number"
-                          min="60"
-                          max="1800"
+                          min="<!-- checkpoint-warning-min-seconds -->"
+                          max="<!-- checkpoint-warning-max-seconds -->"
                           step="1"
-                          value="300"
+                          value="<!-- checkpoint-warning-seconds -->"
                           required=""
                         />
                         <small

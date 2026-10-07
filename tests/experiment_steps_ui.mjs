@@ -1,38 +1,11 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { JSDOM } from "jsdom";
-import { indexHtml } from "./index_page.cjs";
-const w = new JSDOM(
-  indexHtml(),
-  {
-    runScripts: "outside-only",
-    pretendToBeVisual: true,
-    url: "http://localhost:8080/#experiments",
-  },
-).window;
-const observers = [],
-  Observer = w.MutationObserver;
-w.MutationObserver = class extends Observer {
-  constructor(cb) {
-    super(cb);
-    observers.push(this);
-  }
-};
-w.fetch = () => new Promise(() => {});
-w.scrollTo = w.HTMLElement.prototype.scrollIntoView = () => {};
-w.matchMedia = () => ({
-  matches: false,
-  addEventListener() {},
-  removeEventListener() {},
-});
-w.HTMLDialogElement.prototype.showModal = function () {
-  this.open = true;
-};
-w.HTMLDialogElement.prototype.close = function () {
-  this.open = false;
-  this.dispatchEvent(new w.Event("close"));
-};
-const el = (id) => w.document.getElementById(id);
+import { pageWindow, byId, spyMutationObservers, stubBrowserApis, polyfillDialogs } from "./ui_harness.mjs";
+const w = pageWindow({ url: "http://localhost:8080/#experiments" });
+const observers = spyMutationObservers(w);
+stubBrowserApis(w);
+polyfillDialogs(w, { guarded: false, returnValue: false });
+const el = byId(w);
 const step = (name) =>
   w.document.querySelector(`[data-experiment-step="${name}"]`);
 const plain = (x) => JSON.parse(JSON.stringify(x));

@@ -57,36 +57,29 @@
     el("live-xr-error").textContent = message || "";
     el("live-xr-error").hidden = !message;
   }
+  const REQUEST_TIMEOUT_MS = 55000;
+  // app.js's shared request helper with this page's deadline. A deadline or a dropped
+  // connection leaves a mutation's outcome unknown; an HTTP error is a known answer.
   async function api(path = "", options = {}) {
-    let r;
+    const unknown = Boolean(options.method && options.method !== "GET");
     try {
-      r = await fetch("/api/collection/live" + path, {
+      return await window.api("/api/collection/live" + path, {
         ...options,
-        headers: { "Content-Type": "application/json" },
-        signal: AbortSignal.timeout(55000),
+        timeoutMs: REQUEST_TIMEOUT_MS,
       });
     } catch (error) {
-      const unknown = options.method && options.method !== "GET";
       if (error.name === "TimeoutError" || error.name === "AbortError") {
         const failure = new Error(
-          options.method && options.method !== "GET"
+          unknown
             ? "The request could not be confirmed. Checking session status…"
             : "Session status is temporarily unavailable. Retrying automatically…",
         );
-        failure.submissionUnknown = !!unknown;
+        failure.submissionUnknown = unknown;
         throw failure;
       }
-      if (unknown) error.submissionUnknown = true;
+      if (unknown && error.status === undefined) error.submissionUnknown = true;
       throw error;
     }
-    const data = await r.json();
-    if (!r.ok)
-      throw new Error(
-        typeof data.detail === "string"
-          ? data.detail
-          : "Live-session request failed",
-      );
-    return data;
   }
   function text(parent, tag, value, className) {
     const n = document.createElement(tag);

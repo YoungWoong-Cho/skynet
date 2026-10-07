@@ -1,22 +1,13 @@
 import assert from "node:assert/strict";
-import {readFile} from "node:fs/promises";
-import {JSDOM} from "jsdom";
-import {indexHtml} from "./index_page.cjs";
-const dom = new JSDOM(indexHtml(), {
-  runScripts:'outside-only', url:'http://localhost:8080/#data', pretendToBeVisual:true,
-});
-const w=dom.window, el=id=>w.document.getElementById(id), calls=[];
+import {pageWindow, byId, flusher, polyfillDialogs, readStatic, appFunction} from "./ui_harness.mjs";
+const w=pageWindow({url:'http://localhost:8080/#data'}), el=byId(w), calls=[];
 let subscription;
 w.activeTab='cluster';
 w.SkynetRefresh={connected:true,register(key,topics,visible,refresh,invalidate){subscription={topics,visible,refresh,invalidate};}};
-w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
-w.HTMLDialogElement.prototype.close=function(){if(this.open){this.open=false;this.dispatchEvent(new w.Event('close'));}};
+polyfillDialogs(w, {returnValue:false});
 w.HTMLElement.prototype.scrollIntoView=()=>{};
-const app=await readFile(new URL('../static/app.js', import.meta.url),'utf8');
-for(const name of ['escapeHtml','formatDate','stateClass','statusPill','setHtmlIfChanged','emptyRow','patchTableRow','reconcileTableSequence','valueHtml','keyValueHtml','datasetEpisodeCount','datasetCanTrain']){
-  const start=app.indexOf(`function ${name}(`), text=app.slice(start);
-  w.eval(text.slice(0,text.indexOf('\n}\n')+3));
-}
+const app=await readStatic('app.js');
+for(const name of ['escapeHtml','formatDate','stateClass','statusPill','setHtmlIfChanged','tableColumnCount','emptyRow','patchTableRow','reconcileTableSequence','valueHtml','keyValueHtml','datasetEpisodeCount','datasetCanTrain']) w.eval(appFunction(app, name));
 const sharedHistoryStart=app.indexOf('window.SkynetJobHistory =');
 w.eval(app.slice(sharedHistoryStart,app.indexOf('\nfunction renderDataImports()',sharedHistoryStart)));
 w.dataPreparationRows=[];
@@ -57,10 +48,10 @@ const api=async(path,request={})=>{
   throw new Error('Unexpected API '+path);
 };
 w.api=api;
-const flush=async()=>{for(let i=0;i<8;i++)await new Promise(r=>setImmediate(r));};
+const flush = flusher(8);
 try{
-  w.eval(await readFile(new URL('../static/dialogs.js',import.meta.url),'utf8'));
-  w.eval(await readFile(new URL('../static/policy-exports.js',import.meta.url),'utf8'));
+  w.eval(await readStatic('dialogs.js'));
+  w.eval(await readStatic('policy-exports.js'));
   await flush();
   assert.equal(calls.length,0,'Unrelated tabs do not load conversion history');
   await w.openPolicyExport('recording');

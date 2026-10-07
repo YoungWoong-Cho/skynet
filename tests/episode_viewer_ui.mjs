@@ -1,10 +1,8 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {JSDOM} from 'jsdom';
-const w=new JSDOM('<div id="host"></div><div id="collection-host"></div><video id="video"></video><script src="http://localhost/static/episode-viewer.js"></script>',{runScripts:'outside-only',pretendToBeVisual:true,url:'http://localhost/'}).window;
+import {pageWindow, flusher, readStatic} from './ui_harness.mjs';
+const w=pageWindow({html:'<div id="host"></div><div id="collection-host"></div><video id="video"></video><script src="http://localhost/static/episode-viewer.js"></script>',url:'http://localhost/'});
 Object.defineProperty(w.document,'currentScript',{get:()=>w.document.querySelector('script')});
 w.ResizeObserver=class {observe(){} disconnect(){}};
-w.AbortSignal.timeout=()=>undefined;
 const drawn=[];
 const context={save(){},restore(){},beginPath(){},rect(){},clip(){},moveTo(){},lineTo(){},stroke(){},drawImage(){},fill(){},arc(x,y){drawn.push([this.fillStyle,x,y]);}};
 w.HTMLCanvasElement.prototype.getContext=()=>context;
@@ -21,9 +19,10 @@ const data={robot:'unknown',duration:2,views:[camera],edges:[],frames:[
  {time:1,actual:[[3,0,1]],prediction:[[4,0,1]]},
 ]};
 let resolveStale;
-w.fetch=async url=>({ok:true,json:async()=>url==='/api/hands'?{hands:[]}:url.startsWith('/stale')?await new Promise(r=>resolveStale=r):{state:'READY',viewer:data}});
-w.eval(await readFile(new URL('../static/episode-viewer.js',import.meta.url),'utf8'));
-const flush=async()=>{for(let i=0;i<5;i++)await new Promise(r=>setImmediate(r));};
+// The viewer calls app.js's api().
+w.api=async url=>url==='/api/hands'?{hands:[]}:url.startsWith('/stale')?await new Promise(r=>resolveStale=r):{state:'READY',viewer:data};
+w.eval(await readStatic('episode-viewer.js'));
+const flush = flusher(5);
 const viewer=w.SkynetEpisodeViewer.open('host','video','/episode');await flush();
 assert.equal(w.document.querySelectorAll('input[type="checkbox"]').length,3);
 video.currentTime=1.5;onFrame(0,{mediaTime:0});
@@ -98,7 +97,7 @@ assert.equal(viewer.data.robot,'unknown','old episode responses cannot replace t
 w.SkynetEpisodeViewer.close('host');assert.equal(onFrame,null,'closing releases video callbacks');
 // Collection scenes have no media element and only use their recorded-state clock.
 const collectionRequests=[];
-w.fetch=async url=>{collectionRequests.push(url);return {ok:true,json:async()=>({state:'READY',viewer:{...data,kind:'collection',hand_visual_available:true}})};};
+w.api=async url=>{collectionRequests.push(url);return {state:'READY',viewer:{...data,kind:'collection',hand_visual_available:true}};};
 let sceneLoads=0;
 const beforePlayback=played;
 const recordingActions=w.document.createElement('div');

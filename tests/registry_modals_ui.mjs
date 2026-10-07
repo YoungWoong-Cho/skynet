@@ -1,19 +1,13 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {JSDOM} from 'jsdom';
-import {indexHtml} from './index_page.cjs';
-const w = new JSDOM(indexHtml(), {runScripts:'outside-only', pretendToBeVisual:true, url:'http://localhost:8080/?data_view=registry#data'}).window;
-const observers=[]; const NativeObserver=w.MutationObserver;
-w.MutationObserver=class extends NativeObserver {constructor(callback){super(callback);observers.push(this);}};
-const el=id=>w.document.getElementById(id);
-w.fetch = () => new Promise(()=>{});
-w.scrollTo = w.HTMLElement.prototype.scrollIntoView = () => {};
-w.matchMedia = () => ({matches:false,addEventListener(){},removeEventListener(){}});
-w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
-w.HTMLDialogElement.prototype.close=function(value=''){if(this.open){this.returnValue=value;this.open=false;this.dispatchEvent(new w.Event('close'));}};
-const flush = async()=>{for(let i=0;i<3;i++)await new Promise(r=>setImmediate(r));};
+import {pageWindow, byId, flusher, spyMutationObservers, stubBrowserApis, polyfillDialogs, readStatic} from './ui_harness.mjs';
+const w = pageWindow({url:'http://localhost:8080/?data_view=registry#data'});
+const observers = spyMutationObservers(w);
+const el = byId(w);
+stubBrowserApis(w);
+polyfillDialogs(w);
+const flush = flusher(3);
 try {
-  for(const file of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js']) w.eval((await readFile(new URL('../static/'+file,import.meta.url),'utf8')) + (file==='app.js' ? '\nwindow.setRegistryTestData=(resources,imports=[])=>{dataResourceRows=resources;dataImportRows=imports;renderDataResources();renderDataImports();};' : ''));
+  for(const file of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js']) w.eval((await readStatic(file)) + (file==='app.js' ? '\nwindow.setRegistryTestData=(resources,imports=[])=>{dataResourceRows=resources;dataImportRows=imports;renderDataResources();renderDataImports();};' : ''));
   w.activateTab('data',true,'files');
   w.setRegistryTestData([{id:'resource',category:'file',provider:'local',namespace:'test',display_name:'Example',source_key:'example-source',kind:'simulation_assets'}]);
   for(const [launch,panel] of [['show-data-resource-form','data-resource-form'],['show-data-derivation-form','data-derivation-form']]) {

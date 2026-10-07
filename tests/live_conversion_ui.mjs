@@ -1,9 +1,7 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {JSDOM} from 'jsdom';
-import {indexHtml} from './index_page.cjs';
-const w=new JSDOM(indexHtml(),{url:'http://localhost:8080/?data_view=recording#data',runScripts:'outside-only'}).window;
-const el=id=>w.document.getElementById(id);
+import {pageWindow, byId, readStatic} from './ui_harness.mjs';
+const w=pageWindow({url:'http://localhost:8080/?data_view=recording#data',pretendToBeVisual:false});
+const el=byId(w);
 let reviewed,converted,linked,navigation,changes=0,registryState='ready';
 w.openLiveReview=s=>reviewed=s.id;
 w.openPolicyExport=id=>converted=id;
@@ -13,7 +11,7 @@ w.formatDate=value=>value;
 w.recordingRegistrationSummary=id=>({state:registryState,count:id==='one'?2:0});
 w.document.addEventListener('collection-recordings-changed',()=>changes++);
 try {
- w.eval(await readFile(new URL('../static/live-conversion.js',import.meta.url),'utf8'));
+ w.eval(await readStatic('live-conversion.js'));
  const one={id:'one',profile:{task:'cube',robot:'Shadow'},created_at:'2026-09-08',recordings:['a','b'],archive:{state:'READY'}};
  const two={...one,id:'two',profile:{task:'stick',robot:'Shadow'},recordings:['c']};
  w.renderSimulationRecordings([one,two]);w.renderSimulationRecordings([one,two]);

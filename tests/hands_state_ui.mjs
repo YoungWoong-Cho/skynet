@@ -1,10 +1,8 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {JSDOM} from 'jsdom';
-import {indexHtml} from './index_page.cjs';
-const w = new JSDOM(indexHtml(), {runScripts:'outside-only',pretendToBeVisual:true,url:'http://localhost:8080/#cluster'}).window;
-const el = id => w.document.getElementById(id);
-const flush = async () => { for(let i=0;i<5;i++) await new Promise(resolve=>setImmediate(resolve)); };
+import {pageWindow, byId, flusher, polyfillDialogs, readStatic, apiError} from './ui_harness.mjs';
+const w = pageWindow({url:'http://localhost:8080/#cluster'});
+const el = byId(w);
+const flush = flusher(5);
 const records = [];
 let saved = [];
 let snapshot = {};
@@ -12,8 +10,8 @@ let failPoseList = false;
 let modelLoads = 0;
 const model = {revision:'a'.repeat(40),urdf_url:'/model.urdf',license_url:'/LICENSE',mesh_count:1,simulation_robot:'skynet_shadow_left',joints:[{name:'bend',type:'revolute',lower:-Math.PI/9,upper:Math.PI/18,mimic:null}]};
 const catalog = {hands:[{key:'shadow',name:'Shadow Hand',source_kind:'URDF',notes:'Model',repository:'test/test',revision:model.revision,sides:{right:'right.urdf',left:'left.urdf'},variants:{right:{state:'READY'},left:{state:'READY'}}}]};
-w.AbortSignal.timeout = () => undefined;
-w.fetch = async (url, options={}) => {
+// The page calls app.js's api(); this answers as the hands endpoints would.
+w.api = async (url, options={}) => {
   records.push({url,options});
   let payload;
   if (url === '/api/hands') payload=catalog;
@@ -21,26 +19,25 @@ w.fetch = async (url, options={}) => {
   else if (url.endsWith('/poses')) {
     if (options.method === 'POST') {
       const body=JSON.parse(options.body);
-      if(saved.some(p=>p.name===body.name)) return {ok:false,json:async()=>({detail:'A pose with this name already exists.'})};
+      if(saved.some(p=>p.name===body.name)) throw apiError('A pose with this name already exists.');
       const pose={...body,id:String(saved.length+1).padStart(32,'0'),created_at:1};
       saved.push(pose); payload=pose;
     } else {
-      if(failPoseList) return {ok:false,json:async()=>({detail:'Pose list temporarily unavailable'})};
+      if(failPoseList) throw apiError('Pose list temporarily unavailable');
       payload={poses:saved};
     }
   } else if (options.method === 'PATCH') { const pose=saved.find(p=>url.endsWith(p.id)); pose.name=JSON.parse(options.body).name; payload=pose; }
   else if (options.method === 'DELETE') { saved=saved.filter(p=>!url.endsWith(p.id)); payload={deleted:true}; }
   else throw new Error('Unexpected request '+url);
-  return {ok:true,json:async()=>structuredClone(payload)};
+  return structuredClone(payload);
 };
 w.TestHandsViewer=class {clear(){}render(){}fit(){}async load(){modelLoads++;return true;}setJoints(values){snapshot={...values};}};
-w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
-w.HTMLDialogElement.prototype.close=function(value=''){if(this.open){this.returnValue=value;this.open=false;this.dispatchEvent(new w.Event('close'));}};
+polyfillDialogs(w);
 const script=w.document.createElement("script");
 script.src=w.document.querySelector('script[data-workspace-src*="hands-ui"]').dataset.workspaceSrc;
 Object.defineProperty(w.document,'currentScript',{value:script});
-w.eval(await readFile(new URL('../static/dialogs.js',import.meta.url),'utf8'));
-w.eval((await readFile(new URL('../static/hands-ui.js',import.meta.url),'utf8')).replace(/await import\([\s\S]*?\n\s*\)/,'({ HandsViewer: window.TestHandsViewer })'));
+w.eval(await readStatic('dialogs.js'));
+w.eval((await readStatic('hands-ui.js')).replace(/await import\([\s\S]*?\n\s*\)/,'({ HandsViewer: window.TestHandsViewer })'));
 const changeAngle=(value,type='change')=>{el('hand-value').value=value;el('hand-value').dispatchEvent(new w.Event(type,{bubbles:true}));};
 const submit=async()=>{el('hand-pose-form').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await flush();};
 try {
@@ -61,20 +58,20 @@ try {
   assert.equal(el('hand-canvas').hidden,false);
   assert.equal(el('hands-error').hidden,true);
   assert.match(el('hand-status').textContent,/adjustable joints/);
-  const fetchNormally=w.fetch;
+  const answerNormally=w.api;
   let rejectOldPoseRead,holdOldPoseRead=true;
-  w.fetch=(url,options={})=>{
+  w.api=(url,options={})=>{
     if(holdOldPoseRead&&url.endsWith('/poses')&&!options.method){
       holdOldPoseRead=false;return new Promise((_,reject)=>{rejectOldPoseRead=reject;});
     }
-    return fetchNormally(url,options);
+    return answerNormally(url,options);
   };
   const oldRefresh=w.loadHands(true);await flush();
   el('hand-side').value='right';el('hand-side').dispatchEvent(new w.Event('change'));await flush();
   rejectOldPoseRead(new Error('Outdated left-side read failure'));await oldRefresh;
   assert.equal(el('hands-error').hidden,true,'A late refresh failure cannot replace the current side’s healthy state');
   assert.equal(el('hand-canvas').hidden,false);
-  w.fetch=fetchNormally;
+  w.api=answerNormally;
   el('hand-side').value='left';el('hand-side').dispatchEvent(new w.Event('change'));await flush();
   changeAngle('7.25');el('hand-pose-name').value='Unsaved grip';
   const before=snapshot.bend;

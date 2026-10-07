@@ -1,19 +1,12 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {JSDOM} from 'jsdom';
-import {indexHtml} from './index_page.cjs';
-const w=new JSDOM(indexHtml(),{runScripts:'outside-only',pretendToBeVisual:true,url:'http://localhost:8080/#runs'}).window;
-const observers=[];const Observer=w.MutationObserver;
-w.MutationObserver=class extends Observer{constructor(cb){super(cb);observers.push(this);}};
-w.fetch=()=>new Promise(()=>{});
-w.scrollTo=w.HTMLElement.prototype.scrollIntoView=()=>{};
-w.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
-w.CSS={escape:s=>s};
-w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
-w.HTMLDialogElement.prototype.close=function(){this.open=false;this.dispatchEvent(new w.Event('close'));};
-const el=id=>w.document.getElementById(id);
+import {pageWindow, byId, spyMutationObservers, stubBrowserApis, polyfillDialogs, readStatic} from './ui_harness.mjs';
+const w=pageWindow({url:'http://localhost:8080/#runs'});
+const observers=spyMutationObservers(w);
+stubBrowserApis(w,{cssEscape:true});
+polyfillDialogs(w,{guarded:false,returnValue:false});
+const el=byId(w);
 try {
- for(const file of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js'])w.eval(await readFile(new URL('../static/'+file,import.meta.url),'utf8')+(file==='app.js'?'\nactiveTab="runs";':''));
+ for(const file of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js'])w.eval(await readStatic(file)+(file==='app.js'?'\nactiveTab="runs";':''));
  const first={id:'first',attempt_number:1,status:'FAILED',slurm_job_id:'old-job'};
  const second={id:'second',attempt_number:2,status:'SUBMITTING'};
  let submitted=false,posts=0,release;

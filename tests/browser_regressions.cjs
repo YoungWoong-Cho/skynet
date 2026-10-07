@@ -4,8 +4,11 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const source = readFileSync(require('node:path').join(__dirname, '../static/app.js'), 'utf8');
+const timingStart = source.indexOf('const UI_TIMING = ');
+const timingBlock = source.slice(timingStart, source.indexOf('\n});\n', timingStart) + 5);
 function load(names, globals = {}) {
   const context = vm.createContext(globals);
+  vm.runInContext(timingBlock, context);
   for (const name of names) {
     const start = source.search(new RegExp(`^(?:async )?function ${name}\\(`, 'm'));
     assert.ok(start >= 0, name);
@@ -156,7 +159,11 @@ test('a disconnected read expires with a useful error, while submission requests
       return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new Error('aborted'))));
     },
   });
-  await assert.rejects(c.apiRequest('/read'), /timed out after 60 seconds/);
+  await assert.rejects(c.apiRequest('/read'), (error) => {
+    assert.match(error.message, /timed out after 60 seconds/);
+    assert.equal(error.name, 'TimeoutError', 'feature pages tell a deadline from a server failure by name');
+    return true;
+  });
   assert.equal((await c.apiRequest('/submit', {method:'POST'})).submitted, true);
   assert.equal(calls,2);
 });

@@ -1,43 +1,14 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { JSDOM } from "jsdom";
-import { indexHtml } from "./index_page.cjs";
+import { pageWindow, byId, flusher, spyMutationObservers, stubBrowserApis, polyfillDialogs, readStatic } from "./ui_harness.mjs";
 
-const w = new JSDOM(
-  indexHtml(),
-  {
-    runScripts: "outside-only",
-    pretendToBeVisual: true,
-    url: "http://localhost:8080/?experiment_view=presets#experiments",
-  },
-).window;
-const observers = [],
-  Observer = w.MutationObserver;
-w.MutationObserver = class extends Observer {
-  constructor(cb) {
-    super(cb);
-    observers.push(this);
-  }
-};
-w.fetch = () => new Promise(() => {});
-w.scrollTo = w.HTMLElement.prototype.scrollIntoView = () => {};
-w.matchMedia = () => ({
-  matches: false,
-  addEventListener() {},
-  removeEventListener() {},
+const w = pageWindow({
+  url: "http://localhost:8080/?experiment_view=presets#experiments",
 });
-w.HTMLDialogElement.prototype.showModal = function () {
-  this.open = true;
-};
-w.HTMLDialogElement.prototype.close = function () {
-  if (!this.open) return;
-  this.open = false;
-  this.dispatchEvent(new w.Event("close"));
-};
-const el = (id) => w.document.getElementById(id);
-const flush = async () => {
-  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
-};
+const observers = spyMutationObservers(w);
+stubBrowserApis(w);
+polyfillDialogs(w, { returnValue: false });
+const el = byId(w);
+const flush = flusher(5);
 try {
   for (const file of [
     "dialogs.js",
@@ -46,7 +17,7 @@ try {
     "app.js",
   ])
     w.eval(
-      (await readFile(new URL("../static/" + file, import.meta.url), "utf8")) +
+      (await readStatic(file)) +
         (file === "app.js"
           ? "\nwindow.seedPresets = rows => {experimentRows = rows; renderExperiments();};"
           : ""),

@@ -1,18 +1,13 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {JSDOM} from 'jsdom';
-import {indexHtml} from './index_page.cjs';
-const w = new JSDOM(indexHtml(), {runScripts:'outside-only',pretendToBeVisual:true,url:'http://localhost/#evaluations'}).window;
-const observers=[],Observer=w.MutationObserver;
-w.MutationObserver=class extends Observer {constructor(fn){super(fn);observers.push(this);}};
-w.fetch=()=>new Promise(()=>{});w.scrollTo=w.HTMLElement.prototype.scrollIntoView=()=>{};
-w.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});w.CSS={escape:s=>s};
-w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
-w.HTMLDialogElement.prototype.close=function(){this.open=false;this.dispatchEvent(new w.Event('close'));};
-const el=id=>w.document.getElementById(id),flush=async()=>{for(let i=0;i<8;i++)await new Promise(r=>setImmediate(r));};
+import {pageWindow, byId, flusher, spyMutationObservers, stubBrowserApis, polyfillDialogs, readStatic} from './ui_harness.mjs';
+const w = pageWindow({url:'http://localhost/#evaluations'});
+const observers = spyMutationObservers(w);
+stubBrowserApis(w, {cssEscape:true});
+polyfillDialogs(w, {guarded:false, returnValue:false});
+const el = byId(w), flush = flusher(8);
 try {
  for(const file of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js']) {
-  let source=await readFile(new URL('../static/'+file,import.meta.url),'utf8');
+  let source=await readStatic(file);
   if(file==='app.js')source+='\nwindow.seedLinkTest=run=>{runRows=[run];renderRuns();}; window.seedDatasetLinkTest=(dataset,adapter)=>{if(adapter){adapterRows=[{id:"adapter",name:"Policy",latest_version:{id:"adapter-v1",version_number:1,manifest:{schema_version:"skynet.adapter/v1",slug:"policy",display_name:"Policy",train:{input_fields:[{path:"native.config.dataset",label:"Dataset",kind:"json",...(adapter==="takes data"?{data_binding:{role:"training_data"}}:{})}]}}}}];adaptersLoaded=true;populateExperimentAdapters();applySelectedAdapter({loadSource:false});}trainingDatasetRows=[dataset];populateExperimentDataBundles();};';
   w.eval(source);
  }

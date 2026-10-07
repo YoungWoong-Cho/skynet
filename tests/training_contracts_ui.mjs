@@ -1,15 +1,9 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {JSDOM} from 'jsdom';
-import {indexHtml} from './index_page.cjs';
-const w = new JSDOM(indexHtml(), {runScripts:'outside-only', pretendToBeVisual:true, url:'http://localhost:8080/#experiments'}).window;
-const observers=[]; const Observer=w.MutationObserver;
-w.MutationObserver=class extends Observer {constructor(callback){super(callback);observers.push(this);}};
-w.fetch=()=>new Promise(()=>{});
-w.scrollTo=w.HTMLElement.prototype.scrollIntoView=()=>{};
-w.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
-w.CSS={escape:s=>s};
-const el=id=>w.document.getElementById(id);
+import {pageWindow, byId, spyMutationObservers, stubBrowserApis, readStatic} from './ui_harness.mjs';
+const w = pageWindow({url:'http://localhost:8080/#experiments'});
+const observers = spyMutationObservers(w);
+stubBrowserApis(w, {cssEscape:true});
+const el = byId(w);
 const input=key=>el('adapter-field-native-config-'+key);
 const manifest={schema_version:'skynet.adapter/v1',slug:'policy-test',display_name:'Test policy',runtime:{allowed_backends:['existing']},capabilities:{supports_resume:false}, defaults:{resources:{gpu_mode:"explicit",gpu_count:1},hyperparameters:{batch_size:256}},train:{
  supported_canonical_fields:['train.batch.value'], default_preset:'state/v1',
@@ -22,7 +16,7 @@ const manifest={schema_version:'skynet.adapter/v1',slug:'policy-test',display_na
  ]}};
 try {
  for(const name of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js']) {
-  let source=await readFile(new URL('../static/'+name,import.meta.url),'utf8');
+  let source=await readStatic(name);
   if(name==='app.js')source+=`\nwindow.configureContractTest=(manifest)=>{
     adapterRows=[{id:'adapter-test',name:'Test policy',latest_version:{id:'version-test',version_number:1,manifest}}];
     trainingDatasetRows=[{id:'bundle-test',selection:{version_id:'version-test'},name:'Imported source',version:'1',assignments:[{role:'training_data',position:0,version:{status:'READY',path:'/cluster/test',format:'test-zarr/v1',metadata:{contract:'state/v1',validation:{status:'PASSED'}}}}]}];

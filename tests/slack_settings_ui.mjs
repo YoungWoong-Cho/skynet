@@ -1,19 +1,11 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { JSDOM } from "jsdom";
-import { indexHtml } from "./index_page.cjs";
-const window = new JSDOM(
-  indexHtml(),
-  {
-    runScripts: "outside-only",
-    url: "http://skynet:8080/#settings",
-  },
-).window;
-const el = (id) => window.document.getElementById(id);
-const flush = async () => {
-  for (let i = 0; i < 4; i++)
-    await new Promise((resolve) => setImmediate(resolve));
-};
+import { pageWindow, byId, flusher, loadScripts } from "./ui_harness.mjs";
+const window = pageWindow({
+  url: "http://skynet:8080/#settings",
+  pretendToBeVisual: false,
+});
+const el = byId(window);
+const flush = flusher(4);
 const calls = [];
 const disconnected = { configured: false, enabled: false, last_error: null };
 const connected = { configured: true, enabled: true, last_error: null };
@@ -22,11 +14,7 @@ window.api = async (path, options = {}) => {
   calls.push({ path, ...options });
   return handler(path, options);
 };
-for (const file of ["connection-settings.js", "slack-settings.js"])
-  window.eval(
-    await readFile(new URL("../static/" + file, import.meta.url), "utf8"),
-  );
-try {
+await loadScripts(window, ["connection-settings.js", "slack-settings.js"]);try {
   const form = el("slack-notifications-form");
   const connect = form.querySelector('button[type="submit"]');
   await window.loadSlackSettings();

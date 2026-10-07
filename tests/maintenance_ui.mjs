@@ -1,24 +1,20 @@
 import assert from "node:assert/strict";
-import {readFile} from "node:fs/promises";
-import {JSDOM} from "jsdom";
-import {indexHtml} from "./index_page.cjs";
-const w = new JSDOM(indexHtml(), {runScripts:"outside-only", url:"http://skynet/#settings"}).window;
-const el = id => w.document.getElementById(id);
-w.HTMLDialogElement.prototype.showModal = function(){this.open=true;};
-w.HTMLDialogElement.prototype.close = function(){this.open=false;this.dispatchEvent(new w.Event("close"));};
+import {pageWindow, byId, flusher, polyfillDialogs, loadScripts, readStatic} from "./ui_harness.mjs";
+const w = pageWindow({url:"http://skynet/#settings", pretendToBeVisual:false});
+const el = byId(w);
+polyfillDialogs(w, {guarded:false, returnValue:false});
 w.escapeHtml = text => String(text).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll('"', "&quot;");
 w.closeActiveDisclosure = ()=>{};
-const app=await readFile(new URL('../static/app.js',import.meta.url),'utf8');
+const app=await readStatic('app.js');
 for(const name of ['linkedValue','valueHtml']) {const start=app.indexOf(`function ${name}(`);w.eval(app.slice(start,app.indexOf('\nfunction ',start+1)));}
 const refresh=[];
 w.loadExperiments=w.loadRuns=w.loadEvaluations=async()=>{refresh.push(1);};
 w.refreshAfterDeletion = async()=>{await Promise.all([w.loadExperiments(),w.loadRuns(),w.loadEvaluations()]);};
 w.showToast = ()=>{};
-const flush = async()=>{for(let i=0;i<6;i++)await new Promise(r=>setImmediate(r));};
+const flush = flusher(6);
 let calls=[], handler;
 w.api = (url, options={})=>{calls.push({url,...options});return handler(url, options);};
-for (const file of ["dialogs.js","maintenance.js"]) w.eval(await readFile(new URL("../static/"+file, import.meta.url), "utf8"));
-const launch=w.document.createElement("button");launch.dataset.deleteKind="run";launch.dataset.deleteId="run";w.document.body.append(launch);
+await loadScripts(w, ["dialogs.js", "maintenance.js"]);const launch=w.document.createElement("button");launch.dataset.deleteKind="run";launch.dataset.deleteId="run";w.document.body.append(launch);
 try {
  handler=async()=>({label:"Run",token:"d".repeat(64),blockers:[{id:"draft",kind:"draft-revision",label:"Draft revision 3",reason:"Discard the unused draft first"}],counts:{runs:1},files:[]});
  launch.click();await flush();

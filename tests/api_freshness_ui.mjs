@@ -1,18 +1,12 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {JSDOM} from 'jsdom';
-import {indexHtml} from './index_page.cjs';
-const html = indexHtml();
-const source = await readFile(new URL('../static/app.js', import.meta.url), 'utf8');
-const flush = async () => { for (let i=0;i<8;i++) await new Promise(resolve=>setImmediate(resolve)); };
+import {pageWindow, byId, flusher, spyMutationObservers, stubBrowserApis, loadScripts, readStatic} from './ui_harness.mjs';
+const source = await readStatic('app.js');
+const flush = flusher(8);
 const deferred = () => { let resolve; const promise = new Promise(r=>{resolve=r;}); return {promise,resolve}; };
-const w = new JSDOM(html,{url:'http://localhost:8080/#cluster',runScripts:'outside-only',pretendToBeVisual:true}).window;
-const observers=[], Observer=w.MutationObserver;
-w.MutationObserver=class extends Observer {constructor(fn){super(fn);observers.push(this);}};
+const w = pageWindow({url:'http://localhost:8080/#cluster'});
+const observers = spyMutationObservers(w);
 for(const key of ['Headers','Request','Response','AbortController','AbortSignal'])w[key]=globalThis[key];
-w.scrollTo=w.HTMLElement.prototype.scrollIntoView=()=>{};
-w.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
-w.CSS={escape:value=>value};
+stubBrowserApis(w, {fetch:false, cssEscape:true});
 w.SkynetWorkspace={id:'test-workspace',storageKey:key=>'test:'+key};
 const streams=[];
 w.EventSource=class {
@@ -24,10 +18,9 @@ w.EventSource=class {
 let handle=async()=>Response.json({jobs:[],account_usage:[],gateway:'sky2'});
 let fetchCalls=[];
 w.fetch=(path,options={})=>{fetchCalls.push([String(path),options.method||'GET']);return handle(String(path),options);};
-const el=id=>w.document.getElementById(id);
+const el = byId(w);
 try {
- for(const file of ['dialogs.js','workspace-navigation.js','connection-settings.js'])w.eval(await readFile(new URL('../static/'+file,import.meta.url),'utf8'));
- w.eval(source+`\nwindow.testPage=page=>{activeTab=page;};window.testDataState=()=>trainingDatasetRows.map(row=>row.id);window.testFormAdapter=adapter=>{adapterRows=[adapter];populateExperimentAdapters();applySelectedAdapter({loadSource:false});};`);
+ await loadScripts(w, ['dialogs.js', 'workspace-navigation.js', 'connection-settings.js']);w.eval(source+`\nwindow.testPage=page=>{activeTab=page;};window.testDataState=()=>trainingDatasetRows.map(row=>row.id);window.testFormAdapter=adapter=>{adapterRows=[adapter];populateExperimentAdapters();applySelectedAdapter({loadSource:false});};`);
  await flush();
  assert.equal(streams.length,1);
  assert.equal(streams[0].url,'/api/changes?expected_workspace=test-workspace');

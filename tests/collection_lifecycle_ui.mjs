@@ -1,17 +1,10 @@
 import assert from "node:assert/strict";
-import {readFile} from "node:fs/promises";
-import {JSDOM} from "jsdom";
-import {indexHtml} from "./index_page.cjs";
+import {pageWindow, byId, readStatic, appFunction} from "./ui_harness.mjs";
 
-const dom = new JSDOM(indexHtml(), {runScripts:"outside-only", url:"http://localhost/"});
-const w = dom.window;
-const el = id => w.document.getElementById(id);
-const app = await readFile(new URL("../static/app.js", import.meta.url), "utf8");
-const load = name => {
-  const start = app.search(new RegExp(`(?:async )?function ${name}\\(`));
-  assert.ok(start >= 0, name);
-  w.eval(app.slice(start, app.indexOf("\n}\n", start) + 3));
-};
+const w = pageWindow({url:"http://localhost/", pretendToBeVisual:false});
+const el = byId(w);
+const app = await readStatic("app.js");
+const load = name => w.eval(appFunction(app, name));
 w.elements = new Proxy({}, {get: (_, key) => el(key.replace(/[A-Z]/g, c => "-" + c.toLowerCase()))});
 w.collectionAdapterRows = [];
 w.collectionPrepareStates = new Set(["DRAFT", "READY"]);

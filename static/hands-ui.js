@@ -32,21 +32,10 @@
     el("hand-pose-message").textContent = "";
   };
   const endpoint = () => `/api/hands/${selected.key}/${side}`;
-  async function api(url, options = {}) {
-    const response = await fetch(url, {
-      ...options,
-      headers: { "Content-Type": "application/json" },
-      signal: AbortSignal.timeout(45000),
-    });
-    const data = await response.json();
-    if (!response.ok)
-      throw new Error(
-        typeof data.detail === "string"
-          ? data.detail
-          : "The request could not be completed",
-      );
-    return data;
-  }
+  const REQUEST_TIMEOUT_MS = 45000;
+  // app.js's shared request helper with this page's deadline.
+  const api = (url, options = {}) =>
+    window.api(url, { ...options, timeoutMs: REQUEST_TIMEOUT_MS });
   function sourceLinks() {
     el("hand-source-link").href =
       `https://github.com/${selected.repository}/blob/${selected.revision}/${selected.sides[side]}`;

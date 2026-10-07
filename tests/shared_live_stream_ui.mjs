@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 const app = fs.readFileSync('static/app.js', 'utf8');
-const source = app.slice(app.indexOf('function connectWorkspaceChanges('), app.indexOf('function initializeLiveRefresh('));
+const timing = app.slice(app.indexOf('const UI_TIMING = '), app.indexOf('\n});\n', app.indexOf('const UI_TIMING = ')) + 5);
+const source = timing + app.slice(app.indexOf('function connectWorkspaceChanges('), app.indexOf('function initializeLiveRefresh('));
 const channels = new Map(), queues = new Map(), owners = new Set(), streams = [];
 class Channel {
   constructor(key) { this.key=key; const peers=channels.get(key)||new Set();peers.add(this);channels.set(key,peers); }

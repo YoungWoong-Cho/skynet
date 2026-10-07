@@ -44,20 +44,10 @@
     el("live-episode-viewer").querySelectorAll(".episode-viewer-layers > label")
       .forEach((label) => { label.inert = busy; });
   }
-  async function request(path, options = {}, timeout = 40000) {
-    const response = await fetch(path, {
-      ...options,
-      signal: AbortSignal.timeout(timeout),
-    });
-    const result = await response.json();
-    if (!response.ok)
-      throw new Error(
-        typeof result.detail === "string"
-          ? result.detail
-          : "Could not load the recording review",
-      );
-    return result;
-  }
+  const REQUEST_TIMEOUT_MS = 40000;
+  // app.js's shared request helper with this page's deadline.
+  const request = (path, options = {}) =>
+    window.api(path, { ...options, timeoutMs: REQUEST_TIMEOUT_MS });
   function pause() {
     window.SkynetEpisodeViewer?.pause("live-episode-viewer");
   }

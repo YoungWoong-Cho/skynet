@@ -1,12 +1,9 @@
 import assert from "node:assert/strict";
-import {readFile} from "node:fs/promises";
-import {JSDOM} from "jsdom";
+import {pageWindow, flusher, readStatic} from "./ui_harness.mjs";
 
-const w = new JSDOM('<select id="gateway"><option value="sky2" selected>Prefer sky2</option></select><div id="preview"></div><script src="http://localhost/static/episode-viewer.js"></script>', {runScripts: "outside-only", pretendToBeVisual: true, url: "http://localhost/"}).window;
+const w = pageWindow({html: '<select id="gateway"><option value="sky2" selected>Prefer sky2</option></select><div id="preview"></div><script src="http://localhost/static/episode-viewer.js"></script>', url: "http://localhost/"});
 Object.defineProperty(w.document, "currentScript", {get: () => w.document.querySelector("script")});
 w.ResizeObserver = class {observe() {} disconnect() {}};
-w.AbortController = AbortController;
-w.AbortSignal = {timeout: () => new AbortController().signal, any: AbortSignal.any};
 const drawn = [], text = [];
 const context = {save() {}, restore() {}, beginPath() {}, rect() {}, clip() {}, moveTo() {}, lineTo() {}, stroke() {}, fill() {}, arc() {}, clearRect() {}, fillRect() {}, drawImage(...args) {drawn.push(args);}, fillText(...args) {text.push(args);}};
 w.HTMLCanvasElement.prototype.getContext = () => context;
@@ -18,7 +15,8 @@ const modalities = [{modality: "rgb"}, {modality: "state"}, {modality: "point_cl
 const metadata = {state: "READY", modalities, episodes: [0, 1].map(index => ({index, steps: 120, hz: 60, source_session_id: "session", source_recording_index: index, source_episode: 0, source_sha256: "recording-a"}))};
 let holdFrames = false;
 const frame = index => ({index, time: index / 60, images: [camera("Front", 20), camera("Left", 30)], point_cloud: [{id: "front", positions: [[0, 0, 1]], colors: [[1, 0, 0]]}], depth: [{id: "front", positions: [[0, 1, 1]]}], state: [{name: "joints", labels: ["bend"], values: [index]}]});
-w.fetch = async (url, options = {}) => {
+// The preview calls app.js's api().
+w.api = async (url, options = {}) => {
   calls.push({url, options});
   let value;
   if (url.endsWith("/preview")) value = metadata;
@@ -29,10 +27,10 @@ w.fetch = async (url, options = {}) => {
     if (holdFrames) await new Promise(resolve => pending.push(resolve));
   } else if (url.includes("/viewer?")) value = {state: "READY", viewer: source};
   else throw new Error("Unexpected request " + url);
-  return {ok: true, json: async () => structuredClone(value)};
+  return structuredClone(value);
 };
-w.eval(await readFile(new URL("../static/episode-viewer.js", import.meta.url), "utf8"));
-const flush = async () => {for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));};
+w.eval(await readStatic('episode-viewer.js'));
+const flush = flusher(8);
 const originalOpen = w.SkynetEpisodeViewer.open;
 let viewer;
 w.SkynetEpisodeViewer.open = (...args) => {

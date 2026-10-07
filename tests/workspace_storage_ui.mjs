@@ -1,15 +1,12 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { JSDOM } from "jsdom";
-import { indexHtml } from "./index_page.cjs";
-const w = new JSDOM(indexHtml(),
-  { runScripts: "outside-only", url: "http://skynet/#settings" }).window;
-const el = id => w.document.getElementById(id);
-const flush = async () => { for (let i=0;i<4;i++) await new Promise(r=>setImmediate(r)); };
+import { pageWindow, byId, flusher, readStatic } from "./ui_harness.mjs";
+const w = pageWindow({ url: "http://skynet/#settings", pretendToBeVisual: false });
+const el = byId(w);
+const flush = flusher(4);
 const calls=[];
 let handler;
 w.api = async (path, options={}) => { calls.push({path,...options}); return handler(path,options); };
-w.eval(await readFile(new URL("../static/workspace-storage.js", import.meta.url), "utf8"));
+w.eval(await readStatic('workspace-storage.js'));
 try {
   const form=el("workspace-storage-form"), path=el("workspace-base-path");
   w.renderWorkspaceStorage({work_root:null, configured:false});

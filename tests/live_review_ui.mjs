@@ -1,18 +1,8 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { JSDOM } from "jsdom";
-import { indexHtml } from "./index_page.cjs";
-const dom = new JSDOM(
-  indexHtml(),
-  {
-    runScripts: "outside-only",
-    pretendToBeVisual: true,
-    url: "http://localhost:8080/#collection",
-  },
-);
-const { window } = dom,
+import { pageWindow, byId, readStatic } from "./ui_harness.mjs";
+const window = pageWindow({ url: "http://localhost:8080/#collection" }),
   requests = [];
-const get = (id) => window.document.getElementById(id);
+const get = byId(window);
 const recordingIdentity = (session, index) =>
   `${session.id}:${Buffer.from(session.recordings[index], "utf8").toString("base64url")}`;
 function assertRecordingSelection(session, index) {
@@ -32,19 +22,14 @@ dialog.close = () => {
   dialog.open = false;
   dialog.dispatchEvent(new window.Event("close"));
 };
-window.fetch = (path, options) =>
-  new Promise((resolve) =>
-    requests.push({
-      path,
-      options,
-      resolve: (data) => resolve({ ok: true, json: async () => data }),
-    }),
-  );
+// The page calls app.js's api(); each request waits here until the test answers it.
+window.api = (path, options = {}) =>
+  new Promise((resolve) => requests.push({ path, options, resolve }));
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 let viewerOptions, viewerVideoId, viewerPlaying = false;
 const viewerPauses = [];
 window.SkynetEpisodeViewer = {
-  sequenceNavigation: window.eval("(" + (await readFile(new URL("../static/episode-viewer.js", import.meta.url), "utf8")).match(/function sequenceNavigation\([\s\S]*?\n  }/)[0] + ")"),
+  sequenceNavigation: window.eval("(" + (await readStatic('episode-viewer.js')).match(/function sequenceNavigation\([\s\S]*?\n  }/)[0] + ")"),
   open: (...args) => {
     viewerOptions = args[3];
     viewerVideoId = args[1];
@@ -105,12 +90,9 @@ const data = {
   ],
 };
 try {
-  window.eval(await readFile(new URL("../static/dialogs.js", import.meta.url), "utf8"));
+  window.eval(await readStatic('dialogs.js'));
   window.eval(
-    await readFile(
-      new URL("../static/live-review.js", import.meta.url),
-      "utf8",
-    ),
+    await readStatic('live-review.js'),
   );
   window.openLiveReview({ id: "first" }, 0);
   requests[0].resolve({ state: "READY", recording_source: {gateway: "sky2", path: "/cluster/original/episode-1.pkl"} });

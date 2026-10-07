@@ -1,24 +1,13 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {JSDOM} from 'jsdom';
-import {indexHtml} from './index_page.cjs';
+import {pageWindow, byId, spyMutationObservers, stubBrowserApis, polyfillDialogs, loadScripts} from './ui_harness.mjs';
 
-const w = new JSDOM(indexHtml(), {
-  runScripts: 'outside-only', pretendToBeVisual: true, url: 'http://localhost:8080/#runs',
-}).window;
-const observers = [], Observer = w.MutationObserver;
-w.MutationObserver = class extends Observer {constructor(cb) {super(cb); observers.push(this);}};
-w.fetch = () => new Promise(() => {});
-w.scrollTo = w.HTMLElement.prototype.scrollIntoView = () => {};
-w.matchMedia = () => ({matches: false, addEventListener() {}, removeEventListener() {}});
-w.CSS = {escape: value => value};
-w.HTMLDialogElement.prototype.showModal = function() {this.open = true;};
-w.HTMLDialogElement.prototype.close = function() {this.open = false;};
-const el = id => w.document.getElementById(id);
+const w = pageWindow({url: 'http://localhost:8080/#runs'});
+const observers = spyMutationObservers(w);
+stubBrowserApis(w, {cssEscape: true});
+polyfillDialogs(w, {guarded: false, returnValue: false, closeEvent: false});
+const el = byId(w);
 try {
-  for (const file of ['dialogs.js', 'workspace-navigation.js', 'connection-settings.js', 'app.js']) {
-    w.eval(await readFile(new URL('../static/' + file, import.meta.url), 'utf8'));
-  }
+  await loadScripts(w);
   const attempt = {id: 'attempt', attempt_number: 1, status: 'SUBMITTING', display_status: 'SUBMISSION UNCONFIRMED',
     created_at: '2026-09-11T06:13:49Z', slurm_reason: 'Submission outcome unknown: SSH operation timed out'};
   const run = {id: 'run', status: 'SUBMITTING', display_status: 'SUBMISSION UNCONFIRMED',

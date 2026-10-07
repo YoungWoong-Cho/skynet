@@ -1,11 +1,8 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {JSDOM} from 'jsdom';
-import {indexHtml} from './index_page.cjs';
-const w = new JSDOM(indexHtml(), {runScripts:'outside-only',pretendToBeVisual:true}).window;
-w.HTMLDialogElement.prototype.showModal = function(){this.open=true;};
-w.HTMLDialogElement.prototype.close = function(value=''){if(this.open){this.returnValue=value;this.open=false;this.dispatchEvent(new w.Event('close'));}};
-w.eval(await readFile(new URL('../static/dialogs.js',import.meta.url),'utf8'));
+import {pageWindow, polyfillDialogs, loadScripts} from './ui_harness.mjs';
+const w = pageWindow({url:'about:blank'});
+polyfillDialogs(w);
+await loadScripts(w, ['dialogs.js']);
 try {
   for(const surface of w.document.querySelectorAll('dialog, [role="dialog"]')) assert.ok(surface.classList.contains('app-dialog'),surface.id);
   const surfaces=[...w.document.querySelectorAll('dialog, [role="dialog"]')];

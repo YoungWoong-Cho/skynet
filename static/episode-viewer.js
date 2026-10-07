@@ -12,18 +12,10 @@
     if (className) element.className = className;
     return element;
   };
-  async function requestJson(url, options = {}) {
-    if (typeof window.api === "function")
-      return window.api(url, {...options, timeoutMs: 45000});
-    const timeout = AbortSignal.timeout(45000);
-    const response = await fetch(url, {
-      ...options,
-      signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
-    });
-    const value = await response.json();
-    if (!response.ok) throw new Error(typeof value.detail === "string" ? value.detail : "Episode data could not be loaded");
-    return value;
-  }
+  const REQUEST_TIMEOUT_MS = 45000;
+  // app.js's shared request helper with the viewer's deadline; viewers open after app.js has loaded.
+  const requestJson = (url, options = {}) =>
+    window.api(url, { ...options, timeoutMs: REQUEST_TIMEOUT_MS });
 
   // Camera metadata uses ROS optical coordinates (+x right, +y down, +z forward).
   function project(point, camera) {

@@ -1,24 +1,13 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {JSDOM} from 'jsdom';
-import {indexHtml} from './index_page.cjs';
-const w = new JSDOM(indexHtml(), {
-  runScripts: 'outside-only', pretendToBeVisual: true,
-  url: 'http://localhost:8080/?data_view=recording#data',
-}).window;
-const observers = [], Observer = w.MutationObserver;
-w.MutationObserver = class extends Observer { constructor(fn) { super(fn); observers.push(this); } };
-w.fetch = () => new Promise(() => {});
-w.scrollTo = w.HTMLElement.prototype.scrollIntoView = () => {};
-w.matchMedia = () => ({matches: false, addEventListener() {}, removeEventListener() {}});
-w.HTMLDialogElement.prototype.showModal = function() { this.open = true; };
-w.HTMLDialogElement.prototype.close = function() { if (this.open) { this.open = false; this.dispatchEvent(new w.Event('close')); } };
-const el = id => w.document.getElementById(id);
-const flush = async () => { for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve)); };
+import {pageWindow, byId, flusher, spyMutationObservers, stubBrowserApis, polyfillDialogs, loadScripts} from './ui_harness.mjs';
+const w = pageWindow({url: 'http://localhost:8080/?data_view=recording#data'});
+const observers = spyMutationObservers(w);
+stubBrowserApis(w);
+polyfillDialogs(w, {returnValue: false});
+const el = byId(w);
+const flush = flusher(5);
 try {
-  for (const file of ['dialogs.js', 'workspace-navigation.js', 'connection-settings.js', 'app.js', 'live-conversion.js', 'maintenance.js']) {
-    w.eval(await readFile(new URL('../static/' + file, import.meta.url), 'utf8'));
-  }
+  await loadScripts(w, ['dialogs.js', 'workspace-navigation.js', 'connection-settings.js', 'app.js', 'live-conversion.js', 'maintenance.js']);
   const originalId = '6a257afb-aaaa-4000-8000-000000000000';
   const copyId = '5f95eb65-bbbb-4000-8000-000000000000';
   const original = {id: originalId, created_at: '2026-09-08T18:27:14Z', profile: {task: 'Cube', robot: 'Shadow'}, recordings: ['a', 'b']};

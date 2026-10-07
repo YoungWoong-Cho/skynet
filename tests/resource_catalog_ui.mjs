@@ -1,21 +1,12 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {JSDOM} from 'jsdom';
-import {indexHtml} from './index_page.cjs';
-const w = new JSDOM(indexHtml(), {
-  runScripts:'outside-only',pretendToBeVisual:true,url:'http://localhost:8080/?data_view=registry#data'
-}).window;
-const observers=[], Observer=w.MutationObserver;
-w.MutationObserver=class extends Observer{constructor(fn){super(fn);observers.push(this);}};
-w.fetch=()=>new Promise(()=>{});
-w.scrollTo=w.HTMLElement.prototype.scrollIntoView=()=>{};
-w.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
-w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
-w.HTMLDialogElement.prototype.close=function(){this.open=false;this.dispatchEvent(new w.Event('close'));};
-const el=id=>w.document.getElementById(id), flush=async()=>{for(let i=0;i<5;i++)await new Promise(r=>setImmediate(r));};
+import {pageWindow, byId, flusher, spyMutationObservers, stubBrowserApis, polyfillDialogs, loadScripts, readStatic} from './ui_harness.mjs';
+const w = pageWindow({url:'http://localhost:8080/?data_view=registry#data'});
+const observers = spyMutationObservers(w);
+stubBrowserApis(w);
+polyfillDialogs(w, {guarded:false, returnValue:false});
+const el = byId(w), flush = flusher(5);
 try{
-  for(const file of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js'])w.eval(await readFile(new URL('../static/'+file,import.meta.url),'utf8'));
-  el('email-workspace-content').hidden=false;
+  await loadScripts(w);el('email-workspace-content').hidden=false;
   w.eval('window.seedPresets = rows => { experimentRows=rows; renderExperiments(); };');
   const historyFixture=w.document.createElement('div');
   historyFixture.textContent='Loading…';
@@ -68,7 +59,7 @@ try{
   w.SkynetDialog.close(el('data-import-history-dialog'));
 
   // Exercise the actual conversion controller with the shared catalog navigation.
-  w.eval(await readFile(new URL('../static/policy-exports.js',import.meta.url),'utf8'));
+  w.eval(await readStatic('policy-exports.js'));
   await flush();
   const historyButton=el('show-data-conversion-history');
   assert.equal(historyButton.previousElementSibling,el('show-data-import-history'));

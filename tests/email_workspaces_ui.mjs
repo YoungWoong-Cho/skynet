@@ -1,17 +1,18 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
-import {JSDOM, VirtualConsole} from 'jsdom';
+import {VirtualConsole} from 'jsdom';
 import {indexHtml} from './index_page.cjs';
+import {pageWindow, flusher, spyMutationObservers, stubBrowserApis, readStatic} from './ui_harness.mjs';
 
 const html = indexHtml();
 assert.doesNotMatch(html, /For your trusted team\. Anyone entering this email/);
 assert.doesNotMatch(html, /Enter your email to open your configurations/);
-const bootstrap = await readFile(new URL('../static/email-workspace.js', import.meta.url), 'utf8');
+const bootstrap = await readStatic('email-workspace.js');
 const sources = new Map();
 for (const match of html.matchAll(/data-workspace-src="([^"?]+)/g)) {
   sources.set(match[1], await readFile(new URL('..'+match[1], import.meta.url), 'utf8'));
 }
-const flush = async () => {for (let i=0; i<5; i++) await new Promise(resolve=>setImmediate(resolve));};
+const flush = flusher(5);
 function setup(session=null, preferences={}, sessionResponse=null, Channel=null) {
   const errors=[],navigations=[];
   const virtualConsole=new VirtualConsole();
@@ -19,14 +20,11 @@ function setup(session=null, preferences={}, sessionResponse=null, Channel=null)
     if(error.message.includes('navigation')) navigations.push(error);
     else errors.push(error);
   });
-  const dom=new JSDOM(html, {url:'http://localhost:8080/?data_view=recording#runs', runScripts:'outside-only', pretendToBeVisual:true, virtualConsole});
-  const w=dom.window;
+  const w=pageWindow({html, url:'http://localhost:8080/?data_view=recording#runs', virtualConsole});
   if (Channel) w.BroadcastChannel=Channel;
-  const observers=[]; const Observer=w.MutationObserver;
-  w.MutationObserver=class extends Observer {constructor(callback){super(callback);observers.push(this);}};
+  const observers=spyMutationObservers(w);
   for (const key of ['Headers','Request','Response','AbortController','AbortSignal']) w[key]=globalThis[key];
-  w.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
-  w.scrollTo=w.HTMLElement.prototype.scrollIntoView=()=>{};
+  stubBrowserApis(w, {fetch:false});
   const calls=[]; const loaded=[];
   let handler=async (input, options={})=>{
     const raw=input instanceof Request ? input.url : String(input);

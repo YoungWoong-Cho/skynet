@@ -1,14 +1,10 @@
 import assert from "node:assert/strict";
-import {readFile} from "node:fs/promises";
-import {JSDOM} from "jsdom";
-const w = new JSDOM('<section id="experiment-model-io"></section><section id="adapter-model-io"></section>',{runScripts:"outside-only"}).window;
-const app=await readFile(new URL('../static/app.js',import.meta.url),'utf8');
-for (const name of ['escapeHtml','valueHtml','keyValueHtml']) {
- const start=app.indexOf(`function ${name}(`);
- w.eval(app.slice(start,app.indexOf('\nfunction ',start+1)));
-}
-w.eval(app.slice(app.indexOf('const modelIORequests ='), app.indexOf('function trainingAdapterLabel(')));
-const el=id=>w.document.getElementById(id);
+import {pageWindow, byId, readStatic, appFunction, appTimingBlock} from "./ui_harness.mjs";
+const w = pageWindow({html:'<section id="experiment-model-io"></section><section id="adapter-model-io"></section>', url:'about:blank', pretendToBeVisual:false});
+const app=await readStatic('app.js');
+for (const name of ['escapeHtml','valueHtml','keyValueHtml']) w.eval(appFunction(app, name));
+w.eval(appTimingBlock(app) + app.slice(app.indexOf('const modelIORequests ='), app.indexOf('function trainingAdapterLabel(')));
+const el = byId(w);
 const pending=[],calls=[];
 w.api=(url,options)=>{calls.push(JSON.parse(options.body));return new Promise(resolve=>pending.push(resolve));};
 w.selectedAdapter=()=>({});

@@ -1,23 +1,13 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {JSDOM} from 'jsdom';
-import {indexHtml} from './index_page.cjs';
-const w = new JSDOM(indexHtml(), {
-  runScripts:'outside-only', pretendToBeVisual:true, url:'http://localhost:8080/#evaluations',
-}).window;
-const el = id => w.document.getElementById(id);
-const settle = async () => { for (let i=0;i<12;i++) await new Promise(r=>setImmediate(r)); };
-const observers=[], Observer=w.MutationObserver;
-w.MutationObserver=class extends Observer {constructor(callback){super(callback);observers.push(this);}};
-w.fetch = () => new Promise(()=>{});
-w.scrollTo = w.HTMLElement.prototype.scrollIntoView = () => {};
-w.matchMedia = () => ({matches:false, addEventListener(){},removeEventListener(){}});
-w.HTMLDialogElement.prototype.showModal = function(){this.open=true;};
-w.HTMLDialogElement.prototype.close = function(){this.open=false;this.dispatchEvent(new w.Event('close'));};
+import {pageWindow, byId, flusher, spyMutationObservers, stubBrowserApis, polyfillDialogs, loadScripts} from './ui_harness.mjs';
+const w = pageWindow({url:'http://localhost:8080/#evaluations'});
+const el = byId(w);
+const settle = flusher(12);
+const observers = spyMutationObservers(w);
+stubBrowserApis(w);
+polyfillDialogs(w, {guarded:false, returnValue:false});
 try {
-  for (const name of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js','maintenance.js']) {
-    w.eval(await readFile(new URL('../static/'+name, import.meta.url),'utf8'));
-  }
+  await loadScripts(w, ['dialogs.js', 'workspace-navigation.js', 'connection-settings.js', 'app.js', 'maintenance.js']);
   el('email-workspace-content').hidden=false;
   w.scheduleEvaluationTargetValidation=()=>{};
   let suites=[{id:'suite',name:'cube',label:'Cube simulation',evaluator:'isaac_lab',version:'2',tasks:['cube'],can_delete:true,updated_at:'2026-09-11T12:00:00Z',config_json:{tasks:['cube'],task_options:[{id:'cube',label:'Pick <cube>'}],task_selection_reason:'Exactly one case per checkpoint.'}}];

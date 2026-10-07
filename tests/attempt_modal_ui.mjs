@@ -1,20 +1,13 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {JSDOM} from 'jsdom';
-import {indexHtml} from './index_page.cjs';
-const w = new JSDOM(indexHtml(), {runScripts:'outside-only', pretendToBeVisual:true, url:'http://localhost:8080/#runs'}).window;
-const observers=[];const NativeObserver=w.MutationObserver;
-w.MutationObserver=class extends NativeObserver{constructor(callback){super(callback);observers.push(this);}};
-const el=id=>w.document.getElementById(id);
-w.fetch=()=>new Promise(()=>{});
-w.scrollTo=w.HTMLElement.prototype.scrollIntoView=()=>{};
-w.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
-w.CSS={escape:s=>s};
-w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
-w.HTMLDialogElement.prototype.close=function(value=''){if(this.open){this.open=false;this.returnValue=value;this.dispatchEvent(new w.Event('close'));}};
-const flush=async()=>{for(let i=0;i<4;i++)await new Promise(r=>setImmediate(r));};
+import {pageWindow, byId, flusher, spyMutationObservers, stubBrowserApis, polyfillDialogs, loadScripts, APP_SCRIPTS} from './ui_harness.mjs';
+const w = pageWindow({url:'http://localhost:8080/#runs'});
+const observers = spyMutationObservers(w);
+const el = byId(w);
+stubBrowserApis(w, {cssEscape:true});
+polyfillDialogs(w);
+const flush = flusher(4);
 try{
- for(const file of ['dialogs.js','workspace-navigation.js','connection-settings.js','app.js'])w.eval((await readFile(new URL('../static/'+file,import.meta.url),'utf8')) + (file==='app.js' ? '\nwindow.setupAttemptTest=()=>{activeRunDetailId="test-run";elements.runDetail.hidden=false;};window.setupRunHistoryTest=(rows)=>{activeTab="runs";runRows=rows;renderRuns();};window.runModalContext=()=>({id:activeRunDetailId,poll:runDetailPollRunId});' : ''));
+ await loadScripts(w, APP_SCRIPTS, {'app.js': 'window.setupAttemptTest=()=>{activeRunDetailId="test-run";elements.runDetail.hidden=false;};window.setupRunHistoryTest=(rows)=>{activeTab="runs";runRows=rows;renderRuns();};window.runModalContext=()=>({id:activeRunDetailId,poll:runDetailPollRunId});'});
  w.api=async()=>({content:'sample log'});
  w.setupAttemptTest();
  const payload={run:{id:'test-run',status:'RUNNING',adapter_name:'egoverse-act',adapter_version:7,stages:[
