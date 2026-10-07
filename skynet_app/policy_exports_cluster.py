@@ -12,6 +12,7 @@ from .sbatch import SHEBANG, cpu_thread_exports, sbatch_header, shell_prelude
 from .uv_bootstrap import UV_COMMAND, uv_locator_lines, workspace_prelude_lines
 from .cluster_runtime import DEFAULT_GATEWAY, ClusterError, SubmissionOutcomeUnknown, WORK_ROOT
 from .database import canonical_json
+from .live_xr_archive import AVAILABLE_STATES
 from .training_contracts import RECORDING_DATASET_FORMAT as DATASET_FORMAT
 from .remote_artifacts import RemoteArtifact
 from .recording_preflight import RecordingPreflight
@@ -37,7 +38,7 @@ class ClusterPolicyPreparation(RecordingPreflight):
                 sessions[session_id] = self.live.get(session_id)
             session = sessions[session_id]
             descriptor = session.get("archive") or {}
-            if descriptor.get("state") not in {"VERIFIED", "CLEANUP_PENDING", "READY"}:
+            if descriptor.get("state") not in AVAILABLE_STATES:
                 archive.ensure(session_id)
                 raise ArchivePending("Waiting for the collection archive to be verified on the training cluster")
             transport, _, recording = archive.resolve(session, item["path"])

@@ -126,6 +126,14 @@ class LiveSessionResources(ProfileModel):
     max_duration_minutes: int = Field(ge=1)
 
 
+class LiveCollectionRelease(ProfileModel):
+    """The DexVerse release live collection serves: its default task and hand, and its pinned source."""
+
+    task: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    robot: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    source_revision: str = Field(pattern=r"^[0-9a-f]{40}$")
+
+
 class CollectionJobPolicy(ProfileModel):
     grace_seconds: int = Field(ge=1)  # TERM warning before the allocation ends.
 
@@ -305,6 +313,7 @@ class DashboardProfile(ProfileModel):
 class ClusterDefaults(ProfileModel):
     cpus_per_gpu: int = Field(default=8, ge=1)
     background_jobs: BackgroundJobs
+    live_collection: LiveCollectionRelease
     queue_policy: str
     import_queue_policy: str  # Dataset imports: CPU-only background work.
     background_queue_policy: str  # Preflight, preparation and observation jobs.
@@ -322,6 +331,7 @@ class ClusterDefaults(ProfileModel):
     checkpoint_auto_resume: bool = True
     max_attempts: int = Field(ge=1)
     uv_version: str
+    huggingface_hub_version: str = Field(pattern=r"^[0-9][0-9A-Za-z.+!-]*$")  # The client dataset imports run with.
 
 
 class ClusterLimits(ProfileModel):
@@ -426,6 +436,16 @@ class ClusterSsh(ProfileModel):
     command: SshProfile  # One-shot commands, uploads and object transfers.
     tunnel: SshProfile  # The long-lived central database tunnel.
     operations: SshOperationTimeouts  # Whole-operation budgets and the Slurm deadlines inside them.
+    # Text that identifies a login notice the gateways print on stderr; the asterisk-framed
+    # notice around a matching line is removed from command errors.
+    login_banner_markers: list[str] = Field(default_factory=list)
+
+    @field_validator("login_banner_markers")
+    @classmethod
+    def single_line_markers(cls, value: list[str]) -> list[str]:
+        if any(not marker.strip() or "\n" in marker or "\r" in marker for marker in value):
+            raise ValueError("ssh login banner markers must be non-empty single lines")
+        return value
 
 
 class ClusterProfile(ProfileModel):

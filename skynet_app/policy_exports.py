@@ -23,18 +23,23 @@ from .database import canonical_json, utc_now
 from . import dataset_cleanup
 from .dataset_formats import catalog, resolve_adapter
 from .training_contracts import RECORDING_DATASET_FORMAT as DATASET_FORMAT
-
-# The monitor refreshes observation producers and pending preparations this often.
-DATASET_PREPARATION_POLL_SECONDS = 2.0
-from .live_xr import TERMINAL
+from .live_xr_archive import TERMINAL_STATES
 from .live_xr_review import ArrayUnpickler
 from .cluster_config import CLUSTER
-from .cluster_runtime import ClusterClient, ClusterError, WORK_ROOT
+from .cluster_runtime import DEFAULT_GATEWAY, ClusterClient, ClusterError, WORK_ROOT
 from .policy_exports_cluster import ClusterPolicyPreparation, FINISHED_STATES
 from .observation_contracts import validate_requirements
 from .observation_preparation import JobStatusLookup, ObservationPreparation
 
 log = logging.getLogger(__name__)
+
+# The monitor refreshes observation producers and pending preparations this often.
+DATASET_PREPARATION_POLL_SECONDS = 2.0
+# Train/validation split request defaults and bounds; the export API validates with the same values.
+DEFAULT_VALIDATION_PERCENT = 20
+MAX_VALIDATION_PERCENT = 50
+DEFAULT_SPLIT_SEED = 42
+SPLIT_SEED_LIMIT = 2**31  # Exclusive.
 
 
 def fingerprint(value):
@@ -214,7 +219,7 @@ class PolicyExportService(ClusterPolicyPreparation):
             raise RuntimeError("Dataset preparation monitor is still stopping")
 
     def sources(self, session, indices=None, *, require_images=True):
-        if session["state"] not in TERMINAL:
+        if session["state"] not in TERMINAL_STATES:
             raise ValueError("End the collection session before preparing its dataset")
         recordings = session.get("recordings", [])
         if not 1 <= len(recordings) <= 1000:
@@ -336,15 +341,15 @@ class PolicyExportService(ClusterPolicyPreparation):
         )
 
     @staticmethod
-    def split(sources, validation_percent=20, seed=42):
+    def split(sources, validation_percent=DEFAULT_VALIDATION_PERCENT, seed=DEFAULT_SPLIT_SEED):
         if (
             type(validation_percent) is not int
-            or not 0 <= validation_percent <= 50
+            or not 0 <= validation_percent <= MAX_VALIDATION_PERCENT
             or type(seed) is not int
-            or not 0 <= seed < 2**31
+            or not 0 <= seed < SPLIT_SEED_LIMIT
         ):
             raise ValueError(
-                "Validation must be 0–50 percent and the seed a non-negative integer"
+                f"Validation must be 0–{MAX_VALIDATION_PERCENT} percent and the seed a non-negative integer"
             )
         count = (
             min(
@@ -433,9 +438,9 @@ class PolicyExportService(ClusterPolicyPreparation):
         adapter_data_preset=None,
         selections=None,
         target="cluster",
-        validation_percent=20,
-        seed=42,
-        gateway="auto",
+        validation_percent=DEFAULT_VALIDATION_PERCENT,
+        seed=DEFAULT_SPLIT_SEED,
+        gateway=DEFAULT_GATEWAY,
         overfit_episode=None,
     ):
         selection = resolve_adapter(self.database, adapter_id, adapter_version_id, adapter_data_preset)

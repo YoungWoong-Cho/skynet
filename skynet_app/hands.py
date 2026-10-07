@@ -19,6 +19,19 @@ import uuid
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parent.parent
+# The HTTP route that serves installed hands (the prefix of hands_api's router).
+# Installed URDFs and models store URLs below it, so changing it orphans them.
+HANDS_ROUTE = "/api/hands"
+
+
+def hand_url(key, side):
+    """Where one installed hand side is served; its URDF and assets live below."""
+    return f"{HANDS_ROUTE}/{key}/{side}"
+
+
+def hand_asset_url(key, side, path=""):
+    """The served URL of one installed asset, or with no path the prefix of them all."""
+    return f"{hand_url(key, side)}/assets/{path}"
 
 
 @lru_cache(maxsize=32)
@@ -281,7 +294,7 @@ class HandLibrary:
                     ):
                         if image.text:
                             fetch(mesh_path(path, image.text.strip(), {}))
-                mesh.set("filename", f"/api/hands/{key}/{side}/assets/{path}")
+                mesh.set("filename", hand_asset_url(key, side, path))
             joints = joint_metadata(xml)
             model = {
                 "schema": "skynet.hand-model/v1",
@@ -289,8 +302,8 @@ class HandLibrary:
                 "side": side,
                 "revision": revision,
                 "source_url": f"https://github.com/{repo}/blob/{revision}/{hand['sides'][side]}",
-                "license_url": f"/api/hands/{key}/{side}/assets/{hand['license_path']}",
-                "urdf_url": f"/api/hands/{key}/{side}/urdf",
+                "license_url": hand_asset_url(key, side, hand["license_path"]),
+                "urdf_url": f"{hand_url(key, side)}/urdf",
                 "joints": joints,
                 "mesh_count": len(mesh_paths),
                 "size_bytes": total,

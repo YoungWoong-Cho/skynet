@@ -3,8 +3,11 @@
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
+from .cluster_runtime import DEFAULT_GATEWAY
 from .live_xr_api import checked, reviews
-from .policy_exports import PolicyExportService
+from .policy_exports import (
+    DEFAULT_SPLIT_SEED, DEFAULT_VALIDATION_PERCENT, MAX_VALIDATION_PERCENT, SPLIT_SEED_LIMIT, PolicyExportService,
+)
 from .workspaces import require_workspace_records
 
 router = APIRouter(
@@ -21,9 +24,9 @@ class ExportRequest(BaseModel):
     adapter_version_id: str
     adapter_data_preset: str | None = None
     name: str
-    gateway: str = "auto"
-    validation_percent: int = Field(default=20, ge=0, le=50)
-    seed: int = Field(default=42, ge=0, lt=2**31)
+    gateway: str = DEFAULT_GATEWAY
+    validation_percent: int = Field(default=DEFAULT_VALIDATION_PERCENT, ge=0, le=MAX_VALIDATION_PERCENT)
+    seed: int = Field(default=DEFAULT_SPLIT_SEED, ge=0, lt=SPLIT_SEED_LIMIT)
     overfit_episode: int | None = Field(default=None, ge=0)
 
 

@@ -9,6 +9,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from .adapters.policy_contract import contract_issues, recorded_contract
+from .cluster_config import CLUSTER
 from .evaluation_contracts import bind_suite_to_dataset
 from .evaluation_targets import validate_evaluation_target
 
@@ -183,7 +184,8 @@ def compose_evaluator(spec, manifest, suite):
                       if loader in {"hat_cartesian", "diffusion_policy_joints"} else ["evaluation.policy.native_config.dataset_path", "evaluation.policy.native_config.dataset_manifest_sha256"])
     entry = EvaluationAdapterMetadata(
         environment=suite["evaluator_adapter"], suites=[suite["name"]], maximum_parallelism=8,
-        runtime_profile_id="isaacsim-5.1.0_isaaclab-2.3.2_py311",
+        # The recorded simulator replays scenes with the same Isaac runtime that renders observations.
+        runtime_profile_id=CLUSTER.defaults.rendering_runtime_profile,
         command=CommandTemplate(
             argv=["python", "{{tokens.run_dir}}/adapter-support/evaluation_workers.py", "--context", "{{tokens.run_dir}}/adapter-support/evaluation-context.json", "--source-dir", "{{tokens.source_dir}}"],
             capsule_files=files, environment={"SKYNET_EVAL_RESUME_GRANULARITY": "episode"},

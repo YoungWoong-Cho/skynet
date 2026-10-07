@@ -51,7 +51,8 @@
       "dataset_preview_seconds": 120,
       "episode_preview_seconds": 240,
       "unreachable_gateway_seconds": 600
-    }
+    },
+    "login_banner_markers": ["Georgia Institute of Technology - Terms of Use"]
   },
   "paths": {
     "home_root": "/nethome/ycho420",
@@ -565,6 +566,11 @@
       "collection": {"grace_seconds": 60},
       "data_import": {"cpus_per_task": 8, "memory_gb": 32, "max_cpus_per_task": 64, "max_memory_gb": 512}
     },
+    "live_collection": {
+      "task": "Dexverse-PickUpStick-v0",
+      "robot": "skynet_shadow_right",
+      "source_revision": "30cc673e27684b9f10186fa6bea731aed246bc9f"
+    },
     "queue_policy": "normal",
     "import_queue_policy": "overcap",
     "background_queue_policy": "normal",
@@ -582,6 +588,7 @@
     "checkpoint_auto_resume": true,
     "max_attempts": 5,
     "uv_version": "0.8.14",
+    "huggingface_hub_version": "1.29.0",
     "cpus_per_gpu": 8
   },
   "limits": {

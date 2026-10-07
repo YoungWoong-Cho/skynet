@@ -108,7 +108,8 @@ def test_generated_import_is_pinned_and_uses_the_import_queue():
     assert f"#SBATCH --partition={queue.partition}" in job.script
     assert f"#SBATCH --account={queue.account}" in job.script
     assert f"PYTHON={CLUSTER.commands.host_python}" in job.script
-    assert "huggingface-hub==1.29.0" in job.script
+    # The Hub client pin comes from the profile, beside uv's.
+    assert f'--with "huggingface-hub=={CLUSTER.defaults.huggingface_hub_version}"' in job.script
     assert "refs/heads/main" not in job.script
     # uv comes from the shared locator: the configured pin, bootstrapped with the host interpreter.
     assert f'UV_BOOTSTRAP_ROOT="$UV_CACHE_DIR"/bootstrap-{CLUSTER.defaults.uv_version}' in job.script

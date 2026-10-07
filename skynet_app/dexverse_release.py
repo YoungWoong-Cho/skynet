@@ -1,5 +1,6 @@
 """Historical DexVerse release identities; not additional live collection choices."""
 
+from .cluster_config import CLUSTER
 from .cluster_runtime import DEFAULT_GATEWAY
 from .dexverse_versions import V1_TASKS, environment_profile
 
@@ -58,7 +59,7 @@ def release_profile(target, task, cluster_root):
     )
 
 
-# Default live collection release, independent of the retired offline launcher.
-TASK = "Dexverse-PickUpStick-v0"
-ROBOT = "skynet_shadow_right"
-REVISION = "30cc673e27684b9f10186fa6bea731aed246bc9f"
+# Default live collection release (defaults.live_collection), independent of the retired offline launcher.
+TASK = CLUSTER.defaults.live_collection.task
+ROBOT = CLUSTER.defaults.live_collection.robot
+REVISION = CLUSTER.defaults.live_collection.source_revision

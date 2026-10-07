@@ -480,3 +480,33 @@ def test_connect_validates_before_saving_or_enabling(setup):
     assert sender.call_count == 2
     slack.disconnect()
     assert not slack.settings()["configured"]
+
+
+def test_delivery_pass_claims_only_workspaces_with_a_due_message(setup):
+    import time
+    from types import SimpleNamespace
+
+    from skynet_app.workspaces import WorkspaceServices
+
+    system, _, create = setup
+    owners = {name: create(f"{name}@example.com") for name in ("due", "idle", "later", "disabled")}
+    for _, slack, _ in owners.values():
+        slack.configure(webhook_url=WEBHOOK)
+    for name in ("due", "later", "disabled"):
+        database = owners[name][0]
+        _, stage, attempt = graph(database)
+        transition(database, stage, attempt, "SUBMITTED", slurm_job_id="1")
+    later, disabled = owners["later"][0], owners["disabled"][0]
+    with later.transaction() as connection:
+        connection.execute("UPDATE notification_outbox SET due_at=? WHERE owner_id=?",
+                           (time.time() + 3600, later.workspace_id))
+    with disabled.transaction() as connection:
+        connection.execute("UPDATE slack_notifications SET enabled=0 WHERE owner_id=?", (disabled.workspace_id,))
+    assert all(queued(database)[0]["status"] == "pending" for database in (later, disabled))
+    services = WorkspaceServices(SimpleNamespace(database=system))
+    claimed = []
+    services.for_workspace = lambda owner: SimpleNamespace(
+        notifications=SimpleNamespace(deliver_one=lambda: claimed.append(owner)))
+    services._deliver_due_notifications()
+    # Idle, not-yet-due and disabled workspaces are not visited at all.
+    assert claimed == [owners["due"][0].workspace_id]

@@ -18,7 +18,9 @@ from .cluster_runtime import DEFAULT_GATEWAY, ClusterClient, ClusterError, ssh_a
 from .database import canonical_json, utc_now
 from .live_xr_archive_remote import archive_control
 
+# Archive states in which the training cluster holds a verified copy of a session's recordings.
 AVAILABLE_STATES = frozenset({"VERIFIED", "CLEANUP_PENDING", "READY"})
+# Live session states in which a session has ended; the session service and dataset preparation share them.
 TERMINAL_STATES = frozenset({"CAPTURED", "STOPPED", "TIMED_OUT", "FAILED"})
 # The monitor looks for ended workstation sessions without an archive this often.
 ARCHIVE_MONITOR_POLL_SECONDS = 10

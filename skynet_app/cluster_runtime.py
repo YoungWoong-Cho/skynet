@@ -171,28 +171,32 @@ def _sbatch_environment_options(
     return assignments + " ", base64.b64encode(payload).decode("ascii")
 
 
-def _strip_known_ssh_banner(value: str) -> str:
-    """Remove the Georgia Tech login notice without hiding command stderr."""
+# The asterisk rule that frames a login notice above and below its marker line.
+_BANNER_BORDER = re.compile(r"^\s*\*{20,}\s*$")
 
+
+def _strip_login_banner(value: str) -> str:
+    """Remove the configured gateway login notice without hiding command stderr."""
+
+    markers = CLUSTER.ssh.login_banner_markers
     lines = value.splitlines()
     while True:
         notice = next(
             (
                 index
                 for index, line in enumerate(lines)
-                if "Georgia Institute of Technology - Terms of Use" in line
+                if any(marker in line for marker in markers)
             ),
             None,
         )
         if notice is None:
             break
-        border = re.compile(r"^\s*\*{20,}\s*$")
         start = next(
-            (index for index in range(notice, -1, -1) if border.match(lines[index])),
+            (index for index in range(notice, -1, -1) if _BANNER_BORDER.match(lines[index])),
             notice,
         )
         end = next(
-            (index for index in range(notice + 1, len(lines)) if border.match(lines[index])),
+            (index for index in range(notice + 1, len(lines)) if _BANNER_BORDER.match(lines[index])),
             notice,
         )
         del lines[start : end + 1]
@@ -290,7 +294,7 @@ class ClusterClient:
         except subprocess.TimeoutExpired as error:
             raise ClusterError(f"{host}: SSH operation timed out") from error
         if process.returncode != 0:
-            stderr = _strip_known_ssh_banner(process.stderr or "")
+            stderr = _strip_login_banner(process.stderr or "")
             detail = (stderr or process.stdout or f"SSH command failed with exit code {process.returncode}").strip()
             # ssh itself exits 255 when it cannot connect or authenticate.
             failure = GatewayUnreachable if process.returncode == 255 else ClusterError

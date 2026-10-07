@@ -777,3 +777,22 @@ def test_node_inventory_is_validated_deduplicated_and_cached(monkeypatch):
     monkeypatch.setattr(client, "run_with_fallback", lambda *a, **kw: ("sky2", "bad;node"))
     with pytest.raises(ClusterError, match="invalid node inventory"):
         client.node_names("sky2")
+
+
+def test_failed_command_reports_its_error_without_the_configured_login_banner(monkeypatch):
+    rule = "*" * 40
+    marker = "Example Lab - Acceptable Use"
+    profile = cluster_runtime.CLUSTER.model_copy(update={
+        "ssh": cluster_runtime.CLUSTER.ssh.model_copy(update={"login_banner_markers": [marker]})})
+    monkeypatch.setattr(cluster_runtime, "CLUSTER", profile)
+    banner = f"{rule}\n{marker}\nAuthorized use only.\n{rule}\n"
+    monkeypatch.setattr(cluster_runtime.subprocess, "run", lambda argv, **kwargs: subprocess.CompletedProcess(
+        argv, 1, "", banner + "sbatch: error: invalid partition\n" + banner))
+    with pytest.raises(ClusterError) as caught:
+        ClusterClient(("sky9",)).ssh("sky9", "sbatch job.sbatch")
+    assert str(caught.value) == "sky9: sbatch: error: invalid partition"
+    # A notice whose marker is not configured stays: it may be the command's own output.
+    monkeypatch.setattr(cluster_runtime, "CLUSTER", cluster_runtime.CLUSTER.model_copy(update={
+        "ssh": cluster_runtime.CLUSTER.ssh.model_copy(update={"login_banner_markers": []})}))
+    with pytest.raises(ClusterError, match="Authorized use only"):
+        ClusterClient(("sky9",)).ssh("sky9", "sbatch job.sbatch")

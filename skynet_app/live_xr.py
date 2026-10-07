@@ -22,6 +22,7 @@ from .cluster_runtime import (
 from .database import canonical_json, utc_now
 from .cluster_config import CLUSTER, format_slurm_duration
 from .dexverse_release import TASK, ROBOT, REVISION
+from .live_xr_archive import TERMINAL_STATES
 from .live_xr_catalog import selection
 from .dexverse_versions import environment_profile
 from .simulation_hands import build as build_hand, upload as upload_hand
@@ -31,8 +32,7 @@ from .sbatch import SHEBANG, sbatch_header, shell_prelude
 
 ROOT = Path(__file__).resolve().parents[1]
 EULA = "https://developer.download.nvidia.com/cloudxr/EULA/NVIDIA_CloudXR_GA_License_without_Data_Collection_25Feb2025.pdf"
-TERMINAL = {"CAPTURED", "STOPPED", "TIMED_OUT", "FAILED"}
-WORKER_STATES = TERMINAL | {
+WORKER_STATES = TERMINAL_STATES | {
     "STARTING_SERVER",
     "STARTING_SIMULATION",
     "AWAITING_HEADSET",
@@ -243,7 +243,7 @@ class LiveXRService:
         # for unrelated training/archive repository transactions.
         with self.lock, self.database.connection() as c, c.raw.transaction():
             for job in self.list():
-                if job["state"] not in TERMINAL:
+                if job["state"] not in TERMINAL_STATES:
                     if (job["profile"]["task"], job["profile"]["robot"]) != (
                         profile["task"],
                         profile["robot"],
@@ -474,7 +474,7 @@ class LiveXRService:
     def status(self, identifier):
         """Return durable progress immediately; remote checks never hold a HTTP request."""
         job = self.get(identifier)
-        if job["state"] in TERMINAL and (
+        if job["state"] in TERMINAL_STATES and (
             job.get("scheduler_final") or not job.get("job_id")
         ):
             return self.public(job)
@@ -500,7 +500,7 @@ class LiveXRService:
             job = self.get(identifier)
             if (
                 (
-                    job["state"] in TERMINAL
+                    job["state"] in TERMINAL_STATES
                     and (not job.get("job_id") or job.get("scheduler_final"))
                 )
                 or identifier in self.refreshing
@@ -619,7 +619,7 @@ print(json.dumps(value))
                 changes["server_ready"] = False
                 if (
                     scheduler["State"] not in {"COMPLETED", "CANCELLED"}
-                    or changes.get("state") not in TERMINAL
+                    or changes.get("state") not in TERMINAL_STATES
                 ):
                     changes.update(
                         state="STOPPED"
@@ -630,7 +630,7 @@ print(json.dumps(value))
                         f"{GPU_MISSING_MESSAGE if gpu_missing_exit(scheduler) else scheduler.get('ExitCode') or 'see logs'}) "
                         "without a completed capture status. Inspect logs.",
                     )
-            elif changes.get("state") in TERMINAL:
+            elif changes.get("state") in TERMINAL_STATES:
                 changes.update(
                     state="STOPPING",
                     server_ready=False,
@@ -667,7 +667,7 @@ print(json.dumps(value))
     def stop(self, identifier):
         job = self.get(identifier)
         transport = self.transport(job)
-        if job["state"] in TERMINAL:
+        if job["state"] in TERMINAL_STATES:
             return self.public(job)
         if not job.get("job_id"):
             raise ValueError(

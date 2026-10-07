@@ -34,6 +34,13 @@ BACKGROUND_POLL_INTERVAL_SECONDS = 15
 NOTIFICATION_POLL_INTERVAL_SECONDS = 2
 # Seconds to wait for each worker thread on stop before reporting it still stopping.
 WORKER_STOP_TIMEOUT_SECONDS = 5
+# Workspaces with Slack delivery enabled and a queued message already due: the only
+# ones a delivery pass can act on, so idle workspaces cost no per-owner transaction.
+DUE_NOTIFICATION_OWNERS = """SELECT s.owner_id FROM slack_notifications s
+    WHERE s.enabled=1 AND EXISTS (
+        SELECT 1 FROM notification_outbox n
+        WHERE n.owner_id=s.owner_id AND n.status IN ('pending','sending') AND n.due_at<=?)
+    ORDER BY s.owner_id"""
 RECORD_PARAMETERS = {
     "project_id": "projects", "experiment_id": "experiments",
     "experiment_revision_id": "experiment_revisions", "variant_id": "variants",
@@ -139,24 +146,24 @@ class WorkspaceServices:
 
     def _notification_loop(self):
         while not self._stop.wait(NOTIFICATION_POLL_INTERVAL_SECONDS):
+            self._deliver_due_notifications()
+
+    def _deliver_due_notifications(self):
+        """One delivery pass: one claim for each workspace whose Slack queue has a message due."""
+        try:
+            with self.system.database.connection() as connection:
+                owners = [row[0] for row in connection.execute(DUE_NOTIFICATION_OWNERS, (time.time(),))]
+        except Exception as error:
+            logging.getLogger(__name__).error("Slack queue read failed (%s)", type(error).__name__)
+            return
+        for owner in owners:
+            if self._stop.is_set():
+                break
             try:
-                with self.system.database.connection() as connection:
-                    owners = [
-                        row[0] for row in connection.execute(
-                            "SELECT owner_id FROM slack_notifications WHERE enabled=1 ORDER BY owner_id"
-                        )
-                    ]
+                self.for_workspace(owner).notifications.deliver_one()
             except Exception as error:
-                logging.getLogger(__name__).error("Slack queue read failed (%s)", type(error).__name__)
-                continue
-            for owner in owners:
-                if self._stop.is_set():
-                    break
-                try:
-                    self.for_workspace(owner).notifications.deliver_one()
-                except Exception as error:
-                    # Do not log webhook URLs that may appear in transport errors.
-                    logging.getLogger(__name__).error("Slack dispatcher failed (%s)", type(error).__name__)
+                # Do not log webhook URLs that may appear in transport errors.
+                logging.getLogger(__name__).error("Slack dispatcher failed (%s)", type(error).__name__)
 
     def _loop(self):
         self._workspace_loop("reconcile")

@@ -47,6 +47,11 @@ def test_install_is_pinned_atomic_and_reused(library, monkeypatch):
         == hashlib.sha256(b"mesh").hexdigest()
     )
     assert library.asset("test", "right", "meshes/palm.stl").read_bytes() == b"mesh"
+    # Stored models and URDFs point at the route that serves them; these URLs are persisted.
+    assert model["urdf_url"] == "/api/hands/test/right/urdf"
+    assert model["license_url"] == "/api/hands/test/right/assets/LICENSE"
+    urdf = parse_urdf((library.directory(library.entry("test", "right"), "right") / "model.urdf").read_bytes())
+    assert [mesh.get("filename") for mesh in urdf.iter("mesh")] == ["/api/hands/test/right/assets/meshes/palm.stl"]
     monkeypatch.setattr(
         library,
         "_download",

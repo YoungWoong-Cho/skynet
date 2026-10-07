@@ -16,6 +16,7 @@ import uuid
 
 from .recording_guard import guarded_recording
 from .database import canonical_json, utc_now
+from .live_xr_archive import AVAILABLE_STATES
 from .live_xr_review import ArrayUnpickler
 from .live_xr_video_worker import control
 from .live_xr_video_cluster import control_cluster
@@ -342,7 +343,7 @@ class LiveVideoService:
 
     def render(self, transport, job, remote, review, episode, generation=None, key=None):
         profile = job["profile"]
-        archived = (job.get("archive") or {}).get("state") in {"VERIFIED", "CLEANUP_PENDING", "READY"}
+        archived = (job.get("archive") or {}).get("state") in AVAILABLE_STATES
         if archived:
             profile = self.cluster_profile(job)
             job = dict(job, profile=profile, gateway=DEFAULT_GATEWAY)

@@ -73,8 +73,6 @@ class HuggingFaceImportRequest(BaseModel):
         self.time_limit = format_slurm_duration(seconds)
         return self
 
-HUGGINGFACE_HUB_VERSION = "1.29.0"
-
 
 @dataclass(frozen=True)
 class DataImportJob:
@@ -393,7 +391,7 @@ def build_huggingface_import_job(
         "bundle_name": str(request["bundle_name"]),
         "bundle_version": str(request["bundle_version"]),
         "work_root": CLUSTER.paths.work_root,
-        "huggingface_hub_version": HUGGINGFACE_HUB_VERSION,
+        "huggingface_hub_version": CLUSTER.defaults.huggingface_hub_version,
         "cpus": int(request["cpus"]),
     }
     request_b64 = base64.b64encode(
@@ -426,7 +424,7 @@ def build_huggingface_import_job(
         printf %s {shlex.quote(request_b64)} | base64 --decode > "$RUN_DIR/import-request.json"
         printf %s {shlex.quote(program_b64)} | base64 --decode > "$RUN_DIR/import-huggingface.py"
         {uv_locator}
-        {UV_COMMAND} run --python "$PYTHON" --with "huggingface-hub=={HUGGINGFACE_HUB_VERSION}" \
+        {UV_COMMAND} run --python "$PYTHON" --with "huggingface-hub=={CLUSTER.defaults.huggingface_hub_version}" \
           python "$RUN_DIR/import-huggingface.py" "$RUN_DIR/import-request.json" "$RESULT_PATH"
         """
     )

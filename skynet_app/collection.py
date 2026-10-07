@@ -13,7 +13,7 @@ from .data_resource_policy import validate_resource_type
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .cluster_config import CLUSTER
-from .cluster_runtime import ClusterClient, ClusterError, HOME_ROOT, WORK_ROOT
+from .cluster_runtime import ClusterClient, ClusterError, WORK_ROOT
 from .database import Database, canonical_json, content_sha256, new_id, utc_now
 from .experiments import format_slurm_duration, parse_slurm_duration
 from .gpu_preflight import GPU_MISSING_MESSAGE, gpu_missing_exit, gpu_preflight_lines
@@ -1338,7 +1338,8 @@ def compile_collection_sbatch(session: Mapping[str, Any]) -> CompiledCollectionJ
     )]
 
     output_path = str(session["storage_snapshot"]["output_path"])
-    control_path = f"{WORK_ROOT}/jobs/runs/{session['id']}"
+    paths = CLUSTER.paths
+    control_path = f"{paths.jobs}/runs/{session['id']}"
     encoded_manifest = base64.b64encode(
         canonical_json(session["canonical_manifest"]).encode("utf-8")
     ).decode("ascii")
@@ -1347,17 +1348,18 @@ def compile_collection_sbatch(session: Mapping[str, Any]) -> CompiledCollectionJ
         "",
         *shell_prelude(umask="027"),
         *gpu_preflight_lines(resources.gpu_count),
-        f"export HOME={shlex.quote(HOME_ROOT)}",
-        f"export WORK_ROOT={shlex.quote(WORK_ROOT)}",
-        'export UV_CACHE_DIR="$WORK_ROOT/.cache/uv"',
-        'export HF_HOME="$WORK_ROOT/.cache/huggingface"',
-        'export TORCH_HOME="$WORK_ROOT/.cache/torch"',
+        *(f"export {name}={shlex.quote(path)}" for name, path in (
+            ("HOME", paths.home_root), ("WORK_ROOT", paths.work_root), ("UV_CACHE_DIR", paths.uv_cache),
+            ("HF_HOME", paths.huggingface_cache), ("TORCH_HOME", paths.torch_cache),
+        )),
         f"export SKYNET_COLLECTION_SESSION_ID={shlex.quote(session['id'])}",
         f"export SKYNET_COLLECTION_MANIFEST_SHA256={shlex.quote(session['manifest_sha256'])}",
         f"export SKYNET_COLLECTION_OUTPUT={shlex.quote(output_path)}",
         f"export SKYNET_COLLECTION_CONTROL={shlex.quote(control_path)}",
-        'mkdir -p "$WORK_ROOT"/{workspace,repos,datasets,artifacts,logs,jobs}',
-        'mkdir -p "$WORK_ROOT"/.cache/{uv,huggingface,torch}',
+        "mkdir -p " + " ".join(shlex.quote(path) for path in (
+            paths.workspace, paths.repositories, paths.datasets, paths.artifacts, paths.logs, paths.jobs,
+            paths.uv_cache, paths.huggingface_cache, paths.torch_cache,
+        )),
         'mkdir -p "$SKYNET_COLLECTION_OUTPUT" "$SKYNET_COLLECTION_CONTROL"',
         f"printf %s {shlex.quote(encoded_manifest)} | base64 --decode > "
         '"$SKYNET_COLLECTION_CONTROL/session-manifest.json"',
