@@ -1,40 +1,53 @@
 from __future__ import annotations
 
+import re
 import tempfile
 import psycopg
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import mock
 
-from skynet_app.db_backend import INTEGRITY_ERRORS
+from skynet_app.db_backend import INTEGRITY_ERRORS, PostgresConnection
 from skynet_app.database import Database
+from skynet_app.tracking import TRACKING_PROVIDERS
+
+from factories import make_run_chain
+
+MIGRATIONS = Path(__file__).parents[1] / "skynet_app/migrations/postgresql"
+
+
+def recorded_statements():
+    """Patch PostgresConnection.execute to record each statement with its parameters."""
+    statements = []
+    original = PostgresConnection.execute
+
+    def recorded(connection, statement, parameters=None):
+        statements.append((statement, parameters))
+        return original(connection, statement, parameters)
+
+    return statements, mock.patch.object(PostgresConnection, "execute", recorded)
 
 
 class DatabaseTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.database = Database(Path(self.temporary_directory.name) / "skynet.db")
-        self.project = self.database.create_project("robotics", "Robot learning")
-        self.experiment = self.database.create_experiment(
-            project_id=self.project["id"],
-            name="encoder-comparison",
+        chain = make_run_chain(
+            self.database,
+            project_name="robotics",
+            project_description="Robot learning",
+            experiment_name="encoder-comparison",
             requested_spec={"apiVersion": "skynet.rl2/v1", "train": {"learning_rate": 1e-4}},
-        )
-        self.revision = self.experiment["latest_revision"]
-        self.variant = self.database.create_variant(
-            self.revision["id"],
-            name="resnet50",
+            variant_name="resnet50",
             parameters={"model.encoder": "resnet50"},
             resolved_spec={"model": {"encoder": "resnet50"}, "seed": 42},
-        )
-        self.run = self.database.create_run(
-            self.variant["id"],
             seed=42,
             adapter_name="groot",
-            adapter_version="1",
             run_directory="/coc/flash7/ycho420/jobs/run-1",
         )
+        self.experiment, self.variant, self.run = chain.experiment, chain.variant, chain.run
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
@@ -111,13 +124,49 @@ class DatabaseTestCase(unittest.TestCase):
             details={"checkpoint_id": checkpoint["id"]},
         )
 
-        detail = self.database.get_run(self.run["id"])
+        statements, recording = recorded_statements()
+        with recording:
+            detail = self.database.get_run(self.run["id"])
 
         self.assertEqual(detail["stages"][0]["name"], "train")
         self.assertTrue(detail["stages"][0]["auto_resume"])
         self.assertEqual(detail["attempts"][0]["status"], "PREEMPTED")
         self.assertTrue(detail["checkpoints"][0]["is_resumable"])
         self.assertEqual(detail["events"][0]["details_json"]["checkpoint_id"], checkpoint["id"])
+        # The run's events are read through the (entity_type, entity_id, created_at) index.
+        events_query, parameters = next(item for item in statements if "FROM events" in item[0])
+        with self.database.read_snapshot() as connection:
+            connection.execute("SET LOCAL enable_seqscan = off")
+            plan = "\n".join(row[0] for row in connection.execute(f"EXPLAIN {events_query}", parameters).fetchall())
+        self.assertIn("idx_events_entity", plan)
+        self.assertIn("entity_type = 'run'", plan)
+
+    def test_run_experiment_ids_maps_only_visible_runs_in_one_query(self) -> None:
+        with self.database.transaction() as connection:
+            connection.execute(
+                "INSERT INTO workspaces(id,email) VALUES ('alice','alice@example.com'),('bob','bob@example.com')"
+            )
+
+        def owned_run(database):
+            chain = make_run_chain(
+                database, project_name="owned", experiment_name="owned", variant_name="owned",
+                adapter_name="groot", run_directory="/runs/owned",
+            )
+            return chain.run["id"], chain.experiment["id"]
+
+        alice = self.database.for_workspace("alice")
+        alice_run, alice_experiment = owned_run(alice)
+        bob_run, bob_experiment = owned_run(self.database.for_workspace("bob"))
+        statements, recording = recorded_statements()
+        with recording:
+            visible = alice.run_experiment_ids([alice_run, bob_run, "missing"])
+        self.assertEqual(visible, {alice_run: alice_experiment})
+        self.assertEqual(len(statements), 1)
+        self.assertEqual(
+            self.database.run_experiment_ids([self.run["id"], alice_run, bob_run]),
+            {self.run["id"]: self.experiment["id"], alice_run: alice_experiment, bob_run: bob_experiment},
+        )
+        self.assertEqual(alice.run_experiment_ids([]), {})
 
     def test_stage_submission_claim_is_atomic(self) -> None:
         stage = self.database.create_stage(
@@ -286,6 +335,32 @@ class DatabaseTestCase(unittest.TestCase):
         self.assertEqual(loaded["progress_completed"], 1)
         self.assertEqual(loaded["progress_total"], 4)
         self.assertEqual(self.database.list_evaluation_suites()[0]["config_json"]["tasks"][0], "pick_up_the_black_bowl")
+
+
+def test_hot_run_and_status_filters_are_indexed(tmp_path):
+    db = Database(tmp_path / "index.db")
+    expected = {
+        # Run list progress evidence, run detail and tracking sync read samples by run.
+        "idx_training_progress_samples_run": ("training_progress_samples", "(run_id)"),
+        # Workflow repair and the experiment dispatcher select stages by status.
+        "idx_stages_status_run": ("workflow_stages", "(status, run_id)"),
+        # The Slurm poll and submission recovery select attempts by status.
+        "idx_attempts_status_stage": ("job_attempts", "(status, stage_id)"),
+    }
+    with db.connection() as c:
+        definitions = {row[0]: (row[1], row[2]) for row in c.execute(
+            "SELECT indexname, tablename, indexdef FROM pg_indexes WHERE indexname = ANY(?)", (list(expected),)
+        ).fetchall()}
+    for name, (table, columns) in expected.items():
+        assert definitions[name][0] == table and definitions[name][1].endswith(columns), name
+
+
+def test_tracking_provider_checks_list_the_tracking_providers():
+    schema = next(MIGRATIONS.glob("001_*.sql")).read_text()
+    checks = re.findall(r"CHECK\(provider IN \(([^)]*)\)\)", schema)
+    assert len(checks) == 2, "tracking_bindings and tracking_connections"
+    for check in checks:
+        assert sorted(re.findall(r"'([^']*)'", check)) == sorted(TRACKING_PROVIDERS)
 
 
 if __name__ == "__main__":

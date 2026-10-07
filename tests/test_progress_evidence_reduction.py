@@ -1,7 +1,6 @@
 """The run list fetches only the progress samples its summary can observe."""
 from datetime import datetime, timedelta, timezone
 
-from skynet_app.database import Database
 from skynet_app.db_backend import PostgresConnection
 from skynet_app.pipeline_api import training_progress_summary
 from test_tracking_reconciliation import submitted
@@ -60,12 +59,3 @@ def test_reduced_samples_give_the_same_summary_as_the_full_evidence(tmp_path, mo
                                                    progress_samples=samples, resolved_spec=spec, now=stamp(70))
                          for samples in (full, reduced)]
             assert summaries[0] == summaries[1], (status, bool(checkpoints))
-
-
-def test_progress_samples_are_indexed_by_run(tmp_path):
-    db = Database(tmp_path / 'index.db')
-    with db.connection() as c:
-        definitions = {row[0]: row[1] for row in c.execute(
-            "SELECT indexname, indexdef FROM pg_indexes WHERE tablename='training_progress_samples'").fetchall()}
-    assert 'idx_training_progress_samples_run' in definitions
-    assert definitions['idx_training_progress_samples_run'].endswith('(run_id)')

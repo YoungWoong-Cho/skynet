@@ -27,9 +27,49 @@ PROJECTED_PATHS = {
     "adapters": (),
 }
 MARKER = "$skynet_object_v1"
-_CACHE = OrderedDict()
-_CACHE_LOCK = RLock()
 _CACHE_BYTES = 128 * 1024 * 1024
+
+
+class BodyCache:
+    """Byte-bounded stored bodies, evicting the least recently inserted first.
+
+    The running size changes on insert and eviction, so an insert never re-sums
+    every cached body.
+    """
+
+    def __init__(self, max_bytes):
+        self.max_bytes = max_bytes
+        self.entries = OrderedDict()
+        self.size_bytes = 0
+        self.lock = RLock()
+
+    def __contains__(self, key):
+        with self.lock:
+            return key in self.entries
+
+    def get(self, key):
+        with self.lock:
+            return self.entries.get(key)
+
+    def put(self, key, content):
+        with self.lock:
+            previous = self.entries.pop(key, None)
+            if previous is not None:
+                self.size_bytes -= len(previous)
+            self.entries[key] = content
+            self.size_bytes += len(content)
+            while self.size_bytes > self.max_bytes:
+                _, removed = self.entries.popitem(last=False)
+                self.size_bytes -= len(removed)
+
+    def clear(self):
+        with self.lock:
+            self.entries.clear()
+            self.size_bytes = 0
+
+
+_CACHE = BodyCache(_CACHE_BYTES)
+
 
 class ImmutableProjectionCache:
     """Byte-bounded LRU with shared in-flight reads of immutable content.
@@ -118,11 +158,7 @@ class PayloadStore:
         return self.objects.host, str(self.objects.root), digest
 
     def _cache(self, digest, content):
-        with _CACHE_LOCK:
-            _CACHE[self._key(digest)] = content
-            _CACHE.move_to_end(self._key(digest))
-            while sum(len(v) for v in _CACHE.values()) > _CACHE_BYTES:
-                _CACHE.popitem(last=False)
+        _CACHE.put(self._key(digest), content)
 
     def read(self, value):
         ref = reference(value)
@@ -130,8 +166,7 @@ class PayloadStore:
 
     def read_bytes(self, ref):
         digest = ref["sha256"]
-        with _CACHE_LOCK:
-            content = _CACHE.get(self._key(digest))
+        content = _CACHE.get(self._key(digest))
         if content is None:
             content = self.objects.read(ref["path"], digest)
             self._cache(digest, content)
@@ -143,7 +178,7 @@ class PayloadStore:
 
     def prefetch(self, values):
         refs = {}
-        with _CACHE_LOCK:
+        with _CACHE.lock:
             for value in values:
                 ref = reference(value)
                 if ref and self._key(ref["sha256"]) not in _CACHE:

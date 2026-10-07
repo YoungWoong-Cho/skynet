@@ -23,6 +23,7 @@ from .data_import_states import (
 from .data_paths import validate_mount_path
 from .data_resource_policy import validate_resource_metadata, validate_resource_type, resource_recording_ids
 from .experiments import SPEC_API_VERSION
+from .tracking import TRACKING_PROVIDERS
 from .workspace_schema import PRIVATE_TABLES, LEGACY_WORKSPACE, visible_sql
 from .preparation_states import ATTEMPT_TERMINAL_STATES, TRANSIENT_STATES
 from .workflow_states import ACTIVE_STAGE_STATES, CANCELLABLE_STAGE_STATES, SLURM_BOUND_ATTEMPT_STATES, sql_list
@@ -224,9 +225,8 @@ class Database:
         guard_write(connection, table, values)
         if getattr(connection, "payload_store", None):
             values = connection.payload_store.encode_fields(connection, table, values.get("id"), values)
-        if table in PRIVATE_TABLES:
-            values = dict(values)
-            values["owner_id"] = connection.execute("SELECT current_workspace_id()").fetchone()[0] or LEGACY_WORKSPACE
+        # A workspace-owned row's owner_id comes from its column default,
+        # coalesce(current_workspace_id(), 'legacy'), and its workspace guard trigger.
         columns = ", ".join(values)
         placeholders = ", ".join("?" for _ in values)
         connection.execute(
@@ -334,7 +334,6 @@ class Database:
             """,
             (scope_type, *by_id),
         ).fetchall()
-        labels = {"mlflow": "MLflow", "wandb": "Weights & Biases"}
         for row in rows:
             item = dict(row)
             record = by_id.get(str(item["scope_id"]))
@@ -342,7 +341,7 @@ class Database:
                 continue
             record["tracking_links"].append({
                 "provider": item["provider"],
-                "label": labels.get(str(item["provider"]), str(item["provider"])),
+                "label": TRACKING_PROVIDERS.get(str(item["provider"]), str(item["provider"])),
                 "url": item["remote_url"],
                 "remote_id": item["remote_id"],
                 "status": item["status"],
@@ -357,7 +356,7 @@ class Database:
         workspace: str | None = None,
         config: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if provider not in {"mlflow", "wandb"}:
+        if provider not in TRACKING_PROVIDERS:
             raise ValueError(f"unsupported tracking provider: {provider}")
         now = utc_now()
         with self.transaction() as connection:
@@ -409,7 +408,7 @@ class Database:
         metadata: Mapping[str, Any] | None = None,
         last_error: str | None = None,
     ) -> dict[str, Any]:
-        if provider not in {"mlflow", "wandb"}:
+        if provider not in TRACKING_PROVIDERS:
             raise ValueError(f"unsupported tracking provider: {provider}")
         if scope_type not in {"experiment", "run"}:
             raise ValueError(f"unsupported tracking scope: {scope_type}")
@@ -1055,23 +1054,9 @@ class Database:
                     if include_attempt and self.payload_store:
                         document['execution_snapshot_json'] = self.payload_store.read(document['execution_snapshot_json'])
                     run['attempts'].append(self._decode(document, include_payloads=include_attempt))
-            elif include_payloads:
-                run["stages"] = self._decode_many(connection.execute(
-                    "SELECT * FROM workflow_stages WHERE run_id = ? ORDER BY created_at", (run_id,)
-                ).fetchall())
-                run["attempts"] = self._decode_many(connection.execute("""
-                    SELECT a.* FROM job_attempts a JOIN workflow_stages s ON s.id = a.stage_id
-                    WHERE s.run_id = ? ORDER BY a.created_at
-                """, (run_id,)).fetchall())
             else:
-                run["stages"] = [self._decode(row['summary']) for row in connection.execute(
-                    "SELECT to_jsonb(s) - 'resolved_config_json' AS summary FROM workflow_stages s "
-                    "WHERE run_id=? ORDER BY created_at", (run_id,)
-                ).fetchall()]
-                run["attempts"] = [self._decode(row['summary']) for row in connection.execute(
-                    "SELECT to_jsonb(a) - 'execution_snapshot_json' AS summary FROM job_attempts a "
-                    "JOIN workflow_stages s ON s.id=a.stage_id WHERE s.run_id=? ORDER BY a.created_at", (run_id,)
-                ).fetchall()]
+                run["stages"] = self._run_stages(connection, run_id, include_payloads=include_payloads)
+                run["attempts"] = self._run_attempts(connection, run_id, include_payloads=include_payloads)
             run["checkpoints"] = self._decode_many(connection.execute(
                 "SELECT * FROM checkpoints WHERE run_id = ? ORDER BY training_step, created_at", (run_id,)
             ).fetchall())
@@ -1085,10 +1070,53 @@ class Database:
                 "SELECT * FROM manifests WHERE run_id = ? ORDER BY created_at", (run_id,)
             ).fetchall())
             run["events"] = self._decode_many(connection.execute(
-                "SELECT * FROM events WHERE entity_id = ? ORDER BY created_at DESC LIMIT 100", (run_id,)
+                "SELECT * FROM events WHERE entity_type = 'run' AND entity_id = ? "
+                "ORDER BY created_at DESC LIMIT 100", (run_id,)
             ).fetchall())
             self._attach_tracking_links(connection, [run], "run")
             return run
+
+    @classmethod
+    def _run_stages(
+        cls, connection: PostgresConnection, run_id: str, *, include_payloads: bool = True
+    ) -> list[dict[str, Any]]:
+        """A run's stages by creation; without payloads no stage document is read."""
+        if include_payloads:
+            return cls._decode_many(connection.execute(
+                "SELECT * FROM workflow_stages WHERE run_id = ? ORDER BY created_at", (run_id,)
+            ).fetchall())
+        return [cls._decode(row["summary"]) for row in connection.execute(
+            "SELECT to_jsonb(s) - 'resolved_config_json' AS summary FROM workflow_stages s "
+            "WHERE run_id = ? ORDER BY created_at", (run_id,)
+        ).fetchall()]
+
+    @classmethod
+    def _run_attempts(
+        cls, connection: PostgresConnection, run_id: str, *, include_payloads: bool = True
+    ) -> list[dict[str, Any]]:
+        """A run's job attempts by creation; without payloads no execution snapshot is read."""
+        if include_payloads:
+            return cls._decode_many(connection.execute(
+                "SELECT a.* FROM job_attempts a JOIN workflow_stages s ON s.id = a.stage_id "
+                "WHERE s.run_id = ? ORDER BY a.created_at", (run_id,)
+            ).fetchall())
+        return [cls._decode(row["summary"]) for row in connection.execute(
+            "SELECT to_jsonb(a) - 'execution_snapshot_json' AS summary FROM job_attempts a "
+            "JOIN workflow_stages s ON s.id = a.stage_id WHERE s.run_id = ? ORDER BY a.created_at", (run_id,)
+        ).fetchall()]
+
+    def run_experiment_ids(self, run_ids: Sequence[str]) -> dict[str, str]:
+        """Each visible run's experiment id, keyed by run id, in one query."""
+        if not run_ids:
+            return {}
+        with self.connection() as connection:
+            return {row["id"]: row["experiment_id"] for row in connection.execute(f"""
+                SELECT r.id, er.experiment_id
+                FROM runs r
+                JOIN variants v ON v.id = r.variant_id
+                JOIN experiment_revisions er ON er.id = v.experiment_revision_id
+                WHERE r.id = ANY(?) AND {visible_sql('runs', 'r')}
+            """, (list(run_ids),)).fetchall()}
 
     def run_progress_evidence(
         self, run_ids: Sequence[str]
@@ -1258,13 +1286,12 @@ class Database:
 
     create_workflow_stage = create_stage
 
-    def list_stages(self, run_id: str) -> list[dict[str, Any]]:
+    def list_stages(self, run_id: str, *, include_payloads: bool = True) -> list[dict[str, Any]]:
+        """A run's stages; include_payloads=False returns lifecycle columns without resolved configs."""
         if self.workspace_id is not None and run_id is not None and not self.owns("runs", run_id):
             return []
         with self.connection() as connection:
-            return self._decode_many(connection.execute(
-                "SELECT * FROM workflow_stages WHERE run_id = ? ORDER BY created_at", (run_id,)
-            ).fetchall())
+            return self._run_stages(connection, run_id, include_payloads=include_payloads)
 
     def update_stage(self, stage_id: str, **fields: Any) -> dict[str, Any]:
         if self.workspace_id is not None and stage_id is not None and not self.owns("workflow_stages", stage_id):
@@ -1362,17 +1389,12 @@ class Database:
             return []
         if stage_id is None and run_id is None:
             raise ValueError("stage_id or run_id is required")
-        if stage_id is not None:
-            query = "SELECT * FROM job_attempts WHERE stage_id = ? ORDER BY attempt_number"
-            parameters = (stage_id,)
-        else:
-            query = """
-                SELECT a.* FROM job_attempts a JOIN workflow_stages s ON s.id = a.stage_id
-                WHERE s.run_id = ? ORDER BY a.created_at
-            """
-            parameters = (run_id,)
         with self.connection() as connection:
-            return self._decode_many(connection.execute(query, parameters).fetchall())
+            if stage_id is None:
+                return self._run_attempts(connection, run_id)
+            return self._decode_many(connection.execute(
+                "SELECT * FROM job_attempts WHERE stage_id = ? ORDER BY attempt_number", (stage_id,)
+            ).fetchall())
 
     def update_job_attempt(self, attempt_id: str, **fields: Any) -> dict[str, Any]:
         if self.workspace_id is not None and attempt_id is not None and not self.owns("job_attempts", attempt_id):

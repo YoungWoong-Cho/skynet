@@ -13,6 +13,7 @@ from psycopg.conninfo import make_conninfo
 from skynet_app.background_owner import BackgroundOwner
 from skynet_app.database import Database
 from skynet_app.db_backend import close_pools, INTEGRITY_ERRORS, lock_key
+from skynet_app.workspace_schema import PRIVATE_TABLES
 from tests.postgres_backend_plugin import clone_database, drop_databases
 
 
@@ -41,6 +42,25 @@ def test_postgres_workspace_visibility_and_write_guards(pg):
     bob.create_project("Shared name")
     assert [p["id"] for p in alice.list_projects()] == [project["id"]]
     assert project["id"] not in {p["id"] for p in bob.list_projects()}
+    # Inserts leave owner_id to the column default: the session's workspace, else legacy.
+    with db.connection() as c:
+        defaults = dict(c.execute(
+            "SELECT table_name, column_default FROM information_schema.columns "
+            "WHERE column_name='owner_id' AND table_name = ANY(?)", (sorted(PRIVATE_TABLES),)
+        ).fetchall())
+    assert defaults == dict.fromkeys(PRIVATE_TABLES, "COALESCE(current_workspace_id(), 'legacy'::text)")
+    db.create_project("Administrator project")
+    db.record_event(entity_type="run", entity_id="detached", event_type="NOTE")
+    alice.record_event(entity_type="run", entity_id="detached", event_type="NOTE")
+    with db.connection() as c:
+        owners = c.execute(
+            "SELECT name, owner_id FROM projects UNION ALL "
+            "SELECT 'event', owner_id FROM events WHERE entity_id='detached'"
+        ).fetchall()
+    assert sorted(tuple(row) for row in owners) == sorted([
+        ("Administrator project", "legacy"), ("Shared name", "alice"), ("Shared name", "bob"),
+        ("event", "alice"), ("event", "legacy"),
+    ])
     with pytest.raises(INTEGRITY_ERRORS):
         with bob.transaction() as c:
             c.execute(
