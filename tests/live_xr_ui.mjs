@@ -72,6 +72,10 @@ const job = {
   profile: { robot: "skynet_shadow_left", task: "Dexverse-PickCube-v0" },
 };
 try {
+  // Until the catalog arrives the page offers only the server's default solver.
+  const serverDefault = get("live-xr-retargeter").dataset.defaultRetargeter;
+  assert.equal(serverDefault, catalog.default_retargeter);
+  assert.deepEqual([...get("live-xr-retargeter").options].map((option) => option.value), [serverDefault]);
   window.eval(
     await readStatic('live-xr.js'),
   );
@@ -156,8 +160,8 @@ try {
   assert.equal(get("live-xr-retargeter").disabled, true);
   assert.equal(
     get("live-xr-retargeter").value,
-    "dexpilot",
-    "Existing sessions pin their solver",
+    serverDefault,
+    "Existing sessions pin their solver; one saved without a solver used the server's default",
   );
   assert.equal(get("live-xr-start").textContent, "Waiting for GPU…");
   assert.equal(get("live-xr-progress").hidden, false);

@@ -24,6 +24,14 @@ try {
   assert.equal(el('evaluation-suite').value,'same-episode','Single episode defaults to its saved initial scene');
   assert.equal(w.preferredEvaluationSuite({}).id,'same-episode');
   assert.equal(el('evaluation-episodes').max,'1');
+  // A suite without its own cap takes the server's per-task limit, which the page carries.
+  w.api=async()=>({suites:[other,{...simulation,config_json:{...simulation.config_json,maximum_episodes_per_task:undefined}}]});
+  await w.loadEvaluationSuites(true);
+  assert.ok(Number(el('evaluation-episodes').max) > 1);
+  assert.equal(el('evaluation-episodes').max,el('evaluation-episodes').dataset.maxEpisodes);
+  w.api=async()=>({suites:[other,simulation]});
+  await w.loadEvaluationSuites(true);
+  assert.equal(el('evaluation-episodes').max,'1');
   const gpu = el('evaluation-resource-gpu');
   const gpuValues = () => Array.from(gpu.options, option => option.value);
   assert.deepEqual(gpuValues(), ['a40','l40s'], 'Isaac evaluations only show configured compatible GPUs');

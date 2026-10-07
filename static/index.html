@@ -97,7 +97,7 @@
               autocomplete="email"
               autocapitalize="none"
               spellcheck="false"
-              maxlength="254"
+              maxlength="<!-- email-max-length -->"
               required=""
               placeholder="you@example.com"
             />
@@ -545,7 +545,7 @@
                         <label for="hand-pose-name">Pose name</label
                         ><input
                           id="hand-pose-name"
-                          maxlength="80"
+                          maxlength="<!-- pose-name-max-length -->"
                           aria-describedby="hand-pose-error"
                           required=""
                           placeholder="e.g. Relaxed grip"
@@ -1379,7 +1379,7 @@ trainer.deterministic=true"
                           type="number"
                           value="<!-- default-max-attempts -->"
                           min="1"
-                          max="100"
+                          max="<!-- checkpoint-max-attempts-limit -->"
                           required=""
                         />
                       </div>
@@ -2135,8 +2135,9 @@ trainer.deterministic=true"
                       <input
                         id="evaluation-episodes"
                         type="number"
-                        value="20"
+                        value="<!-- evaluation-episodes -->"
                         min="1"
+                        data-max-episodes="<!-- max-evaluation-episodes -->"
                       />
                     </div>
                     <div class="field span-2">
@@ -3691,8 +3692,8 @@ Select a session.</pre
                         </div>
                         <div class="field">
                           <label for="live-xr-retargeter">Retargeting</label>
-                          <select id="live-xr-retargeter" required disabled>
-                            <option value="dexpilot">DexPilot</option>
+                          <select id="live-xr-retargeter" required disabled data-default-retargeter="<!-- default-retargeter -->">
+                            <!-- default-retargeter-option -->
                           </select>
                           <span id="live-xr-retargeter-description" class="secondary"></span>
                         </div>
@@ -4414,6 +4415,7 @@ Select a session.</pre
             <section
               id="settings-view-connections"
               data-settings-view="connections"
+              data-tracking-providers="<!-- tracking-providers -->"
               role="tabpanel"
               aria-labelledby="settings-tab-connections"
               class="tracking-settings-grid"

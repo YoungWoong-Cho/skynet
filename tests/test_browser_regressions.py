@@ -153,6 +153,34 @@ def test_homepage_offers_the_configured_gateways_queues_gpus_and_defaults(monkey
     assert headers == list(CLUSTER.dashboard.gpu_usage_columns)
     # Placeholder rows span the header app.js reads; the page states no column counts.
     assert 'colspan' not in page
+    # Request-model bounds and server registries reach the page instead of retyped copies.
+    import html
+    import json
+    import pytest
+    from pydantic import ValidationError
+    from skynet_app import retargeting
+    from skynet_app.experiments import DEFAULT_EVALUATION_EPISODES, MAX_EVALUATION_EPISODES, CheckpointPolicy
+    from skynet_app.hands_api import Pose
+    from skynet_app.tracking import TRACKING_PROVIDERS
+    from skynet_app.workspaces import EmailRequest
+    def attributes(element_id):
+        tag = re.search(rf'<\w+\b[^>]*\bid="{element_id}"[^>]*>', page).group(0)
+        return {name: html.unescape(value) for name, value in re.findall(r'([\w-]+)="([^"]*)"', tag)}
+    for element_id, attribute, accepts in (
+        ('checkpoint-max-attempts', 'max', lambda n: CheckpointPolicy(max_attempts=n)),
+        ('hand-pose-name', 'maxlength', lambda n: Pose(name='p' * n, revision='r', joints={})),
+        ('workspace-email', 'maxlength', lambda n: EmailRequest(email='e' * n)),
+    ):
+        limit = int(attributes(element_id)[attribute])
+        accepts(limit)
+        with pytest.raises(ValidationError):
+            accepts(limit + 1)
+    episodes = attributes('evaluation-episodes')
+    assert (episodes['value'], episodes['data-max-episodes']) == (str(DEFAULT_EVALUATION_EPISODES), str(MAX_EVALUATION_EPISODES))
+    assert attributes('live-xr-retargeter')['data-default-retargeter'] == retargeting.DEFAULT
+    assert options(page, 'live-xr-retargeter') == [
+        (retargeting.DEFAULT, next(method['name'] for method in retargeting.METHODS if method['key'] == retargeting.DEFAULT))]
+    assert json.loads(attributes('settings-view-connections')['data-tracking-providers']) == TRACKING_PROVIDERS
     # The list follows the configuration, and configured names are escaped.
     def configured(**changes):
         monkeypatch.setattr(page_markup, 'CLUSTER', CLUSTER.model_copy(update=changes))

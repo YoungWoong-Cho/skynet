@@ -7,7 +7,8 @@ const observers = spyMutationObservers(w);
 stubBrowserApis(w);
 polyfillDialogs(w, {guarded:false, returnValue:false});
 try {
-  await loadScripts(w, ['dialogs.js', 'workspace-navigation.js', 'connection-settings.js', 'app.js', 'maintenance.js']);
+  await loadScripts(w, ['dialogs.js', 'workspace-navigation.js', 'connection-settings.js', 'app.js', 'maintenance.js'],
+    {'app.js': 'window.showCollectionAdapters=rows=>{collectionAdapterRows=rows;renderCollectionAdapters();};'});
   el('email-workspace-content').hidden=false;
   w.scheduleEvaluationTargetValidation=()=>{};
   let suites=[{id:'suite',name:'cube',label:'Cube simulation',evaluator_adapter:'isaac_lab',suite_version:'2',tasks:['cube'],can_delete:true,updated_at:'2026-09-11T12:00:00Z',config_json:{tasks:['cube'],task_options:[{id:'cube',label:'Pick <cube>'}],task_selection_reason:'Exactly one case per checkpoint.'}}];
@@ -57,6 +58,55 @@ try {
   assert.equal(el('maintenance-content').querySelector('[data-delete-kind]').dataset.deleteKind,'experiment');
   el('maintenance-dialog').querySelector('[data-dialog-close]').click();
 
+  // Both adapter registries archive and restore through one flow, each with its own wording.
+  const lastToast=()=>[...el('toast').querySelectorAll('.notification-message')].at(-1)?.textContent;
+  const confirmArchive=async message=>{
+    await settle();
+    const dialog=w.document.querySelector('dialog[data-app-confirmation][open]');
+    assert.equal(dialog?.querySelector('.dialog-message').textContent,message);
+    dialog.returnValue='confirm'; // this page's dialog polyfill records no close value
+    dialog.querySelector('form').dispatchEvent(new w.Event('submit',{cancelable:true}));
+    await settle();
+  };
+  const writes=()=>calls.filter(c=>c.method&&/^\/api\/(collection\/)?adapters\//.test(c.path)).map(c=>[c.method,c.path]);
+  calls.length=0;
+  el('adapters-body').querySelector('[data-adapter-action="archive"]').click();
+  await confirmArchive('Archive adapter adapter? Existing experiment snapshots will not change.');
+  assert.deepEqual(writes(),[['DELETE','/api/adapters/adapter']]);
+  assert.equal(lastToast(),'Adapter archived.');
+  const activeAdapters=adapters;
+  adapters=[{...activeAdapters[0],archived_at:'2026-09-11T12:00:00Z'}];
+  el('adapter-show-archived').checked=true;
+  await w.loadAdapters(true);
+  calls.length=0;
+  el('adapters-body').querySelector('[data-adapter-action="restore"]').click();
+  await confirmArchive('Restore adapter adapter? Existing experiment snapshots will not change.');
+  assert.deepEqual(writes(),[['POST','/api/adapters/adapter/restore']]);
+  assert.equal(lastToast(),'Adapter restored.');
+  adapters=activeAdapters;
+  el('adapter-show-archived').checked=false;
+  await w.loadAdapters(true);
+  let collectionReloads=0;
+  w.loadCollection=async()=>{collectionReloads++;};
+  const showCollectionAdapter=archived_at=>w.showCollectionAdapters([{id:'recorder',archived_at,manifest:{key:'recorder',version:'1',runnable:true,streams:[]}}]);
+  showCollectionAdapter(null);
+  calls.length=0;
+  el('collection-adapters-body').querySelector('[data-collection-adapter-action="archive"]').click();
+  await confirmArchive('Archive this collection adapter? Existing sessions will remain readable.');
+  assert.deepEqual(writes(),[['DELETE','/api/collection/adapters/recorder']]);
+  assert.equal(lastToast(),'Collection adapter archived.');
+  assert.equal(collectionReloads,1);
+  showCollectionAdapter('2026-09-11T12:00:00Z');
+  calls.length=0;
+  const collectionApi=w.api;
+  w.api=async(path,options={})=>{calls.push({path,...options});throw new Error('Gone');};
+  el('collection-adapters-body').querySelector('[data-collection-adapter-action="restore"]').click();
+  await settle();
+  assert.equal(w.document.querySelector('dialog[data-app-confirmation][open]'),null,'restoring a collection adapter asks nothing');
+  assert.deepEqual(writes(),[['POST','/api/collection/adapters/recorder/restore']]);
+  assert.equal(lastToast(),'Adapter restore failed: Gone');
+  w.api=collectionApi;
+
   await w.loadEvaluationSuites(true,'');
   await w.loadEvaluationCatalog(true);
   await w.activateTab('evaluations',true,'suites');
@@ -89,5 +139,5 @@ try {
   assert.doesNotMatch(el('evaluation-suite').innerHTML,/value="suite"/,'submit options cannot retain a deleted suite');
   assert.doesNotMatch(el('experiment-evaluation-suites').innerHTML,/value="suite"/,'experiment defaults cannot retain a deleted suite');
   assert.match(el('evaluation-suites-body').textContent,/No evaluation suites/);
-  console.log('Registry deletion UI: shared modal, dependency guidance, direct editing, single submission and refreshed selectors passed.');
+  console.log('Registry deletion UI: shared modal, dependency guidance, direct editing, archive and restore, single submission and refreshed selectors passed.');
 } finally {observers.forEach(o=>o.disconnect());await settle();w.close();}

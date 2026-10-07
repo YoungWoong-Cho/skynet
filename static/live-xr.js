@@ -36,6 +36,10 @@
     target = null;
   let catalog = null,
     selectionWarning = null;
+  // The server's default retargeting method; sessions saved without one used it.
+  const DEFAULT_RETARGETER = el("live-xr-retargeter").dataset.defaultRetargeter;
+  const sessionRetargeter = (session) =>
+    session.profile?.retargeting?.key || DEFAULT_RETARGETER;
   let sessions = [],
     loading = false,
     submitting = false,
@@ -221,7 +225,7 @@
       !pending.existingIds.has(s.id) &&
       s.profile?.robot === pending.robot &&
       s.profile?.task === pending.task &&
-      (s.profile?.retargeting?.key || "dexpilot") === pending.retargeter,
+      sessionRetargeter(s) === pending.retargeter,
     );
     if (!session) return;
     pending.observedId = session.id;
@@ -402,8 +406,7 @@
     if (catalog && running?.profile) {
       el("live-xr-hand").value = running.profile.robot;
       el("live-xr-task").value = running.profile.task;
-      el("live-xr-retargeter").value =
-        running.profile.retargeting?.key || "dexpilot";
+      el("live-xr-retargeter").value = sessionRetargeter(running);
       renderRetargeter();
       el("live-xr-task-instructions").textContent =
         running.profile.instructions ||
@@ -482,15 +485,13 @@
     for (const item of catalog.tasks) task.add(new Option(item.name, item.key));
     const selector = el("live-xr-retargeter");
     selector.replaceChildren();
-    const methods = catalog.retargeters || [
-      { key: "dexpilot", name: "DexPilot" },
-    ];
+    const methods = catalog.retargeters;
     for (const item of methods) selector.add(new Option(item.name, item.key));
     const params = new URL(location.href).searchParams;
     const chosenRetargeter = params.get("live_retargeter");
     selector.value = methods.some((m) => m.key === chosenRetargeter)
       ? chosenRetargeter
-      : catalog.default_retargeter || "dexpilot";
+      : catalog.default_retargeter;
     const chosenHand = params.get("live_hand"),
       chosenTask = params.get("live_task");
     hand.value = catalog.hands.some((h) => h.key === chosenHand && h.available)
@@ -538,10 +539,10 @@
         (s) =>
           s.profile?.robot === robot &&
           s.profile?.task === task &&
-          (s.profile?.retargeting?.key || "dexpilot") === method &&
+          sessionRetargeter(s) === method &&
           s.recordings?.length,
       ) ||
-      (method === "dexpilot" &&
+      (method === DEFAULT_RETARGETER &&
         catalog.verified_pairs.some(
           (pair) => pair.robot === robot && pair.task === task,
         ));

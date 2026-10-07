@@ -120,6 +120,10 @@ try {
     assert.ok(!markup.includes('<a '));
   }
   assert.match(w.trackingLinksHtml({tracking_links:[{provider:'wandb',status:'CONNECTED',url:'https://wandb.ai/team/project/runs/one'}]}), /href="https:\/\/wandb.ai\/team\/project\/runs\/one"/);
+  // Provider names come from the server's tracking registry, rendered into the page.
+  assert.match(w.trackingLinksHtml({tracking_links:[{provider:'wandb',status:'CONNECTED',url:'https://wandb.ai/team/project/runs/one'}]}), /title="Open Weights &amp; Biases"/);
+  assert.equal(w.trackingProviderLabel('mlflow'), 'MLflow');
+  assert.equal(w.trackingProviderLabel('constructor'), 'constructor', 'an unregistered provider keeps its own name');
 
   // Loading another run removes the previous external tracking destination immediately.
   w.audit.setRuns([{id: 'new-run', status: 'PENDING'}]);

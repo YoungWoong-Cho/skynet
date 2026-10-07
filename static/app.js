@@ -2579,6 +2579,10 @@ function resolvedExperimentGpuCount() {
 const CPUS_PER_GPU = Number(elements.resourceCpus.dataset.cpusPerGpu);
 if (!Number.isInteger(CPUS_PER_GPU) || CPUS_PER_GPU < 1)
   throw new Error("The page carries no CPUs-per-GPU policy");
+// Tracking provider names, rendered by the server from its tracking provider registry.
+const TRACKING_PROVIDER_LABELS = JSON.parse(
+  document.querySelector("#settings-view-connections").dataset.trackingProviders,
+);
 
 function updateCpuResources() {
   for (const [control, count] of [
@@ -4640,7 +4644,7 @@ function renderAdapters() {
           ${
             adapter.editable === false
               ? ""
-              : `<button type="button" data-adapter-action="${archived ? "restore" : "archive"}" data-id="${escapeHtml(id)}">${archived ? "Restore" : "Archive"}</button>
+              : `${archiveToggleButton("adapter", id, archived)}
           <button type="button" data-delete-kind="adapter" data-delete-id="${escapeHtml(id)}">Delete</button>`
           }
         </td>
@@ -5762,28 +5766,53 @@ async function cloneAdapter(id) {
   }
 }
 
-async function setAdapterArchived(id, archived) {
-  const verb = archived ? "Archive" : "Restore";
-  if (
-    !(await askUserDialog(
-      `${verb} adapter ${id}? Existing experiment snapshots will not change.`,
-    ))
-  )
-    return;
-  try {
-    await api(
+// Both adapter registries archive with DELETE and restore with POST .../restore; each
+// kind keeps its own confirmation, notices and refresh.
+const ARCHIVABLE_ADAPTERS = {
+  adapter: {
+    endpoint: "/api/adapters",
+    confirmation: (archived, id) =>
+      `${archived ? "Archive" : "Restore"} adapter ${id}? Existing experiment snapshots will not change.`,
+    notice: "Adapter",
+    failure: (archived) => (archived ? "Archive failed" : "Restore failed"),
+    async refresh() {
+      closeDisclosurePanel(elements.adapterEditor, elements.addAdapter);
+      await loadAdapters(true);
+    },
+  },
+  "collection-adapter": {
+    endpoint: "/api/collection/adapters",
+    confirmation: (archived) =>
       archived
-        ? `/api/adapters/${encodeURIComponent(id)}`
-        : `/api/adapters/${encodeURIComponent(id)}/restore`,
-      {
-        method: archived ? "DELETE" : "POST",
-      },
-    );
-    showToast(`Adapter ${archived ? "archived" : "restored"}.`);
-    closeDisclosurePanel(elements.adapterEditor, elements.addAdapter);
-    await loadAdapters(true);
+        ? "Archive this collection adapter? Existing sessions will remain readable."
+        : null,
+    notice: "Collection adapter",
+    failure: (archived) => `Adapter ${archived ? "archive" : "restore"} failed`,
+    async refresh() {
+      loadedTabs.delete("collection");
+      await loadCollection(true);
+    },
+  },
+};
+
+// A registry row's Archive or Restore action; `kind` names its data-<kind>-action attribute.
+function archiveToggleButton(kind, id, archived) {
+  return `<button type="button" data-${kind}-action="${archived ? "restore" : "archive"}" data-id="${escapeHtml(id)}">${archived ? "Restore" : "Archive"}</button>`;
+}
+
+async function setAdapterArchived(kind, id, archived) {
+  const registry = ARCHIVABLE_ADAPTERS[kind];
+  const confirmation = registry.confirmation(archived, id);
+  if (confirmation && !(await askUserDialog(confirmation))) return;
+  const path = `${registry.endpoint}/${encodeURIComponent(id)}`;
+  try {
+    await api(archived ? path : `${path}/restore`, {
+      method: archived ? "DELETE" : "POST",
+    });
+    showToast(`${registry.notice} ${archived ? "archived" : "restored"}.`);
+    await registry.refresh();
   } catch (error) {
-    showToast(`${verb} failed: ${error.message}`, true);
+    showToast(`${registry.failure(archived)}: ${error.message}`, true);
   }
 }
 
@@ -12138,7 +12167,10 @@ function updateEvaluationEnvironmentFromSuite({ preserveTasks = false } = {}) {
   );
   elements.evaluationEnvironment.value = suite ? String(environment || "") : "";
   updateEvaluationGpuOptions(suite);
-  const episodeLimit = Number(config.maximum_episodes_per_task || 10000);
+  const episodeLimit = Number(
+    config.maximum_episodes_per_task ||
+      elements.evaluationEpisodes.dataset.maxEpisodes,
+  );
   elements.evaluationEpisodes.max = String(episodeLimit);
   if (Number(elements.evaluationEpisodes.value) > episodeLimit)
     elements.evaluationEpisodes.value = String(episodeLimit);
@@ -14543,7 +14575,7 @@ function renderDataResources() {
       <td><button type="button" class="text-button" data-dataset-presets="${escapedId}" data-dataset-label="${escapeHtml(resource.display_name)}" data-preset-ids="${escapeHtml(JSON.stringify(presetIds))}">${presetIds.length} preset${presetIds.length === 1 ? "" : "s"}</button></td>`
       : `<td>${escapeHtml(dataResourceTypeLabel(resource))}</td><td>${formats ? `<button type="button" class="text-button" data-resource-action="files" data-id="${escapedId}">${escapeHtml(formats)}</button>` : "—"}</td><td>${escapeHtml(resource.provider || "—")}</td>`}
       <td>${escapeHtml(formatDate(datasets ? resource.created_at : resource.updated_at || resource.created_at))}</td>
-      <td class="row-actions data-resource-row-actions"><button type="button" data-resource-action="${viewAction}" data-id="${escapedId}">View</button>${useAction}${sourceActions}<button type="button" data-resource-action="edit" data-id="${escapedId}">Edit</button><button type="button" data-resource-action="${resource.archived_at ? "restore" : "archive"}" data-id="${escapedId}">${resource.archived_at ? "Restore" : "Archive"}</button>${datasets ? `<button type="button" data-delete-kind="dataset" data-delete-id="${escapedId}">Delete</button>` : ""}</td>
+      <td class="row-actions data-resource-row-actions"><button type="button" data-resource-action="${viewAction}" data-id="${escapedId}">View</button>${useAction}${sourceActions}<button type="button" data-resource-action="edit" data-id="${escapedId}">Edit</button>${archiveToggleButton("resource", id, Boolean(resource.archived_at))}${datasets ? `<button type="button" data-delete-kind="dataset" data-delete-id="${escapedId}">Delete</button>` : ""}</td>
     </tr>`;
   }).join("") : emptyRow(elements.dataResourcesBody,
     query || recordingId || datasetIds ? `No ${datasets ? "datasets" : "file sets"} match your filter.`
@@ -15548,7 +15580,7 @@ function renderCollectionAdapters() {
           <button type="button" data-collection-adapter-action="edit" data-id="${escapeHtml(id)}">Edit</button>
           ${canReviewTemplate ? `<button type="button" data-collection-adapter-action="template" data-id="${escapeHtml(id)}">Review bundled setup ${escapeHtml(template.manifest.version)}</button>` : ""}
           <button type="button" data-collection-adapter-action="session" data-id="${escapeHtml(id)}"${archived || !manifest.runnable ? " disabled" : ""}>Collect</button>
-          <button type="button" data-collection-adapter-action="${archived ? "restore" : "archive"}" data-id="${escapeHtml(id)}">${archived ? "Restore" : "Archive"}</button>
+          ${archiveToggleButton("collection-adapter", id, archived)}
         </td>
       </tr>`;
         })
@@ -15798,35 +15830,6 @@ async function saveCollectionAdapter(event) {
     showToast(`Adapter save failed: ${error.message}`, true, { scope });
   } finally {
     elements.saveCollectionAdapter.disabled = false;
-  }
-}
-
-async function setCollectionAdapterArchived(id, archived) {
-  if (
-    archived &&
-    !(await askUserDialog(
-      "Archive this collection adapter? Existing sessions will remain readable.",
-    ))
-  )
-    return;
-  try {
-    if (archived) {
-      await api(`/api/collection/adapters/${encodeURIComponent(id)}`, {
-        method: "DELETE",
-      });
-    } else {
-      await api(`/api/collection/adapters/${encodeURIComponent(id)}/restore`, {
-        method: "POST",
-      });
-    }
-    showToast(`Collection adapter ${archived ? "archived" : "restored"}.`);
-    loadedTabs.delete("collection");
-    await loadCollection(true);
-  } catch (error) {
-    showToast(
-      `Adapter ${archived ? "archive" : "restore"} failed: ${error.message}`,
-      true,
-    );
   }
 }
 
@@ -19504,9 +19507,9 @@ function isSensitiveKey(key) {
 }
 
 function trackingProviderLabel(provider) {
-  if (provider === "wandb") return "Weights & Biases";
-  if (provider === "mlflow") return "MLflow";
-  return String(provider || "Tracking");
+  return Object.hasOwn(TRACKING_PROVIDER_LABELS, provider)
+    ? TRACKING_PROVIDER_LABELS[provider]
+    : String(provider || "Tracking");
 }
 
 function selectedTrackingProviders() {
@@ -20725,10 +20728,12 @@ elements.collectionAdaptersBody.addEventListener("click", (event) => {
       launcher: button,
     });
   }
-  if (button.dataset.collectionAdapterAction === "archive")
-    setCollectionAdapterArchived(id, true);
-  if (button.dataset.collectionAdapterAction === "restore")
-    setCollectionAdapterArchived(id, false);
+  if (["archive", "restore"].includes(button.dataset.collectionAdapterAction))
+    setAdapterArchived(
+      "collection-adapter",
+      id,
+      button.dataset.collectionAdapterAction === "archive",
+    );
 });
 elements.collectionRegisterOutput.addEventListener(
   "change",
@@ -20800,8 +20805,8 @@ elements.adaptersBody.addEventListener("click", (event) => {
   if (button.dataset.adapterAction === "view") openAdapter(id, false, button);
   if (button.dataset.adapterAction === "edit") openAdapter(id, true, button);
   if (button.dataset.adapterAction === "clone") cloneAdapter(id);
-  if (button.dataset.adapterAction === "archive") setAdapterArchived(id, true);
-  if (button.dataset.adapterAction === "restore") setAdapterArchived(id, false);
+  if (["archive", "restore"].includes(button.dataset.adapterAction))
+    setAdapterArchived("adapter", id, button.dataset.adapterAction === "archive");
 });
 elements.adapterEditor.addEventListener("submit", saveAdapter);
 elements.closeAdapterEditor.addEventListener("click", () => {

@@ -72,3 +72,13 @@ test('every class and id in styles.css is produced by the page, a script or the 
   assert.deepEqual(unreferenced, [], `styles.css selects tokens nothing produces:\n${unreferenced.join('\n')}`);
   for (const [token, reason] of DYNAMIC) assert.ok(tokens.has(token), `${token} left styles.css; drop it from DYNAMIC (${reason})`);
 });
+
+test('every custom property styles.css reads is declared there and read without a per-use fallback', () => {
+  const css = readFileSync(join(ROOT, 'static/styles.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, ' ');
+  const declared = new Set([...css.matchAll(/(--[A-Za-z0-9-]+)\s*:/g)].map(([, name]) => name));
+  const reads = [...css.matchAll(/var\(\s*(--[A-Za-z0-9-]+)\s*(,[^)]*)?\)/g)];
+  assert.ok(reads.length > 50, `parsed only ${reads.length} var() reads`);
+  assert.deepEqual(reads.filter(([, name]) => !declared.has(name)).map(([read]) => read), [], 'styles.css reads undeclared custom properties');
+  assert.deepEqual(reads.filter(([, , fallback]) => fallback).map(([read]) => read), [], 'a token defined once needs no per-use fallback');
+  assert.match(css, /:root \{[^}]*--accent:/, 'the accent colour is defined on :root');
+});

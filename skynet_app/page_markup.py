@@ -1,4 +1,4 @@
-"""Page fragments built from the cluster configuration, so forms offer exactly what the server accepts.
+"""Page fragments built from the cluster configuration and the server's models, so forms offer exactly what the server accepts.
 
 index() fills these placeholders in static/index.html; browser tests take the same
 fragments from `python -m skynet_app.page_markup`.
@@ -12,7 +12,11 @@ from pathlib import PurePosixPath
 from .cluster_config import CLUSTER, format_slurm_duration
 from .collection import CollectionResources
 from .data_imports import HuggingFaceImportRequest
-from .experiments import CheckpointPolicy
+from .experiments import DEFAULT_EVALUATION_EPISODES, MAX_EVALUATION_EPISODES, CheckpointPolicy
+from .hands_api import Pose
+from . import retargeting
+from .tracking import TRACKING_PROVIDERS
+from .workspaces import EmailRequest
 
 
 def _option(value: str, label: str, *, selected: bool = False, **data: str) -> str:
@@ -70,6 +74,15 @@ def cluster_markup() -> dict[str, str]:
         "<!-- checkpoint-warning-seconds -->": str(_bound(CheckpointPolicy, "save_before_timeout_seconds", "default")),
         "<!-- checkpoint-warning-min-seconds -->": str(_bound(CheckpointPolicy, "save_before_timeout_seconds", "ge")),
         "<!-- checkpoint-warning-max-seconds -->": str(_bound(CheckpointPolicy, "save_before_timeout_seconds", "le")),
+        "<!-- checkpoint-max-attempts-limit -->": str(_bound(CheckpointPolicy, "max_attempts", "le")),
+        "<!-- evaluation-episodes -->": str(DEFAULT_EVALUATION_EPISODES),
+        "<!-- max-evaluation-episodes -->": str(MAX_EVALUATION_EPISODES),
+        "<!-- pose-name-max-length -->": str(_bound(Pose, "name", "max_length")),
+        "<!-- email-max-length -->": str(_bound(EmailRequest, "email", "max_length")),
+        "<!-- default-retargeter -->": escape(retargeting.DEFAULT),
+        "<!-- default-retargeter-option -->": _option(
+            retargeting.DEFAULT, next(method["name"] for method in retargeting.METHODS if method["key"] == retargeting.DEFAULT)),
+        "<!-- tracking-providers -->": escape(json.dumps(TRACKING_PROVIDERS)),
         "<!-- artifacts-path-example -->": escape(f"{CLUSTER.paths.artifacts}/.../last.ckpt"),
         "<!-- collection-output-example -->": escape(f"{CLUSTER.paths.datasets}/.staging/collection/..."),
         "<!-- data-version-path-example -->": escape(f"{CLUSTER.paths.datasets}/resources/..."),

@@ -38,6 +38,8 @@
   --blue-soft: #dfe9f3;
   --danger: #9c2d25;
   --danger-soft: #f3dedb;
+  --accent: #20714c;
+  --accent-soft: #edf5f4;
   --topbar-min-height: 52px;
   --topbar-height: var(--topbar-min-height);
   --page-heading-height: 70px;
@@ -1722,7 +1724,7 @@ details.evaluation-task-select.is-disabled > summary::after {
   color: var(--green);
 }
 .field-validation.is-invalid {
-  color: var(--danger, #9d3c35);
+  color: var(--danger);
 }
 
 .field:has(> .field-validation.is-valid) > :is(input, select, textarea) {
@@ -1731,7 +1733,7 @@ details.evaluation-task-select.is-disabled > summary::after {
 
 .field:has(> .field-validation.is-invalid:not([hidden]))
   > :is(input, select, textarea) {
-  border-color: var(--danger, #9d3c35);
+  border-color: var(--danger);
 }
 
 .derived-field > label {
@@ -2676,7 +2678,7 @@ footer {
   vertical-align: middle;
 }
 .hand-layout .registry-table tr.is-selected {
-  background: var(--accent-soft, #edf5f4);
+  background: var(--accent-soft);
 }
 .hand-model-name {
   display: block;
@@ -2688,7 +2690,7 @@ footer {
   align-items: center;
   gap: 12px;
   padding: 12px 18px;
-  border-bottom: 1px solid var(--line, #dce1e6);
+  border-bottom: 1px solid var(--line);
   flex-wrap: wrap;
 }
 .hand-toolbar [role="status"] {
@@ -2717,9 +2719,9 @@ footer {
 }
 .hand-view-help {
   padding: 9px 18px;
-  color: var(--muted, #647181);
+  color: var(--muted);
   font-size: 12px;
-  border-bottom: 1px solid var(--line, #dce1e6);
+  border-bottom: 1px solid var(--line);
 }
 .hand-controls,
 .hand-model-info {
@@ -2734,7 +2736,7 @@ footer {
 }
 .hand-pose-details {
   margin-top: 18px;
-  border-top: 1px solid var(--line, #dce1e6);
+  border-top: 1px solid var(--line);
   padding-top: 14px;
 }
 .hand-pose-details summary {
@@ -2745,7 +2747,7 @@ footer {
   margin-top: 14px;
 }
 .hand-model-info {
-  border-top: 1px solid var(--line, #dce1e6);
+  border-top: 1px solid var(--line);
   font-size: 13px;
   line-height: 1.6;
 }
@@ -2759,7 +2761,7 @@ footer {
 #hand-angle {
   padding: 0;
   width: 100%;
-  accent-color: var(--accent, #16665c);
+  accent-color: var(--accent);
 }
 @media (max-width: 1100px) {
   .hand-layout {
@@ -3250,7 +3252,7 @@ table:has(> tbody#settings-body) :is(th, td):last-child {
   width: min(100%, 440px);
   padding: 28px;
   background: var(--surface);
-  border: 1px solid var(--line, #d3dad5);
+  border: 1px solid var(--line);
 }
 .email-workspace-card h1 {
   margin: 20px 0 12px;
@@ -3336,7 +3338,7 @@ table:has(> tbody#settings-body) :is(th, td):last-child {
   margin-bottom: 12px;
 }
 .episode-viewer-tabs [aria-pressed="true"] {
-  background: var(--green, #22734d);
+  background: var(--green);
   color: white;
 }
 .episode-viewer-layers label {
@@ -3558,7 +3560,7 @@ table:has(> tbody#settings-body) :is(th, td):last-child {
   border: 0;
   padding: 0;
   background: none;
-  color: var(--accent, #20714c);
+  color: var(--accent);
   font: inherit;
   font-weight: 600;
   cursor: pointer;
@@ -3568,7 +3570,7 @@ table:has(> tbody#settings-body) :is(th, td):last-child {
   overflow-wrap: anywhere;
 }
 .entity-link:focus-visible {
-  outline: 2px solid var(--accent, #20714c);
+  outline: 2px solid var(--accent);
   outline-offset: 3px;
 }
 .copy-value {
@@ -3585,7 +3587,7 @@ table:has(> tbody#settings-body) :is(th, td):last-child {
   overflow-wrap: anywhere;
 }
 #run-checkpoint-list tr:focus {
-  outline: 2px solid var(--accent, #20714c);
+  outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
 
