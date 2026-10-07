@@ -17,7 +17,7 @@ from pathlib import PurePosixPath
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from .cluster_runtime import ClusterClient, ClusterError
+from .cluster_runtime import TIMEOUTS, ClusterClient, ClusterError
 from .cluster_config import CLUSTER
 
 
@@ -1159,7 +1159,7 @@ class SourceDiscovery:
             "git -c credential.interactive=never ls-remote --symref "
             f"{repository_q} HEAD 'refs/heads/*'"
         )
-        host, output = self.cluster.run_with_fallback(command, gateway, timeout=25)
+        host, output = self.cluster.run_with_fallback(command, gateway, timeout=TIMEOUTS.git_ref_lookup_seconds)
         default_branch: str | None = None
         tips: dict[str, str] = {}
         for line in output.splitlines():
@@ -1224,7 +1224,7 @@ class SourceDiscovery:
         ) + f'''git -C "$tmp" log -n {limit} \
   --format='%H%x1f%h%x1f%s%x1f%an%x1f%cI%x1e' FETCH_HEAD
 '''
-        host, output = self.cluster.run_with_fallback(command, gateway, timeout=45)
+        host, output = self.cluster.run_with_fallback(command, gateway, timeout=TIMEOUTS.git_history_seconds)
         commits: list[dict[str, str]] = []
         for raw_record in output.split("\x1e"):
             record = raw_record.strip("\r\n")
@@ -1271,7 +1271,7 @@ class SourceDiscovery:
             "git -c credential.interactive=never ls-remote --exit-code "
             f"{repository_q} {revision_q} {shlex.quote(requested + '^{}')}"
         )
-        host, output = self.cluster.run_with_fallback(command, gateway, timeout=25)
+        host, output = self.cluster.run_with_fallback(command, gateway, timeout=TIMEOUTS.git_ref_lookup_seconds)
         candidates: list[tuple[str, str]] = []
         for line in output.splitlines():
             fields = line.split(None, 1)
@@ -1359,7 +1359,7 @@ for path in {path_words}; do
   emit_blob "$object" "$path" "$size"
 done
 '''
-        host, output = self.cluster.run_with_fallback(command, gateway, timeout=60)
+        host, output = self.cluster.run_with_fallback(command, gateway, timeout=TIMEOUTS.git_file_fetch_seconds)
         actual_commit: str | None = None
         contents: dict[str, bytes] = {}
         files: dict[str, dict[str, Any]] = {}
@@ -1449,7 +1449,7 @@ while IFS= read -r path; do
   emit_blob "$object" "$path" "$size"
 done < "$tmp/catalog-paths"
 '''
-        host, output = self.cluster.run_with_fallback(command, gateway, timeout=60)
+        host, output = self.cluster.run_with_fallback(command, gateway, timeout=TIMEOUTS.git_file_fetch_seconds)
         actual_commit: str | None = None
         contents: dict[str, bytes] = {}
         files: dict[str, dict[str, Any]] = {}
@@ -1614,7 +1614,7 @@ done < "$tmp/catalog-paths"
   fi
 done
 '''
-        host, output = self.cluster.run_with_fallback(command, gateway, timeout=60)
+        host, output = self.cluster.run_with_fallback(command, gateway, timeout=TIMEOUTS.git_file_fetch_seconds)
         files: dict[str, dict[str, Any]] = {}
         contents: dict[str, bytes] = {}
         actual_commit: str | None = None

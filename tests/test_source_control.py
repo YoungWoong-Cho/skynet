@@ -14,6 +14,7 @@ from skynet_app.adapters import (
     RepositoryYamlMetadataField,
     builtin_adapter_manifests,
 )
+from skynet_app.cluster_runtime import TIMEOUTS
 from skynet_app.pipeline_api import PipelineService
 from skynet_app.source_control import SourceDiscovery
 
@@ -26,8 +27,10 @@ class StaticFilesCluster:
 
     def __init__(self, files: dict[str, str]) -> None:
         self.files = files
+        self.budgets: list[int] = []  # The operation budget of every round trip, as the profile tier gave it.
 
     def run_with_fallback(self, command: str, gateway: str = "auto", timeout: int = 60):
+        self.budgets.append(timeout)
         lines = [f"COMMIT\t{COMMIT}"]
         for path, source in self.files.items():
             content = source.encode("utf-8")
@@ -91,12 +94,15 @@ def get_extra_configs():
     field["choice_source"]["supporting_files"] = [
         "src/openpi/training/misc/extra_config.py"
     ]
-    discovery = SourceDiscovery(StaticFilesCluster(files))
+    cluster = StaticFilesCluster(files)
+    discovery = SourceDiscovery(cluster)
 
     options = discovery.input_options(
         "https://github.com/Physical-Intelligence/openpi", COMMIT, [field]
     )["native.config.config_name"]
 
+    # A commit's files come through the shallow blob fetch tier, never a literal budget.
+    assert cluster.budgets and set(cluster.budgets) == {TIMEOUTS.git_file_fetch_seconds}
     assert options["choices"] == ["direct", "imported"]
     assert options["complete"] is True
     assert options["source"]["commit"] == COMMIT

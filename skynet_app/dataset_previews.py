@@ -12,7 +12,7 @@ import numpy as np
 
 from .adapters import recording_dataset, recording_time
 from .cluster_config import CLUSTER
-from .cluster_runtime import validate_remote_path
+from .cluster_runtime import TIMEOUTS, validate_remote_path
 from .data_selection import verified_cluster_location
 from . import dataset_preview_worker
 from .dataset_preview_worker import input_streams
@@ -137,7 +137,7 @@ class DatasetPreviews:
             if not runtime:
                 raise ValueError('No configured Python environment can read saved dataset arrays')
             code = self.program + '\nprint(json.dumps(read_frames(' + repr(request) + '), separators=(",", ":"), allow_nan=False))\n'
-            host, output = cluster.run_with_fallback(shlex.quote(runtime + '/bin/python') + ' -', gateway, stdin=code, timeout=120)
+            host, output = cluster.run_with_fallback(shlex.quote(runtime + '/bin/python') + ' -', gateway, stdin=code, timeout=TIMEOUTS.dataset_preview_seconds)
             if len(output.encode()) > self.MAX_RESPONSE_BYTES:
                 raise ValueError('Preview slice is too large; request fewer frames')
             result = json.loads(output.strip().splitlines()[-1])

@@ -390,6 +390,20 @@ class SshOperationTimeouts(ProfileModel):
     slurm_tool_seconds: OperationSeconds  # The remote `timeout` on each sacct and squeue call.
     dashboard_seconds: OperationSeconds  # Each gateway's dashboard query.
     dashboard_probe_seconds: OperationSeconds  # The remote `timeout` on the dashboard's idle-quota probe.
+    probe_seconds: OperationSeconds  # A gateway connection check or a READY marker read: an answer that must come at once.
+    workstation_launch_seconds: OperationSeconds  # A workstation service launch and its acknowledgement.
+    workstation_launch_tool_seconds: OperationSeconds  # The remote `subprocess` deadline on the launch inside it.
+    workstation_video_control_seconds: OperationSeconds  # Starting or polling a workstation video render.
+    workstation_video_cancel_seconds: OperationSeconds  # Cancelling one; the unit stop runs inside it.
+    review_artifact_seconds: OperationSeconds  # Saving a review record or hashing a saved review video on the recording host.
+    hand_bundle_upload_seconds: OperationSeconds  # A verified hand bundle upload.
+    storage_operation_seconds: OperationSeconds  # One storage helper exchange: a scan, an inspection or a removal.
+    git_ref_lookup_seconds: OperationSeconds  # git ls-remote: branch tips and revision resolution.
+    git_history_seconds: OperationSeconds  # A shallow fetch and git log of one branch.
+    git_file_fetch_seconds: OperationSeconds  # A shallow fetch and the blob reads of one commit's files.
+    rollout_preview_seconds: OperationSeconds  # Attaching a recorded demonstration to a rollout viewer.
+    dataset_preview_seconds: OperationSeconds  # Reading a slice of dataset frames with the Isaac Lab Python.
+    episode_preview_seconds: OperationSeconds  # Preparing a recorded episode's 3D scene on the recording host.
     unreachable_gateway_seconds: OperationSeconds  # How long a gateway that refused its connection is tried last and reserves no time.
 
     @model_validator(mode="after")
@@ -400,6 +414,7 @@ class SshOperationTimeouts(ProfileModel):
             ("recovery_lookup_seconds", "slurm_tool_seconds", 1),
             ("job_status_seconds", "slurm_tool_seconds", 2),  # sacct, then squeue.
             ("dashboard_seconds", "dashboard_probe_seconds", 1),
+            ("workstation_launch_seconds", "workstation_launch_tool_seconds", 1),
         )
         for budget, deadline, calls in nested:
             if getattr(self, budget) <= calls * getattr(self, deadline):

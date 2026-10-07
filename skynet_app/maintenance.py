@@ -19,7 +19,7 @@ from . import history_journals, storage_files
 
 # The storage helper runs remotely from its source: one SSH exchange per operation.
 _STORAGE_SCRIPT = Path(storage_files.__file__).read_text()
-STORAGE_OPERATION_TIMEOUT = 120
+from .cluster_runtime import TIMEOUTS
 from .database import canonical_json, utc_now
 from .workspace_schema import LEGACY_WORKSPACE, visible_sql
 from .workspace_storage import WorkspaceStorage
@@ -147,7 +147,7 @@ class Maintenance:
                     "scope": scope,
                 }
             ),
-            attempt_timeout=STORAGE_OPERATION_TIMEOUT,
+            attempt_timeout=TIMEOUTS.storage_operation_seconds,
         )
         return json.loads(result)
 

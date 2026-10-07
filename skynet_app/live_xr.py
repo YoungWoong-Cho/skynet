@@ -16,6 +16,7 @@ from .cluster_runtime import (
     ClusterClient,
     ClusterError,
     SubmissionOutcomeUnknown,
+    TIMEOUTS,
     WORK_ROOT,
 )
 from .database import canonical_json, utc_now
@@ -323,7 +324,7 @@ class LiveXRService:
                 startup_stage="server",
                 detail=f"Connecting to {job['gateway']}",
             )
-            transport.ssh(job["gateway"], "true", timeout=10)
+            transport.ssh(job["gateway"], "true", timeout=TIMEOUTS.probe_seconds)
             self.update(
                 identifier,
                 server_connected_at=utc_now(),
@@ -342,7 +343,7 @@ class LiveXRService:
                     f"test -f {shlex.quote(p['runtime'] + '/.skynet-runtime-ready.json')}",
                 ]
             try:
-                transport.ssh(job["gateway"], " && ".join(checks), timeout=15)
+                transport.ssh(job["gateway"], " && ".join(checks), timeout=TIMEOUTS.short_command_seconds)
             except ClusterError as exc:
                 raise ValueError(
                     "Simulation runtime check failed: " + str(exc)
@@ -364,7 +365,7 @@ class LiveXRService:
                             p["retargeting"]["runtime_root"],
                         ]
                     ),
-                    timeout=30,
+                    timeout=TIMEOUTS.command_seconds,
                 )
             self.update(
                 identifier,
@@ -564,7 +565,7 @@ print(json.dumps(value))
                     "python3 - " + shlex.quote(job["root"] + "/output/status.json"),
                     job["gateway"],
                     stdin=script,
-                    attempt_timeout=15,
+                    attempt_timeout=TIMEOUTS.short_command_seconds,
                 )[1]
             )
             changes = dict(
@@ -683,7 +684,7 @@ print(json.dumps(value))
             transport.run_with_fallback(
                 f"mkdir -p {shlex.quote(str(Path(dest).parent))} && touch {shlex.quote(dest)}",
                 job["gateway"],
-                attempt_timeout=15,
+                attempt_timeout=TIMEOUTS.short_command_seconds,
             )
         return self.update(
             identifier,
@@ -709,7 +710,7 @@ print(json.dumps(value))
             path = shlex.quote(root + "/" + name)
             parts.append(f"if test -f {path}; then tail -c 16000 {path}; fi")
         return (
-            transport.run_with_fallback("\n".join(parts), gateway, attempt_timeout=20)[1]
+            transport.run_with_fallback("\n".join(parts), gateway, attempt_timeout=TIMEOUTS.read_seconds)[1]
             or job.get("error")
             or "No logs yet."
         )

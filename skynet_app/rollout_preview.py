@@ -10,6 +10,7 @@ import shlex
 from .adapters import episode_geometry
 from .adapters.episode_geometry import recorded_urdf, replay_urdf, HandKinematics, camera_layout
 from .cluster_config import CLUSTER
+from .cluster_runtime import TIMEOUTS
 from .live_xr_review import ArrayUnpickler
 from .dexverse_versions import V1_REVISION, V1_REPOSITORY
 from .trajectory import validate_identity
@@ -37,7 +38,7 @@ def enrich_demonstration(database, cluster, spec, viewer, gateway, *, duration=0
     program = (Path(episode_geometry.__file__).read_text() + "\nimport pickle,io,json,hashlib\n"
                + inspect.getsource(ArrayUnpickler) + "\n" + inspect.getsource(validate_identity) + "\n" + inspect.getsource(attach_demonstration)
                + "\nprint(json.dumps(attach_demonstration(" + repr(request) + "),allow_nan=False))\n")
-    _, output = cluster.run_with_fallback(shlex.quote(runtime.environment_path + "/bin/python") + " -", gateway, stdin=program, timeout=45)
+    _, output = cluster.run_with_fallback(shlex.quote(runtime.environment_path + "/bin/python") + " -", gateway, stdin=program, timeout=TIMEOUTS.rollout_preview_seconds)
     return json.loads(output)
 
 

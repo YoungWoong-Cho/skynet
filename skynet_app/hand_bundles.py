@@ -16,6 +16,7 @@ import threading
 import xml.etree.ElementTree as ET
 
 import numpy as np
+from .cluster_runtime import TIMEOUTS
 from .database import canonical_json
 from .mesh_assets import bake_gltf_nodes
 from .hands import HandLibrary, ROOT, parse_urdf, joint_metadata
@@ -553,7 +554,7 @@ def upload(directory, remote_root, transport, gateway):
         + shlex.quote(remote + "/READY")
         + "; fi",
         gateway,
-        attempt_timeout=10,
+        attempt_timeout=TIMEOUTS.probe_seconds,
     )[1].strip()
     if marker == manifest["digest"]:
         return remote
@@ -602,6 +603,6 @@ finally:
         "python3 -c " + shlex.quote(script),
         gateway,
         stdin=json.dumps(request),
-        attempt_timeout=60,
+        attempt_timeout=TIMEOUTS.hand_bundle_upload_seconds,
     )
     return remote

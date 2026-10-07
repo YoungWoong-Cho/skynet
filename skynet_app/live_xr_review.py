@@ -12,7 +12,7 @@ import threading
 import numpy as np
 
 from .recording_guard import guarded_recording
-from .cluster_runtime import DEFAULT_GATEWAY
+from .cluster_runtime import DEFAULT_GATEWAY, TIMEOUTS
 from .database import canonical_json, utc_now
 from .live_xr_catalog import selection
 from .remote_artifacts import RemoteArtifact
@@ -355,7 +355,7 @@ class LiveReviewService:
                     + shlex.quote(target.path),
                     target.gateway,
                     stdin=content,
-                    attempt_timeout=40,
+                    attempt_timeout=TIMEOUTS.review_artifact_seconds,
                 )
             current = self.remote_location(identifier, index, "review.json")
             if (current.gateway, current.path) == (

@@ -62,18 +62,47 @@ def test_no_module_spells_its_own_ssh_timeouts():
     assert offenders == []
 
 
+# Modules whose every cluster round trip reads a named tier of ssh.operations.
+BUDGETED_MODULES = (
+    "cluster_runtime.py", "main.py", "source_control.py", "live_xr.py", "live_xr_video.py", "live_xr_review.py",
+    "live_xr_video_cluster.py", "live_xr_workstation.py", "episode_previews.py", "episode_preview_worker.py",
+    "hand_bundles.py", "dataset_previews.py", "dataset_preview_worker.py", "rollout_preview.py", "maintenance.py",
+    "recording_deletion.py", "recording_file_deletion.py",
+)
+
+
 def test_the_cluster_client_and_dashboard_take_their_operation_budgets_from_the_profile():
     assert cluster_runtime.TIMEOUTS is CLUSTER.ssh.operations
-    for name in ("cluster_runtime.py", "main.py"):
+    for name in BUDGETED_MODULES:
         text = Path("skynet_app", name).read_text()
-        assert not re.search(r"timeout=\d|timeout \d+s|\d+ days ago|SECONDS \+ \d", text), name
+        assert not re.search(r"timeout=\d|timeout \d+s|\d+ days ago|SECONDS \+ \d|TIMEOUT\s*=\s*\d", text), name
+
+
+def test_each_budgeted_module_reads_the_tier_for_its_purpose():
+    for name, tiers in {
+        "source_control.py": ("git_ref_lookup_seconds", "git_history_seconds", "git_file_fetch_seconds"),
+        "live_xr.py": ("probe_seconds", "short_command_seconds", "command_seconds", "read_seconds"),
+        "live_xr_workstation.py": ("workstation_launch_seconds", "workstation_launch_tool_seconds"),
+        "live_xr_video.py": ("workstation_video_control_seconds", "workstation_video_cancel_seconds", "review_artifact_seconds"),
+        "live_xr_review.py": ("review_artifact_seconds",),
+        "live_xr_video_cluster.py": ("read_seconds",),
+        "episode_previews.py": ("read_seconds", "episode_preview_seconds"),
+        "hand_bundles.py": ("probe_seconds", "hand_bundle_upload_seconds"),
+        "dataset_previews.py": ("dataset_preview_seconds",),
+        "rollout_preview.py": ("rollout_preview_seconds",),
+        "maintenance.py": ("storage_operation_seconds",),
+    }.items():
+        text = Path("skynet_app", name).read_text()
+        for tier in tiers:
+            assert hasattr(CLUSTER.ssh.operations, tier) and f"TIMEOUTS.{tier}" in text, (name, tier)
 
 
 def test_an_operation_budget_must_outlast_the_remote_deadline_inside_it():
     operations = CLUSTER.ssh.operations
     assert operations.job_status_seconds > 2 * operations.slurm_tool_seconds
     for budget, deadline in (("submission_seconds", "submission_receipt_wait_seconds"),
-                             ("validation_seconds", "validation_tool_seconds")):
+                             ("validation_seconds", "validation_tool_seconds"),
+                             ("workstation_launch_seconds", "workstation_launch_tool_seconds")):
         too_short = {**operations.model_dump(), budget: getattr(operations, deadline)}
         with pytest.raises(ValidationError, match=budget):
             SshOperationTimeouts.model_validate(too_short)

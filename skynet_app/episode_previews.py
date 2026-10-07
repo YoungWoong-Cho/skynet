@@ -13,7 +13,7 @@ from .recording_guard import guarded_recording
 from .adapters import episode_geometry
 from . import episode_preview_worker
 from .cluster_config import CLUSTER
-from .cluster_runtime import WORK_ROOT
+from .cluster_runtime import TIMEOUTS, WORK_ROOT
 from .dexverse_versions import environment_profile
 from .live_xr_review import ArrayUnpickler
 from .remote_artifacts import RemoteArtifact
@@ -105,7 +105,7 @@ class EpisodePreviews:
             seen.add((gateway, root))
             code = inspect.getsource(verified_hand_file) + "\nimport json\nprint(json.dumps(verified_hand_file(" + repr(dict(request, root=root)) + ")))\n"
             try:
-                result = json.loads(transport.run_with_fallback("python3 -", gateway, stdin=code, attempt_timeout=20)[1].strip().splitlines()[-1])
+                result = json.loads(transport.run_with_fallback("python3 -", gateway, stdin=code, attempt_timeout=TIMEOUTS.read_seconds)[1].strip().splitlines()[-1])
                 return transport, gateway, result
             except (OSError, ValueError, RuntimeError) as exc:
                 error = exc
@@ -177,7 +177,7 @@ class EpisodePreviews:
             except (OSError, ValueError, RuntimeError) as exc:
                 request["hand_visual_warning"] = str(exc)
             code = self.program + "\nprint(json.dumps(prepare_preview(" + repr(request) + ")))\n"
-            _, reply = transport.run_with_fallback(shlex.quote(python) + " -", gateway, stdin=code, attempt_timeout=240)
+            _, reply = transport.run_with_fallback(shlex.quote(python) + " -", gateway, stdin=code, attempt_timeout=TIMEOUTS.episode_preview_seconds)
             result = json.loads(reply.strip().splitlines()[-1])
             if result != {"state": "READY"}:
                 raise ValueError("Recorded scene preparation did not complete")

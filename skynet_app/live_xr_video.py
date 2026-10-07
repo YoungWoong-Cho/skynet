@@ -20,7 +20,7 @@ from .live_xr_review import ArrayUnpickler
 from .live_xr_video_worker import control
 from .live_xr_video_cluster import control_cluster
 from .remote_artifacts import RemoteArtifact
-from .cluster_runtime import DEFAULT_GATEWAY, WORK_ROOT
+from .cluster_runtime import DEFAULT_GATEWAY, TIMEOUTS, WORK_ROOT
 from .dexverse_versions import environment_profile
 from .simulation_hands import upload as upload_hand
 
@@ -337,7 +337,7 @@ class LiveVideoService:
         return json.loads(transport.ssh(
             job["gateway"], "python3 -c " + shlex.quote(program),
             stdin=json.dumps(dict(value, operation=operation, generation=generation.token, root=root)),
-            timeout=55 if operation == "cancel" else 40,
+            timeout=TIMEOUTS.workstation_video_cancel_seconds if operation == "cancel" else TIMEOUTS.workstation_video_control_seconds,
         ))
 
     def render(self, transport, job, remote, review, episode, generation=None, key=None):
@@ -537,6 +537,6 @@ class LiveVideoService:
     @staticmethod
     def verify_remote_video(transport, gateway, path, metadata):
         program = "import hashlib,json,sys; from pathlib import Path; p=Path(sys.argv[1]); s=p.stat().st_size; assert 0<s<=268435456; f=p.open('rb'); header=f.read(12); f.seek(0); h=hashlib.sha256(); [h.update(b) for b in iter(lambda:f.read(1048576),b'')]; print(json.dumps({'sha256':h.hexdigest(),'size_bytes':s,'mp4':header[4:8]==b'ftyp'}))"
-        result = json.loads(transport.run_with_fallback("python3 -c " + shlex.quote(program) + " " + shlex.quote(path), gateway, attempt_timeout=40)[1])
+        result = json.loads(transport.run_with_fallback("python3 -c " + shlex.quote(program) + " " + shlex.quote(path), gateway, attempt_timeout=TIMEOUTS.review_artifact_seconds)[1])
         if not result.get("mp4") or any(result.get(key) != metadata.get(key) for key in ("sha256", "size_bytes")):
             raise ValueError("The remote video differs from its saved checksum or size")

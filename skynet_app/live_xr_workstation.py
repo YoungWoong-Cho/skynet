@@ -7,7 +7,7 @@ import shlex
 from types import SimpleNamespace
 
 from .cluster_config import CLUSTER
-from .cluster_runtime import ClusterClient, ClusterError, SubmissionOutcomeUnknown
+from .cluster_runtime import TIMEOUTS, ClusterClient, ClusterError, SubmissionOutcomeUnknown
 
 
 class LaunchRejected(ValueError):
@@ -106,7 +106,7 @@ else:
             "/bin/bash",
             root + "/run.sh",
         ]
-        launcher = """import json,subprocess,sys
+        launcher = f"""import json,subprocess,sys
 from pathlib import Path
 request=json.load(sys.stdin); root=Path(request['root'])
 # Persist before starting. A lost acknowledgement must never launch twice.
@@ -114,8 +114,8 @@ try:
  with (root/'launch.attempt.json').open('x') as f: json.dump(request,f)
 except FileExistsError:
  raise SystemExit('A launch was already attempted; recover the existing service')
-r=subprocess.run(request['command'],capture_output=True,text=True,timeout=25)
-result={'returncode':r.returncode,'error':r.stderr.strip()}
+r=subprocess.run(request['command'],capture_output=True,text=True,timeout={TIMEOUTS.workstation_launch_tool_seconds})
+result={{'returncode':r.returncode,'error':r.stderr.strip()}}
 (root/'launch.result.json').write_text(json.dumps(result))
 if r.returncode: raise SystemExit(result['error'])
 print(request['unit'])
@@ -125,7 +125,7 @@ print(request['unit'])
                 gateway,
                 "python3 -c " + shlex.quote(launcher),
                 stdin=json.dumps(dict(root=root, unit=unit, command=command)),
-                timeout=35,
+                timeout=TIMEOUTS.workstation_launch_seconds,
             )
         except ClusterError as exc:
             raise SubmissionOutcomeUnknown(

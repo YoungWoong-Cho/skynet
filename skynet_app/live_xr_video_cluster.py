@@ -5,7 +5,7 @@ import json
 import shlex
 
 from .isaac_job import compile_isaac_job
-from .cluster_runtime import WORK_ROOT, ClusterError, SubmissionOutcomeUnknown
+from .cluster_runtime import TIMEOUTS, WORK_ROOT, ClusterError, SubmissionOutcomeUnknown
 from .cluster_config import CLUSTER
 from .gpu_preflight import GPU_MISSING_MESSAGE, gpu_missing_exit
 from .preparation_states import TERMINAL_FAILURE_STATES
@@ -86,7 +86,7 @@ def control_cluster(transport, job, generation, root, operation, **value):
                 raise ValueError("Waiting for Slurm to confirm video cancellation")
             return {"state": "CANCELLED"}
         program = "import json,sys; from pathlib import Path; p=Path(sys.argv[1]); print(p.read_text() if p.is_file() and p.stat().st_size < 100000 else '{}')"
-        metadata = json.loads(transport.run_with_fallback("python3 -c " + shlex.quote(program) + " " + shlex.quote(root + "/video.json"), gateway, attempt_timeout=20)[1])
+        metadata = json.loads(transport.run_with_fallback("python3 -c " + shlex.quote(program) + " " + shlex.quote(root + "/video.json"), gateway, attempt_timeout=TIMEOUTS.read_seconds)[1])
         if state in TERMINAL:
             if state == "COMPLETED" and metadata.get("state") == "READY":
                 if metadata.get("path") != root + "/video.mp4":
