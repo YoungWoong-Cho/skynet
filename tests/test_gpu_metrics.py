@@ -8,10 +8,10 @@ from unittest.mock import patch
 import pytest
 
 from skynet_app import gpu_metrics, gpu_tracking
-from skynet_app.pipeline_api import PipelineService
+from skynet_app.pipeline_api import TRACKING_FLUSH_EVENT_LIMIT, PipelineService
 from skynet_app.slurm import compile_sbatch, RUNNER_SOURCE
 from skynet_app.adapters import resolve_adapter_plan
-from skynet_app.tracking import TrackingRequestError, WandBSettings, WandBBridge
+from skynet_app.tracking import DrainReport, TrackingRequestError, WandBSettings, WandBBridge
 from test_slurm import make_spec
 from test_tracking import FakeWandBBridge
 
@@ -204,10 +204,15 @@ def test_progress_timestamp_ms_reads_recorded_times_and_falls_back_to_now():
 
 
 def gpu_service(bridge):
-    return SimpleNamespace(
+    failures = []
+    service = SimpleNamespace(
         gpu_tracking_bridge=lambda run, spec, capsule_root: bridge,
-        _tracking_failure=lambda *a: None,
+        _tracking_failure=lambda *args: failures.append(args),
+        failures=failures,
     )
+    # Delivery (its event limit and failure record) is the service's seam: use the real one.
+    service.deliver_gpu_tracking = partial(PipelineService.deliver_gpu_tracking, service)
+    return service
 
 
 def tracked_run():
@@ -295,6 +300,37 @@ def test_controller_ingests_existing_job_once_and_preserves_pending_samples(tmp_
     assert [row["_runtime"] for row in bridge.system_rows] == [20, 35, 50]
     state = json.loads((tmp_path / "run/gpu-statistics.json").read_text())
     assert state["attempt"]["cursors"] == response["cursors"]
+    assert service.failures == []
+
+
+def test_gpu_delivery_error_is_recorded_and_fails_only_a_strict_sync(tmp_path):
+    settings = WandBSettings(api_key="fake", entity="team", auto_flush=False)
+    bridge = FakeWandBBridge(tmp_path / "run", settings)
+    bridge.ensure_run(
+        local_run_id="run", entity="team", project="test", run_name="test", group="test"
+    )
+    bridge.drain_spool()
+    service = gpu_service(bridge)
+    limits = []
+
+    def offline(*, limit=None):
+        limits.append(limit)
+        return DrainReport(attempted=1, delivered=0, remaining=3, online=False, errors=("W&B is offline",))
+
+    with (
+        patch.object(gpu_tracking, "_read", return_value=gpu_response()),
+        patch.object(gpu_tracking, "_sample_existing"),
+        patch.object(bridge, "drain_spool", side_effect=offline),
+    ):
+        # Telemetry never changes the training outcome: the samples stay queued.
+        assert gpu_tracking.sync_gpu_statistics(service, tracked_run(), tmp_path, force=True) == 3
+        with pytest.raises(RuntimeError, match="W&B is offline"):
+            gpu_tracking.sync_gpu_statistics(service, tracked_run(), tmp_path, force=True, raise_on_error=True)
+    assert limits == [TRACKING_FLUSH_EVENT_LIMIT] * 2
+    assert [(provider, run["id"], str(error)) for provider, run, error in service.failures] == [
+        ("wandb", "run", "W&B is offline")
+    ] * 2
+    assert "W&B is offline" in (tmp_path / "run" / gpu_tracking.ERROR_FILENAME).read_text()
 
 
 def test_gpu_state_lives_in_the_bridge_journal_when_the_run_has_one(tmp_path):

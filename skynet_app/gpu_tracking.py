@@ -192,12 +192,9 @@ def _sync(service, run, capsule_root, force, *, raise_on_error=False):
     state.pop("error", None)
     bridge.write_sidecar(STATE_FILENAME, json.dumps(state).encode())
     _error_path(capsule_root, run_id).unlink(missing_ok=True)
-    report = bridge.drain_spool(limit=100)
-    if report.errors:
-        error = RuntimeError(report.errors[0])
-        service._tracking_failure("wandb", run, error)
-        if raise_on_error:
-            raise error
+    error = service.deliver_gpu_tracking(bridge, run)
+    if error is not None and raise_on_error:
+        raise error
     return published
 
 

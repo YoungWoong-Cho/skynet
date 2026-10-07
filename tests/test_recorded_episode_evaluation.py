@@ -141,7 +141,13 @@ def test_run_api_keeps_single_episode_simulation_and_explains_empty_results(tmp_
         credential_store=SimpleNamespace(load=lambda _:None), session_credentials=SessionCredentialStore())
     monkeypatch.setattr(svc.database, "get_run", lambda _, **kwargs: {"resolved_spec_json": document})
     monkeypatch.setattr(pipeline, "service", svc)
-    monkeypatch.setattr(pipeline, "recorded_episode_sources", lambda *_: [{"path":"/original.pkl"}])
+    seeded = svc.database.list_evaluation_suites()
+    episode_suite = next(s for s in seeded if s["name"] == "dexverse_training_episode")
+    # A second suite starting from the recorded episode shares the run's one lookup.
+    monkeypatch.setattr(svc.database, "list_evaluation_suites",
+                        lambda **_: [*seeded, {**copy.deepcopy(episode_suite), "id": "second-episode-suite"}])
+    lookups = []
+    monkeypatch.setattr(pipeline, "recorded_episode_sources", lambda *_: lookups.append(1) or [{"path":"/original.pkl"}])
     app = FastAPI(); app.include_router(pipeline.router)
     try:
         client = TestClient(app)
@@ -149,18 +155,24 @@ def test_run_api_keeps_single_episode_simulation_and_explains_empty_results(tmp_
         assert response.status_code == 200, response.text
         payload = response.json()
         returned = {s['name']: s for s in payload['suites']}
+        episode_suites = [s for s in payload['suites'] if s['name'] == 'dexverse_training_episode']
         assert len(payload['suites']) == len(svc.database.list_evaluation_suites())
-        assert returned['dexverse_training_episode']['is_default']
+        assert len(episode_suites) == 2 and all(s['is_default'] for s in episode_suites)
+        assert len(lookups) == 1
+        assert not {'slug', 'evaluator', 'version', 'current'} & returned['dexverse_recorded'].keys()
         assert returned['dexverse_training_episode']['config_json']['maximum_episodes_per_task'] == 1
         assert returned['dexverse_recorded']['compatibility']['ready']
         assert returned['egoverse_held_out']['compatibility']['status'] == 'incompatible'
         assert any('no held-out' in s['reason'] for s in payload['unavailable_suites'])
         def missing(*_):
+            lookups.append(1)
             raise ValueError("Original recording unavailable")
         monkeypatch.setattr(pipeline, "recorded_episode_sources", missing)
         payload = client.get('/api/evaluation-suites?run_id=run').json()
         returned = {s['name']: s for s in payload['suites']}
-        assert returned['dexverse_training_episode']['compatibility']['status'] == 'unknown'
+        assert [s['compatibility']['status'] for s in payload['suites']
+                if s['name'] == 'dexverse_training_episode'] == ['unknown', 'unknown']
+        assert len(lookups) == 2
         assert returned['dexverse_recorded']['compatibility']['ready']
         assert any(s["reason"] == "Original recording unavailable" for s in payload["unavailable_suites"])
     finally:

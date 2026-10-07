@@ -13,6 +13,7 @@ import ipaddress
 import urllib.parse
 
 import copy
+import functools
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -128,6 +129,7 @@ from .tracking import (
     MLflowBridge,
     SESSION_CREDENTIALS,
     SessionCredentialStore,
+    TRACKING_PROVIDERS,
     TrackingRequestError,
     TrackingSettings,
     WandBBridge,
@@ -162,6 +164,9 @@ HELD_RECHECK_SECONDS = 600
 # sends per run (the delivery pass, the progress publisher and the terminal sync alike).
 TRACKING_FLUSH_RUN_LIMIT = 10
 TRACKING_FLUSH_EVENT_LIMIT = 100
+# Queued runs one provider flush replays outside the delivery pass, as when a
+# tracking connection is saved.
+TRACKING_CONNECTION_FLUSH_RUN_LIMIT = 100
 # Seconds before the final progress read of an ended attempt is retried after it
 # failed or found no evidence yet.
 FINAL_PROGRESS_RETRY_SECONDS = 60
@@ -1704,7 +1709,7 @@ class PipelineService:
         self.notifications = SlackNotifications(self.database, self.credential_store)
         self._credential_restore_lock = threading.Lock()
         self._tracking_connection_lock = self.database.operation_lock("tracking:" + (self.database.workspace_id or "system"))
-        self._tracking_connection_revisions = {"mlflow": 0, "wandb": 0}
+        self._tracking_connection_revisions = dict.fromkeys(TRACKING_PROVIDERS, 0)
         self._credentials_restored = False
         self._evaluator_runtime_readiness_lock = threading.Lock()
         self._evaluator_runtime_readiness_cache: dict[
@@ -3533,7 +3538,7 @@ class PipelineService:
             if not isinstance(provider_input, Mapping):
                 raise ValueError("each tracking provider must be an object")
             provider_name = str(provider_input.get("provider") or "").lower()
-            if provider_name not in {"mlflow", "wandb"}:
+            if provider_name not in TRACKING_PROVIDERS:
                 raise ValueError(f"unsupported tracking provider: {provider_name or '<missing>'}")
             normalized_provider = {
                 "provider": provider_name,
@@ -5624,7 +5629,7 @@ class PipelineService:
         self, provider: str, request: TrackingConnectionRequest
     ) -> dict[str, Any]:
         self._ensure_tracking_credentials_restored()
-        if provider not in {"wandb", "mlflow"}:
+        if provider not in TRACKING_PROVIDERS:
             raise ValueError(f"unsupported tracking provider: {provider}")
         if provider == "wandb":
             if any((request.tracking_uri, request.token, request.username, request.password)):
@@ -5743,7 +5748,7 @@ class PipelineService:
     def disconnect_tracking_connection(self, provider: str) -> dict[str, Any]:
         with self._tracking_connection_lock:
             self._ensure_tracking_credentials_restored()
-            if provider not in {"wandb", "mlflow"}:
+            if provider not in TRACKING_PROVIDERS:
                 raise ValueError(f"unsupported tracking provider: {provider}")
             connection = self.database.get_tracking_connection(provider) or {}
             configured_source = (connection.get("config_json") or {}).get("credential_source")
@@ -5849,7 +5854,7 @@ class PipelineService:
         """Attach a connected provider without mutating the immutable run spec."""
 
         provider = str(provider or "").lower()
-        if provider not in {"wandb", "mlflow"}:
+        if provider not in TRACKING_PROVIDERS:
             raise ValueError(f"unsupported tracking provider: {provider}")
         with self._reconcile_lock:
             run = self.database.get_run(run_id)
@@ -5981,6 +5986,19 @@ class PipelineService:
             Path(capsule_root) / str(run["id"]), replace(self._wandb_settings(provider), auto_flush=False)
         )
 
+    def deliver_gpu_tracking(self, bridge: WandBBridge, run: Mapping[str, Any]) -> RuntimeError | None:
+        """Drain the GPU samples queued on the bridge ``gpu_tracking_bridge`` returned.
+
+        A delivery error is recorded on the run's W&B binding and returned rather
+        than raised, so the caller alone decides whether it fails anything.
+        """
+        report = bridge.drain_spool(limit=TRACKING_FLUSH_EVENT_LIMIT)
+        if not report.errors:
+            return None
+        error = RuntimeError(report.errors[0])
+        self._tracking_failure("wandb", run, error)
+        return error
+
     def _native_tracking_runtime(
         self,
         spec: ExperimentSpec,
@@ -6099,7 +6117,7 @@ class PipelineService:
                     f"{name} tracking is enabled but its validated {missing} is unavailable"
                 )
 
-    def _flush_tracking_provider(self, provider: str, *, limit: int = 100, event_limit: int | None = None, run_ids: set[str] | None = None) -> dict[str, Any]:
+    def _flush_tracking_provider(self, provider: str, *, limit: int = TRACKING_CONNECTION_FLUSH_RUN_LIMIT, event_limit: int | None = None, run_ids: set[str] | None = None) -> dict[str, Any]:
         attempted = delivered = 0
         errors: list[str] = []
         bindings = [binding for binding in self.database.list_tracking_bindings_for_provider(
@@ -10916,6 +10934,17 @@ def evaluation_suites(
                 spec_document or {}, target_dataset_id, unseen_embodiment)["config_json"]
         except ValueError as error:
             target_error = str(error)
+
+    @functools.cache
+    def recorded_episode_problem() -> str | None:
+        # The recorded training episode belongs to the run, not to a suite: look it
+        # up once per request, and only when a ready suite starts from it.
+        try:
+            recorded_episode_sources(service.database, service.cluster, spec_document or {})
+        except ValueError as error:
+            return sanitize(str(error))
+        return None
+
     for original in service.database.list_evaluation_suites():
         row = original
         compatibility = None
@@ -10932,12 +10961,11 @@ def evaluation_suites(
                 compatibility["messages"].append(row["config_json"].pop("target_error"))
             resolved_manifest = compose_evaluator(spec_document or {}, evaluator_manifest, row)
             if compatibility["ready"] and row["config_json"].get("initial_state") == "single_training_episode":
-                try:
-                    recorded_episode_sources(service.database, service.cluster, spec_document or {})
-                except ValueError as error:
+                problem = recorded_episode_problem()
+                if problem is not None:
                     compatibility.update(status="unknown", label="Missing information", ready=False)
-                    compatibility["messages"].append(sanitize(str(error)))
-                    compatibility["checks"].append({"field": "recording", "status": "unknown", "message": sanitize(str(error))})
+                    compatibility["messages"].append(problem)
+                    compatibility["checks"].append({"field": "recording", "status": "unknown", "message": problem})
             if not compatibility["ready"]:
                 unavailable_suites.append({"id": row["id"], "reason": "; ".join(compatibility["messages"])})
         config = row["config_json"]
@@ -10949,7 +10977,6 @@ def evaluation_suites(
         suites.append({
             **row,
             "config_json": {key: value for key, value in config.items() if key != "target_dataset"},
-            "slug": row["id"],
             "can_delete": service.database.workspace_id in (None, LEGACY_WORKSPACE),
             "is_default": bool(compatibility and compatibility["ready"] and config.get("initial_state") == "single_training_episode"),
             "compatibility": compatibility,
@@ -10958,7 +10985,6 @@ def evaluation_suites(
             "label": row["description"] or row["name"],
             "requires_target_dataset": bool(evaluation_target_contract(spec_document or {})),
             "target_dataset_contract": evaluation_target_contract(spec_document or {}),
-            "evaluator": row["evaluator_adapter"], "version": row["suite_version"],
             "tasks": config.get("tasks", []), "task_options": config.get("task_options", []),
             "default_tasks": config.get("default_tasks", []),
             "maximum_parallelism": max((entry.maximum_parallelism or 1
@@ -10971,7 +10997,6 @@ def evaluation_suites(
             "task_catalog_provenance": config.get("task_catalog_provenance"),
             "task_catalog_sha256": config.get("task_catalog_sha256"),
             "catalog_sha256": config.get("catalog_sha256"),
-            "current": bool(row["enabled"]),
             **({"evaluator_implementation": copy.deepcopy(evaluator_identity)} if evaluator_identity is not None else {}),
         })
     return {"suites": suites, "unavailable_suites": unavailable_suites}
