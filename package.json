@@ -2,7 +2,7 @@
   "name": "skynet-ui",
   "private": true,
   "scripts": {
-    "test:ui": "npm run -s test:presets && npm run -s test:dataset-preview && npm run -s test:hands && npm run -s test:live && npm run -s test:shared && npm run -s test:workspaces && npm run -s test:slack && npm run -s test:maintenance && npm run -s test:storage",
+    "test:ui": "npm run -s test:presets && npm run -s test:dataset-preview && npm run -s test:hands && npm run -s test:live && npm run -s test:shared && npm run -s test:workspaces && npm run -s test:slack && npm run -s test:maintenance && npm run -s test:storage && npm run -s test:notes",
     "test:presets": "node tests/experiment_steps_ui.mjs && node tests/experiment_preset_ui.mjs",
     "build:viewers": "rm -f static/vendor/viewer-shared-*.js static/vendor/viewer-shared-*.js.LEGAL.txt && esbuild frontend/hands-viewer.js frontend/episode-scene.js --bundle --splitting --format=esm --minify --legal-comments=linked '--chunk-names=vendor/viewer-shared-[hash]' --outdir=static",
     "test:dataset-preview": "node tests/dataset_preview_ui.mjs && node tests/episode_models.mjs && node tests/episode_viewer_ui.mjs && node tests/episode_hand_sync_ui.mjs && node tests/scene_assets.mjs && node tests/urdf_mesh_frame.mjs",

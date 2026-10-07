@@ -159,22 +159,35 @@ def test_homepage_offers_the_configured_gateways_queues_gpus_and_defaults(monkey
     import pytest
     from pydantic import ValidationError
     from skynet_app import retargeting
-    from skynet_app.experiments import DEFAULT_EVALUATION_EPISODES, MAX_EVALUATION_EPISODES, CheckpointPolicy
+    from skynet_app.experiments import DEFAULT_EVALUATION_EPISODES, MAX_EVALUATION_EPISODES, CheckpointPolicy, SweepSpec
     from skynet_app.hands_api import Pose
+    from skynet_app.live_xr_archive import TERMINAL_STATES
+    from skynet_app.policy_exports_api import ExportRequest
     from skynet_app.tracking import TRACKING_PROVIDERS
     from skynet_app.workspaces import EmailRequest
     def attributes(element_id):
         tag = re.search(rf'<\w+\b[^>]*\bid="{element_id}"[^>]*>', page).group(0)
         return {name: html.unescape(value) for name, value in re.findall(r'([\w-]+)="([^"]*)"', tag)}
+    def export_split(**split):
+        return ExportRequest(session_id='s', adapter_id='a', adapter_version_id='v', name='n', **split)
     for element_id, attribute, accepts in (
         ('checkpoint-max-attempts', 'max', lambda n: CheckpointPolicy(max_attempts=n)),
         ('hand-pose-name', 'maxlength', lambda n: Pose(name='p' * n, revision='r', joints={})),
         ('workspace-email', 'maxlength', lambda n: EmailRequest(email='e' * n)),
+        ('preparation-validation', 'max', lambda n: export_split(validation_percent=n)),
+        ('preparation-seed', 'max', lambda n: export_split(seed=n)),
     ):
         limit = int(attributes(element_id)[attribute])
         accepts(limit)
         with pytest.raises(ValidationError):
             accepts(limit + 1)
+    split = export_split()
+    assert attributes('preparation-validation')['value'] == str(split.validation_percent)
+    assert attributes('preparation-seed')['value'] == str(split.seed)
+    assert json.loads(attributes('collection-view-live')['data-terminal-states']) == sorted(TERMINAL_STATES)
+    sweep = SweepSpec()
+    assert json.loads(attributes('sweep-definition')['data-sweep-defaults']) == {
+        name: getattr(sweep, name) for name in ('seeds', 'max_parallel', 'confirmation_threshold')}
     episodes = attributes('evaluation-episodes')
     assert (episodes['value'], episodes['data-max-episodes']) == (str(DEFAULT_EVALUATION_EPISODES), str(MAX_EVALUATION_EPISODES))
     assert attributes('live-xr-retargeter')['data-default-retargeter'] == retargeting.DEFAULT

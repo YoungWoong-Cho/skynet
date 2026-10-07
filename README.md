@@ -74,7 +74,7 @@ Run the test suite:
 ```bash
 SKYNET_TEST_POSTGRES_ADMIN="host=127.0.0.1 dbname=postgres user=your_test_user" uv run pytest
 npm ci
-npm run test:ui  # every browser suite except notes, which runs with npm run test:notes
+npm run test:ui  # every browser suite; npm run test:<area> runs one area (see package.json)
 ```
 
 The tests clone temporary databases from one migrated template per session (`tests/postgres_backend_plugin.py`) and use mocked transports where appropriate. Cluster integration tests require active SSH access and submit real Slurm jobs, so review their markers and payloads before running them.

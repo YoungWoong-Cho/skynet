@@ -12,8 +12,10 @@ from pathlib import PurePosixPath
 from .cluster_config import CLUSTER, format_slurm_duration
 from .collection import CollectionResources
 from .data_imports import HuggingFaceImportRequest
-from .experiments import DEFAULT_EVALUATION_EPISODES, MAX_EVALUATION_EPISODES, CheckpointPolicy
+from .experiments import DEFAULT_EVALUATION_EPISODES, MAX_EVALUATION_EPISODES, CheckpointPolicy, SweepSpec
 from .hands_api import Pose
+from .live_xr_archive import TERMINAL_STATES as LIVE_XR_TERMINAL_STATES
+from .policy_exports import DEFAULT_SPLIT_SEED, DEFAULT_VALIDATION_PERCENT, MAX_VALIDATION_PERCENT, SPLIT_SEED_LIMIT
 from . import retargeting
 from .tracking import TRACKING_PROVIDERS
 from .workspaces import EmailRequest
@@ -75,9 +77,17 @@ def cluster_markup() -> dict[str, str]:
         "<!-- checkpoint-warning-min-seconds -->": str(_bound(CheckpointPolicy, "save_before_timeout_seconds", "ge")),
         "<!-- checkpoint-warning-max-seconds -->": str(_bound(CheckpointPolicy, "save_before_timeout_seconds", "le")),
         "<!-- checkpoint-max-attempts-limit -->": str(_bound(CheckpointPolicy, "max_attempts", "le")),
+        # The sweep values the experiment form leaves implicit; a restored sweep with others cannot be shown.
+        "<!-- sweep-defaults -->": escape(json.dumps(
+            {name: _bound(SweepSpec, name, "default") for name in ("seeds", "max_parallel", "confirmation_threshold")})),
         "<!-- evaluation-episodes -->": str(DEFAULT_EVALUATION_EPISODES),
         "<!-- max-evaluation-episodes -->": str(MAX_EVALUATION_EPISODES),
         "<!-- pose-name-max-length -->": str(_bound(Pose, "name", "max_length")),
+        "<!-- default-validation-percent -->": str(DEFAULT_VALIDATION_PERCENT),
+        "<!-- max-validation-percent -->": str(MAX_VALIDATION_PERCENT),
+        "<!-- default-split-seed -->": str(DEFAULT_SPLIT_SEED),
+        "<!-- max-split-seed -->": str(SPLIT_SEED_LIMIT - 1),
+        "<!-- live-xr-terminal-states -->": escape(json.dumps(sorted(LIVE_XR_TERMINAL_STATES))),
         "<!-- email-max-length -->": str(_bound(EmailRequest, "email", "max_length")),
         "<!-- default-retargeter -->": escape(retargeting.DEFAULT),
         "<!-- default-retargeter-option -->": _option(

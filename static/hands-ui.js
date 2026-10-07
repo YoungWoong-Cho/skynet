@@ -413,12 +413,13 @@
     if (!metadata) return;
     clearPoseFeedback();
     updateJoint();
-    const name = el("hand-pose-name").value.trim();
-    if (!name || name.length > 80) {
-      poseError("Give the pose a name of 1–80 characters.", {
+    const nameInput = el("hand-pose-name");
+    const name = nameInput.value.trim();
+    if (!name || name.length > nameInput.maxLength) {
+      poseError(`Give the pose a name of 1–${nameInput.maxLength} characters.`, {
         nameInvalid: true,
       });
-      el("hand-pose-name").focus();
+      nameInput.focus();
       return;
     }
     const token = request,

@@ -270,6 +270,16 @@ try {
   assert.equal(step("tracking").disabled, true);
   change("sweep-definition", "");
   assert.equal(step("tracking").disabled, false);
+  // A restored sweep fits the form only while it keeps the server's implicit SweepSpec values.
+  const sweepDefaults = JSON.parse(el("sweep-definition").dataset.sweepDefaults);
+  assert.equal(w.loadedSweepDefinition({ ...sweepDefaults, axes: {} }), "");
+  for (const field of ["max_parallel", "confirmation_threshold"])
+    assert.throws(
+      () => w.loadedSweepDefinition({ ...sweepDefaults, [field]: sweepDefaults[field] + 1 }),
+      new RegExp(`Sweep ${field}=${sweepDefaults[field] + 1} cannot be represented`),
+    );
+  const seeds = [...sweepDefaults.seeds, 7];
+  assert.equal(w.loadedSweepDefinition({ seeds }), JSON.stringify({ seeds }, null, 2));
   // Restoring a preset keeps every exact dataset identity in its frozen order.
   const inspectOriginal = w.inspectRepositoryRuntime;
   w.inspectRepositoryRuntime = async () => w.installTestRuntime();

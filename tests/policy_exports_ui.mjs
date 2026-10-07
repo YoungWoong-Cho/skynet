@@ -129,7 +129,11 @@ try{
   await w.openPreparedDataset('hpt');assert.equal(el('prepared-dataset-title').textContent,'Shadow HPT','Published data details are independent of history availability');
   await w.openFileResource('file-group');assert.equal(inspectedResource,'file-group','Files reuse the existing inspection controller');
   assert.equal(el('prepared-dataset-dialog').open,false);
+  el('preparation-validation').value='5';el('preparation-seed').value='17';
   w.api=api;await w.openPolicyExport('one');assert.equal(el('preparation-validation').disabled,true);assert.equal(el('create-policy-export').disabled,false);
+  for(const id of ['preparation-validation','preparation-seed']){
+    assert.notEqual(el(id).defaultValue,'');assert.equal(el(id).value,el(id).defaultValue,'Reopening restores the server split defaults');
+  }
   let resolveOld;
   w.api=(path,request={})=>path.endsWith('/options/one')?new Promise(resolve=>{resolveOld=resolve;}):api(path,request);
   const old=w.openPolicyExport('one');await flush();await w.openPolicyExport('recording');resolveOld({session:sessions.one,adapters});await old;

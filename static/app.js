@@ -2583,6 +2583,8 @@ if (!Number.isInteger(CPUS_PER_GPU) || CPUS_PER_GPU < 1)
 const TRACKING_PROVIDER_LABELS = JSON.parse(
   document.querySelector("#settings-view-connections").dataset.trackingProviders,
 );
+// Sweep values the experiment form leaves implicit, rendered by the server from its sweep model.
+const SWEEP_DEFAULTS = JSON.parse(elements.sweepDefinition.dataset.sweepDefaults);
 
 function updateCpuResources() {
   for (const [control, count] of [
@@ -8754,23 +8756,16 @@ function loadedSweepDefinition(sweep) {
       "An explicit sweep variant list cannot be represented by this configuration form.",
     );
   }
-  if (
-    sweep.max_parallel !== null &&
-    sweep.max_parallel !== undefined &&
-    Number(sweep.max_parallel) !== 2
-  ) {
-    throw new Error(
-      `Sweep max_parallel=${sweep.max_parallel} cannot be represented by this configuration form.`,
-    );
+  for (const field of ["max_parallel", "confirmation_threshold"]) {
+    if (
+      sweep[field] !== null &&
+      sweep[field] !== undefined &&
+      Number(sweep[field]) !== SWEEP_DEFAULTS[field]
+    )
+      throw new Error(
+        `Sweep ${field}=${sweep[field]} cannot be represented by this configuration form.`,
+      );
   }
-  if (
-    sweep.confirmation_threshold !== null &&
-    sweep.confirmation_threshold !== undefined &&
-    Number(sweep.confirmation_threshold) !== 20
-  )
-    throw new Error(
-      `Sweep confirmation_threshold=${sweep.confirmation_threshold} cannot be represented by this configuration form.`,
-    );
   const axes =
     sweep.axes && typeof sweep.axes === "object" && !Array.isArray(sweep.axes)
       ? sweep.axes
@@ -8781,8 +8776,10 @@ function loadedSweepDefinition(sweep) {
   });
   const definition = { ...axes };
   const seeds = Array.isArray(sweep.seeds) ? sweep.seeds : [];
-  if (seeds.length && !(seeds.length === 1 && Number(seeds[0]) === 42))
-    definition.seeds = seeds;
+  const defaultSeeds =
+    seeds.length === SWEEP_DEFAULTS.seeds.length &&
+    seeds.every((seed, index) => Number(seed) === SWEEP_DEFAULTS.seeds[index]);
+  if (seeds.length && !defaultSeeds) definition.seeds = seeds;
   return Object.keys(definition).length
     ? JSON.stringify(definition, null, 2)
     : "";
@@ -9126,7 +9123,8 @@ async function hydrateExperimentConfiguration(spec, request) {
   );
   const unsupportedProviders = enabledProviders.filter(
     (provider) =>
-      !["wandb", "mlflow"].includes(
+      !Object.hasOwn(
+        TRACKING_PROVIDER_LABELS,
         String(provider?.provider || "").toLowerCase(),
       ),
   );
@@ -19671,13 +19669,13 @@ function renderTrackingConnections(payload) {
   const byProvider = new Map(
     rows.map((row) => [String(row.provider || "").toLowerCase(), row]),
   );
-  ["wandb", "mlflow"].forEach((provider) =>
+  Object.keys(TRACKING_PROVIDER_LABELS).forEach((provider) =>
     renderTrackingConnection(provider, byProvider.get(provider)),
   );
 }
 
 function renderTrackingConnectionsUnavailable(message) {
-  ["wandb", "mlflow"].forEach((provider) => {
+  Object.keys(TRACKING_PROVIDER_LABELS).forEach((provider) => {
     const ui = trackingConnectionElements(provider);
     trackingConnections.set(provider, {
       ...(trackingConnections.get(provider) || {}),
@@ -20784,7 +20782,7 @@ elements.disconnectWandb.addEventListener("click", () =>
 elements.disconnectMlflow.addEventListener("click", () =>
   submitTrackingConnection("mlflow", "disconnect"),
 );
-["wandb", "mlflow"].forEach((provider) => {
+Object.keys(TRACKING_PROVIDER_LABELS).forEach((provider) => {
   trackingConnectionElements(provider).form.addEventListener(
     "input",
     (event) => {

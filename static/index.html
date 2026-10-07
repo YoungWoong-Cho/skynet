@@ -1401,6 +1401,7 @@ trainer.deterministic=true"
                         <textarea
                           id="sweep-definition"
                           rows="4"
+                          data-sweep-defaults="<!-- sweep-defaults -->"
                           placeholder='JSON, e.g. {"model.encoder":["resnet50","dinov2"],"seed":[1,2,3]}'
                         ></textarea>
                         <small>An empty matrix creates one variant.</small>
@@ -2634,6 +2635,7 @@ trainer.deterministic=true"
               <div
                 id="collection-view-live"
                 data-collection-view="live"
+                data-terminal-states="<!-- live-xr-terminal-states -->"
                 role="tabpanel"
                 aria-labelledby="data-tab-collect"
                 hidden=""
@@ -4930,8 +4932,8 @@ Select a session.</pre
                     id="preparation-validation"
                     type="number"
                     min="0"
-                    max="50"
-                    value="20"
+                    max="<!-- max-validation-percent -->"
+                    value="<!-- default-validation-percent -->"
                     required=""
                   />
                 </div>
@@ -4941,8 +4943,8 @@ Select a session.</pre
                     id="preparation-seed"
                     type="number"
                     min="0"
-                    max="2147483647"
-                    value="42"
+                    max="<!-- max-split-seed -->"
+                    value="<!-- default-split-seed -->"
                     required=""
                   />
                 </div>

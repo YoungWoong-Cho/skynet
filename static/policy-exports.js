@@ -260,8 +260,9 @@
     el("policy-export-name").value = "";
     el("policy-export-name").readOnly = false;
     el("policy-export-name-help").textContent = "Name this dataset.";
-    el("preparation-validation").value = 20;
-    el("preparation-seed").value = 42;
+    // Each split input starts from the server's default, rendered as its value attribute.
+    for (const id of ["preparation-validation", "preparation-seed"])
+      el(id).value = el(id).defaultValue;
     el("create-policy-export").disabled = true;
     error("policy-export-compatibility", "Loading recordings…");
     SkynetDialog.open(dialog);

@@ -97,6 +97,11 @@ try {
   el('hand-pose-name').value='   ';await submit();
   assert.match(el('hand-pose-error').textContent,/name/);assert.equal(w.document.activeElement,el('hand-pose-name'));
   assert.equal(saved.length,0);
+  // The length limit is the input's server-rendered maxlength, in both the check and the message.
+  const nameLimit=el('hand-pose-name').maxLength;assert.ok(nameLimit>0);
+  el('hand-pose-name').value='g'.repeat(nameLimit+1);await submit();
+  assert.equal(el('hand-pose-error').textContent,`Give the pose a name of 1–${nameLimit} characters.`);
+  assert.equal(saved.length,0);
   el('hand-pose-name').value=' Grip ';await submit();
   assert.equal(saved.length,1);assert.equal(saved[0].name,'Grip');
   assert.equal(el('hand-pose-error').hidden,true);assert.match(el('hand-pose-message').textContent,/Saved/);

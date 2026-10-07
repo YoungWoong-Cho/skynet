@@ -217,7 +217,7 @@ test('Collection refresh loads its adapter registry and sessions without startin
   assert.equal(calls.length, 4);
 });
 
-test('every browser suite runs from one npm area script, and test:ui runs every area but notes', () => {
+test('every browser suite runs from one npm area script, and test:ui runs every area', () => {
   const { readdirSync } = require('node:fs');
   const { join } = require('node:path');
   const scripts = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf8')).scripts;
@@ -227,6 +227,5 @@ test('every browser suite runs from one npm area script, and test:ui runs every 
     for (const [, file] of scripts[area].matchAll(/node tests\/([\w.]+)/g)) runs.set(file, [...(runs.get(file) || []), area]);
   const suites = readdirSync(__dirname).filter((file) => /\.(mjs|cjs)$/.test(file) && !['ui_harness.mjs', 'index_page.cjs'].includes(file));
   assert.deepEqual(suites.filter((file) => runs.get(file)?.length !== 1), [], 'each suite runs from exactly one area script');
-  assert.deepEqual([...scripts['test:ui'].matchAll(/npm run -s (test:[\w-]+)/g)].map(([, area]) => area).sort(),
-    areas.filter((area) => area !== 'test:notes').sort());
+  assert.deepEqual([...scripts['test:ui'].matchAll(/npm run -s (test:[\w-]+)/g)].map(([, area]) => area).sort(), areas.sort());
 });

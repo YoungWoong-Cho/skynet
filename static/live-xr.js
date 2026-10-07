@@ -1,6 +1,7 @@
 (() => {
   const el = (id) => document.getElementById(id);
-  const terminal = new Set(["CAPTURED", "STOPPED", "TIMED_OUT", "FAILED"]);
+  // Live-session terminal states, rendered by the server from its archive lifecycle.
+  const terminal = new Set(JSON.parse(el("collection-view-live").dataset.terminalStates));
   const sessionLabels = {
     PREPARING: "Checking server…",
     SUBMITTING: "Starting session…",
