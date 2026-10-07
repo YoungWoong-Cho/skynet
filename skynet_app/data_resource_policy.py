@@ -26,6 +26,17 @@ def validate_resource_type(category, kind):
         raise ValueError(f"Unsupported type {kind!r} for category {category!r}")
 
 
+def validate_resource_edit(category, fields):
+    """A dataset group row keeps its own label, description and metadata.
+
+    Archive state belongs to each published dataset (migration 016), so the group
+    row refuses it; its label and description seed presentations of versions
+    registered without their own display_name.
+    """
+    if category == "dataset" and fields.get("archived") is not None:
+        raise ValueError("Select an individual dataset to archive")
+
+
 def validate_resource_metadata(category, metadata):
     metadata = metadata or {}
     sources = metadata.get("sources")

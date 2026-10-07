@@ -69,7 +69,9 @@ from .cluster_runtime import (
     SubmissionOutcomeUnknown,
     approved_operator_environment,
 )
-from .data_resource_policy import RESOURCE_TYPES, validate_resource_type, validate_resource_metadata
+from .data_resource_policy import (
+    RESOURCE_TYPES, validate_resource_edit, validate_resource_metadata, validate_resource_type,
+)
 from .data_import_states import (
     DATA_IMPORT_IN_FLIGHT_STATES,
     DATA_IMPORT_SCHEDULED_STATES,
@@ -10443,14 +10445,9 @@ def edit_data_resource(
         resource = service.database.get_data_resource(resource_id)
         if resource is None:
             raise KeyError("Data resource not found")
-        if resource["category"] == "dataset":
-            raise ValueError("Select an individual dataset to edit or archive")
-        return {
-            "resource": service.database.update_data_resource(
-                resource_id,
-                **request.model_dump(mode="python", exclude_unset=True),
-            )
-        }
+        fields = request.model_dump(mode="python", exclude_unset=True)
+        validate_resource_edit(resource["category"], fields)
+        return {"resource": service.database.update_data_resource(resource_id, **fields)}
     except Exception as error:
         raise _http_error(error) from error
 
@@ -10461,11 +10458,9 @@ def archive_data_resource(resource_id: str) -> dict[str, Any]:
         resource = service.database.get_data_resource(resource_id)
         if resource is None:
             raise KeyError("Data resource not found")
-        if resource["category"] == "dataset":
-            raise ValueError("Select an individual dataset to edit or archive")
-        return {
-            "resource": service.database.update_data_resource(resource_id, archived=True)
-        }
+        fields = {"archived": True}
+        validate_resource_edit(resource["category"], fields)
+        return {"resource": service.database.update_data_resource(resource_id, **fields)}
     except Exception as error:
         raise _http_error(error) from error
 

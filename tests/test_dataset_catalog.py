@@ -126,6 +126,17 @@ def test_dataset_api_accepts_only_presentation_and_filters_files(tmp_path, monke
         assert client.get('/api/data/datasets/'+parent['id']).status_code==404
         assert client.patch('/api/data/resources/'+parent['id'],json={'archived':True}).status_code==422
         assert client.delete('/api/data/resources/'+parent['id']).status_code==422
+        versions_before=db.get_data_resource(parent['id'])['versions']
+        response=client.patch('/api/data/resources/'+parent['id'],json={'display_name':'Shadow · Cube (fixed)','description':'Group description'})
+        assert response.status_code==200, response.text
+        assert response.json()['resource']['display_name']=='Shadow · Cube (fixed)'
+        assert response.json()['resource']['description']=='Group description'
+        assert response.json()['resource']['archived_at'] is None
+        assert db.get_data_resource(parent['id'])['versions']==versions_before
+        assert db.get_dataset(first['id'])['display_name']=='Shadow · Cube'
+        assert db.get_dataset(first['id'])['description']=='Original description'
+        assert client.patch('/api/data/resources/'+parent['id'],json={'metadata':{'session_id':'a','curated':True}}).status_code==200
+        assert db.get_data_resource(parent['id'])['metadata']=={'session_id':'a','curated':True}
         response=client.patch('/api/data/datasets/'+first['id'],json={'display_name':'Renamed','archived':True})
         assert response.status_code==200 and response.json()['dataset']['archived_at']
         assert response.json()['dataset']['created_at']==first['created_at']
@@ -139,3 +150,8 @@ def test_dataset_api_accepts_only_presentation_and_filters_files(tmp_path, monke
         assert client.patch('/api/data/datasets/absent',json={'archived':True}).status_code==404
         assert [row['id'] for row in client.get('/api/data/resources?category=file').json()['resources']]==[file['id']]
         assert 'dataset' in client.get('/api/data/resources?category=file').json()['resource_types']
+        response=client.post('/api/data/resources/'+parent['id']+'/versions',json={'revision':'three',
+            'format':'skynet.recording-dataset/v1','path':'/datasets/three','manifest_sha256':'3'*64})
+        assert response.status_code==201, response.text
+        third=db.get_dataset(response.json()['version']['id'])
+        assert (third['display_name'],third['description'])==('Shadow · Cube (fixed)','Group description')
