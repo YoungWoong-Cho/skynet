@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections import OrderedDict
 from concurrent.futures import Future
-from threading import RLock
 
+from .byte_cache import ByteBoundedCache
 from .metadata_objects import MetadataObjects
 from .registry_reference_match import registry_reference_match
 
@@ -28,50 +27,15 @@ PROJECTED_PATHS = {
 }
 MARKER = "$skynet_object_v1"
 _CACHE_BYTES = 128 * 1024 * 1024
+# Each projection cache's bound, and the bookkeeping charged per entry beyond its key and value.
+_PROJECTION_CACHE_BYTES = 32 * 1024 * 1024
+_PROJECTION_ENTRY_OVERHEAD_BYTES = 128
 
 
-class BodyCache:
-    """Byte-bounded stored bodies, evicting the least recently inserted first.
-
-    The running size changes on insert and eviction, so an insert never re-sums
-    every cached body.
-    """
-
-    def __init__(self, max_bytes):
-        self.max_bytes = max_bytes
-        self.entries = OrderedDict()
-        self.size_bytes = 0
-        self.lock = RLock()
-
-    def __contains__(self, key):
-        with self.lock:
-            return key in self.entries
-
-    def get(self, key):
-        with self.lock:
-            return self.entries.get(key)
-
-    def put(self, key, content):
-        with self.lock:
-            previous = self.entries.pop(key, None)
-            if previous is not None:
-                self.size_bytes -= len(previous)
-            self.entries[key] = content
-            self.size_bytes += len(content)
-            while self.size_bytes > self.max_bytes:
-                _, removed = self.entries.popitem(last=False)
-                self.size_bytes -= len(removed)
-
-    def clear(self):
-        with self.lock:
-            self.entries.clear()
-            self.size_bytes = 0
+_CACHE = ByteBoundedCache(_CACHE_BYTES, oversize="evict_all", refresh_on_read=False)
 
 
-_CACHE = BodyCache(_CACHE_BYTES)
-
-
-class ImmutableProjectionCache:
+class ImmutableProjectionCache(ByteBoundedCache):
     """Byte-bounded LRU with shared in-flight reads of immutable content.
 
     Count limits made two large list views evict one another on every refresh.
@@ -79,25 +43,17 @@ class ImmutableProjectionCache:
     No cache lock is held while the remote loader runs.
     """
 
-    def __init__(self, max_bytes=32 * 1024 * 1024):
-        self.max_bytes = max_bytes
-        self.entries = OrderedDict()
+    def __init__(self, max_bytes=_PROJECTION_CACHE_BYTES):
+        super().__init__(max_bytes, oversize="skip", refresh_on_read=True)
         self.pending = {}
-        self.size_bytes = 0
-        self.lock = RLock()
-
-    def clear(self):
-        with self.lock:
-            self.entries.clear()
-            self.size_bytes = 0
 
     def load(self, references, loader):
         values, owned = {}, {}
         with self.lock:
             for key, ref in references.items():
-                if key in self.entries:
-                    values[key] = self.entries[key][0]
-                    self.entries.move_to_end(key)
+                cached = self.get(key)
+                if cached is not None:
+                    values[key] = cached
                 else:
                     if key not in self.pending:
                         self.pending[key] = Future()
@@ -112,13 +68,8 @@ class ImmutableProjectionCache:
                            for value in loaded]
                 with self.lock:
                     for key, content in zip(owned, encoded):
-                        size = len(content) + len(repr(key).encode("utf-8")) + 128
-                        if size <= self.max_bytes:
-                            self.entries[key] = (content, size)
-                            self.size_bytes += size
-                            while self.size_bytes > self.max_bytes:
-                                _, (_, removed) = self.entries.popitem(last=False)
-                                self.size_bytes -= removed
+                        self.put(key, content, len(content) + len(repr(key).encode("utf-8"))
+                                 + _PROJECTION_ENTRY_OVERHEAD_BYTES)
                         self.pending.pop(key).set_result(content)
             except BaseException as error:
                 with self.lock:

@@ -20,6 +20,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from .credential_store import CredentialStore, CredentialStoreError
 from .database import Database
 from .tracking import backoff_seconds
+from .workflow_states import sql_list
 
 # Notification categories in lifecycle order: (category, message verb, connect-message noun).
 EVENT_TABLE = (
@@ -53,6 +54,9 @@ CREDENTIAL_RETRY_SECONDS = 60
 LEASE_SECONDS = 30
 BACKOFF_BASE_SECONDS = 15
 BACKOFF_CAP_SECONDS = 900
+# Outbox statuses still awaiting delivery; a sending row whose lease lapses is claimed again.
+QUEUED_STATUSES = frozenset({"pending", "sending"})
+_QUEUED = sql_list(QUEUED_STATUSES)
 
 
 def default_app_url() -> str:
@@ -141,6 +145,22 @@ def post_to_slack(webhook: str, payload: dict) -> None:
         ) from None
 
 
+def due_owners(connection: PostgresConnection, timestamp: float) -> list[str]:
+    """Workspaces with Slack delivery enabled and a queued message due by ``timestamp``.
+
+    They are the only ones a delivery pass can act on, so idle workspaces cost
+    the dispatcher no per-owner transaction.
+    """
+    return [row[0] for row in connection.execute(
+        f"""SELECT s.owner_id FROM slack_notifications s
+        WHERE s.enabled=1 AND EXISTS (
+            SELECT 1 FROM notification_outbox n
+            WHERE n.owner_id=s.owner_id AND n.status IN ({_QUEUED}) AND n.due_at<=?)
+        ORDER BY s.owner_id""",
+        (timestamp,),
+    )]
+
+
 class SlackNotifications:
     def __init__(
         self,
@@ -190,7 +210,7 @@ class SlackNotifications:
             "app_url": config["app_url"] if config else default_app_url(),
             "last_error": store_error or (config["last_error"] if config else None),
             "last_sent_at": config["last_sent_at"] if config else None,
-            "pending_count": counts.get("pending", 0) + counts.get("sending", 0),
+            "pending_count": sum(counts.get(status, 0) for status in QUEUED_STATUSES),
             "failed_count": counts.get("failed", 0),
         }
 
@@ -231,7 +251,7 @@ class SlackNotifications:
                         and old.credentials.get("webhook_url") != webhook
                     ):
                         connection.execute(
-                            "UPDATE notification_outbox SET status='skipped',lease_token=NULL WHERE owner_id=? AND status IN ('pending','sending')",
+                            f"UPDATE notification_outbox SET status='skipped',lease_token=NULL WHERE owner_id=? AND status IN ({_QUEUED})",
                             (self.owner,),
                         )
                     connection.execute(
@@ -249,7 +269,7 @@ class SlackNotifications:
                     if events:
                         placeholders = ",".join("?" for _ in events)
                         connection.execute(
-                            f"UPDATE notification_outbox SET status='skipped',lease_token=NULL WHERE owner_id=? AND status IN ('pending','sending') AND category NOT IN ({placeholders})",
+                            f"UPDATE notification_outbox SET status='skipped',lease_token=NULL WHERE owner_id=? AND status IN ({_QUEUED}) AND category NOT IN ({placeholders})",
                             (self.owner, *events),
                         )
             except DATABASE_ERRORS:
@@ -363,10 +383,10 @@ class SlackNotifications:
                 if not config or not config["enabled"]:
                     return False
                 row = connection.execute(
-                    f"""SELECT n.* FROM notification_outbox n WHERE n.owner_id=? AND n.status IN ('pending','sending')
+                    f"""SELECT n.* FROM notification_outbox n WHERE n.owner_id=? AND n.status IN ({_QUEUED})
                     AND NOT EXISTS (SELECT 1 FROM notification_outbox earlier
                         WHERE earlier.owner_id=n.owner_id AND earlier.stage_id=n.stage_id
-                            AND earlier.attempt_key=n.attempt_key AND earlier.status IN ('pending','sending')
+                            AND earlier.attempt_key=n.attempt_key AND earlier.status IN ({_QUEUED})
                             AND {_RANK_CASE.format(column='earlier.category')}
                               < {_RANK_CASE.format(column='n.category')})
                     ORDER BY n.id LIMIT 1""",

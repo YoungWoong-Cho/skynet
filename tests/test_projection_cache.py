@@ -1,10 +1,42 @@
-"""Large histories stay cached; concurrent browsers share immutable reads."""
+"""Byte-bounded caches: large histories stay cached; concurrent browsers share immutable reads."""
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 
 import pytest
 
+from skynet_app.byte_cache import ByteBoundedCache
 from skynet_app.payload_store import ImmutableProjectionCache
+
+
+def test_byte_bounded_cache_keeps_its_running_size_through_replacement_and_eviction():
+    cache = ByteBoundedCache(10, oversize="evict_all", refresh_on_read=False)
+    cache.put("a", b"1234")
+    cache.put("b", b"5678")
+    cache.put("a", b"1234")
+    assert list(cache.entries) == ["b", "a"] and cache.size_bytes == 8
+    cache.put("c", b"90")
+    assert "b" in cache and cache.size_bytes == 10, "A full cache at its bound evicts nothing"
+    cache.put("d", b"x")
+    assert list(cache.entries) == ["a", "c", "d"] and cache.size_bytes == 7
+    assert cache.get("a") == b"1234" and list(cache.entries)[0] == "a", "Reads do not reorder insertion order"
+    cache.put("e", b"y" * 11)
+    assert list(cache.entries) == [] and cache.size_bytes == 0, "evict_all: an oversized entry evicts everything, itself last"
+    cache.put("f", b"zz")
+    cache.clear()
+    assert cache.get("f") is None and cache.size_bytes == 0
+
+
+def test_byte_bounded_cache_refreshes_reads_and_skips_oversized_entries():
+    cache = ByteBoundedCache(10, oversize="skip", refresh_on_read=True)
+    cache.put("a", "first", 4)
+    cache.put("b", "second", 4)
+    assert cache.get("a") == "first" and list(cache.entries) == ["b", "a"], "A hit becomes the newest entry"
+    cache.put("c", "third", 4)
+    assert list(cache.entries) == ["a", "c"] and cache.size_bytes == 8, "The least recently read entry goes first"
+    cache.put("a", "replaced", 11)
+    assert list(cache.entries) == ["c"] and cache.size_bytes == 4, "skip: an oversized entry is dropped with its old value"
+    with pytest.raises(ValueError, match="oversize"):
+        ByteBoundedCache(10, oversize="keep", refresh_on_read=True)
 
 
 def test_large_history_and_planning_do_not_evict_each_other():

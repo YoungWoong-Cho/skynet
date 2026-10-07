@@ -11,7 +11,7 @@ from test_postgres import pg as pg
 from skynet_app.database import Database
 from skynet_app.db_backend import INTEGRITY_ERRORS
 from skynet_app.metadata_objects import _REMOTE, MetadataObjects
-from skynet_app.payload_store import _CACHE, BodyCache, PayloadStore
+from skynet_app.payload_store import _CACHE, PayloadStore
 from skynet_app.tracking_journal import TrackingJournal
 
 from factories import make_run_chain
@@ -260,24 +260,6 @@ def test_new_stage_writes_external_body_and_missing_or_changed_object_fails(obje
     assert "resolved_config_json" not in lifecycle[0]
     with pytest.raises((ValueError, OSError), match="checksum"):
         db.list_stages(run["id"])
-
-
-def test_body_cache_keeps_its_running_size_through_replacement_and_eviction():
-    cache = BodyCache(10)
-    cache.put("a", b"1234")
-    cache.put("b", b"5678")
-    cache.put("a", b"1234")
-    assert list(cache.entries) == ["b", "a"] and cache.size_bytes == 8
-    cache.put("c", b"90")
-    assert "b" in cache and cache.size_bytes == 10, "A full cache at its bound evicts nothing"
-    cache.put("d", b"x")
-    assert list(cache.entries) == ["a", "c", "d"] and cache.size_bytes == 7
-    assert cache.get("a") == b"1234" and list(cache.entries)[0] == "a", "Reads do not reorder eviction"
-    cache.put("e", b"y" * 11)
-    assert list(cache.entries) == [] and cache.size_bytes == 0, "An oversized body evicts everything, itself last"
-    cache.put("f", b"zz")
-    cache.clear()
-    assert cache.get("f") is None and cache.size_bytes == 0
 
 
 def test_binary_body_round_trips_and_keeps_its_row_reference(object_db):

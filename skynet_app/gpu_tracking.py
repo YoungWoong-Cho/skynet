@@ -15,11 +15,12 @@ import time
 from .cluster_runtime import SLURM_BIN
 from .experiments import ExperimentSpec
 from .tracking import sanitize
+from .tracking_journal import GPU_STATISTICS_FILE
 
 _LOCK = threading.Lock()
 _LAST_POLLS = {}
 _SOURCE = Path(__file__).with_name("gpu_metrics.py").read_text()
-STATE_FILENAME = "gpu-statistics.json"
+STATE_FILENAME = GPU_STATISTICS_FILE
 ERROR_FILENAME = "gpu-statistics-error.txt"
 
 

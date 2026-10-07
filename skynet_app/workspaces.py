@@ -19,6 +19,7 @@ from starlette.datastructures import MutableHeaders
 
 from .availability import DATABASE_CONNECTION_ERRORS, outage, unavailable_response
 from .database import Database
+from .slack_notifications import due_owners
 from .workspace_schema import LEGACY_WORKSPACE, normalize_email
 
 
@@ -34,13 +35,6 @@ BACKGROUND_POLL_INTERVAL_SECONDS = 15
 NOTIFICATION_POLL_INTERVAL_SECONDS = 2
 # Seconds to wait for each worker thread on stop before reporting it still stopping.
 WORKER_STOP_TIMEOUT_SECONDS = 5
-# Workspaces with Slack delivery enabled and a queued message already due: the only
-# ones a delivery pass can act on, so idle workspaces cost no per-owner transaction.
-DUE_NOTIFICATION_OWNERS = """SELECT s.owner_id FROM slack_notifications s
-    WHERE s.enabled=1 AND EXISTS (
-        SELECT 1 FROM notification_outbox n
-        WHERE n.owner_id=s.owner_id AND n.status IN ('pending','sending') AND n.due_at<=?)
-    ORDER BY s.owner_id"""
 RECORD_PARAMETERS = {
     "project_id": "projects", "experiment_id": "experiments",
     "experiment_revision_id": "experiment_revisions", "variant_id": "variants",
@@ -152,7 +146,7 @@ class WorkspaceServices:
         """One delivery pass: one claim for each workspace whose Slack queue has a message due."""
         try:
             with self.system.database.connection() as connection:
-                owners = [row[0] for row in connection.execute(DUE_NOTIFICATION_OWNERS, (time.time(),))]
+                owners = due_owners(connection, time.time())
         except Exception as error:
             logging.getLogger(__name__).error("Slack queue read failed (%s)", type(error).__name__)
             return

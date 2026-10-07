@@ -12,6 +12,11 @@ CHUNKS = "$skynet_chunks_v1"
 CHUNK_BYTES = 64 * 1024
 # Stored as one object so its path can be handed to a job; every other journal is chunked.
 SINGLE_OBJECT_FILE = "tracking-artifact-links.json"
+MLFLOW_STATE_FILE = "mlflow-state.json"
+MLFLOW_SPOOL_FILE = "mlflow-spool.jsonl"
+WANDB_STATE_FILE = "wandb-state.json"
+WANDB_SPOOL_FILE = "wandb-spool.jsonl"
+GPU_STATISTICS_FILE = "gpu-statistics.json"
 
 
 def journal_chunks(name: str, text: str) -> list[str]:
@@ -26,11 +31,11 @@ def journal_chunks(name: str, text: str) -> list[str]:
 
 JOURNAL_FILES = frozenset(
     {
-        "mlflow-state.json",
-        "mlflow-spool.jsonl",
-        "wandb-state.json",
-        "wandb-spool.jsonl",
-        "gpu-statistics.json",
+        MLFLOW_STATE_FILE,
+        MLFLOW_SPOOL_FILE,
+        WANDB_STATE_FILE,
+        WANDB_SPOOL_FILE,
+        GPU_STATISTICS_FILE,
         SINGLE_OBJECT_FILE,
     }
 )

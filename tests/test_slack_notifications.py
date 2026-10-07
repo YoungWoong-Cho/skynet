@@ -489,17 +489,24 @@ def test_delivery_pass_claims_only_workspaces_with_a_due_message(setup):
     from skynet_app.workspaces import WorkspaceServices
 
     system, _, create = setup
-    owners = {name: create(f"{name}@example.com") for name in ("due", "idle", "later", "disabled")}
+    names = ("due", "leased", "idle", "later", "disabled", "failed")
+    owners = {name: create(f"{name}@example.com") for name in names}
     for _, slack, _ in owners.values():
         slack.configure(webhook_url=WEBHOOK)
-    for name in ("due", "later", "disabled"):
+    for name in ("due", "leased", "later", "disabled", "failed"):
         database = owners[name][0]
         _, stage, attempt = graph(database)
         transition(database, stage, attempt, "SUBMITTED", slurm_job_id="1")
-    later, disabled = owners["later"][0], owners["disabled"][0]
-    with later.transaction() as connection:
-        connection.execute("UPDATE notification_outbox SET due_at=? WHERE owner_id=?",
-                           (time.time() + 3600, later.workspace_id))
+    leased, later, disabled, failed = (owners[name][0] for name in ("leased", "later", "disabled", "failed"))
+    for database, assignment, values in (
+        (later, "due_at=?", (time.time() + 3600,)),
+        # A sending row whose lease has lapsed is queued again.
+        (leased, "status='sending',due_at=?", (time.time() - 1,)),
+        (failed, "status='failed'", ()),
+    ):
+        with database.transaction() as connection:
+            connection.execute(f"UPDATE notification_outbox SET {assignment} WHERE owner_id=?",
+                               (*values, database.workspace_id))
     with disabled.transaction() as connection:
         connection.execute("UPDATE slack_notifications SET enabled=0 WHERE owner_id=?", (disabled.workspace_id,))
     assert all(queued(database)[0]["status"] == "pending" for database in (later, disabled))
@@ -508,5 +515,5 @@ def test_delivery_pass_claims_only_workspaces_with_a_due_message(setup):
     services.for_workspace = lambda owner: SimpleNamespace(
         notifications=SimpleNamespace(deliver_one=lambda: claimed.append(owner)))
     services._deliver_due_notifications()
-    # Idle, not-yet-due and disabled workspaces are not visited at all.
-    assert claimed == [owners["due"][0].workspace_id]
+    # Idle, not-yet-due, disabled and finished workspaces are not visited at all.
+    assert sorted(claimed) == sorted(owners[name][0].workspace_id for name in ("due", "leased"))

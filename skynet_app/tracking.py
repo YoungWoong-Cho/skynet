@@ -14,7 +14,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from collections import ChainMap, OrderedDict
+from collections import ChainMap
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -22,7 +22,10 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 from . import __version__
-from .tracking_journal import SINGLE_OBJECT_FILE
+from .byte_cache import ByteBoundedCache
+from .tracking_journal import (
+    MLFLOW_SPOOL_FILE, MLFLOW_STATE_FILE, SINGLE_OBJECT_FILE, WANDB_SPOOL_FILE, WANDB_STATE_FILE,
+)
 
 try:
     import fcntl
@@ -348,38 +351,8 @@ class _SpoolSnapshot:
         return _SpoolSnapshot([*self.events, *events], dirty, sequence, by_key)
 
 
-class _SpoolCache:
-    """Parsed spools keyed by content digest; bridges are rebuilt on every call."""
-
-    def __init__(self, budget_bytes: int) -> None:
-        self._budget = budget_bytes
-        self._lock = threading.Lock()
-        self._entries: OrderedDict[tuple[str, str], tuple[_SpoolSnapshot, int]] = OrderedDict()
-        self._size = 0
-
-    def get(self, key: tuple[str, str]) -> _SpoolSnapshot | None:
-        with self._lock:
-            entry = self._entries.get(key)
-            if entry is None:
-                return None
-            self._entries.move_to_end(key)
-            return entry[0]
-
-    def put(self, key: tuple[str, str], snapshot: _SpoolSnapshot, size: int) -> None:
-        with self._lock:
-            previous = self._entries.pop(key, None)
-            if previous is not None:
-                self._size -= previous[1]
-            if size > self._budget:
-                return
-            self._entries[key] = (snapshot, size)
-            self._size += size
-            while self._size > self._budget:
-                _, (_, evicted) = self._entries.popitem(last=False)
-                self._size -= evicted
-
-
-_SPOOL_CACHE = _SpoolCache(SPOOL_CACHE_BYTES)
+# Parsed spools keyed by content digest; bridges are rebuilt on every call.
+_SPOOL_CACHE = ByteBoundedCache(SPOOL_CACHE_BYTES, oversize="skip", refresh_on_read=True)
 
 
 class _SpoolBridge:
@@ -678,8 +651,8 @@ class _SpoolBridge:
 class MLflowBridge(_SpoolBridge):
     """Offline-first, dependency-free MLflow REST bridge for one run capsule."""
 
-    SPOOL_FILENAME = "mlflow-spool.jsonl"
-    STATE_FILENAME = "mlflow-state.json"
+    SPOOL_FILENAME = MLFLOW_SPOOL_FILE
+    STATE_FILENAME = MLFLOW_STATE_FILE
     LOCK_FILENAME = ".mlflow-spool.lock"
     STATE_COLLECTIONS = ("experiments", "runs")
     SPOOL_LABEL = "tracking"
@@ -1382,8 +1355,8 @@ def mlflow_run_url(tracking_uri: str, experiment_id: str, run_id: str) -> str:
 class WandBBridge(_SpoolBridge):
     """Offline-first W&B GraphQL bridge with stable Skynet run identities."""
 
-    SPOOL_FILENAME = "wandb-spool.jsonl"
-    STATE_FILENAME = "wandb-state.json"
+    SPOOL_FILENAME = WANDB_SPOOL_FILE
+    STATE_FILENAME = WANDB_STATE_FILE
     LOCK_FILENAME = ".wandb-spool.lock"
     STATE_COLLECTIONS = ("projects", "runs")
     SPOOL_LABEL = "W&B"
