@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse, FileResponse, Response
@@ -12,16 +13,40 @@ from .live_xr_video import LiveVideoService
 from .live_xr_archive import LiveArchiveService
 from .remote_artifacts import RemoteArtifact
 from .episode_previews import EpisodePreviews
+from .lazy_service import LazyService, resolve
 
 router = APIRouter(prefix="/api/collection/live", tags=["collection"])
-service = LiveXRService(collection.database)
-archive = service.archive = LiveArchiveService(service)
-reviews = LiveReviewService(service)
-episode_previews = EpisodePreviews(reviews)
-videos = LiveVideoService(reviews)
-archive.busy = lambda identifier: (
-    any(key[0] == identifier for key in reviews.active | videos.active)
-)
+
+
+@dataclass(frozen=True)
+class LiveServices:
+    """The live-collection services, which refer to each other and are built together."""
+
+    service: LiveXRService
+    archive: LiveArchiveService
+    reviews: LiveReviewService
+    episode_previews: EpisodePreviews
+    videos: LiveVideoService
+
+
+def _build_live_services() -> LiveServices:
+    live = LiveXRService(collection.database)
+    archive = live.archive = LiveArchiveService(live)
+    reviews = LiveReviewService(live)
+    episode_previews = EpisodePreviews(reviews)
+    videos = LiveVideoService(reviews)
+    archive.busy = lambda identifier: (
+        any(key[0] == identifier for key in reviews.active | videos.active)
+    )
+    return LiveServices(live, archive, reviews, episode_previews, videos)
+
+
+_live = LazyService(_build_live_services)
+service = LazyService(lambda: resolve(_live).service)
+archive = LazyService(lambda: resolve(_live).archive)
+reviews = LazyService(lambda: resolve(_live).reviews)
+episode_previews = LazyService(lambda: resolve(_live).episode_previews)
+videos = LazyService(lambda: resolve(_live).videos)
 
 
 class StartRequest(BaseModel):

@@ -91,6 +91,7 @@ from .workspace_schema import LEGACY_WORKSPACE, visible_sql
 from .workspace_storage import WorkspaceStorage, paths_for_root, validate_work_root, evaluation_execution_directory
 from .slack_notifications import SlackNotifications
 from .job_status import SUBMISSION_UNKNOWN_PREFIX, attach_attempt_display_status, attach_job_display_status
+from .lazy_service import LazyService
 from .metadata_objects import MetadataObjects
 from .workspaces import BACKGROUND_POLL_INTERVAL_SECONDS, WorkspaceServices, require_workspace_records
 from .experiments import (
@@ -10322,7 +10323,7 @@ class PipelineService:
         return evaluation
 
 
-service = WorkspaceServices(PipelineService())
+service = LazyService(lambda: WorkspaceServices(PipelineService()))
 router = APIRouter(prefix="/api", dependencies=[Depends(require_workspace_records)])
 
 

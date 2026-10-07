@@ -18,10 +18,11 @@ from .collection import (
     CollectionValidationError,
     compile_collection_sbatch,
 )
+from .lazy_service import LazyService
 
 
 router = APIRouter(prefix="/api/collection", tags=["collection"])
-service = CollectionService()
+service = LazyService(CollectionService)
 
 
 def _http_error(error: Exception) -> HTTPException:

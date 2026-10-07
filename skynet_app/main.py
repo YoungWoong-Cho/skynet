@@ -62,12 +62,13 @@ APP_TITLE = "Skynet Slurm Console"
 
 
 def _create_cluster_application():
-    # These imports construct services and connect to the central database.
-    # Defer the entire dependency graph so the local page can open offline.
+    # The API modules are slow to import and wrap services that open the
+    # central database. Defer them so the local page opens at once and offline.
     from .background_owner import BackgroundOwner, stop_background_services
     from .changes import ChangeFeed, change_router
-    from .collection_api import router as collection_router
+    from .collection_api import router as collection_router, service as collection_service
     from .hands_api import router as hands_router
+    from .lazy_service import resolve
     from .live_xr_api import router as live_xr_router
     from .live_xr_api import archive as live_archive
     from .maintenance_api import router as maintenance_router
@@ -76,6 +77,14 @@ def _create_cluster_application():
     from .slack_api import slack_router
     from .notes import notes_router
     from .workspaces import WorkspaceMiddleware, session_router
+
+    # Importing built nothing. Build every service now, in dependency order, so
+    # a database outage fails this whole load and ClusterApplication retries it
+    # instead of publishing routes whose services cannot be built.
+    resolve(collection_service)
+    live_archive, pipeline_service, policy_exports = (
+        resolve(live_archive), resolve(pipeline_service), resolve(policy_exports)
+    )
 
     def start_services():
         pipeline_service.start()

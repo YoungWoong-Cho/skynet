@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from .cluster_runtime import DEFAULT_GATEWAY
+from .lazy_service import LazyService, resolve
 from .live_xr_api import checked, reviews
 from .policy_exports import (
     DEFAULT_SPLIT_SEED, DEFAULT_VALIDATION_PERCENT, MAX_VALIDATION_PERCENT, SPLIT_SEED_LIMIT, PolicyExportService,
@@ -14,7 +15,7 @@ router = APIRouter(
     prefix="/api/data/exports", tags=["data"],
     dependencies=[Depends(require_workspace_records)],
 )
-service = PolicyExportService(reviews)
+service = LazyService(lambda: PolicyExportService(resolve(reviews)))
 
 
 class ExportRequest(BaseModel):

@@ -256,17 +256,31 @@ def test_real_loader_builds_session_protected_api_and_docs(request, monkeypatch)
     # An environment variable alone does not establish test DB isolation.
     if not getattr(request.config, "_skynet_bootstrap", None):
         pytest.skip("Requires the isolated PostgreSQL test plugin")
-    from skynet_app import main, pipeline_api
+    from types import SimpleNamespace
+
+    from skynet_app import collection_api, live_xr_api, main, pipeline_api, policy_exports_api
     from skynet_app.database import Database
+    from skynet_app.lazy_service import LazyService
     from skynet_app.workspaces import WorkspaceServices
 
-    # Another test may have imported the module-level coordinator against its
-    # own disposable database. Build this test's coordinator while the current
+    # Another test may have built the module-level coordinator against its own
+    # disposable database. Build this test's coordinator while the current
     # PostgreSQL fixture is active instead of reusing that closed database.
     services = WorkspaceServices(pipeline_api.PipelineService(Database()))
     monkeypatch.setattr(pipeline_api, "service", services)
+    built = []
+
+    def recorded(name):
+        return LazyService(lambda: built.append(name) or SimpleNamespace())
+
+    monkeypatch.setattr(collection_api, "service", recorded("collection"))
+    monkeypatch.setattr(live_xr_api, "archive", recorded("live archive"))
+    monkeypatch.setattr(policy_exports_api, "service", recorded("policy exports"))
 
     api, owner = main._create_cluster_application()
+    # The loader, not the first request, builds every service, so a database
+    # outage fails the whole load and the application retries it.
+    assert built == ["collection", "live archive", "policy exports"]
     assert owner.database is services.system.database
     assert owner.thread is None, "Building API routes must not start background workers"
     with TestClient(api) as client:

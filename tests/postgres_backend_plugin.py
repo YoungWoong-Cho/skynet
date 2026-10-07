@@ -1,7 +1,7 @@
 """Isolated PostgreSQL databases and cluster-file doubles for repository tests.
 
 SKYNET_TEST_POSTGRES_ADMIN must point to a disposable test server. A bootstrap
-DB isolates module-level app initialization; every test gets separate DBs,
+DB catches any Database() built outside a test's own; every test gets separate DBs,
 cloned from one fully migrated template per session. Path arguments below are
 fixture keys only, never application database files.
 """

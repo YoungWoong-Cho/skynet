@@ -70,7 +70,7 @@ class ClusterApplication:
     async def connect(self):
         while self.application is None:
             try:
-                # Imports initialize the central DB and may wait on SSH. Keep
+                # Building the services opens the central DB and may wait on SSH. Keep
                 # them off the event loop, with exactly one attempt in flight.
                 # Default cancellation waits for the worker before shutdown.
                 application, owner = await anyio.to_thread.run_sync(self.loader)
