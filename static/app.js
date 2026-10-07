@@ -1863,28 +1863,6 @@ function itemPartitions(item, field) {
     .filter(Boolean);
 }
 
-function quotaCell(metric) {
-  const usage = Number(metric?.usage || 0);
-  const rawLimit = metric?.limit;
-  const hasLimit =
-    rawLimit !== null &&
-    rawLimit !== undefined &&
-    rawLimit !== "" &&
-    Number.isFinite(Number(rawLimit));
-  const limit = hasLimit ? Number(rawLimit) : null;
-  const ratio =
-    hasLimit && limit > 0
-      ? Math.min(100, Math.round((usage / limit) * 100))
-      : 0;
-  const overLimit = hasLimit && usage > limit;
-  const label = hasLimit ? `${usage} / ${limit}` : `${usage}`;
-  return `
-    <div class="quota-cell ${overLimit ? "is-over" : ""}">
-      <span>${label}</span>
-      ${hasLimit && limit > 0 ? `<div class="quota-track"><i style="width:${ratio}%"></i></div>` : ""}
-    </div>`;
-}
-
 const allocationColors = [
   "#386cb0",
   "#1f8a5b",
@@ -8151,53 +8129,13 @@ function matchingExperimentForPayload(payload) {
   );
 }
 
-function explicitBoolean(value) {
-  if (typeof value === "boolean") return value;
-  const normalized = normalizeExperimentIdentityPart(value);
-  if (["true", "1", "yes"].includes(normalized)) return true;
-  if (["false", "0", "no"].includes(normalized)) return false;
-  return null;
-}
-
-function normalizedLifecycleState(value) {
-  return normalizeExperimentIdentityPart(value).replace(/[_-]+/g, " ");
-}
-
 function experimentLifecycle(experiment) {
-  const lifecycleStates = [
-    experiment?.lifecycle,
-    experiment?.submission_lifecycle,
-    experiment?.submission_state,
-    experiment?.status,
-    experiment?.latest_revision?.lifecycle,
-  ].map(normalizedLifecycleState);
-  const lockDeclarations = [
-    experiment?.locked,
-    experiment?.is_locked,
-    experiment?.latest_revision?.locked,
-  ]
-    .map(explicitBoolean)
-    .filter((value) => value !== null);
-  const submittedDeclaration = explicitBoolean(experiment?.submitted);
-  const explicitlyUnsubmitted =
-    lockDeclarations.includes(false) ||
-    submittedDeclaration === false ||
-    lifecycleStates.some((state) =>
-      ["draft", "unsubmitted", "not submitted"].includes(state),
-    );
-  const explicitlyLocked =
-    lockDeclarations.includes(true) ||
-    submittedDeclaration === true ||
-    lifecycleStates.some((state) =>
-      ["submitted", "locked", "submitted locked"].includes(state),
-    );
-  const submittedAt = firstValue(
-    experiment?.submitted_at,
-    experiment?.latest_revision_submitted_at,
-    experiment?.latest_revision?.submitted_at,
-  );
+  // The API derives `locked` from the pinned revision's submitted_at, while
+  // `status` follows the runs: an experiment whose runs are all still DRAFT
+  // (or that has none) stays editable even once its revision is stamped.
   const locked =
-    !explicitlyUnsubmitted && (explicitlyLocked || Boolean(submittedAt));
+    Boolean(experiment?.locked) &&
+    normalizeExperimentIdentityPart(experiment?.status) !== "draft";
   return {
     locked,
     label: locked ? "Submitted / locked" : "Draft",
@@ -8255,7 +8193,7 @@ function attemptSucceeded(attempt) {
 }
 
 function runAttemptCount(run) {
-  const declared = run?.attempt_count ?? run?.attempts_count;
+  const declared = run?.attempt_count;
   if (declared !== null && declared !== undefined && declared !== "") {
     const count = Number(declared);
     if (Number.isInteger(count) && count >= 0) return count;
@@ -8319,25 +8257,6 @@ function runHasExplicitPreflightFailure(run, attempts) {
   ) {
     return true;
   }
-  if (
-    explicitBoolean(run?.preflight_failed) === true ||
-    explicitBoolean(run?.submission_failed) === true
-  ) {
-    return true;
-  }
-  const declaredFailure = firstValue(
-    run?.preflight_error,
-    run?.preflight_failure,
-    run?.submission_error,
-    run?.submission_failure,
-    run?.submit_error,
-  );
-  if (
-    declaredFailure !== null &&
-    declaredFailure !== undefined &&
-    declaredFailure !== ""
-  )
-    return true;
   return attempts.some(
     (attempt) =>
       ["PREFLIGHT_FAILED", "SUBMISSION_FAILED"].includes(
@@ -9852,25 +9771,16 @@ function trainingDataCell(run) {
 }
 
 function runRowDescriptor(run) {
-  const id = String(run.id || run.run_id || "");
+  const id = String(run.id || "");
   const state = jobStatusLabel(run);
-  const attempt =
-    run.attempt ??
-    run.attempt_number ??
-    run.latest_attempt?.attempt_number ??
-    run.latest_attempt?.number ??
-    "-";
+  const attempt = run.latest_attempt?.attempt_number ?? "-";
   const attemptCount = runAttemptCount(run);
   const attemptLabel =
     attempt === "-"
       ? "-"
       : `#${attempt}${attemptCount && Number(attemptCount) !== Number(attempt) ? ` of ${attemptCount}` : ""}`;
   const progressSummary = run.progress_summary;
-  const progress = progressSummary ?? run.progress ?? run.metrics?.progress;
-  const progressLabel =
-    progressSummaryLabel(progressSummary) ||
-    run.progress_label ||
-    run.current_step;
+  const progressLabel = progressSummaryLabel(progressSummary);
   const eta =
     String(state).toUpperCase() === "RUNNING"
       ? `<div class="progress-eta">ETA ${etaCell(progressSummary)}</div>`
@@ -9907,7 +9817,7 @@ function runRowDescriptor(run) {
       {
         html: run.status_detail
           ? `<span class="secondary" title="${escapeHtml(run.status_detail)}">Cluster acceptance unconfirmed</span>`
-          : `${eta}${progressCell(progress, progressLabel)}`,
+          : `${eta}${progressCell(progressSummary, progressLabel)}`,
       },
       { html: escapeHtml(formatDate(run.latest_attempt?.started_at)) },
       {
@@ -12977,56 +12887,32 @@ function evaluationPrimaryResult(evaluation) {
   const primaryMetric = aggregate.find((metric) => metric.mean !== undefined);
   if (primaryMetric)
     return `${primaryMetric.metric}: ${Number(primaryMetric.mean).toPrecision(4)}`;
-  const result =
-    evaluation.result || evaluation.results || evaluation.metrics || {};
-  if (evaluation.primary_result !== undefined) return evaluation.primary_result;
-  for (const key of ["success_rate", "score", "mean_reward", "accuracy"]) {
-    if (key === "success_rate" && result[key] !== undefined)
-      return `Success rate: ${(Number(result[key]) * 100).toFixed(1)}%`;
-    if (result[key] !== undefined) return `${key}: ${result[key]}`;
-  }
-  return Object.keys(result).length
-    ? compactJson(result, 80)
-    : "No result recorded";
+  return "No result recorded";
 }
 
 function evaluationRowCells(evaluation) {
-  const id = evaluation.id || evaluation.evaluation_id;
   const state = jobStatusLabel(evaluation);
-  const suite =
-    evaluation.suite_label ||
-    evaluation.suite_name ||
-    evaluation.suite_id ||
-    evaluation.suite ||
-    "-";
-  const environment =
-    evaluation.environment || evaluation.evaluator_adapter || "-";
+  const suite = evaluation.suite_label || evaluation.suite_name || "-";
+  const environment = evaluation.evaluator_adapter || "-";
   const progressSummary = evaluation.progress_summary;
   const completed = Number(
-    progressSummary?.completed ??
-      evaluation.progress_completed ??
-      evaluation.completed_episodes,
+    progressSummary?.completed ?? evaluation.progress_completed,
   );
-  const total = Number(
-    progressSummary?.total ??
-      evaluation.progress_total ??
-      evaluation.total_episodes,
-  );
+  const total = Number(progressSummary?.total ?? evaluation.progress_total);
   const progress =
     progressSummary ||
     (Number.isFinite(completed) && Number.isFinite(total) && total > 0
       ? completed / total
-      : (evaluation.progress ?? evaluation.completed_episodes_ratio));
+      : undefined);
   const progressLabel =
     progressSummaryLabel(progressSummary) ||
-    evaluation.progress_label ||
     (Number.isFinite(completed) && Number.isFinite(total)
       ? `${completed}/${total}`
       : null);
   return [
     `<span class="node-name">${escapeHtml(evaluationName(evaluation))}</span>`,
     `${valueHtml(linkedValue("run", evaluation.run_id, trainingRunName(evaluation)))}<span class="secondary">${valueHtml(linkedValue("run", evaluation.run_id, evaluation.checkpoint_path?.split("/").pop() || "Checkpoint details", { checkpoint: evaluation.checkpoint_id }))}</span>`,
-    `${valueHtml(linkedValue("suite", evaluation.evaluation_suite_id || evaluation.suite_id, suite))}<span class="secondary">${escapeHtml(environment)}</span>`,
+    `${valueHtml(linkedValue("suite", evaluation.evaluation_suite_id, suite))}<span class="secondary">${escapeHtml(environment)}</span>`,
     statusPill(state),
     executionHtml(evaluation),
     evaluation.status_detail
@@ -14029,34 +13915,6 @@ function trainingDatasetLabel(dataset) {
     .join(" · ");
 }
 
-function datasetAlgorithmCompatibility(
-  dataset,
-  adapter,
-  { allowAnyContract = false } = {},
-) {
-  const slot = experimentInputSlots(adapter).find(
-    (item) => item.role === "training_data",
-  );
-  if (!slot)
-    return {
-      compatible: false,
-      message: "This algorithm does not accept a registered training dataset.",
-    };
-  return experimentBundleCompatibility(
-    {
-      ...dataset,
-      assignments: dataset.assignments.map((item) => ({
-        ...item,
-        role: slot.role,
-        position: slot.position,
-      })),
-    },
-    adapter,
-    slot.bindings,
-    { allowAnyContract },
-  );
-}
-
 function updateAlgorithmCompatibility() {
   // Algorithm comes first. Changing it must remain possible with old datasets selected.
   for (const option of elements.experimentAdapter.options) {
@@ -14558,10 +14416,6 @@ function selectDataCatalog(view) {
       view === "files" ? "data-tab-files" : "data-tab-registry",
     );
 }
-function isFileResource(resource) {
-  return resource.category === "file";
-}
-
 function visibleDataResources() {
   const files =
     document
@@ -18044,16 +17898,6 @@ function beginTutorialRecovery(record) {
   persistTutorialSession();
   showTutorialStep(readIndex, 1);
   return true;
-}
-
-function tutorialActiveRecoveryRecord() {
-  const recoveryId = tutorialState.session?.recoveryRecordId;
-  if (!recoveryId) return null;
-  return (
-    (tutorialState.session.ownedRecords || []).find(
-      (record) => `${record.binding}:${record.id}` === recoveryId,
-    ) || null
-  );
 }
 
 function tutorialBindingIsOwned(binding) {

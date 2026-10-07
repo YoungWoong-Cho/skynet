@@ -55,11 +55,16 @@ test('seed validation rejects malformed, empty and unsafe values', () => {
   }
 });
 test('submitted variant uses persisted latest attempt rather than NOT SUBMITTED', () => {
-  const c = load(['jobStatusLabel', 'normalizedRunState', 'runAttemptCount', 'runAttemptRecords', 'attemptHasSlurmSubmission', 'runHasExplicitPreflightFailure', 'variantRunDisplayState'], {
-    explicitBoolean: () => null, firstValue: (...v) => v.find(x => x != null),
-  });
+  const c = load(['jobStatusLabel', 'normalizedRunState', 'runAttemptCount', 'runAttemptRecords', 'attemptHasSlurmSubmission', 'runHasExplicitPreflightFailure', 'variantRunDisplayState']);
   assert.equal(c.variantRunDisplayState({ status: 'FAILED', attempt_count: 1, latest_attempt: { slurm_job_id: '1', status: 'FAILED' } }), 'FAILED');
   assert.equal(c.variantRunDisplayState({ status: 'DRAFT', attempt_count: 0 }), 'NOT SUBMITTED');
+});
+test('experiment lifecycle follows the API lock flag unless its runs are still drafts', () => {
+  const c = load(['normalizeExperimentIdentityPart', 'experimentLifecycle']);
+  assert.equal(c.experimentLifecycle({ locked: true, status: 'ACTIVE' }).label, 'Submitted / locked');
+  assert.equal(c.experimentLifecycle({ locked: true, status: 'DRAFT' }).locked, false);
+  assert.equal(c.experimentLifecycle({ locked: false, lifecycle: 'DRAFT' }).label, 'Draft');
+  assert.equal(c.experimentLifecycle({ latest_revision_number: 6 }).locked, false);
 });
 test('adapter view uses the versions returned by the API', async () => {
   const field = () => ({ value: '', textContent: '' });
