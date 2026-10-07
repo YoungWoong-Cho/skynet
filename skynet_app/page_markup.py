@@ -70,7 +70,6 @@ def cluster_markup() -> dict[str, str]:
         "<!-- checkpoint-warning-seconds -->": str(_bound(CheckpointPolicy, "save_before_timeout_seconds", "default")),
         "<!-- checkpoint-warning-min-seconds -->": str(_bound(CheckpointPolicy, "save_before_timeout_seconds", "ge")),
         "<!-- checkpoint-warning-max-seconds -->": str(_bound(CheckpointPolicy, "save_before_timeout_seconds", "le")),
-        "<!-- gpu-usage-colspan -->": str(1 + len(CLUSTER.dashboard.gpu_usage_columns)),
         "<!-- artifacts-path-example -->": escape(f"{CLUSTER.paths.artifacts}/.../last.ckpt"),
         "<!-- collection-output-example -->": escape(f"{CLUSTER.paths.datasets}/.staging/collection/..."),
         "<!-- data-version-path-example -->": escape(f"{CLUSTER.paths.datasets}/resources/..."),

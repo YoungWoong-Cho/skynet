@@ -730,7 +730,7 @@ function installStructuredEvaluationTaskOptions() {
       ? { preferredTasks: options }
       : options || {};
     const preserve = Boolean(renderOptions.preserve);
-    const suiteId = String(suite?.id || suite?.suite_id || suite?.slug || "");
+    const suiteId = String(suite?.id || suite?.suite_id || "");
     const taskOptions = normalizedEvaluationTaskOptions(suite);
     renderedEvaluationTaskPolicy = evaluationTaskSelectionPolicy(
       suite,
@@ -1087,6 +1087,10 @@ function reconcileTableSequence(tbody, sequence) {
   });
 }
 
+// The change topics the server streams for a workspace (skynet_app/changes.py).
+// Reads also group under "runs" and "other", which no stream event carries.
+const WORKSPACE_CHANGE_TOPICS = ["data", "exports", "recordings", "adapters", "settings", "notes"];
+
 // Reads share work only within the same committed-change generation.
 function apiReadTopics(path) {
   if (path.startsWith("/api/data/exports/jobs")) return ["exports", "data", "adapters"];
@@ -1302,11 +1306,10 @@ function initializeLiveRefresh() {
     () => loadTrackingConnections(true), () => { trackingConnectionsLoaded = false; });
   refresh.register("recordings", ["recordings"], () => activeTab === "collection",
     () => window.loadLiveXR?.(), () => loadedTabs.delete("collection"));
-  const topics = ["data", "exports", "recordings", "adapters", "settings", "notes"];
   if (window.EventSource && window.SkynetWorkspace?.id) {
     const stopStream = connectWorkspaceChanges(window.SkynetWorkspace.id, {
-      resync: () => refresh.invalidate(topics),
-      change: changed => refresh.invalidate(changed.filter(topic => topics.includes(topic))),
+      resync: () => refresh.invalidate(WORKSPACE_CHANGE_TOPICS),
+      change: changed => refresh.invalidate(changed.filter(topic => WORKSPACE_CHANGE_TOPICS.includes(topic))),
       connection: connected => {
         refresh.connected = connected;
         document.dispatchEvent(new CustomEvent("skynet-live-updates", { detail: { connected } }));
@@ -1320,7 +1323,7 @@ function initializeLiveRefresh() {
     // hidden. Focusing a field/window is not a data change: replay only dirty
     // subscriptions instead of downloading every catalog again.
     if (refresh.connected) void refresh.flush();
-    else refresh.invalidate(topics);
+    else refresh.invalidate(WORKSPACE_CHANGE_TOPICS);
   };
   window.addEventListener("focus", resumeVisibleReads);
   document.addEventListener("visibilitychange", () => {
@@ -1766,17 +1769,21 @@ function clearNotice(element) {
   delete element.dataset.persistentError;
 }
 
-// The visible header cells of a body's table; a table whose header is rendered
-// later keeps the width of the placeholder row it already shows.
+// The visible header cells of a body's table; every placeholder and empty row
+// spans them, and a table renders its header before any such row.
 function tableColumnCount(tbody) {
   const header = tbody.closest("table")?.tHead?.rows[0];
-  if (header) return [...header.cells].filter((cell) => !cell.hidden).length;
-  return tbody.rows[0]?.cells[0]?.colSpan || 1;
+  return header ? [...header.cells].filter((cell) => !cell.hidden).length : 1;
 }
 
 function emptyRow(tbody, message) {
   return `<tr class="empty-row"><td colspan="${tableColumnCount(tbody)}">${escapeHtml(message)}</td></tr>`;
 }
+
+// index.html's placeholder rows carry no column counts; at load they take the
+// width emptyRow() gives the rows that replace them.
+for (const cell of document.querySelectorAll("tbody > tr:only-child > td:only-child"))
+  cell.colSpan = tableColumnCount(cell.closest("tbody"));
 
 function formatDate(value) {
   if (!value) return "-";
@@ -5781,7 +5788,7 @@ async function setAdapterArchived(id, archived) {
 }
 
 function evaluationSuiteId(suite) {
-  return String(suite?.id || suite?.slug || suite?.name || "");
+  return String(suite?.id || suite?.name || "");
 }
 
 function selectedEvaluationSuite() {
@@ -6072,8 +6079,8 @@ function openEvaluationSuite(id, launcher) {
   document.getElementById("evaluation-suite-detail-meta").innerHTML =
     keyValueHtml([
       ["Suite", suite.name],
-      ["Suite version", suite.version || suite.suite_version],
-      ["Environment", suite.evaluator || suite.evaluator_adapter],
+      ["Suite version", suite.suite_version],
+      ["Environment", suite.evaluator_adapter],
       ["Updated", formatDate(suite.updated_at || suite.created_at)],
     ]);
   const description = document.getElementById("evaluation-suite-description");
@@ -6108,8 +6115,8 @@ function renderEvaluationCatalog() {
     [
       suite.label,
       suite.name,
-      suite.version || suite.suite_version,
-      suite.evaluator || suite.evaluator_adapter,
+      suite.suite_version,
+      suite.evaluator_adapter,
       evaluationCatalogDescription(suite),
       ...evaluationCatalogTasks(suite).flatMap((task) => [task.id, task.label]),
     ]
@@ -6132,8 +6139,8 @@ function renderEvaluationCatalog() {
             : "0 tasks";
         return `<tr>
       <td><strong>${escapeHtml(suite.label || suite.name)}</strong><span class="secondary">${escapeHtml(suite.name)}</span></td>
-      <td>${escapeHtml(suite.version || suite.suite_version)}</td>
-      <td>${escapeHtml(suite.evaluator || suite.evaluator_adapter)}</td>
+      <td>${escapeHtml(suite.suite_version)}</td>
+      <td>${escapeHtml(suite.evaluator_adapter)}</td>
       <td>${taskCount}</td>
       <td>${escapeHtml(formatDate(suite.updated_at || suite.created_at))}</td>
       <td class="row-actions"><button type="button" data-suite-view="${escapeHtml(suite.id)}" aria-haspopup="dialog" aria-controls="evaluation-suite-detail-dialog">View</button>${suite.can_delete ? `<button type="button" data-delete-kind="suite" data-delete-id="${escapeHtml(suite.id)}">Delete</button>` : ""}</td>
@@ -8888,7 +8895,7 @@ function loadedEvaluationSuiteIds(specs) {
       evaluation.version,
     );
     const matches = evaluationSuites.filter((suite) => {
-      const names = [suite.id, suite.slug, suite.name, suite.label, suite.suite]
+      const names = [suite.id, suite.name, suite.label, suite.suite]
         .filter(Boolean)
         .map(String);
       if (!requestedNames.some((name) => names.includes(name))) return false;
@@ -8898,7 +8905,7 @@ function loadedEvaluationSuiteIds(specs) {
         requestedVersion === ""
       )
         return true;
-      const version = firstValue(suite.suite_version, suite.version);
+      const version = suite.suite_version;
       return (
         version !== null &&
         version !== undefined &&
@@ -11902,7 +11909,6 @@ function evaluationSuitePreference(run, suite) {
   const runMetadata = JSON.stringify(run || {});
   const suiteIdentity = [
     suite?.id,
-    suite?.slug,
     suite?.name,
     suite?.suite,
     config.suite,
@@ -11912,7 +11918,6 @@ function evaluationSuitePreference(run, suite) {
     suite?.environment,
     suite?.default_environment,
     suite?.evaluator_adapter,
-    suite?.evaluator,
     suite?.adapter,
     suite?.dataset,
     suite?.data_bundle,
@@ -12128,7 +12133,6 @@ function updateEvaluationEnvironmentFromSuite({ preserveTasks = false } = {}) {
     config.default_environment,
     config.simulator,
     suite?.evaluator_adapter,
-    suite?.evaluator,
     config.evaluator,
     "",
   );

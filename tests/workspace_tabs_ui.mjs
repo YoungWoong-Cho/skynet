@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {pageWindow, byId, spyMutationObservers, stubBrowserApis, loadScripts} from './ui_harness.mjs';
+import {pageWindow, byId, spyMutationObservers, stubBrowserApis, loadScripts, readStatic} from './ui_harness.mjs';
 
 const w = pageWindow({url: 'http://localhost:8080/?experiment_view=submit#runs'});
 const el = byId(w);
@@ -9,14 +9,22 @@ stubBrowserApis(w);
 const settle = () => new Promise(resolve => setTimeout(resolve, 15));
 try {
   await loadScripts(w);
+  // index.html carries no column counts: placeholder rows span the header app.js reads.
+  assert.ok(!(await readStatic('index.html')).includes('colspan'));
+  for (const body of ['usage-body', 'jobs-body', 'runs-body', 'data-resources-body']) {
+    const header = el(body).closest('table').tHead.rows[0];
+    assert.equal(el(body).rows[0].cells[0].colSpan, [...header.cells].filter(cell => !cell.hidden).length, body);
+  }
+  assert.equal(el('usage-body').rows[0].cells[0].colSpan, 1 + el('usage-body').closest('table').querySelectorAll('th[data-gpu-column]').length);
   // Display the signed-in shell without involving real workspace credentials or a server.
   el('email-workspace-content').hidden = false;
   w.scheduleEvaluationTargetValidation = () => {};
   const requests = [];
+  // Suite rows carry only their canonical columns, as the server sends once its aliases go.
   const compatible = {id: 'held-out', name: 'egoverse_held_out', label: 'Held-out predictions',
-    evaluator: 'egoverse', version: 'v2', tasks: ['held_out']};
+    evaluator_adapter: 'egoverse', suite_version: 'v2', tasks: ['held_out']};
   const simulator = {id: 'simulator', name: 'dexverse_recorded', label: 'DexVerse simulator',
-    evaluator: 'isaac_lab', version: 'v1', tasks: ['PickCube'], config_json: {tasks: ['PickCube']}};
+    evaluator_adapter: 'isaac_lab', suite_version: 'v1', tasks: ['PickCube'], config_json: {tasks: ['PickCube']}};
   const run = {id: 'training', status: 'SUCCEEDED', checkpoints: [
     {path: '/cluster/last.ckpt', status: 'AVAILABLE', checkpoint_type: 'INFERENCE'},
   ]};
@@ -54,6 +62,7 @@ try {
   assert.equal(visible('evaluation-form'), false);
   assert.equal(visible('evaluations-body'), false);
   assert.match(el('evaluation-suites-body').textContent, /DexVerse simulator/);
+  assert.deepEqual([...el('evaluation-suites-body').rows[1].cells].slice(1, 3).map(cell => cell.textContent), ['v1', 'isaac_lab']);
   assert.equal(el('evaluation-suite-count').textContent, '2 suites');
   assert.equal(el('evaluation-suite').innerHTML, formOptions, 'The catalog cannot overwrite run-compatible options');
   assert.equal(el('evaluation-suite').value, 'held-out');

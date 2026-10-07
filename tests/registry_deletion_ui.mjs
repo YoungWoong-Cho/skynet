@@ -10,7 +10,7 @@ try {
   await loadScripts(w, ['dialogs.js', 'workspace-navigation.js', 'connection-settings.js', 'app.js', 'maintenance.js']);
   el('email-workspace-content').hidden=false;
   w.scheduleEvaluationTargetValidation=()=>{};
-  let suites=[{id:'suite',name:'cube',label:'Cube simulation',evaluator:'isaac_lab',version:'2',tasks:['cube'],can_delete:true,updated_at:'2026-09-11T12:00:00Z',config_json:{tasks:['cube'],task_options:[{id:'cube',label:'Pick <cube>'}],task_selection_reason:'Exactly one case per checkpoint.'}}];
+  let suites=[{id:'suite',name:'cube',label:'Cube simulation',evaluator_adapter:'isaac_lab',suite_version:'2',tasks:['cube'],can_delete:true,updated_at:'2026-09-11T12:00:00Z',config_json:{tasks:['cube'],task_options:[{id:'cube',label:'Pick <cube>'}],task_selection_reason:'Exactly one case per checkpoint.'}}];
   let adapters=[{id:'adapter',name:'Editable default',editable:true,shared:false,versions:[],latest_version_number:2,
     latest_version:{id:'version',version_number:2,manifest:{slug:'example',display_name:'Example'}}}];
   const calls=[];

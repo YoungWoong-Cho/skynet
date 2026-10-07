@@ -154,6 +154,8 @@ def test_homepage_offers_the_configured_gateways_queues_gpus_and_defaults(monkey
     assert re.search(r'id="collection-partition"\s+value="%s"' % re.escape(default.partition), page)
     headers = re.findall(r'<th data-gpu-column="([^"]+)">', page)
     assert headers == list(CLUSTER.dashboard.gpu_usage_columns)
+    # Placeholder rows span the header app.js reads; the page states no column counts.
+    assert 'colspan' not in page
     # The list follows the configuration, and configured names are escaped.
     def configured(**changes):
         monkeypatch.setattr(page_markup, 'CLUSTER', CLUSTER.model_copy(update=changes))
