@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import psycopg
 from skynet_app.db_backend import DATABASE_ERRORS
 import tempfile
@@ -27,6 +28,7 @@ from skynet_app.adapters import (
     resolve_adapter_plan,
 )
 from skynet_app.database import Database, content_sha256
+from skynet_app.gpu_preflight import INTERRUPTION_RECEIPT, TIME_LIMIT_EXIT_CODE, TIME_LIMIT_REASON
 from skynet_app.pipeline_api import EvaluationRequest, PipelineService, manual_run_actions
 from skynet_app.source_validation import (
     CACHE_KIND as REPOSITORY_ARGUMENT_VALIDATION_CACHE_KIND,
@@ -246,7 +248,7 @@ class FakeCluster:
             return "sky1", self.exit_records.get(path.split("/")[-2])
         if path.endswith("/system-manifest.json"):
             return "sky1", self.launch_records.get(path.split("/")[-2])
-        if path.endswith(("/selected-for-inference.json", "/state/interruption.json")):
+        if path.endswith(("/selected-for-inference.json", f"/state/{INTERRUPTION_RECEIPT}")):
             return "sky1", self.log_content
         return "sky1", self.file_content
 
@@ -3089,16 +3091,16 @@ def test_forgotten_job_with_a_failing_exit_record_fails_and_never_resubmits(tmp_
     attempt = run["attempts"][0]
     # The same receipt that lets a scheduler-confirmed time limit resume automatically.
     cluster.log_content = json.dumps(dict(schema_version=1, job_id=attempt["slurm_job_id"], run_id=run["id"],
-                                          reason="time_limit_warning", exit_code=124))
+                                          reason=TIME_LIMIT_REASON, exit_code=TIME_LIMIT_EXIT_CODE))
     cluster.accounting_error, cluster.forgotten = "sacct: error: Connection refused", {attempt["slurm_job_id"]}
-    cluster.exit_records[attempt["slurm_job_id"]] = _exit_record(attempt["slurm_job_id"], exit_code=124)
+    cluster.exit_records[attempt["slurm_job_id"]] = _exit_record(attempt["slurm_job_id"], exit_code=TIME_LIMIT_EXIT_CODE)
 
     service.reconcile()
     service.reconcile()
 
     failed = database.get_run(run["id"])
     assert failed["status"] == "FAILED" and len(failed["attempts"]) == 1
-    assert failed["attempts"][0]["exit_code"] == "124:0"
+    assert failed["attempts"][0]["exit_code"] == f"{TIME_LIMIT_EXIT_CODE}:0"
     assert cluster.submit_count == 1, "an exit record alone never queues another attempt"
     event = next(e for e in failed["events"] if e["event_type"] == "JOB_FAILED")
     assert event["details_json"]["source"] == pipeline_api.EXIT_RECORD_SOURCE
@@ -3519,3 +3521,23 @@ def test_transition_stage_writes_only_the_lifecycle_each_site_passes():
     assert block['stage_updates']['status'] == 'BLOCKED' and block['stage_updates']['completed_at']
     assert block['event']['details'] == {'error': 'x'}
     assert blocked == {'run_id': 'r', 'stage_id': 's', 'status': 'BLOCKED', 'blockers': ['x']}
+
+
+def test_reconcile_loop_logs_a_failed_pass_and_keeps_polling(monkeypatch, caplog):
+    service = PipelineService.__new__(PipelineService)
+    service._stop = threading.Event()
+    passes = []
+
+    def reconcile():
+        passes.append(len(passes))
+        if len(passes) == 1:
+            raise ConnectionError("cluster unreachable")
+        service._stop.set()
+
+    service.reconcile = reconcile
+    monkeypatch.setattr(pipeline_api, "BACKGROUND_POLL_INTERVAL_SECONDS", 0.001)
+    with caplog.at_level(logging.ERROR, logger=pipeline_api.__name__):
+        service._loop()
+    assert passes == [0, 1]
+    failure = next(record for record in caplog.records if record.getMessage() == "Reconciliation failed")
+    assert failure.levelno == logging.ERROR and "cluster unreachable" in caplog.text

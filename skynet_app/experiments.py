@@ -27,6 +27,17 @@ SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 SAFE_PATH_RE = re.compile(r"^[A-Za-z0-9_./:@+,-]+$")
 SWEEP_PATH_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*$")
 
+# Evaluation profiles: episodes per task and seeds by profile name. The spec fills
+# an unset field from its profile; the API request models default to the standard
+# profile's values.
+DEFAULT_EVALUATION_PROFILE = "standard"
+EVALUATION_PROFILE_EPISODES = {"smoke": 2, "standard": 20, "report": 50}
+EVALUATION_PROFILE_SEEDS = {"smoke": (42,), "standard": (42,), "report": (41, 42, 43)}
+DEFAULT_EVALUATION_EPISODES = EVALUATION_PROFILE_EPISODES[DEFAULT_EVALUATION_PROFILE]
+DEFAULT_EVALUATION_SEEDS = EVALUATION_PROFILE_SEEDS[DEFAULT_EVALUATION_PROFILE]
+# Episodes per task any evaluation may request at most.
+MAX_EVALUATION_EPISODES = 10000
+
 
 class CanonicalModel(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -653,8 +664,8 @@ class EvaluationSpec(CanonicalModel):
     suite: str
     suite_version: str
     tasks: list[str] = Field(default_factory=list)
-    profile: str = Field(default="standard", min_length=1)
-    episodes_per_task: int | None = Field(default=None, ge=1, le=10000)
+    profile: str = Field(default=DEFAULT_EVALUATION_PROFILE, min_length=1)
+    episodes_per_task: int | None = Field(default=None, ge=1, le=MAX_EVALUATION_EPISODES)
     seeds: list[int] | None = None
     horizon: int | None = Field(default=None, ge=1)
     episode_timeout_seconds: int = Field(default=900, ge=1)
@@ -669,11 +680,10 @@ class EvaluationSpec(CanonicalModel):
 
     @model_validator(mode="after")
     def apply_profile_defaults(self) -> "EvaluationSpec":
-        profile_episodes = {"smoke": 2, "standard": 20, "report": 50}
         if self.episodes_per_task is None:
-            self.episodes_per_task = profile_episodes.get(self.profile, profile_episodes["standard"])
+            self.episodes_per_task = EVALUATION_PROFILE_EPISODES.get(self.profile, DEFAULT_EVALUATION_EPISODES)
         if self.seeds is None:
-            self.seeds = [41, 42, 43] if self.profile == "report" else [42]
+            self.seeds = list(EVALUATION_PROFILE_SEEDS.get(self.profile, DEFAULT_EVALUATION_SEEDS))
         if len(set(self.seeds)) != len(self.seeds):
             raise ValueError("evaluation seeds must be unique")
         if self.checkpoint_selector == "explicit" and not self.checkpoint_path:

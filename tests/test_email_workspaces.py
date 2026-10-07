@@ -14,7 +14,7 @@ from skynet_app.pipeline_api import PipelineService, router
 from skynet_app.source_metadata_cache import SourceMetadataStore
 from skynet_app.tracking import SessionCredentialStore
 from skynet_app.workspaces import (
-    COOKIE, CURRENT_WORKSPACE, WorkspaceDirectory, WorkspaceMiddleware,
+    BACKGROUND_POLL_INTERVAL_SECONDS, COOKIE, CURRENT_WORKSPACE, WorkspaceDirectory, WorkspaceMiddleware,
     WorkspaceServices, session_router,
 )
 
@@ -31,6 +31,10 @@ def services(tmp_path, monkeypatch):
         connection.execute("UPDATE workspaces SET email=? WHERE id=?", ('ycho420@gatech.edu', 'legacy'))
     monkeypatch.setattr('skynet_app.pipeline_api.service', coordinator)
     return coordinator
+
+
+def test_coordinator_polls_every_workspace_at_the_shared_background_interval(services):
+    assert services.poll_interval == BACKGROUND_POLL_INTERVAL_SECONDS
 
 
 def open_db(services, email):

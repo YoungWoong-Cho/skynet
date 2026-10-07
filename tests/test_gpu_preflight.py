@@ -13,8 +13,8 @@ from skynet_app.adapters import resolve_adapter_plan
 from skynet_app.cluster_config import CLUSTER
 from skynet_app.database import Database
 from skynet_app.gpu_preflight import (
-    GPU_MISSING_EXIT_CODE, GPU_MISSING_REASON, GPU_MISSING_STATE, gpu_missing_exit, gpu_missing_receipt,
-    gpu_preflight_lines,
+    GPU_MISSING_EXIT_CODE, GPU_MISSING_REASON, GPU_MISSING_STATE, INTERRUPTION_RECEIPT, TIME_LIMIT_EXIT_CODE,
+    TIME_LIMIT_REASON, gpu_missing_exit, gpu_missing_receipt, gpu_preflight_lines, time_limit_receipt,
 )
 import skynet_app.pipeline_api as pipeline
 from skynet_app.preparation_states import TRANSIENT_STATES
@@ -24,12 +24,16 @@ PREFLIGHT = "\n".join(gpu_preflight_lines(1))
 
 def test_only_gpu_jobs_get_a_preflight_and_only_its_exit_code_counts():
     assert gpu_preflight_lines(0) == []
-    assert f"exit {GPU_MISSING_EXIT_CODE}" in PREFLIGHT and "interruption.json" not in PREFLIGHT
-    assert "interruption.json" in "\n".join(gpu_preflight_lines(2, receipt_dir='"$DIR"'))
+    assert f"exit {GPU_MISSING_EXIT_CODE}" in PREFLIGHT and INTERRUPTION_RECEIPT not in PREFLIGHT
+    assert INTERRUPTION_RECEIPT in "\n".join(gpu_preflight_lines(2, receipt_dir='"$DIR"'))
     assert gpu_missing_exit({"ExitCode": f"{GPU_MISSING_EXIT_CODE}:0"})
     assert not gpu_missing_exit({"ExitCode": "1:0"}) and not gpu_missing_exit(None)
-    assert gpu_missing_receipt({"reason": GPU_MISSING_REASON, "exit_code": GPU_MISSING_EXIT_CODE})
-    assert not gpu_missing_receipt({"reason": "time_limit_warning", "exit_code": 124}) and not gpu_missing_receipt(None)
+    gpu_receipt = {"reason": GPU_MISSING_REASON, "exit_code": GPU_MISSING_EXIT_CODE}
+    time_limit = {"reason": TIME_LIMIT_REASON, "exit_code": TIME_LIMIT_EXIT_CODE}
+    assert gpu_missing_receipt(gpu_receipt) and not gpu_missing_receipt(time_limit) and not gpu_missing_receipt(None)
+    assert time_limit_receipt(time_limit) and not time_limit_receipt(gpu_receipt) and not time_limit_receipt(None)
+    # Each receipt is one reason with its own code; a mixed pair is neither.
+    assert not time_limit_receipt({"reason": TIME_LIMIT_REASON, "exit_code": GPU_MISSING_EXIT_CODE})
     assert GPU_MISSING_STATE in TRANSIENT_STATES
 
 
@@ -46,7 +50,7 @@ def test_preflight_exits_under_bash_only_when_a_requested_gpu_is_missing(tmp_pat
     script = "\n".join(["set -Eeuo pipefail", *gpu_preflight_lines(requested, receipt_dir=f'"{tmp_path}/state"'),
                         "echo workload", "exit 0"])
     result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
-    receipt = tmp_path / "state" / "interruption.json"
+    receipt = tmp_path / "state" / INTERRUPTION_RECEIPT
     if scenario in ("nothing_visible", "partial"):
         assert result.returncode == GPU_MISSING_EXIT_CODE and "workload" not in result.stdout
         assert GPU_MISSING_REASON in result.stderr

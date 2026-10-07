@@ -19,7 +19,12 @@ from skynet_app.adapters import (
 from skynet_app.cluster_config import CLUSTER
 from skynet_app.cluster_runtime import SLURM_BIN
 from skynet_app.experiments import CanonicalModel, ExperimentSpec, canonical_sha256
-from skynet_app.gpu_preflight import gpu_preflight_lines
+from skynet_app.gpu_preflight import (
+    INTERRUPTION_RECEIPT,
+    TIME_LIMIT_EXIT_CODE,
+    TIME_LIMIT_REASON,
+    gpu_preflight_lines,
+)
 from skynet_app.sbatch import SHEBANG, sbatch_header, shell_prelude
 from skynet_app.uv_bootstrap import (
     UV_COMMAND,
@@ -44,7 +49,7 @@ GITHUB_SSH_TO_HTTPS = (
 GPU_COUNT_VARIABLE = "SKYNET_ASSIGNED_GPU_COUNT"
 
 
-RUNNER_SOURCE = r'''#!/usr/bin/env python3
+_RUNNER_TEMPLATE = r'''#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -62,6 +67,12 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+# The interruption protocol shared with the console (skynet_app.gpu_preflight);
+# the values are filled in when this wrapper is compiled.
+INTERRUPTION_RECEIPT = __INTERRUPTION_RECEIPT__
+TIME_LIMIT_EXIT_CODE = __TIME_LIMIT_EXIT_CODE__
+TIME_LIMIT_REASON = __TIME_LIMIT_REASON__
 
 TOKENS = {
     "{{SKYNET_RUN_DIR}}": lambda: os.environ["SKYNET_RUN_DIR"],
@@ -885,12 +896,12 @@ def forward(signum, _frame):
     marker.write_text(str(signum))
     if signum == signal.SIGUSR1:
         capsule = Path(os.environ.get("SKYNET_CAPSULE_DIR", os.environ["SKYNET_RUN_DIR"]))
-        atomic_json(capsule / "state" / "interruption.json", {
+        atomic_json(capsule / "state" / INTERRUPTION_RECEIPT, {
             "schema_version": 1,
             "job_id": os.environ.get("SLURM_JOB_ID"),
             "run_id": os.environ.get("SKYNET_RUN_ID"),
-            "reason": "time_limit_warning",
-            "exit_code": 124,
+            "reason": TIME_LIMIT_REASON,
+            "exit_code": TIME_LIMIT_EXIT_CODE,
         })
         print("[skynet] Time-limit warning: stopping training and preserving its latest checkpoint.", flush=True)
     if child is not None and child.poll() is None:
@@ -902,7 +913,7 @@ def forward(signum, _frame):
 
 
 def interrupted_exit_code():
-    return 124 if termination_signal == signal.SIGUSR1 else 128 + termination_signal
+    return TIME_LIMIT_EXIT_CODE if termination_signal == signal.SIGUSR1 else 128 + termination_signal
 
 
 def check_timeout_warning():
@@ -1003,12 +1014,27 @@ if __name__ == "__main__":
 '''
 
 
+def _runner_source() -> str:
+    """The runtime wrapper with the interruption protocol it shares with the console filled in."""
+    source = _RUNNER_TEMPLATE
+    for name, value in (
+        ("INTERRUPTION_RECEIPT", INTERRUPTION_RECEIPT),
+        ("TIME_LIMIT_EXIT_CODE", TIME_LIMIT_EXIT_CODE),
+        ("TIME_LIMIT_REASON", TIME_LIMIT_REASON),
+    ):
+        source = source.replace(f"__{name}__", json.dumps(value))
+    return source
+
+
+RUNNER_SOURCE = _runner_source()
+
+
 class SlurmCompileError(ValueError):
     pass
 
 
-BATCH_WARNING_HANDLER = '''mkdir -p "$SKYNET_CAPSULE_DIR/state"
-rm -f "$SKYNET_CAPSULE_DIR/state/time-limit-warning" "$SKYNET_CAPSULE_DIR/state/interruption.json"
+BATCH_WARNING_HANDLER = f'''mkdir -p "$SKYNET_CAPSULE_DIR/state"
+rm -f "$SKYNET_CAPSULE_DIR/state/time-limit-warning" "$SKYNET_CAPSULE_DIR/state/{INTERRUPTION_RECEIPT}"
 trap 'skynet_wait_interrupted=1; printf "%s\\n" USR1 > "$SKYNET_CAPSULE_DIR/state/time-limit-warning"' USR1'''
 
 

@@ -11,10 +11,12 @@ from skynet_app.adapters import (
 from skynet_app.database import Database
 from skynet_app.cluster_config import CLUSTER
 from skynet_app.experiments import (
+    DEFAULT_EVALUATION_EPISODES, DEFAULT_EVALUATION_SEEDS, EVALUATION_PROFILE_EPISODES, EVALUATION_PROFILE_SEEDS,
     ExperimentSpec, EvaluationSpec, SweepSpec, TrainSpec, expand_sweep, get_evaluation_catalog,
 )
 from skynet_app.pipeline_api import (
-    FRONTEND_TRAIN_FIELDS, PipelineService, _manifest_default, _sweep_from_frontend,
+    FRONTEND_TRAIN_FIELDS, EvaluationRequest, EvaluationTargetValidationRequest, PipelineService,
+    _manifest_default, _sweep_from_frontend,
 )
 
 
@@ -84,7 +86,15 @@ def test_registered_evaluation_metadata_uses_catalog_names_and_profiles():
     suites = catalog.values() if isinstance(catalog, dict) else catalog
     for suite in suites:
         EvaluationSpec(adapter=suite.evaluator, suite=suite.suite, suite_version=suite.version, profile=suite.default_profile)
-    assert EvaluationSpec(adapter="egoverse", suite="held_out", suite_version="1").episodes_per_task
+    standard = EvaluationSpec(adapter="egoverse", suite="held_out", suite_version="1")
+    assert (standard.episodes_per_task, standard.seeds) == (DEFAULT_EVALUATION_EPISODES, list(DEFAULT_EVALUATION_SEEDS))
+    for profile in EVALUATION_PROFILE_EPISODES:
+        profiled = EvaluationSpec(adapter="egoverse", suite="held_out", suite_version="1", profile=profile)
+        assert (profiled.episodes_per_task, profiled.seeds) == (
+            EVALUATION_PROFILE_EPISODES[profile], list(EVALUATION_PROFILE_SEEDS[profile]))
+    # The API request models default to the spec's standard profile, from one definition.
+    for request in (EvaluationRequest(suite_id="suite"), EvaluationTargetValidationRequest()):
+        assert (request.episodes_per_task, request.seeds) == (standard.episodes_per_task, standard.seeds)
     assert EvaluationSpec(adapter="mujoco", suite="DexJoCo", suite_version="1", profile="rand_obj").profile == "rand_obj"
 
 

@@ -24,7 +24,16 @@ from .workspace_schema import LEGACY_WORKSPACE, normalize_email
 
 CURRENT_WORKSPACE: ContextVar[str | None] = ContextVar("skynet_workspace", default=None)
 COOKIE = "skynet_workspace_session"
+# Seconds a workspace session (its cookie and its server-side row) stays valid.
 SESSION_SECONDS = 30 * 24 * 60 * 60
+# Seconds between passes of each background loop (reconcile, tracking, delivery),
+# whether one service runs them for itself or the coordinator runs them per workspace.
+BACKGROUND_POLL_INTERVAL_SECONDS = 15
+# Seconds between Slack queue polls; independent of cluster polling so webhook
+# latency never delays job management.
+NOTIFICATION_POLL_INTERVAL_SECONDS = 2
+# Seconds to wait for each worker thread on stop before reporting it still stopping.
+WORKER_STOP_TIMEOUT_SECONDS = 5
 RECORD_PARAMETERS = {
     "project_id": "projects", "experiment_id": "experiments",
     "experiment_revision_id": "experiment_revisions", "variant_id": "variants",
@@ -81,7 +90,7 @@ class WorkspaceServices:
         self._notification_thread: threading.Thread | None = None
         self._tracking_thread: threading.Thread | None = None
         self._tracking_delivery_thread: threading.Thread | None = None
-        self.poll_interval = 15
+        self.poll_interval = BACKGROUND_POLL_INTERVAL_SECONDS
 
     def for_workspace(self, identifier: str):
         with self._lock:
@@ -129,8 +138,7 @@ class WorkspaceServices:
         return (self._thread, self._notification_thread, self._tracking_thread, self._tracking_delivery_thread)
 
     def _notification_loop(self):
-        # Independent of cluster polling: Slack latency never delays job management.
-        while not self._stop.wait(2):
+        while not self._stop.wait(NOTIFICATION_POLL_INTERVAL_SECONDS):
             try:
                 with self.system.database.connection() as connection:
                     owners = [
@@ -196,7 +204,7 @@ class WorkspaceServices:
         self.request_stop()
         for thread in self._worker_threads():
             if thread:
-                thread.join(timeout=5)
+                thread.join(timeout=WORKER_STOP_TIMEOUT_SECONDS)
         if any(thread and thread.is_alive() for thread in self._worker_threads()):
             raise RuntimeError("Workspace workers are still stopping")
         with self._lock:

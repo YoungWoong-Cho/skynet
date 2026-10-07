@@ -4,7 +4,7 @@ from skynet_app.evaluation_contracts import bind_suite_to_dataset
 from skynet_app.evaluation_targets import attach_evaluation_target, evaluation_target_contract
 from skynet_app.recorded_evaluation import recorded_episode_sources
 from skynet_app import data_selection
-from skynet_app.gpu_tracking import sync_gpu_statistics
+from skynet_app.gpu_tracking import progress_timestamp_ms, sync_gpu_statistics
 from skynet_app.model_io import resolve_model_io, preview_spec
 
 import math
@@ -46,7 +46,15 @@ from .adapters import (
     resolve_training_progress_contract,
 )
 from .adapters.dataset_inputs import evaluation_context_json
-from .gpu_preflight import GPU_MISSING_EXIT_CODE, GPU_MISSING_MESSAGE, GPU_MISSING_STATE, gpu_missing_receipt
+from .gpu_preflight import (
+    GPU_MISSING_EXIT_CODE,
+    GPU_MISSING_MESSAGE,
+    GPU_MISSING_STATE,
+    INTERRUPTION_RECEIPT,
+    TIME_LIMIT_EXIT_CODE,
+    gpu_missing_receipt,
+    time_limit_receipt,
+)
 from .gpu_quota import account_gpu_quota, idle_partition_quota
 from .preparation_states import ATTEMPT_FAILURE_STATES, EXECUTING_STATES, TRANSIENT_STATES
 from .workflow_states import ACTIVE_STAGE_STATES, CANCELLABLE_STAGE_STATES, SLURM_BOUND_ATTEMPT_STATES, sql_list
@@ -62,6 +70,12 @@ from .cluster_runtime import (
     approved_operator_environment,
 )
 from .data_resource_policy import RESOURCE_TYPES, validate_resource_type, validate_resource_metadata
+from .data_import_states import (
+    DATA_IMPORT_IN_FLIGHT_STATES,
+    DATA_IMPORT_SCHEDULED_STATES,
+    DATA_IMPORT_SETTLING_STATES,
+    DATA_IMPORT_TERMINAL_STATES,
+)
 from .data_imports import HuggingFaceImportRequest, build_huggingface_import_job
 from .data_paths import validate_mount_path
 from .credential_store import (
@@ -75,11 +89,15 @@ from .workspace_storage import WorkspaceStorage, paths_for_root, validate_work_r
 from .slack_notifications import SlackNotifications
 from .job_status import SUBMISSION_UNKNOWN_PREFIX, attach_attempt_display_status, attach_job_display_status
 from .metadata_objects import MetadataObjects
-from .workspaces import WorkspaceServices, require_workspace_records
+from .workspaces import BACKGROUND_POLL_INTERVAL_SECONDS, WorkspaceServices, require_workspace_records
 from .experiments import (
     CanonicalResult,
+    DEFAULT_EVALUATION_EPISODES,
+    DEFAULT_EVALUATION_PROFILE,
+    DEFAULT_EVALUATION_SEEDS,
     ExperimentSpec,
     FULL_COMMIT_RE,
+    MAX_EVALUATION_EPISODES,
     ResourceSpec,
     SPEC_API_VERSION,
     canonical_sha256,
@@ -138,6 +156,29 @@ FORGOTTEN_JOB_HELD = (
     "Its outcome is unknown: cancel it, or wait for Slurm accounting."
 )
 HELD_RECHECK_SECONDS = 600
+# Runs one tracking delivery pass flushes per provider, and spooled events one drain
+# sends per run (the delivery pass, the progress publisher and the terminal sync alike).
+TRACKING_FLUSH_RUN_LIMIT = 10
+TRACKING_FLUSH_EVENT_LIMIT = 100
+# Seconds before the final progress read of an ended attempt is retried after it
+# failed or found no evidence yet.
+FINAL_PROGRESS_RETRY_SECONDS = 60
+# Seconds between remote reads of one running evaluation's episode progress; the
+# list and detail endpoints polled together share one read.
+EVALUATION_PROGRESS_READ_INTERVAL_SECONDS = 4.0
+# List-driven remote progress refreshes queued at most, and threads draining the queue.
+PROGRESS_REFRESH_QUEUE_LIMIT = 2000
+PROGRESS_REFRESH_WORKERS = 2
+# Seconds an evaluator runtime readiness probe is reused: longer when it found no
+# blockers, shorter when it did.
+RUNTIME_READINESS_CACHE_SECONDS = 60.0
+RUNTIME_READINESS_BLOCKED_CACHE_SECONDS = 10.0
+# Seconds allowed for the live GPU usage query and the idle-quota verification that
+# automatic queue selection runs over SSH.
+GPU_USAGE_QUERY_TIMEOUT_SECONDS = 20
+IDLE_QUOTA_VERIFICATION_TIMEOUT_SECONDS = 55
+# Characters of sbatch's own output kept on an attempt as its submission reason.
+SUBMISSION_OUTPUT_LIMIT = 2000
 GPU_USAGE_LONG_COMMAND = CLUSTER.commands.gpu_usage_shell_command("-l")
 
 
@@ -1326,8 +1367,8 @@ class EvaluationRequest(BaseModel):
     suite_id: str
     environment: str | None = None
     tasks: list[str] = Field(default_factory=list)
-    episodes_per_task: int = Field(default=20, ge=1, le=10000)
-    seeds: list[int] = Field(default_factory=lambda: [42])
+    episodes_per_task: int = Field(default=DEFAULT_EVALUATION_EPISODES, ge=1, le=MAX_EVALUATION_EPISODES)
+    seeds: list[int] = Field(default_factory=lambda: list(DEFAULT_EVALUATION_SEEDS))
     parallelism: int = Field(
         default=1,
         ge=1,
@@ -1358,8 +1399,8 @@ class EvaluationTargetValidationRequest(BaseModel):
     suite_id: str | None = None
     environment: str | None = None
     tasks: list[str] = Field(default_factory=list)
-    episodes_per_task: int = Field(default=20, ge=1, le=10000)
-    seeds: list[int] = Field(default_factory=lambda: [42])
+    episodes_per_task: int = Field(default=DEFAULT_EVALUATION_EPISODES, ge=1, le=MAX_EVALUATION_EPISODES)
+    seeds: list[int] = Field(default_factory=lambda: list(DEFAULT_EVALUATION_SEEDS))
     parallelism: int = Field(
         default=1,
         ge=1,
@@ -1778,22 +1819,22 @@ class PipelineService:
                 thread.join()
 
     def _loop(self) -> None:
-        while not self._stop.wait(15):
+        while not self._stop.wait(BACKGROUND_POLL_INTERVAL_SECONDS):
             try:
                 self.reconcile()
             except Exception:
                 # The next pass retries after cluster/database recovery.
-                continue
+                logging.getLogger(__name__).exception("Reconciliation failed")
 
     def _tracking_loop(self) -> None:
-        while not self._stop.wait(15):
+        while not self._stop.wait(BACKGROUND_POLL_INTERVAL_SECONDS):
             try:
                 self.reconcile_tracking()
             except Exception:
                 logging.getLogger(__name__).exception("Tracking reconciliation failed")
 
     def _tracking_delivery_loop(self) -> None:
-        while not self._stop.wait(15):
+        while not self._stop.wait(BACKGROUND_POLL_INTERVAL_SECONDS):
             try:
                 self.flush_tracking()
             except Exception:
@@ -1810,7 +1851,9 @@ class PipelineService:
             for provider in ("wandb", "mlflow"):
                 if self._stop.is_set():
                     break
-                reports[provider] = self._flush_tracking_provider(provider, limit=10, event_limit=100)
+                reports[provider] = self._flush_tracking_provider(
+                    provider, limit=TRACKING_FLUSH_RUN_LIMIT, event_limit=TRACKING_FLUSH_EVENT_LIMIT
+                )
             return {"ok": True, "providers": reports}
         finally:
             self._tracking_delivery_lock.release()
@@ -3533,7 +3576,7 @@ class PipelineService:
                     "suite": suite["name"],
                     "suite_version": suite["suite_version"],
                     "tasks": config.get("tasks", []),
-                    "profile": config.get("default_profile", "standard"),
+                    "profile": config.get("default_profile", DEFAULT_EVALUATION_PROFILE),
                 })
 
         canonical = {
@@ -4222,7 +4265,7 @@ class PipelineService:
             f"LC_ALL=C {GPU_USAGE_LONG_COMMAND}"
         )
         try:
-            host, output = self.cluster.run_with_fallback(command, gateway, timeout=20)
+            host, output = self.cluster.run_with_fallback(command, gateway, timeout=GPU_USAGE_QUERY_TIMEOUT_SECONDS)
             requested_type = resolve_gpu_type(spec, plan)
             requested_columns = (CLUSTER.dashboard.gpu_usage_columns if requested_type == "any"
                                  else [requested_type])
@@ -4239,7 +4282,7 @@ class PipelineService:
                     f"export PATH={shlex.quote(SLURM_BIN)}:${{PATH:-}}; LC_ALL=C python3 -c "
                     + shlex.quote(program) + " " + shlex.quote(normal.account) + " " + shlex.quote(normal.partition)
                 )
-                host, raw = self.cluster.run_with_fallback(idle_command, host, timeout=55)
+                host, raw = self.cluster.run_with_fallback(idle_command, host, timeout=IDLE_QUOTA_VERIFICATION_TIMEOUT_SECONDS)
                 idle_receipt = json.loads(raw)
                 if not isinstance(idle_receipt, dict):
                     raise ValueError("Slurm returned an invalid quota verification response")
@@ -5138,7 +5181,7 @@ class PipelineService:
                 "stdout_path": stdout,
                 "stderr_path": stderr,
                 "submitted_at": submitted_at,
-                "slurm_reason": test_output.strip()[:2000],
+                "slurm_reason": test_output.strip()[:SUBMISSION_OUTPUT_LIMIT],
             },
             event_type="JOB_SUBMITTED",
             old_status=evaluation["status"] if evaluation else run["status"],
@@ -5167,7 +5210,7 @@ class PipelineService:
                     "stdout_path": stdout,
                     "stderr_path": stderr,
                     "submitted_at": submitted_at,
-                    "slurm_reason": test_output.strip()[:2000],
+                    "slurm_reason": test_output.strip()[:SUBMISSION_OUTPUT_LIMIT],
                 },
                 event_type="JOB_SUBMITTED_AFTER_CANCEL_REQUEST",
                 details={
@@ -5911,6 +5954,31 @@ class PipelineService:
             if integration.provider in enabled
         }
 
+    def gpu_tracking_bridge(
+        self, run: Mapping[str, Any], spec: ExperimentSpec, capsule_root: Path
+    ) -> WandBBridge | None:
+        """The W&B bridge a run's GPU statistics publish through, or None when they must not.
+
+        An adapter's native W&B SDK owns the run's events stream, so the console
+        never competes with it; a run without an active W&B provider has nowhere
+        to publish.
+        """
+        if "wandb" in self._native_tracking_provider_names(spec):
+            return None
+        provider = next(
+            (
+                p
+                for p in self._active_tracking_providers(spec)
+                if self._tracking_provider_value(p, "provider") == "wandb"
+            ),
+            None,
+        )
+        if provider is None:
+            return None
+        return self._wandb_bridge(
+            Path(capsule_root) / str(run["id"]), replace(self._wandb_settings(provider), auto_flush=False)
+        )
+
     def _native_tracking_runtime(
         self,
         spec: ExperimentSpec,
@@ -6602,12 +6670,12 @@ class PipelineService:
         record = self.database.get_data_import(import_id)
         if record is None:
             raise KeyError("Data import not found")
-        if record["state"] in {"CANCELLED", "CANCELLING", "SUCCEEDED", "FAILED", "FINALIZING"}:
+        if record["state"] in DATA_IMPORT_TERMINAL_STATES | DATA_IMPORT_SETTLING_STATES:
             return record
         if not record.get("slurm_job_id"):
             raise ValueError("Import submission is still in progress; refresh before cancelling")
         claimed = self.database.update_data_import(
-            import_id, expected_states=["SUBMITTED", "PENDING", "RUNNING"],
+            import_id, expected_states=DATA_IMPORT_SCHEDULED_STATES,
             state="CANCELLING", error=None,
         )
         if claimed is None:
@@ -6718,7 +6786,7 @@ class PipelineService:
         records = [
             record
             for record in self.database.list_data_imports(
-                states=["SUBMITTED", "PENDING", "RUNNING", "FINALIZING", "CANCELLING"]
+                states=DATA_IMPORT_IN_FLIGHT_STATES
             )
             if record.get("slurm_job_id")
         ]
@@ -6766,7 +6834,7 @@ class PipelineService:
                     with self._data_import_publication_lock:
                         claimed = self.database.update_data_import(
                             record["id"], state="FINALIZING", **common,
-                            expected_states=["SUBMITTED", "PENDING", "RUNNING", "FINALIZING", "CANCELLING"],
+                            expected_states=DATA_IMPORT_IN_FLIGHT_STATES,
                         )
                         if claimed is None or claimed["state"] != "FINALIZING":
                             continue
@@ -7026,7 +7094,7 @@ class PipelineService:
         """
         path = (
             f"{self._run_directory(attempt['run_id'])}/attempts/"
-            f"{attempt['slurm_job_id']}/state/interruption.json"
+            f"{attempt['slurm_job_id']}/state/{INTERRUPTION_RECEIPT}"
         )
         # Only a gateway that answers can say the receipt is missing.
         _, content = self.cluster.read_optional_file(path, attempt.get("gateway") or "auto", max_bytes=65_536)
@@ -7231,7 +7299,7 @@ class PipelineService:
                     }
                     receipt: dict[str, Any] | None = None
                     exit_code = record.get("ExitCode")
-                    time_limit_exit = exit_code == "124:0"
+                    time_limit_exit = exit_code == f"{TIME_LIMIT_EXIT_CODE}:0"
                     if state == "FAILED" and (
                         # An exit record cannot tell a time limit from a cancellation
                         # that followed its warning, so it never queues a new attempt;
@@ -7243,7 +7311,7 @@ class PipelineService:
                             receipt = self._interruption_receipt(row)
                         except ClusterError:
                             continue  # The gateway failed, not the receipt.
-                    if time_limit_exit and receipt and receipt.get("reason") == "time_limit_warning" and receipt.get("exit_code") == 124:
+                    if time_limit_exit and time_limit_receipt(receipt):
                         state = "TIMEOUT"
                         common["slurm_reason"] = "Stopped at the Slurm time-limit warning; checkpoint preserved if available"
                     elif gpu_missing_receipt(receipt):
@@ -7888,10 +7956,10 @@ class PipelineService:
                         or (version == self._progress_refresh_versions.get(key)
                             and now < self._progress_refresh_due.get(key, 0))):
                     continue
-                if key in self._progress_refresh_pending or len(self._progress_refresh_pending) < 2000:
+                if key in self._progress_refresh_pending or len(self._progress_refresh_pending) < PROGRESS_REFRESH_QUEUE_LIMIT:
                     self._progress_refresh_pending[key] = 0 if status in active_states else 1
                     self._progress_refresh_versions[key] = version
-            while self._progress_refresh_pending and self._progress_refresh_workers < 2:
+            while self._progress_refresh_pending and self._progress_refresh_workers < PROGRESS_REFRESH_WORKERS:
                 self._progress_refresh_workers += 1
                 threading.Thread(target=self._refresh_list_progress, name="skynet-list-progress", daemon=True).start()
             return bool(keys & (self._progress_refresh_pending.keys() | self._progress_refresh_inflight))
@@ -8028,7 +8096,7 @@ class PipelineService:
                 final_failures.pop(final_key, None)
                 return 0
             if final_read:
-                final_failures[final_key] = time.monotonic() + 60
+                final_failures[final_key] = time.monotonic() + FINAL_PROGRESS_RETRY_SECONDS
                 self._training_progress_final_failures = final_failures
             if raise_on_error:
                 raise
@@ -8042,7 +8110,7 @@ class PipelineService:
         if not records:
             if final_read and attempt_status in _PROGRESS_SUCCESS_STATES:
                 # An empty/temporarily unavailable tail is not completion evidence.
-                final_failures[final_key] = time.monotonic() + 60
+                final_failures[final_key] = time.monotonic() + FINAL_PROGRESS_RETRY_SECONDS
                 self._training_progress_final_failures = final_failures
                 if raise_on_error:
                     raise ClusterError("Successful training has no valid final progress evidence yet")
@@ -8158,18 +8226,6 @@ class PipelineService:
         return changed
 
     @staticmethod
-    def _training_progress_timestamp_ms(value: Any) -> int:
-        if not isinstance(value, str) or not value.strip():
-            return int(datetime.now(timezone.utc).timestamp() * 1000)
-        try:
-            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-        except ValueError:
-            return int(datetime.now(timezone.utc).timestamp() * 1000)
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return int(parsed.timestamp() * 1000)
-
-    @staticmethod
     def _training_progress_metrics(sample: Mapping[str, Any]) -> dict[str, float | int]:
         evidence = sample.get("evidence") or sample.get("evidence_json") or {}
         if not isinstance(evidence, Mapping) or not isinstance(evidence.get("metrics"), Mapping):
@@ -8276,14 +8332,14 @@ class PipelineService:
                     pending_metrics.append({
                         "metrics": metrics,
                         "step": int(sample.get("completed") or 0),
-                        "timestamp_ms": self._training_progress_timestamp_ms(sample.get("recorded_at")),
+                        "timestamp_ms": progress_timestamp_ms(sample.get("recorded_at")),
                         "idempotency_key": idempotency_key,
                     })
                     emitted.setdefault(sample_key, set()).update(metrics)
                     published += 1
                 if name == "wandb":
                     bridge.log_metrics_batch(run_id, pending_metrics)
-                    report = bridge.drain_spool(limit=100)
+                    report = bridge.drain_spool(limit=TRACKING_FLUSH_EVENT_LIMIT)
                     if report.errors:
                         raise TrackingRequestError(report.errors[0])
                 else:
@@ -8304,7 +8360,7 @@ class PipelineService:
         # causing duplicate SSH reads while still making progress visibly live.
         now = time.monotonic()
         last_reads = getattr(self, "_evaluation_progress_last_reads", {})
-        if now - float(last_reads.get(evaluation["id"], 0.0)) < 4.0:
+        if now - float(last_reads.get(evaluation["id"], 0.0)) < EVALUATION_PROGRESS_READ_INTERVAL_SECONDS:
             return
         last_reads[evaluation["id"]] = now
         self._evaluation_progress_last_reads = last_reads
@@ -8815,7 +8871,7 @@ class PipelineService:
                             bridge = self._wandb_bridge(LOCAL_CAPSULE_ROOT / run_id, replace(self._wandb_settings(provider), auto_flush=False))
                         else:
                             bridge = self._mlflow_bridge(LOCAL_CAPSULE_ROOT / run_id, replace(self._mlflow_settings(provider), auto_flush=False))
-                        report = bridge.drain_spool(limit=100)
+                        report = bridge.drain_spool(limit=TRACKING_FLUSH_EVENT_LIMIT)
                         existing = next((item for item in self.database.list_tracking_bindings("run", run_id) if item["provider"] == name), {})
                         self.database.upsert_tracking_binding(
                             name, "run", run_id,
@@ -8861,7 +8917,7 @@ class PipelineService:
                 if status:
                     bridge.finish_run(run_id, status=status, idempotency_key=final_key + (
                         ":finish:file-stream-v1" if name == "wandb" else ":finish"))
-                report = bridge.drain_spool(limit=100)
+                report = bridge.drain_spool(limit=TRACKING_FLUSH_EVENT_LIMIT)
                 delivered = not report.errors and report.remaining == 0
                 binding = bridge.binding(run_id)
                 existing = next(
@@ -9492,7 +9548,9 @@ class PipelineService:
         if not refresh:
             with cache_lock:
                 cached = cache.get(cache_key)
-            if cached is not None and now - cached[0] < (60.0 if not cached[2] else 10.0):
+            if cached is not None and now - cached[0] < (
+                RUNTIME_READINESS_BLOCKED_CACHE_SECONDS if cached[2] else RUNTIME_READINESS_CACHE_SECONDS
+            ):
                 return copy.deepcopy(cached[1]), list(cached[2])
         readiness = self._probe_runtime_profile(
             public_profile,
@@ -9944,7 +10002,7 @@ class PipelineService:
         unseen_embodiment: bool = False,
         environment: str | None = None,
         tasks: list[str] | None = None,
-        episodes_per_task: int = 20,
+        episodes_per_task: int = DEFAULT_EVALUATION_EPISODES,
         seeds: list[int] | None = None,
         parallelism: int = 1,
         headless: bool = True,
@@ -10005,7 +10063,7 @@ class PipelineService:
                     "target_dataset": suite_config.get("target_dataset"),
                     "unseen_embodiment": suite_config.get("unseen_embodiment", False),
                     "tasks": resolved_tasks,
-                    "seeds": list(seeds or [42]),
+                    "seeds": list(seeds or DEFAULT_EVALUATION_SEEDS),
                     "resources": resources.model_dump(mode="json", by_alias=True) if resources else None,
                 }
             )[:20]
@@ -10028,7 +10086,7 @@ class PipelineService:
                         suite,
                         environment=str(resolved_environment),
                         tasks=resolved_tasks,
-                        seeds=list(seeds or [42]),
+                        seeds=list(seeds or DEFAULT_EVALUATION_SEEDS),
                         episodes_per_task=episodes_per_task,
                         parallelism=parallelism,
                         headless=headless,

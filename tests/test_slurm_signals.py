@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from skynet_app.gpu_preflight import INTERRUPTION_RECEIPT, TIME_LIMIT_EXIT_CODE, TIME_LIMIT_REASON
 from skynet_app.slurm import BATCH_WARNING_HANDLER, RUNNER_SOURCE, _supervise_runtime
 
 
@@ -93,10 +94,10 @@ def test_batch_warning_waits_for_trainer_and_preserves_resumable_checkpoint(tmp_
         time.sleep(0.03)
         process.send_signal(signal.SIGUSR1)
         stdout, stderr = process.communicate(timeout=10)
-        assert process.returncode == 124, (stdout, stderr)
-        receipt = json.loads((attempt / 'state/interruption.json').read_text())
+        assert process.returncode == TIME_LIMIT_EXIT_CODE, (stdout, stderr)
+        receipt = json.loads((attempt / 'state' / INTERRUPTION_RECEIPT).read_text())
         assert receipt == {'schema_version': 1, 'job_id': 'job1', 'run_id': 'run',
-                           'reason': 'time_limit_warning', 'exit_code': 124}
+                           'reason': TIME_LIMIT_REASON, 'exit_code': TIME_LIMIT_EXIT_CODE}
         saved = json.loads((run / 'checkpoints/latest.json').read_text())
         assert saved['resumable'] is True and saved['final'] is False
         assert not (run / 'checkpoints/selected-for-inference.json').exists()
@@ -120,14 +121,14 @@ def test_warning_during_runtime_setup_never_launches_training(tmp_path):
         wait_for(run / 'batch-ready', process)
         process.send_signal(signal.SIGUSR1)
         stdout, stderr = process.communicate(timeout=10)
-        assert process.returncode == 124, (stdout, stderr)
+        assert process.returncode == TIME_LIMIT_EXIT_CODE, (stdout, stderr)
         assert not (run / 'ready').exists()
-        assert (attempt / 'state/interruption.json').is_file()
+        assert (attempt / 'state' / INTERRUPTION_RECEIPT).is_file()
     finally:
         cleanup(process)
 
 
-@pytest.mark.parametrize('return_code', [0, 17, 124])
+@pytest.mark.parametrize('return_code', [0, 17, TIME_LIMIT_EXIT_CODE])
 def test_runtime_supervisor_preserves_normal_exit_codes(return_code):
     script = '\n'.join(['set -Eeuo pipefail', *_supervise_runtime([f'exit {return_code}'])])
     result = subprocess.run(['bash', '-c', script], timeout=5)

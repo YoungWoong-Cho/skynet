@@ -8,12 +8,18 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence, Literal
+from typing import Any, Collection, Iterator, Mapping, Sequence, Literal
 
 from psycopg import IntegrityError
 
 from .database_endpoint import load_endpoint
 from .db_backend import PostgresBackend, PostgresConnection, Record, DistributedRLock, lock_key
+from .data_import_states import (
+    DATA_IMPORT_ACTIVE_STATES,
+    DATA_IMPORT_OBSERVED_STATES,
+    DATA_IMPORT_SETTLING_STATES,
+    DATA_IMPORT_TERMINAL_STATES,
+)
 from .data_paths import validate_mount_path
 from .data_resource_policy import validate_resource_metadata, validate_resource_type, resource_recording_ids
 from .experiments import SPEC_API_VERSION
@@ -4043,7 +4049,7 @@ class Database:
                     continue
                 if row["resource_id"] != resource_id:
                     raise ValueError("Another dataset import uses this dataset")
-                if row["state"] not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                if row["state"] not in DATA_IMPORT_TERMINAL_STATES:
                     raise ValueError("Wait for dataset import to finish before deleting it")
                 imports.append(dict(row))
             if preview:
@@ -4383,8 +4389,8 @@ class Database:
             )
             identity = tuple(request.get(key) for key in identity_fields)
             active = connection.execute(
-                """SELECT request_json FROM data_imports WHERE resource_id = ?
-                   AND state IN ('SUBMITTING', 'SUBMITTED', 'PENDING', 'RUNNING', 'FINALIZING', 'CANCELLING')""",
+                f"""SELECT request_json FROM data_imports WHERE resource_id = ?
+                   AND state IN ({sql_list(DATA_IMPORT_ACTIVE_STATES)})""",
                 (resource_id,),
             ).fetchall()
             for row in active:
@@ -4421,7 +4427,7 @@ class Database:
             return self._public_data_import(row)
 
     def update_data_import(
-        self, import_id: str, *, expected_states: Sequence[str] | None = None, **changes: Any
+        self, import_id: str, *, expected_states: Collection[str] | None = None, **changes: Any
     ) -> dict[str, Any] | None:
         """Update atomically; conditional callers receive None if another transition won."""
         allowed = {
@@ -4446,14 +4452,14 @@ class Database:
                 raise KeyError(f"Data import not found: {import_id}")
             if expected_states is not None and row["state"] not in expected_states:
                 return None
-            if row["state"] in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+            if row["state"] in DATA_IMPORT_TERMINAL_STATES:
                 return self._public_data_import(row)
             # Scheduler observations can lag a cancellation or finalization.
             # A conditional transition can explicitly roll back a failed cancel.
             if (
                 expected_states is None
-                and row["state"] in {"CANCELLING", "FINALIZING"}
-                and fields.get("state") in {"SUBMITTING", "SUBMITTED", "PENDING", "RUNNING"}
+                and row["state"] in DATA_IMPORT_SETTLING_STATES
+                and fields.get("state") in DATA_IMPORT_OBSERVED_STATES
             ):
                 fields.pop("state")
             self._update(connection, "data_imports", import_id, fields)
@@ -4471,11 +4477,11 @@ class Database:
             ).fetchone()
             return self._public_data_import(row) if row is not None else None
 
-    def list_data_imports(self, *, states: Sequence[str] | None = None) -> list[dict[str, Any]]:
+    def list_data_imports(self, *, states: Collection[str] | None = None) -> list[dict[str, Any]]:
         parameters: list[Any] = []
         where = ""
         if states:
-            normalized = [str(state).upper() for state in states]
+            normalized = sorted(str(state).upper() for state in states)
             where = f"WHERE state IN ({','.join('?' for _ in normalized)})"
             parameters.extend(normalized)
         with self.connection() as connection:

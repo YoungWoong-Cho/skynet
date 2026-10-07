@@ -65,8 +65,28 @@ def cleaned_payload(filename, body, needles):
     ).encode()
 
 
+def _journal_payload_refs(connection, run_id):
+    """Each payload ref of the run's journals with every ref that shares its body, in one read."""
+    sharing = {}
+    for ref in connection.execute(
+        """SELECT r.sha256, r.table_name, r.record_id, r.field_name, p.path, p.size_bytes
+           FROM metadata_payload_refs r JOIN metadata_payloads p ON p.sha256=r.sha256
+           WHERE r.sha256 IN (SELECT sha256 FROM metadata_payload_refs
+                              WHERE table_name='tracking_journals' AND record_id=?)""",
+        (run_id,),
+    ).fetchall():
+        sharing.setdefault(ref["sha256"], []).append(ref)
+    return [
+        (ref, refs)
+        for refs in sharing.values()
+        for ref in refs
+        if ref["table_name"] == "tracking_journals" and ref["record_id"] == run_id
+    ]
+
+
 def changes(connection, database, run_id, needles):
     result = []
+    journal_refs = None  # Read once, on the first journal that changes.
     for row in connection.execute(
         "SELECT owner_id,filename,payload FROM tracking_journals WHERE run_id=?",
         (run_id,),
@@ -95,35 +115,24 @@ def changes(connection, database, run_id, needles):
                 ]
             )
             retained = {hashlib.sha256(chunk.encode()).hexdigest() for chunk in chunks}
-            old_refs = connection.execute(
-                "SELECT r.sha256,p.path,p.size_bytes,r.field_name FROM metadata_payload_refs r JOIN metadata_payloads p ON p.sha256=r.sha256 WHERE r.table_name='tracking_journals' AND r.record_id=?",
-                (run_id,),
-            ).fetchall()
-            retired = []
-            for ref in old_refs:
-                if ref["sha256"] in retained or not (
-                    ref["field_name"] == row[1]
-                    or ref["field_name"].startswith(row[1] + ":")
-                ):
-                    continue
-                shared = connection.execute(
-                    "SELECT table_name,record_id,field_name FROM metadata_payload_refs WHERE sha256=?",
-                    (ref["sha256"],),
-                ).fetchall()
-                if all(
-                    r[0] == "tracking_journals"
-                    and r[1] == run_id
-                    and (r[2] == row[1] or r[2].startswith(row[1] + ":"))
+            if journal_refs is None:
+                journal_refs = _journal_payload_refs(connection, run_id)
+
+            def owned(field_name):
+                return field_name == row[1] or field_name.startswith(row[1] + ":")
+
+            item["retired"] = [
+                {"sha256": ref["sha256"], "path": ref["path"], "size_bytes": ref["size_bytes"]}
+                for ref, shared in journal_refs
+                if ref["sha256"] not in retained
+                and owned(ref["field_name"])
+                and all(
+                    r["table_name"] == "tracking_journals"
+                    and r["record_id"] == run_id
+                    and owned(r["field_name"])
                     for r in shared
-                ):
-                    retired.append(
-                        {
-                            "sha256": ref["sha256"],
-                            "path": ref["path"],
-                            "size_bytes": ref["size_bytes"],
-                        }
-                    )
-            item["retired"] = retired
+                )
+            ]
         result.append(item)
     return result
 

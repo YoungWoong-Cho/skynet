@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
@@ -15,7 +14,7 @@ import time
 
 from .cluster_runtime import SLURM_BIN
 from .experiments import ExperimentSpec
-from .tracking import WandBBridge, sanitize
+from .tracking import sanitize
 
 _LOCK = threading.Lock()
 _LAST_POLLS = {}
@@ -26,6 +25,19 @@ ERROR_FILENAME = "gpu-statistics-error.txt"
 
 def _error_path(capsule_root, run_id):
     return Path(capsule_root) / run_id / ERROR_FILENAME
+
+
+def progress_timestamp_ms(value):
+    """Epoch milliseconds of a recorded ISO-8601 timestamp; now when it is absent or unreadable."""
+    if not isinstance(value, str) or not value.strip():
+        return int(datetime.now(timezone.utc).timestamp() * 1000)
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return int(datetime.now(timezone.utc).timestamp() * 1000)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp() * 1000)
 
 
 def system_metrics(record, multi_node=False):
@@ -97,23 +109,9 @@ def _sync(service, run, capsule_root, force, *, raise_on_error=False):
     if not run_id or not run.get("run_directory"):
         return 0
     spec = ExperimentSpec.model_validate(run["resolved_spec_json"])
-    # Do not compete with an adapter's native W&B SDK for the events stream.
-    if "wandb" in service._native_tracking_provider_names(spec):
+    bridge = service.gpu_tracking_bridge(run, spec, capsule_root)
+    if bridge is None:
         return 0
-    provider = next(
-        (
-            p
-            for p in service._active_tracking_providers(spec)
-            if service._tracking_provider_value(p, "provider") == "wandb"
-        ),
-        None,
-    )
-    if provider is None:
-        return 0
-    bridge = getattr(service, "_wandb_bridge", WandBBridge)(
-        Path(capsule_root) / run_id,
-        replace(service._wandb_settings(provider), auto_flush=False),
-    )
     if not bridge.binding(run_id):
         if raise_on_error:
             raise RuntimeError("W&B run binding is not ready for GPU metrics")
@@ -161,9 +159,7 @@ def _sync(service, run, capsule_root, force, *, raise_on_error=False):
             response.update(
                 {key: value for key, value in page.items() if key != "records"}
             )
-        start = service._training_progress_timestamp_ms(
-            run.get("started_at") or attempt.get("started_at")
-        )
+        start = progress_timestamp_ms(run.get("started_at") or attempt.get("started_at"))
         samples = []
         for record in response["records"]:
             if str(record.get("job_id")) != job_id:

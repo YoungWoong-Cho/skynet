@@ -1,3 +1,4 @@
+from functools import partial
 import hashlib
 import json
 import time
@@ -7,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from skynet_app import gpu_metrics, gpu_tracking
+from skynet_app.pipeline_api import PipelineService
 from skynet_app.slurm import compile_sbatch, RUNNER_SOURCE
 from skynet_app.adapters import resolve_adapter_plan
 from skynet_app.tracking import TrackingRequestError, WandBSettings, WandBBridge
@@ -172,7 +174,9 @@ def test_existing_job_probe_is_scoped_bounded_and_does_not_edit_capsule():
 
 
 def test_native_sdk_keeps_ownership_of_wandb_stream(tmp_path):
+    # The early exit is the service's seam; gpu_tracking only asks it for a bridge.
     service = SimpleNamespace(_native_tracking_provider_names=lambda spec: {"wandb"})
+    service.gpu_tracking_bridge = partial(PipelineService.gpu_tracking_bridge, service)
     run = {
         "id": "native",
         "run_directory": "/runs/native",
@@ -182,13 +186,26 @@ def test_native_sdk_keeps_ownership_of_wandb_stream(tmp_path):
     assert not list(tmp_path.iterdir())
 
 
-def gpu_service(settings):
-    return SimpleNamespace(
+def test_no_active_wandb_provider_leaves_gpu_statistics_without_a_bridge(tmp_path):
+    service = SimpleNamespace(
         _native_tracking_provider_names=lambda spec: set(),
-        _active_tracking_providers=lambda spec: [{"provider": "wandb"}],
+        _active_tracking_providers=lambda spec: [{"provider": "mlflow"}],
         _tracking_provider_value=lambda provider, key: provider[key],
-        _wandb_settings=lambda provider: settings,
-        _training_progress_timestamp_ms=lambda value: 100000,
+    )
+    assert PipelineService.gpu_tracking_bridge(service, {"id": "run"}, make_spec(), tmp_path) is None
+
+
+def test_progress_timestamp_ms_reads_recorded_times_and_falls_back_to_now():
+    assert gpu_tracking.progress_timestamp_ms("1970-01-01T00:01:40Z") == 100000
+    assert gpu_tracking.progress_timestamp_ms("1970-01-01T00:01:40") == 100000  # naive means UTC
+    now = time.time() * 1000
+    for value in (None, "", "not a time"):
+        assert abs(gpu_tracking.progress_timestamp_ms(value) - now) < 5000
+
+
+def gpu_service(bridge):
+    return SimpleNamespace(
+        gpu_tracking_bridge=lambda run, spec, capsule_root: bridge,
         _tracking_failure=lambda *a: None,
     )
 
@@ -197,6 +214,7 @@ def tracked_run():
     return {
         "id": "run",
         "run_directory": "/runs/run",
+        "started_at": "1970-01-01T00:01:40Z",
         "resolved_spec_json": make_spec().model_dump(mode="json", by_alias=True),
         "stages": [
             {"id": "train", "stage_type": "TRAIN"},
@@ -242,7 +260,7 @@ def test_controller_ingests_existing_job_once_and_preserves_pending_samples(tmp_
         local_run_id="run", entity="team", project="test", run_name="test", group="test"
     )
     bridge.drain_spool()
-    service = gpu_service(settings)
+    service = gpu_service(bridge)
     run = tracked_run()
     empty = {"records": [], "cursors": {}, "latest": 0, "oldest": 0}
     response = gpu_response()
@@ -257,7 +275,6 @@ def test_controller_ingests_existing_job_once_and_preserves_pending_samples(tmp_
         return result
 
     with (
-        patch.object(gpu_tracking, "WandBBridge", return_value=bridge),
         patch.object(gpu_tracking, "_read", side_effect=[empty, response, response]),
         patch.object(gpu_tracking, "_sample_existing") as probe,
         patch.object(bridge, "log_system_metrics_batch", side_effect=persist_then_interrupt),
@@ -293,11 +310,10 @@ def test_gpu_state_lives_in_the_bridge_journal_when_the_run_has_one(tmp_path):
     bridge.drain_spool()
     response = gpu_response()
     with (
-        patch.object(gpu_tracking, "WandBBridge", return_value=bridge),
         patch.object(gpu_tracking, "_read", return_value=response),
         patch.object(gpu_tracking, "_sample_existing") as probe,
     ):
-        assert gpu_tracking.sync_gpu_statistics(gpu_service(settings), tracked_run(), tmp_path, force=True) == 3
+        assert gpu_tracking.sync_gpu_statistics(gpu_service(bridge), tracked_run(), tmp_path, force=True) == 3
     assert probe.call_count == 0
     assert len(bridge.system_rows) == 3
     # The source cursor is shared through the journal, never through the local capsule.

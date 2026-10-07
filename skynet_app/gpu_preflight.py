@@ -1,20 +1,38 @@
-"""GPU allocation preflight shared by every generated GPU job script.
+"""The deliberate-exit protocol of generated job scripts: GPU preflight and time limit.
 
-The cluster controller occasionally starts a job that requested ``--gres=gpu``
-without allocating one (the batch step then sees no ``SLURM_JOB_GPUS`` and no
-``CUDA_VISIBLE_DEVICES``). Instead of letting the workload discover that minutes
-later, every GPU job script runs this preflight first and exits with a dedicated
-code; the services that watch those jobs recognise the code and report (or, for
-training and evaluation attempts, retry) a cluster-side allocation failure
-instead of a workload failure.
+A training or evaluation attempt that stops on purpose leaves an interruption
+receipt (``state/INTERRUPTION_RECEIPT`` under its capsule) naming the reason and
+the exit code, so the services that watch the job can tell the exit from a
+workload failure. Two exits write one:
+
+* The cluster controller occasionally starts a job that requested ``--gres=gpu``
+  without allocating one (the batch step then sees no ``SLURM_JOB_GPUS`` and no
+  ``CUDA_VISIBLE_DEVICES``). Instead of letting the workload discover that
+  minutes later, every GPU job script runs the preflight below first and exits
+  with a dedicated code; reconcile reports (or, for training and evaluation
+  attempts, retries) a cluster-side allocation failure.
+* The batch script's time-limit warning handler stops the trainer at Slurm's
+  warning signal and exits with Slurm's own time-limit code; reconcile then
+  queues the resume instead of failing the run.
+
+The runtime wrapper (``slurm.RUNNER_SOURCE``) writes the time-limit receipt, the
+shell lines below write the GPU one, and ``pipeline_api`` reads both.
 """
 from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
 
-# Outside sysexits (64-78), Slurm's own 124 time-limit convention and the
-# 125+ shell range; the receipt below is what reconcile keys on, not the code.
+# Filename of the receipt, under the attempt capsule's state directory.
+INTERRUPTION_RECEIPT = "interruption.json"
+
+# Slurm's own convention for a job that reached its time limit; the runtime
+# wrapper exits with it after the warning signal stopped the trainer.
+TIME_LIMIT_EXIT_CODE = 124
+TIME_LIMIT_REASON = "time_limit_warning"
+
+# Outside sysexits (64-78), Slurm's own time-limit convention above and the
+# 125+ shell range; the receipt is what reconcile keys on, not the code.
 GPU_MISSING_EXIT_CODE = 97
 GPU_MISSING_REASON = "gpu_not_allocated"
 GPU_MISSING_MESSAGE = "The cluster started the job without the requested GPU"
@@ -45,7 +63,7 @@ def gpu_preflight_lines(gpu_count: int, *, receipt_dir: str | None = None) -> li
             f'  mkdir -p {receipt_dir}',
             '  printf \'{"schema_version": 1, "job_id": "%s", "run_id": "%s", "reason": "%s", "exit_code": %d}\\n\' '
             f'"${{SLURM_JOB_ID:-}}" "${{SKYNET_RUN_ID:-}}" {GPU_MISSING_REASON} {GPU_MISSING_EXIT_CODE} '
-            f'> {receipt_dir}/interruption.json',
+            f'> {receipt_dir}/{INTERRUPTION_RECEIPT}',
         ]
     return [
         "# GPU preflight: the controller sometimes starts a GPU job without allocating one.",
@@ -69,10 +87,19 @@ def gpu_missing_exit(record: Mapping[str, Any] | None) -> bool:
     return exit_code.split(":", 1)[0] == str(GPU_MISSING_EXIT_CODE)
 
 
-def gpu_missing_receipt(receipt: Any) -> bool:
-    """Whether an attempt's interruption receipt records the GPU preflight exit."""
+def _receipt_records(receipt: Any, reason: str, exit_code: int) -> bool:
     return (
         isinstance(receipt, Mapping)
-        and receipt.get("reason") == GPU_MISSING_REASON
-        and receipt.get("exit_code") == GPU_MISSING_EXIT_CODE
+        and receipt.get("reason") == reason
+        and receipt.get("exit_code") == exit_code
     )
+
+
+def gpu_missing_receipt(receipt: Any) -> bool:
+    """Whether an attempt's interruption receipt records the GPU preflight exit."""
+    return _receipt_records(receipt, GPU_MISSING_REASON, GPU_MISSING_EXIT_CODE)
+
+
+def time_limit_receipt(receipt: Any) -> bool:
+    """Whether an attempt's interruption receipt records the time-limit warning exit."""
+    return _receipt_records(receipt, TIME_LIMIT_REASON, TIME_LIMIT_EXIT_CODE)

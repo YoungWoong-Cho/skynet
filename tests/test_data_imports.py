@@ -11,6 +11,10 @@ import pytest
 from pydantic import ValidationError
 
 from skynet_app.cluster_runtime import ClusterError, Submission
+from skynet_app.data_import_states import (
+    DATA_IMPORT_ACTIVE_STATES, DATA_IMPORT_IN_FLIGHT_STATES, DATA_IMPORT_OBSERVED_STATES,
+    DATA_IMPORT_SCHEDULED_STATES, DATA_IMPORT_SETTLING_STATES, DATA_IMPORT_TERMINAL_STATES,
+)
 from skynet_app.data_imports import _IMPORT_PROGRAM, build_huggingface_import_job
 from skynet_app.database import Database
 from skynet_app.cluster_config import CLUSTER, format_slurm_duration
@@ -412,3 +416,13 @@ def test_download_worker_uses_allocated_cpu_budget(tmp_path):
     result = namespace["download_subset"]({"namespace": "test", "name": "dataset", "subset": "subset", "revision": "e" * 40, "cpus": 3}, tmp_path)
     assert result == snapshot
     assert worker_counts == [3]
+
+
+def test_data_import_lifecycle_sets_partition_the_states_once():
+    lifecycle = {"SUBMITTING", "SUBMITTED", "PENDING", "RUNNING", "FINALIZING", "CANCELLING",
+                 "SUCCEEDED", "FAILED", "CANCELLED"}
+    assert DATA_IMPORT_ACTIVE_STATES | DATA_IMPORT_TERMINAL_STATES == lifecycle
+    assert not DATA_IMPORT_ACTIVE_STATES & DATA_IMPORT_TERMINAL_STATES
+    assert DATA_IMPORT_OBSERVED_STATES == {"SUBMITTING"} | DATA_IMPORT_SCHEDULED_STATES
+    assert DATA_IMPORT_IN_FLIGHT_STATES == DATA_IMPORT_SCHEDULED_STATES | DATA_IMPORT_SETTLING_STATES
+    assert not DATA_IMPORT_SCHEDULED_STATES & DATA_IMPORT_SETTLING_STATES
