@@ -10,8 +10,12 @@ from skynet_app.adapters import (
 )
 from skynet_app.database import Database
 from skynet_app.cluster_config import CLUSTER
-from skynet_app.experiments import ExperimentSpec, EvaluationSpec, expand_sweep, get_evaluation_catalog
-from skynet_app.pipeline_api import PipelineService, _sweep_from_frontend
+from skynet_app.experiments import (
+    ExperimentSpec, EvaluationSpec, SweepSpec, TrainSpec, expand_sweep, get_evaluation_catalog,
+)
+from skynet_app.pipeline_api import (
+    FRONTEND_TRAIN_FIELDS, PipelineService, _manifest_default, _sweep_from_frontend,
+)
 
 
 def spec(**changes):
@@ -27,7 +31,10 @@ def spec(**changes):
 
 def test_automatic_seed_remains_implicit_after_expand_and_json_round_trip():
     generic = next(m for m in builtin_adapter_manifests() if m.slug == "generic")
+    # The frontend names only its axes; SweepSpec owns every other default.
+    assert _sweep_from_frontend(None) == {"strategy": "grid", "axes": {}}
     original = spec(sweep=_sweep_from_frontend(None))
+    assert original.sweep.max_parallel == SweepSpec.model_fields["max_parallel"].default
     for _ in range(3):
         expanded = expand_sweep(original)[0].resolved_spec
         assert not expanded.intent.is_explicit("train.seed")
@@ -46,8 +53,26 @@ def test_unspecified_sweep_preserves_an_explicit_training_seed():
 def test_null_checkpoint_warning_consumes_manifest_default_and_explicit_wins():
     manifest = next(m for m in builtin_adapter_manifests() if m.slug == "generic").model_copy(deep=True)
     manifest.defaults.checkpoint.save_before_timeout_seconds = 60
-    assert PipelineService._payload_with_manifest_defaults({"checkpoint_warning_seconds": None}, manifest)["checkpoint_warning_seconds"] == 60
+    manifest.defaults.hyperparameters.num_workers_per_rank = 2
+    defaulted = PipelineService._payload_with_manifest_defaults(
+        {"checkpoint_warning_seconds": None, "hyperparameters": {"num_workers": ""}}, manifest,
+    )
+    assert defaulted["checkpoint_warning_seconds"] == 60
+    assert defaulted["hyperparameters"]["num_workers"] == 2
     assert PipelineService._payload_with_manifest_defaults({"checkpoint_warning_seconds": 120}, manifest)["checkpoint_warning_seconds"] == 120
+    # One field table serves frontend and canonical submissions alike, and each of
+    # its rows names a real TrainSpec path and a real manifest default.
+    canonical = PipelineService._canonical_manifest_defaults(manifest)["train"]
+    assert canonical["checkpoint"]["save_before_timeout_seconds"] == 60
+    assert canonical["num_workers_per_rank"] == 2
+    assert spec(train=canonical).train.num_workers_per_rank == 2
+    for path, attribute in FRONTEND_TRAIN_FIELDS.values():
+        model = TrainSpec
+        *parents, leaf = path.removeprefix("train.").split(".")
+        for part in parents:
+            model = model.model_fields[part].annotation
+        assert leaf in model.model_fields, path
+        _manifest_default(manifest, attribute)
     assert spec(train={"checkpoint": {"auto_resume": False}}, resources={"time_limit": "00:01:00"})
     assert spec(train={"checkpoint": {"auto_resume": True, "save_before_timeout_seconds": 60}}, resources={"time_limit": "00:05:00"})
     with pytest.raises(ValidationError, match="warning"):

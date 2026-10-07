@@ -45,6 +45,8 @@ class ImportCluster:
         self.result = None
         self.state = "COMPLETED"
         self.cancel_calls = []
+        self.status_calls = []
+        self.submissions = 0
         self.on_status = None
         self.on_cancel = None
         self.on_read = None
@@ -55,23 +57,27 @@ class ImportCluster:
 
     def submit_script(self, script: str, run_id: str, gateway: str = "auto"):
         self.script = script
+        self.submissions += 1
+        job_id = str(1233 + self.submissions)
         return Submission(
-            "1234",
-            "1234",
+            job_id,
+            job_id,
             "sky2",
-            f"/coc/flash7/ycho420/jobs/runs/{run_id}/attempts/1234/job.sbatch",
+            f"/coc/flash7/ycho420/jobs/runs/{run_id}/attempts/{job_id}/job.sbatch",
             f"/coc/flash7/ycho420/jobs/runs/{run_id}",
         )
 
     def job_statuses(self, job_ids, gateway: str = "auto"):
+        self.status_calls.append((list(job_ids), gateway))
         if self.on_status:
             self.on_status()
         return "sky2", {
-            "1234": {
+            str(job_id): {
                 "State": self.state,
                 "ExitCode": "0:0",
                 "NodeList": "node1",
             }
+            for job_id in job_ids
         }
 
     def cancel(self, job_id: str, gateway: str = "auto"):
@@ -100,6 +106,13 @@ def test_generated_import_is_pinned_and_uses_the_import_queue():
     assert f"PYTHON={CLUSTER.commands.host_python}" in job.script
     assert "huggingface-hub==1.29.0" in job.script
     assert "refs/heads/main" not in job.script
+    # uv comes from the shared locator: the configured pin, bootstrapped with the host interpreter.
+    assert f'UV_BOOTSTRAP_ROOT="$UV_CACHE_DIR"/bootstrap-{CLUSTER.defaults.uv_version}' in job.script
+    assert f'{CLUSTER.commands.host_python} -m venv "$UV_BOOTSTRAP_ROOT"' in job.script
+    assert f'"uv=={CLUSTER.defaults.uv_version}"' in job.script
+    assert 'skynet_uv run --python "$PYTHON" --with "huggingface-hub==' in job.script
+    for key, value in (("WORK_ROOT", CLUSTER.paths.work_root), ("UV_CACHE_DIR", CLUSTER.paths.uv_cache), ("HF_HOME", CLUSTER.paths.huggingface_cache)):
+        assert f"export {key}={value}\n" in job.script
 
 
 def import_result(record):
@@ -168,11 +181,20 @@ def test_cancellation_waits_for_scheduler_confirmation_and_is_idempotent(submitt
     first = service.cancel_data_import(record["id"])
     assert first["state"] == "CANCELLING"
     assert service.cancel_data_import(record["id"])["state"] == "CANCELLING"
+    # A second in-flight import rides the pass's single scheduler lookup.
+    sibling = database.create_data_resource(
+        category="dataset", **{**{key: RESOURCE[key] for key in ("provider", "namespace", "kind")}, "source_key": "sibling"},
+    )
+    other = service.submit_data_import(sibling["id"], import_request())
+    cluster.status_calls.clear()
     service.reconcile_data_imports()
+    assert [sorted(job_ids) for job_ids, _ in cluster.status_calls] == [["1234", "1235"]]
     assert database.get_data_import(record["id"])["state"] == "CANCELLING"
+    assert database.get_data_import(other["id"])["state"] == "RUNNING"
     cluster.state = "CANCELLED by 1001"
     service.reconcile_data_imports()
     assert service.cancel_data_import(record["id"])["state"] == "CANCELLED"
+    assert database.get_data_import(other["id"])["state"] == "CANCELLED"
     assert cluster.cancel_calls == [("1234", "sky2")]
     assert database.get_data_import(record["id"])["version_id"] is None
 

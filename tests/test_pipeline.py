@@ -3486,5 +3486,36 @@ def test_evaluation_retry_distinguishes_past_preemption_from_live_attempt(tmp_pa
     evaluation = {'run_id': 'r', 'stage_id': 's', 'status': 'FAILED'}
     run = {'stages': [{'id': 's', 'stage_type': 'EVALUATE', 'status': 'FAILED'}],
            'attempts': [{'id': 'old', 'stage_id': 's', 'attempt_number': 1, 'status': previous_status},
-                        {'id': 'new', 'stage_id': 's', 'attempt_number': 2, 'status': 'FAILED', 'slurm_job_id': '999'}]}
+                        {'id': 'new', 'stage_id': 's', 'attempt_number': 2, 'status': 'FAILED', 'slurm_job_id': '999'},
+                        # A stage-less attempt belongs to no evaluation, however new it is.
+                        {'id': 'stray', 'attempt_number': 3, 'status': 'RUNNING'}]}
+    assert [a['id'] for a in pipeline_api._stage_attempts(run, 's')] == ['old', 'new']
+    assert pipeline_api._latest_stage_attempt(run, 's')['id'] == 'new'
     assert service.evaluation_manual_actions(evaluation, run)['retry_submission']['enabled'] is enabled
+
+
+def test_transition_stage_writes_only_the_lifecycle_each_site_passes():
+    transitions = []
+    service = PipelineService.__new__(PipelineService)
+    service.database = SimpleNamespace(transition_workflow_state=lambda **kw: transitions.append(kw) or {'applied': True})
+    service._transition_stage(stage_id='s', stage_type='TRAIN', run_id='r', evaluation_id=None,
+                              status='PENDING', stage_status='PENDING_SLURM')
+    service._transition_stage(stage_id='s', stage_type='EVALUATE', run_id='r', evaluation_id='e',
+                              status='SUCCEEDED', completed_at='t1', evaluation_updates={'progress_completed': 3},
+                              event_type='DONE', old_status='RUNNING', details={'job_id': '1'})
+    blocked = service._block_stage(stage_id='s', stage_type='EVALUATE', run_id='r', evaluation_id='e',
+                                   event_type='ADAPTER_BLOCKED', details={'error': 'x'}, blockers=['x'])
+    pending, succeeded, block = transitions
+    # A stage may hold a Slurm-specific status while its run shares the plain one,
+    # and a site that passes no completed_at leaves the stored one alone.
+    assert pending['stage_updates'] == {'status': 'PENDING_SLURM'}
+    assert pending['run_id'] == 'r' and pending['run_updates'] == {'status': 'PENDING'}
+    assert pending['evaluation_id'] is None and pending['evaluation_updates'] is None and pending['event'] is None
+    # An evaluation stage carries its evaluation, leaves the run alone, and its event names the evaluation.
+    assert succeeded['run_id'] is None and succeeded['run_updates'] is None
+    assert succeeded['evaluation_updates'] == {'status': 'SUCCEEDED', 'completed_at': 't1', 'progress_completed': 3}
+    assert succeeded['event'] == {'entity_type': 'evaluation', 'entity_id': 'e', 'event_type': 'DONE',
+                                  'old_status': 'RUNNING', 'new_status': 'SUCCEEDED', 'details': {'job_id': '1'}}
+    assert block['stage_updates']['status'] == 'BLOCKED' and block['stage_updates']['completed_at']
+    assert block['event']['details'] == {'error': 'x'}
+    assert blocked == {'run_id': 'r', 'stage_id': 's', 'status': 'BLOCKED', 'blockers': ['x']}

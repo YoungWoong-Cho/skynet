@@ -168,6 +168,57 @@ def _frontend_parameter_is_unset(value: Any) -> bool:
     return value is None or value == "" or value == "adapter-default"
 
 
+_UNSET: Any = object()
+
+# Frontend submission field -> (canonical train path, manifest defaults attribute).
+# Hyperparameter rows arrive under payload["hyperparameters"], checkpoint rows at
+# the payload's top level; everything that translates between the frontend and
+# canonical shapes (explicit-intent detection, manifest defaults) reads this table.
+FRONTEND_TRAIN_FIELDS: dict[str, tuple[str, str]] = {
+    "learning_rate": ("train.learning_rate", "hyperparameters.learning_rate"),
+    "batch_semantics": ("train.batch.declared_semantics", "hyperparameters.batch_semantics"),
+    "batch_size": ("train.batch.value", "hyperparameters.batch_size"),
+    "gradient_accumulation": (
+        "train.batch.gradient_accumulation_steps", "hyperparameters.gradient_accumulation_steps",
+    ),
+    "num_workers": ("train.num_workers_per_rank", "hyperparameters.num_workers_per_rank"),
+    "max_steps": ("train.max_steps", "hyperparameters.max_steps"),
+    "max_epochs": ("train.max_epochs", "hyperparameters.max_epochs"),
+    "seed": ("train.seed", "hyperparameters.seed"),
+    "precision": ("train.precision", "hyperparameters.precision"),
+    "checkpoint_save_steps": ("train.checkpoint.save_every_steps", "checkpoint.save_every_steps"),
+    "checkpoint_warning_seconds": (
+        "train.checkpoint.save_before_timeout_seconds", "checkpoint.save_before_timeout_seconds",
+    ),
+    "checkpoint_keep_last": ("train.checkpoint.keep_last", "checkpoint.keep_last"),
+    "auto_resume": ("train.checkpoint.auto_resume", "checkpoint.auto_resume"),
+    "max_attempts": ("train.checkpoint.max_attempts", "checkpoint.max_attempts"),
+    "checkpoint_final_selector": ("train.checkpoint.final_selector", "checkpoint.final_selector"),
+    "remove_training_state_after_success": (
+        "train.checkpoint.remove_training_state_after_success",
+        "checkpoint.remove_training_state_after_success",
+    ),
+}
+FRONTEND_HYPERPARAMETER_FIELDS = frozenset(
+    field for field, (_, attribute) in FRONTEND_TRAIN_FIELDS.items()
+    if attribute.startswith("hyperparameters.")
+)
+
+
+def _frontend_train_field_holder(
+    field: str, payload: Mapping[str, Any], hyperparameters: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    """Where a table field sits in a frontend payload: its hyperparameters or top level."""
+    return hyperparameters if field in FRONTEND_HYPERPARAMETER_FIELDS else payload
+
+
+def _manifest_default(manifest: AdapterManifest, attribute: str) -> Any:
+    value: Any = manifest.defaults
+    for part in attribute.split("."):
+        value = getattr(value, part)
+    return value
+
+
 _PROGRESS_SUCCESS_STATES = {"SUCCEEDED", "COMPLETED", "COMPLETE"}
 _PROGRESS_FAILURE_STATES = {
     "FAILED", "CANCELLED", "CANCELED", "TIMEOUT", "TIMED_OUT",
@@ -881,6 +932,20 @@ def _training_stage_attempts(
     )
 
 
+def _stage_attempts(run: Mapping[str, Any] | None, stage_id: Any) -> list[Mapping[str, Any]]:
+    """Attempts recorded for one stage; unlike training lookups, a stage-less attempt never qualifies."""
+    return [
+        attempt for attempt in list((run or {}).get("attempts") or [])
+        if attempt.get("stage_id") == stage_id
+    ]
+
+
+def _latest_stage_attempt(
+    run: Mapping[str, Any] | None, stage_id: Any
+) -> Mapping[str, Any] | None:
+    return _latest_attempt(_stage_attempts(run, stage_id))
+
+
 def _evaluation_busy_reason(run: Mapping[str, Any]) -> str | None:
     active_states = {"SUBMITTING", "SUBMITTED", "PENDING_SLURM", "RUNNING", "RETRY_PENDING", "CANCELLING"}
     for stage in run.get("stages", []):
@@ -1443,8 +1508,9 @@ def _parse_native(lines: list[str]) -> tuple[dict[str, Any], dict[str, Any], lis
 
 
 def _sweep_from_frontend(raw: str | None) -> dict[str, Any]:
+    """Grid axes from the frontend's JSON; SweepSpec supplies every other default."""
     if not raw:
-        return {"strategy": "grid", "axes": {}, "max_parallel": 2}
+        return {"strategy": "grid", "axes": {}}
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as error:
@@ -1452,8 +1518,8 @@ def _sweep_from_frontend(raw: str | None) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ValueError("sweep definition must be a JSON object")
     explicit_seeds = "seed" in parsed or "seeds" in parsed
-    seeds = parsed.pop("seed", parsed.pop("seeds", [42]))
-    if not isinstance(seeds, list):
+    seeds = parsed.pop("seed", parsed.pop("seeds", None))
+    if explicit_seeds and not isinstance(seeds, list):
         seeds = [seeds]
     axes: dict[str, list[Any]] = {}
     canonical_roots = {"train", "resources", "runtime", "tracking", "native", "data"}
@@ -1466,8 +1532,6 @@ def _sweep_from_frontend(raw: str | None) -> dict[str, Any]:
         "strategy": "grid",
         "axes": axes,
         **({"seeds": seeds} if explicit_seeds else {}),
-        "max_parallel": 2,
-        "confirmation_threshold": 20,
     }
 
 
@@ -1918,11 +1982,8 @@ class PipelineService:
             ),
             None,
         )
-        attempts = [
-            item for item in list(parent.get("attempts") or [])
-            if item.get("stage_id") == evaluation.get("stage_id")
-        ]
-        latest = max(attempts, key=lambda item: int(item.get("attempt_number") or 0), default={})
+        attempts = _stage_attempts(parent, evaluation.get("stage_id"))
+        latest = _latest_attempt(attempts) or {}
         submission_failed = latest.get("status") == "SUBMISSION_FAILED" and not latest.get("slurm_job_id")
         execution_failed = bool(latest.get("slurm_job_id")) and latest.get("status") in ATTEMPT_FAILURE_STATES
         retryable = bool(
@@ -2011,36 +2072,15 @@ class PipelineService:
     @staticmethod
     def _canonical_manifest_defaults(manifest: AdapterManifest) -> dict[str, Any]:
         defaults = manifest.defaults
-        hyper = defaults.hyperparameters
         resources = defaults.resources
-        checkpoint = defaults.checkpoint.model_dump(mode="json", exclude_none=True)
-        train: dict[str, Any] = {
-            key: value
-            for key, value in {
-                "learning_rate": hyper.learning_rate,
-                "num_workers_per_rank": hyper.num_workers_per_rank,
-                "max_steps": hyper.max_steps,
-                "max_epochs": hyper.max_epochs,
-                "seed": hyper.seed,
-                "precision": hyper.precision,
-            }.items()
-            if value is not None
-        }
-        batch = {
-            key: value
-            for key, value in {
-                "declared_semantics": hyper.batch_semantics,
-                "value": hyper.batch_size,
-                "gradient_accumulation_steps": hyper.gradient_accumulation_steps,
-            }.items()
-            if value is not None
-        }
-        if batch:
-            train["batch"] = batch
-        if hyper.values:
-            train["hyperparameters"] = copy.deepcopy(hyper.values)
-        if checkpoint:
-            train["checkpoint"] = checkpoint
+        document: dict[str, Any] = {"train": {}}
+        for path, attribute in FRONTEND_TRAIN_FIELDS.values():
+            value = _manifest_default(manifest, attribute)
+            if value is not None:
+                PipelineService._set_missing_canonical_path(document, path, value)
+        train: dict[str, Any] = document["train"]
+        if defaults.hyperparameters.values:
+            train["hyperparameters"] = copy.deepcopy(defaults.hyperparameters.values)
 
         resource_document: dict[str, Any] = {
             key: value
@@ -2517,21 +2557,13 @@ class PipelineService:
         document = copy.deepcopy(dict(payload))
         defaults = manifest.defaults
         hyper = document.setdefault("hyperparameters", {})
-        for field, value in {
-            "learning_rate": defaults.hyperparameters.learning_rate,
-            "batch_semantics": defaults.hyperparameters.batch_semantics,
-            "batch_size": defaults.hyperparameters.batch_size,
-            "gradient_accumulation": defaults.hyperparameters.gradient_accumulation_steps,
-            "num_workers": defaults.hyperparameters.num_workers_per_rank,
-            "max_steps": defaults.hyperparameters.max_steps,
-            "max_epochs": defaults.hyperparameters.max_epochs,
-            "seed": defaults.hyperparameters.seed,
-            "precision": defaults.hyperparameters.precision,
-        }.items():
+        for field, (_, attribute) in FRONTEND_TRAIN_FIELDS.items():
+            holder = _frontend_train_field_holder(field, document, hyper)
+            value = _manifest_default(manifest, attribute)
             if value is not None and (
-                field not in hyper or _frontend_parameter_is_unset(hyper[field])
+                field not in holder or _frontend_parameter_is_unset(holder[field])
             ):
-                hyper[field] = value
+                holder[field] = value
         for key, value in defaults.hyperparameters.values.items():
             hyper.setdefault(key, copy.deepcopy(value))
 
@@ -2551,19 +2583,6 @@ class PipelineService:
         }.items():
             if value is not None:
                 resources.setdefault(field, value)
-
-        checkpoint = defaults.checkpoint
-        for field, value in {
-            "checkpoint_save_steps": checkpoint.save_every_steps,
-            "checkpoint_warning_seconds": checkpoint.save_before_timeout_seconds,
-            "checkpoint_keep_last": checkpoint.keep_last,
-            "auto_resume": checkpoint.auto_resume,
-            "max_attempts": checkpoint.max_attempts,
-            "checkpoint_final_selector": checkpoint.final_selector,
-            "remove_training_state_after_success": checkpoint.remove_training_state_after_success,
-        }.items():
-            if value is not None and _frontend_parameter_is_unset(document.get(field)):
-                document[field] = value
 
         tracking = document.setdefault("tracking", {})
         for field, value in {
@@ -3350,43 +3369,17 @@ class PipelineService:
         requested_hyper = dict(payload.get("hyperparameters") or {})
         explicit_parameters = {
             path
-            for field, path in {
-                "learning_rate": "train.learning_rate",
-                "batch_semantics": "train.batch.declared_semantics",
-                "batch_size": "train.batch.value",
-                "gradient_accumulation": "train.batch.gradient_accumulation_steps",
-                "num_workers": "train.num_workers_per_rank",
-                "max_steps": "train.max_steps",
-                "max_epochs": "train.max_epochs",
-                "seed": "train.seed",
-                "precision": "train.precision",
-            }.items()
-            if field in requested_hyper
-            and not _frontend_parameter_is_unset(requested_hyper[field])
-        }
-        canonical_hyperparameter_names = {
-            "learning_rate", "batch_semantics", "batch_size", "gradient_accumulation",
-            "num_workers", "max_steps", "max_epochs", "seed", "precision",
+            for field, (path, _) in FRONTEND_TRAIN_FIELDS.items()
+            if not _frontend_parameter_is_unset(
+                _frontend_train_field_holder(field, payload, requested_hyper).get(field)
+            )
         }
         if any(
-            field not in canonical_hyperparameter_names
+            field not in FRONTEND_HYPERPARAMETER_FIELDS
             and not _frontend_parameter_is_unset(value)
             for field, value in requested_hyper.items()
         ):
             explicit_parameters.add("train.hyperparameters")
-        for field, path in {
-            "checkpoint_save_steps": "train.checkpoint.save_every_steps",
-            "checkpoint_warning_seconds": "train.checkpoint.save_before_timeout_seconds",
-            "checkpoint_keep_last": "train.checkpoint.keep_last",
-            "auto_resume": "train.checkpoint.auto_resume",
-            "max_attempts": "train.checkpoint.max_attempts",
-            "checkpoint_final_selector": "train.checkpoint.final_selector",
-            "remove_training_state_after_success": (
-                "train.checkpoint.remove_training_state_after_success"
-            ),
-        }.items():
-            if field in payload and not _frontend_parameter_is_unset(payload[field]):
-                explicit_parameters.add(path)
 
         source = dict(payload.get("source") or {})
         adapter_key = str(payload.get("adapter") or source.get("adapter_id") or source.get("adapter") or "")
@@ -3469,7 +3462,7 @@ class PipelineService:
             "hyperparameters": {
                 key: copy.deepcopy(value)
                 for key, value in hyper.items()
-                if key not in canonical_hyperparameter_names
+                if key not in FRONTEND_HYPERPARAMETER_FIELDS
             },
             "checkpoint": {
                 "save_every_steps": int(payload.get("checkpoint_save_steps") or CLUSTER.defaults.checkpoint_save_steps),
@@ -4410,6 +4403,84 @@ class PipelineService:
                 "stage_status": stage["status"], "run_id": run_id, "run_started_at": run.get("started_at"), "evaluation_id": None}, submission)
             return {"run_id": run_id, "status": self.database.get_run(run_id)["status"], "slurm_job_id": submission.job_id, "gateway": submission.gateway}
 
+    def _transition_stage(
+        self,
+        *,
+        stage_id: str,
+        stage_type: str | None,
+        run_id: str | None,
+        evaluation_id: str | None,
+        status: str,
+        stage_status: str | None = None,
+        completed_at: Any = _UNSET,
+        stage_updates: Mapping[str, Any] | None = None,
+        run_updates: Mapping[str, Any] | None = None,
+        evaluation_updates: Mapping[str, Any] | None = None,
+        attempt_id: str | None = None,
+        attempt_updates: Mapping[str, Any] | None = None,
+        event_type: str | None = None,
+        old_status: str | None = None,
+        details: Mapping[str, Any] | None = None,
+        expected_stage_statuses: tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        """Move a stage and the entity that owns it to ``status`` in one commit.
+
+        An evaluation stage carries its evaluation and leaves the run untouched;
+        every other stage carries its run. ``completed_at`` is written only when
+        given, so a transition that must keep a completion time omits it. The
+        event, when ``event_type`` is set, names the evaluation if there is one
+        and the run otherwise.
+        """
+        is_evaluation = str(stage_type or "").upper() == "EVALUATE"
+        lifecycle: dict[str, Any] = {"status": status}
+        if completed_at is not _UNSET:
+            lifecycle["completed_at"] = completed_at
+        event = None
+        if event_type:
+            event = {
+                "entity_type": "evaluation" if evaluation_id else "run",
+                "entity_id": evaluation_id if evaluation_id else run_id,
+                "event_type": event_type,
+                "old_status": old_status,
+                "new_status": status,
+                "details": details or {},
+            }
+        return self.database.transition_workflow_state(
+            stage_id=stage_id,
+            stage_updates={**lifecycle, "status": stage_status or status, **(stage_updates or {})},
+            attempt_id=attempt_id,
+            attempt_updates=attempt_updates,
+            run_id=None if is_evaluation else run_id,
+            run_updates=None if is_evaluation else {**lifecycle, **(run_updates or {})},
+            evaluation_id=evaluation_id,
+            evaluation_updates={**lifecycle, **(evaluation_updates or {})} if evaluation_id else None,
+            event=event,
+            expected_stage_statuses=expected_stage_statuses,
+        )
+
+    def _block_stage(
+        self,
+        *,
+        stage_id: str,
+        stage_type: str | None,
+        run_id: str,
+        evaluation_id: str | None,
+        event_type: str,
+        details: Mapping[str, Any],
+        blockers: list[str],
+    ) -> dict[str, Any]:
+        self._transition_stage(
+            stage_id=stage_id,
+            stage_type=stage_type,
+            run_id=run_id,
+            evaluation_id=evaluation_id,
+            status="BLOCKED",
+            completed_at=utc_now(),
+            event_type=event_type,
+            details=details,
+        )
+        return {"run_id": run_id, "stage_id": stage_id, "status": "BLOCKED", "blockers": blockers}
+
     def _preserve_cancelling_submission(
         self,
         *,
@@ -4421,28 +4492,18 @@ class PipelineService:
         event_type: str,
         details: Mapping[str, Any],
     ) -> dict[str, Any]:
-        is_evaluation = str(stage.get("stage_type") or "").upper() == "EVALUATE"
-        return self.database.transition_workflow_state(
+        return self._transition_stage(
+            stage_id=str(stage["id"]),
+            stage_type=stage.get("stage_type"),
+            run_id=run_id,
+            evaluation_id=str(evaluation["id"]) if evaluation else None,
+            status="CANCELLING",
+            completed_at=None,
             attempt_id=attempt_id,
             attempt_updates=attempt_updates,
-            stage_id=str(stage["id"]),
-            stage_updates={"status": "CANCELLING", "completed_at": None},
-            run_id=None if is_evaluation else run_id,
-            run_updates=None if is_evaluation else {
-                "status": "CANCELLING",
-                "completed_at": None,
-            },
-            evaluation_id=str(evaluation["id"]) if evaluation else None,
-            evaluation_updates={"status": "CANCELLING", "completed_at": None}
-            if evaluation else None,
-            event={
-                "entity_type": "evaluation" if evaluation else "run",
-                "entity_id": str(evaluation["id"]) if evaluation else run_id,
-                "event_type": event_type,
-                "old_status": "CANCELLING",
-                "new_status": "CANCELLING",
-                "details": {**dict(details), "cancellation_requested": True},
-            },
+            event_type=event_type,
+            old_status="CANCELLING",
+            details={**dict(details), "cancellation_requested": True},
         )
 
     def _finalize_cancelled_before_submission(
@@ -4455,32 +4516,22 @@ class PipelineService:
         error: Exception,
     ) -> dict[str, Any]:
         completed = utc_now()
-        is_evaluation = str(stage.get("stage_type") or "").upper() == "EVALUATE"
-        return self.database.transition_workflow_state(
+        return self._transition_stage(
+            stage_id=str(stage["id"]),
+            stage_type=stage.get("stage_type"),
+            run_id=run_id,
+            evaluation_id=str(evaluation["id"]) if evaluation else None,
+            status="CANCELLED",
+            completed_at=completed,
             attempt_id=attempt_id,
             attempt_updates={
                 "status": "CANCELLED",
                 "slurm_reason": f"Cancelled before Slurm accepted the job: {error}",
                 "finished_at": completed,
             },
-            stage_id=str(stage["id"]),
-            stage_updates={"status": "CANCELLED", "completed_at": completed},
-            run_id=None if is_evaluation else run_id,
-            run_updates=None if is_evaluation else {
-                "status": "CANCELLED",
-                "completed_at": completed,
-            },
-            evaluation_id=str(evaluation["id"]) if evaluation else None,
-            evaluation_updates={"status": "CANCELLED", "completed_at": completed}
-            if evaluation else None,
-            event={
-                "entity_type": "evaluation" if evaluation else "run",
-                "entity_id": str(evaluation["id"]) if evaluation else run_id,
-                "event_type": "CANCELLED_BEFORE_SUBMISSION",
-                "old_status": "CANCELLING",
-                "new_status": "CANCELLED",
-                "details": {"attempt_id": attempt_id, "submission_error": str(error)},
-            },
+            event_type="CANCELLED_BEFORE_SUBMISSION",
+            old_status="CANCELLING",
+            details={"attempt_id": attempt_id, "submission_error": str(error)},
         )
 
     def _signal_stage_cancellation(
@@ -4556,6 +4607,12 @@ class PipelineService:
             (item for item in run["evaluations"] if item.get("stage_id") == stage_id),
             None,
         )
+        stage_entity = {
+            "stage_id": stage_id,
+            "stage_type": stage["stage_type"],
+            "run_id": run_id,
+            "evaluation_id": evaluation["id"] if evaluation else None,
+        }
         spec = ExperimentSpec.model_validate(run["resolved_spec_json"])
         plan: AdapterPlan | None = None
         preserve_pinned_plan = False
@@ -4573,26 +4630,12 @@ class PipelineService:
             stored_plan = config.get("plan") if isinstance(config, Mapping) else None
             if not isinstance(stored_spec, Mapping) or not isinstance(stored_plan, Mapping):
                 message = "stored evaluation adapter plan is missing"
-                self.database.transition_workflow_state(
-                    stage_id=stage_id,
-                    stage_updates={"status": "BLOCKED", "completed_at": utc_now()},
-                    evaluation_id=evaluation["id"] if evaluation else None,
-                    evaluation_updates={"status": "BLOCKED", "completed_at": utc_now()}
-                    if evaluation else None,
-                    event={
-                        "entity_type": "evaluation" if evaluation else "run",
-                        "entity_id": evaluation["id"] if evaluation else run_id,
-                        "event_type": "EVALUATION_PLAN_BLOCKED",
-                        "new_status": "BLOCKED",
-                        "details": {"error": message},
-                    },
+                return self._block_stage(
+                    **stage_entity,
+                    event_type="EVALUATION_PLAN_BLOCKED",
+                    details={"error": message},
+                    blockers=[message],
                 )
-                return {
-                    "run_id": run_id,
-                    "stage_id": stage_id,
-                    "status": "BLOCKED",
-                    "blockers": [message],
-                }
             spec = ExperimentSpec.model_validate(stored_spec)
             plan_payload = copy.deepcopy(dict(stored_plan))
             plan_payload.pop("runnable", None)
@@ -4773,24 +4816,12 @@ class PipelineService:
             if native_blocker:
                 plan.blockers.append(native_blocker)
         if plan.blockers:
-            completed = utc_now()
-            self.database.transition_workflow_state(
-                stage_id=stage_id,
-                stage_updates={"status": "BLOCKED", "completed_at": completed},
-                run_id=None if is_evaluation_stage else run_id,
-                run_updates=None if is_evaluation_stage else {"status": "BLOCKED", "completed_at": completed},
-                evaluation_id=evaluation["id"] if evaluation else None,
-                evaluation_updates={"status": "BLOCKED", "completed_at": completed}
-                if evaluation else None,
-                event={
-                    "entity_type": "evaluation" if evaluation else "run",
-                    "entity_id": evaluation["id"] if evaluation else run_id,
-                    "event_type": "ADAPTER_BLOCKED",
-                    "new_status": "BLOCKED",
-                    "details": {"blockers": plan.blockers, "todos": plan.todos},
-                },
+            return self._block_stage(
+                **stage_entity,
+                event_type="ADAPTER_BLOCKED",
+                details={"blockers": plan.blockers, "todos": plan.todos},
+                blockers=plan.blockers,
             )
-            return {"run_id": run_id, "stage_id": stage_id, "status": "BLOCKED", "blockers": plan.blockers}
         spec, snapshot_id = self._auto_queue(spec, plan, gateway)
         if not preserve_pinned_plan:
             plan = resolve_adapter_plan(spec)
@@ -4894,24 +4925,12 @@ class PipelineService:
                 native_tracking_resume=manual_mode in {"resume", "replay_initial"},
             )
         except SlurmCompileError as error:
-            completed = utc_now()
-            self.database.transition_workflow_state(
-                stage_id=stage_id,
-                stage_updates={"status": "BLOCKED", "completed_at": completed},
-                run_id=None if is_evaluation_stage else run_id,
-                run_updates=None if is_evaluation_stage else {"status": "BLOCKED", "completed_at": completed},
-                evaluation_id=evaluation["id"] if evaluation else None,
-                evaluation_updates={"status": "BLOCKED", "completed_at": completed}
-                if evaluation else None,
-                event={
-                    "entity_type": "evaluation" if evaluation else "run",
-                    "entity_id": evaluation["id"] if evaluation else run_id,
-                    "event_type": "SBATCH_COMPILE_BLOCKED",
-                    "new_status": "BLOCKED",
-                    "details": {"error": str(error)},
-                },
+            return self._block_stage(
+                **stage_entity,
+                event_type="SBATCH_COMPILE_BLOCKED",
+                details={"error": str(error)},
+                blockers=[str(error)],
             )
-            return {"run_id": run_id, "stage_id": stage_id, "status": "BLOCKED", "blockers": [str(error)]}
 
         attempt = self.database.claim_stage_and_create_job_attempt(
             stage_id,
@@ -5005,30 +5024,18 @@ class PipelineService:
                 **submission_options,
             )
         except SubmissionOutcomeUnknown as error:
-            transition = self.database.transition_workflow_state(
+            transition = self._transition_stage(
+                **stage_entity,
+                status="SUBMITTING",
+                completed_at=None,
                 attempt_id=attempt["id"],
                 attempt_updates={
                     "status": "SUBMITTING",
                     "gateway": test_gateway,
                     "slurm_reason": f"{SUBMISSION_UNKNOWN_PREFIX}: {error}",
                 },
-                stage_id=stage_id,
-                stage_updates={"status": "SUBMITTING", "completed_at": None},
-                run_id=None if is_evaluation_stage else run_id,
-                run_updates=None if is_evaluation_stage else {
-                    "status": "SUBMITTING",
-                    "completed_at": None,
-                },
-                evaluation_id=evaluation["id"] if evaluation else None,
-                evaluation_updates={"status": "SUBMITTING", "completed_at": None}
-                if evaluation else None,
-                event={
-                    "entity_type": "evaluation" if evaluation else "run",
-                    "entity_id": evaluation["id"] if evaluation else run_id,
-                    "event_type": "SUBMISSION_OUTCOME_UNKNOWN",
-                    "new_status": "SUBMITTING",
-                    "details": {"error": str(error), "attempt_id": attempt["id"]},
-                },
+                event_type="SUBMISSION_OUTCOME_UNKNOWN",
+                details={"error": str(error), "attempt_id": attempt["id"]},
                 expected_stage_statuses=("SUBMITTING",),
             )
             if transition.get("applied") is False:
@@ -5068,27 +5075,18 @@ class PipelineService:
         except (ClusterError, OSError, ValueError) as error:
             cleanup_staged_secrets(selected_gateway)
             completed = utc_now()
-            transition = self.database.transition_workflow_state(
+            transition = self._transition_stage(
+                **stage_entity,
+                status="FAILED",
+                completed_at=completed,
                 attempt_id=attempt["id"],
                 attempt_updates={
                     "status": "SUBMISSION_FAILED",
                     "slurm_reason": str(error),
                     "finished_at": completed,
                 },
-                stage_id=stage_id,
-                stage_updates={"status": "FAILED", "completed_at": completed},
-                run_id=None if is_evaluation_stage else run_id,
-                run_updates=None if is_evaluation_stage else {"status": "FAILED", "completed_at": completed},
-                evaluation_id=evaluation["id"] if evaluation else None,
-                evaluation_updates={"status": "FAILED", "completed_at": completed}
-                if evaluation else None,
-                event={
-                    "entity_type": "evaluation" if evaluation else "run",
-                    "entity_id": evaluation["id"] if evaluation else run_id,
-                    "event_type": "SUBMISSION_FAILED",
-                    "new_status": "FAILED",
-                    "details": {"error": str(error), "attempt_id": attempt["id"]},
-                },
+                event_type="SUBMISSION_FAILED",
+                details={"error": str(error), "attempt_id": attempt["id"]},
                 expected_stage_statuses=("SUBMITTING",),
             )
             if transition.get("applied") is False:
@@ -5125,7 +5123,12 @@ class PipelineService:
         attempt_directory = f"{submission.run_directory}/attempts/{submission.job_id}"
         archived_script_path = f"{attempt_directory}/job.sbatch"
         submitted_at = utc_now()
-        submission_transition = self.database.transition_workflow_state(
+        submission_transition = self._transition_stage(
+            **stage_entity,
+            status="SUBMITTED",
+            stage_updates={"started_at": submitted_at},
+            run_updates={"started_at": run.get("started_at") or submitted_at},
+            evaluation_updates={"started_at": submitted_at, "completed_at": None},
             attempt_id=attempt["id"],
             attempt_updates={
                 "status": "SUBMITTED",
@@ -5137,31 +5140,13 @@ class PipelineService:
                 "submitted_at": submitted_at,
                 "slurm_reason": test_output.strip()[:2000],
             },
-            stage_id=stage_id,
-            stage_updates={"status": "SUBMITTED", "started_at": submitted_at},
-            run_id=None if is_evaluation_stage else run_id,
-            run_updates=None if is_evaluation_stage else {
-                "status": "SUBMITTED",
-                "started_at": run.get("started_at") or submitted_at,
-            },
-            evaluation_id=evaluation["id"] if evaluation else None,
-            evaluation_updates={
-                "status": "SUBMITTED",
-                "started_at": submitted_at,
-                "completed_at": None,
-            } if evaluation else None,
-            event={
-                "entity_type": "evaluation" if evaluation else "run",
-                "entity_id": evaluation["id"] if evaluation else run_id,
-                "event_type": "JOB_SUBMITTED",
-                "old_status": evaluation["status"] if evaluation else run["status"],
-                "new_status": "SUBMITTED",
-                "details": {
-                    "job_id": submission.job_id,
-                    "gateway": submission.gateway,
-                    "attempt": attempt["attempt_number"],
-                    "recovered": submission.recovered,
-                },
+            event_type="JOB_SUBMITTED",
+            old_status=evaluation["status"] if evaluation else run["status"],
+            details={
+                "job_id": submission.job_id,
+                "gateway": submission.gateway,
+                "attempt": attempt["attempt_number"],
+                "recovered": submission.recovered,
             },
             expected_stage_statuses=("SUBMITTING",),
         )
@@ -6730,17 +6715,33 @@ class PipelineService:
         )
 
     def reconcile_data_imports(self) -> list[dict[str, Any]]:
-        records = self.database.list_data_imports(
-            states=["SUBMITTED", "PENDING", "RUNNING", "FINALIZING", "CANCELLING"]
-        )
+        records = [
+            record
+            for record in self.database.list_data_imports(
+                states=["SUBMITTED", "PENDING", "RUNNING", "FINALIZING", "CANCELLING"]
+            )
+            if record.get("slurm_job_id")
+        ]
+        # One accounting round trip per gateway answers for every in-flight import;
+        # a failed lookup settles each of its imports exactly as a direct one would.
+        job_ids_by_gateway: dict[str, list[str]] = {}
         for record in records:
-            job_id = record.get("slurm_job_id")
-            if not job_id:
-                continue
+            job_ids_by_gateway.setdefault(
+                str(record.get("gateway") or "auto"), []
+            ).append(str(record["slurm_job_id"]))
+        snapshots: dict[str, tuple[str, dict[str, dict[str, str]]] | Exception] = {}
+        for requested_gateway, job_ids in job_ids_by_gateway.items():
             try:
-                gateway, statuses = self.cluster.job_statuses(
-                    [str(job_id)], str(record.get("gateway") or "auto")
-                )
+                snapshots[requested_gateway] = self.cluster.job_statuses(job_ids, requested_gateway)
+            except Exception as error:
+                snapshots[requested_gateway] = error
+        for record in records:
+            job_id = record["slurm_job_id"]
+            try:
+                snapshot = snapshots[str(record.get("gateway") or "auto")]
+                if isinstance(snapshot, Exception):
+                    raise snapshot
+                gateway, statuses = snapshot
                 status = statuses.get(str(job_id))
                 if status is None:
                     continue
@@ -6939,7 +6940,15 @@ class PipelineService:
             unknown["stderr_path"], recovered.job_id, logs_root=self._run_paths(str(unknown["run_id"])).logs
         )
         is_evaluation = unknown["stage_type"] == "EVALUATE"
-        transition = self.database.transition_workflow_state(
+        transition = self._transition_stage(
+            stage_id=unknown["stage_id"],
+            stage_type=unknown["stage_type"],
+            run_id=unknown["run_id"],
+            evaluation_id=unknown["evaluation_id"] if is_evaluation else None,
+            status="SUBMITTED",
+            stage_updates={"started_at": submitted_at},
+            run_updates={"started_at": unknown["run_started_at"] or submitted_at, "completed_at": None},
+            evaluation_updates={"started_at": submitted_at, "completed_at": None},
             attempt_id=unknown["id"],
             attempt_updates={
                 "status": "SUBMITTED",
@@ -6951,30 +6960,11 @@ class PipelineService:
                 "submitted_at": submitted_at,
                 "slurm_reason": "Recovered after a lost SSH acknowledgement",
             },
-            stage_id=unknown["stage_id"],
-            stage_updates={"status": "SUBMITTED", "started_at": submitted_at},
-            run_id=None if is_evaluation else unknown["run_id"],
-            run_updates=None if is_evaluation else {
-                "status": "SUBMITTED",
-                "started_at": unknown["run_started_at"] or submitted_at,
-                "completed_at": None,
-            },
-            evaluation_id=unknown["evaluation_id"] if is_evaluation else None,
-            evaluation_updates={
-                "status": "SUBMITTED",
-                "started_at": submitted_at,
-                "completed_at": None,
-            } if is_evaluation and unknown["evaluation_id"] else None,
-            event={
-                "entity_type": "evaluation" if is_evaluation else "run",
-                "entity_id": unknown["evaluation_id"] if is_evaluation else unknown["run_id"],
-                "event_type": "SUBMISSION_RECOVERED",
-                "new_status": "SUBMITTED",
-                "details": {
-                    "attempt_id": unknown["id"],
-                    "job_id": recovered.job_id,
-                    "gateway": recovered.gateway,
-                },
+            event_type="SUBMISSION_RECOVERED",
+            details={
+                "attempt_id": unknown["id"],
+                "job_id": recovered.job_id,
+                "gateway": recovered.gateway,
             },
             expected_stage_statuses=("SUBMITTING",),
         )
@@ -7227,6 +7217,12 @@ class PipelineService:
                         if is_evaluation_stage
                         else None
                     )
+                    stage_entity = {
+                        "stage_id": row["stage_id"],
+                        "stage_type": row["stage_type"],
+                        "run_id": row["run_id"],
+                        "evaluation_id": evaluation["id"] if evaluation else None,
+                    }
                     common = {
                         "slurm_state": state,
                         "slurm_reason": reason,
@@ -7262,21 +7258,12 @@ class PipelineService:
                             attempt_updates = {"status": "CANCELLING", **common}
                             if state in EXECUTING_STATES and not row["started_at"]:
                                 attempt_updates["started_at"] = accounting_started or utc_now()
-                            self.database.transition_workflow_state(
+                            self._transition_stage(
+                                **stage_entity,
+                                status="CANCELLING",
+                                completed_at=None,
                                 attempt_id=row["id"],
                                 attempt_updates=attempt_updates,
-                                stage_id=row["stage_id"],
-                                stage_updates={"status": "CANCELLING", "completed_at": None},
-                                run_id=None if is_evaluation_stage else row["run_id"],
-                                run_updates=None if is_evaluation_stage else {
-                                    "status": "CANCELLING",
-                                    "completed_at": None,
-                                },
-                                evaluation_id=evaluation["id"] if evaluation else None,
-                                evaluation_updates={
-                                    "status": "CANCELLING",
-                                    "completed_at": None,
-                                } if evaluation else None,
                             )
                             self._signal_stage_cancellation(
                                 entity_type="evaluation" if evaluation else "run",
@@ -7292,15 +7279,12 @@ class PipelineService:
                         attempt_updates = {"status": attempt_status, **common}
                         if state in EXECUTING_STATES and not row["started_at"]:
                             attempt_updates["started_at"] = accounting_started or utc_now()
-                        self.database.transition_workflow_state(
+                        self._transition_stage(
+                            **stage_entity,
+                            status=attempt_status,
+                            stage_status=stage_status,
                             attempt_id=row["id"],
                             attempt_updates=attempt_updates,
-                            stage_id=row["stage_id"],
-                            stage_updates={"status": stage_status},
-                            run_id=None if is_evaluation_stage else row["run_id"],
-                            run_updates=None if is_evaluation_stage else {"status": attempt_status},
-                            evaluation_id=evaluation["id"] if evaluation else None,
-                            evaluation_updates={"status": attempt_status} if evaluation else None,
                         )
                         updated += 1
                         continue
@@ -7321,35 +7305,24 @@ class PipelineService:
                                 # Keep the attempt open; the next cycle reads the result again.
                                 continue
                             if ingestion_error:
-                                self.database.transition_workflow_state(
+                                self._transition_stage(
+                                    **stage_entity,
+                                    status="FAILED",
+                                    completed_at=finished,
                                     attempt_id=row["id"],
                                     attempt_updates=attempt_success_updates,
-                                    stage_id=row["stage_id"],
-                                    stage_updates={"status": "FAILED", "completed_at": finished},
-                                    evaluation_id=evaluation["id"] if evaluation else None,
-                                    evaluation_updates={"status": "FAILED", "completed_at": finished}
-                                    if evaluation else None,
-                                    event={
-                                        "entity_type": "evaluation" if evaluation else "run",
-                                        "entity_id": evaluation["id"] if evaluation else row["run_id"],
-                                        "event_type": "EVALUATION_RESULT_INVALID",
-                                        "new_status": "FAILED",
-                                        "details": {"error": ingestion_error, "job_id": row["slurm_job_id"]},
-                                    },
+                                    event_type="EVALUATION_RESULT_INVALID",
+                                    details={"error": ingestion_error, "job_id": row["slurm_job_id"]},
                                 )
                                 updated += 1
                                 continue
-                            self.database.transition_workflow_state(
+                            self._transition_stage(
+                                **stage_entity,
+                                status="SUCCEEDED",
+                                completed_at=finished,
+                                evaluation_updates={"progress_completed": completed_episodes},
                                 attempt_id=row["id"],
                                 attempt_updates=attempt_success_updates,
-                                stage_id=row["stage_id"],
-                                stage_updates={"status": "SUCCEEDED", "completed_at": finished},
-                                evaluation_id=evaluation["id"] if evaluation else None,
-                                evaluation_updates={
-                                    "status": "SUCCEEDED",
-                                    "progress_completed": completed_episodes,
-                                    "completed_at": finished,
-                                } if evaluation else None,
                             )
                             updated += 1
                             continue
@@ -7374,39 +7347,32 @@ class PipelineService:
                                 raise  # Nor did the database's failure change what the job produced.
                             except Exception as error:
                                 message = sanitize(str(error))
-                                self.database.transition_workflow_state(
+                                self._transition_stage(
+                                    **stage_entity,
+                                    status="FAILED",
+                                    completed_at=finished,
                                     attempt_id=row["id"],
                                     attempt_updates=attempt_success_updates,
-                                    stage_id=row["stage_id"],
-                                    stage_updates={"status": "FAILED", "completed_at": finished},
-                                    run_id=row["run_id"],
-                                    run_updates={"status": "FAILED", "completed_at": finished},
-                                    event={
-                                        "entity_type": "run",
-                                        "entity_id": row["run_id"],
-                                        "event_type": "CHECKPOINT_FINALIZATION_FAILED",
-                                        "old_status": row["status"],
-                                        "new_status": "FAILED",
-                                        "details": {
-                                            "error": message,
-                                            "attempt_id": row["id"],
-                                            "job_id": row["slurm_job_id"],
-                                            "slurm_state": state,
-                                            "exit_code": record.get("ExitCode"),
-                                            "process_status": "SUCCEEDED",
-                                            "checkpoint_globs": checkpoint_globs,
-                                        },
+                                    event_type="CHECKPOINT_FINALIZATION_FAILED",
+                                    old_status=row["status"],
+                                    details={
+                                        "error": message,
+                                        "attempt_id": row["id"],
+                                        "job_id": row["slurm_job_id"],
+                                        "slurm_state": state,
+                                        "exit_code": record.get("ExitCode"),
+                                        "process_status": "SUCCEEDED",
+                                        "checkpoint_globs": checkpoint_globs,
                                     },
                                 )
                                 updated += 1
                                 continue
-                        self.database.transition_workflow_state(
+                        self._transition_stage(
+                            **stage_entity,
+                            status="SUCCEEDED",
+                            completed_at=finished,
                             attempt_id=row["id"],
                             attempt_updates=attempt_success_updates,
-                            stage_id=row["stage_id"],
-                            stage_updates={"status": "SUCCEEDED", "completed_at": finished},
-                            run_id=None if is_evaluation_stage else row["run_id"],
-                            run_updates=None if is_evaluation_stage else {"status": "SUCCEEDED", "completed_at": finished},
                         )
                         updated += 1
                         continue
@@ -7417,7 +7383,10 @@ class PipelineService:
                         and row["budget_attempt_count"] < row["max_attempts"]
                     ):
                         finished = accounting_finished or utc_now()
-                        self.database.transition_workflow_state(
+                        self._transition_stage(
+                            **stage_entity,
+                            status="RETRY_PENDING",
+                            completed_at=None,
                             attempt_id=row["id"],
                             attempt_updates={
                                 "status": state,
@@ -7425,22 +7394,10 @@ class PipelineService:
                                 "finished_at": finished,
                                 **common,
                             },
-                            stage_id=row["stage_id"],
-                            stage_updates={"status": "RETRY_PENDING", "completed_at": None},
-                            run_id=None if is_evaluation_stage else row["run_id"],
-                            run_updates=None if is_evaluation_stage else {"status": "RETRY_PENDING", "completed_at": None},
-                            evaluation_id=evaluation["id"] if evaluation else None,
-                            evaluation_updates={"status": "RETRY_PENDING", "completed_at": None}
-                            if evaluation else None,
-                            event={
-                                "entity_type": "evaluation" if evaluation else "run",
-                                "entity_id": evaluation["id"] if evaluation else row["run_id"],
-                                "event_type": "AUTO_RESUME_QUEUED",
-                                "old_status": state,
-                                "new_status": "RETRY_PENDING",
-                                "details": {"attempt": row["attempt_number"], "job_id": row["slurm_job_id"],
-                                            "reason": common["slurm_reason"]},
-                            },
+                            event_type="AUTO_RESUME_QUEUED",
+                            old_status=state,
+                            details={"attempt": row["attempt_number"], "job_id": row["slurm_job_id"],
+                                     "reason": common["slurm_reason"]},
                         )
                         updated += 1
                         continue
@@ -7466,7 +7423,10 @@ class PipelineService:
                                     "node_list": record.get("NodeList"),
                                     "source": record.get("Source"),
                         }
-                        self.database.transition_workflow_state(
+                        self._transition_stage(
+                            **stage_entity,
+                            status=target_status,
+                            completed_at=finished,
                             attempt_id=row["id"],
                             attempt_updates={
                                 "status": target_status if cancellation_requested else state,
@@ -7474,26 +7434,9 @@ class PipelineService:
                                 "finished_at": finished,
                                 **common,
                             },
-                            stage_id=row["stage_id"],
-                            stage_updates={"status": target_status, "completed_at": finished},
-                            run_id=None if is_evaluation_stage else row["run_id"],
-                            run_updates=None if is_evaluation_stage else {
-                                "status": target_status,
-                                "completed_at": finished,
-                            },
-                            evaluation_id=evaluation["id"] if evaluation else None,
-                            evaluation_updates={"status": target_status, "completed_at": finished}
-                            if evaluation else None,
-                            event={
-                                "entity_type": "evaluation" if evaluation else "run",
-                                "entity_id": evaluation["id"] if evaluation else row["run_id"],
-                                "event_type": "JOB_CANCELLED"
-                                if target_status == "CANCELLED"
-                                else "JOB_FAILED",
-                                "old_status": row["status"],
-                                "new_status": target_status,
-                                "details": event_details,
-                            },
+                            event_type="JOB_CANCELLED" if target_status == "CANCELLED" else "JOB_FAILED",
+                            old_status=row["status"],
+                            details=event_details,
                         )
                         updated += 1
             for experiment_id in experiments:
@@ -8369,14 +8312,9 @@ class PipelineService:
         run = self.database.get_run(str(evaluation["run_id"]), execution_stage_ids=[evaluation["stage_id"]])
         if not run:
             return
-        attempts = [
-            attempt
-            for attempt in run.get("attempts", [])
-            if attempt.get("stage_id") == evaluation.get("stage_id")
-        ]
-        if not attempts:
+        attempt = _latest_stage_attempt(run, evaluation.get("stage_id"))
+        if attempt is None:
             return
-        attempt = max(attempts, key=lambda item: int(item.get("attempt_number") or 0))
         gateway = attempt.get("gateway") or "auto"
 
         stage = next(
@@ -9213,10 +9151,9 @@ class PipelineService:
             refreshed_evaluation = self.database.get_evaluation(entity_id)
             parent = self.database.get_run(str(run["id"]))
             if refreshed_evaluation:
-                refreshed_evaluation["attempts"] = [
-                    attempt for attempt in list((parent or {}).get("attempts") or [])
-                    if attempt.get("stage_id") == refreshed_evaluation.get("stage_id")
-                ]
+                refreshed_evaluation["attempts"] = _stage_attempts(
+                    parent, refreshed_evaluation.get("stage_id")
+                )
                 refreshed_evaluation["manual_actions"] = self.evaluation_manual_actions(
                     refreshed_evaluation, parent
                 )
@@ -9260,8 +9197,7 @@ class PipelineService:
         action = self.evaluation_manual_actions(evaluation, run)["retry_submission"]
         if not action["enabled"]:
             raise ValueError(str(action["reason"]))
-        attempts = [a for a in run["attempts"] if a["stage_id"] == evaluation["stage_id"]]
-        latest = max(attempts, key=lambda a: a["attempt_number"])
+        latest = _latest_stage_attempt(run, evaluation["stage_id"])
         selected_gateway = latest["gateway"] or gateway
         recovered = None
         job_id = latest.get("slurm_job_id")
@@ -9281,8 +9217,7 @@ class PipelineService:
         with self._reconcile_lock:
             current = self.database.get_evaluation(evaluation_id)
             parent = self.database.get_run(run["id"], include_payloads=False)
-            current_attempts = [a for a in parent["attempts"] if a["stage_id"] == evaluation["stage_id"]]
-            newest = max(current_attempts, key=lambda a: a["attempt_number"])
+            newest = _latest_stage_attempt(parent, evaluation["stage_id"])
             action = self.evaluation_manual_actions(current, parent)["retry_submission"]
             if not action["enabled"] or newest["id"] != latest["id"]:
                 return {"evaluation": current, "skipped": "Submission state changed while checking the receipt"}
@@ -9326,8 +9261,7 @@ class PipelineService:
             parent = self.database.get_run(run["id"], execution_stage_ids=stage_ids)
             if not self.evaluation_manual_actions(current, parent)["reread_result"]["enabled"]:
                 return {"evaluation": current, "skipped": "Evaluation state changed"}
-            latest = max((a for a in parent["attempts"] if a["stage_id"] == evaluation["stage_id"]),
-                         key=lambda a: a["attempt_number"])
+            latest = _latest_stage_attempt(parent, evaluation["stage_id"])
             error, completed = self._ingest_evaluation_result({**latest, "run_id": parent["id"]})
             if error:
                 raise ValueError(f"The evaluation result is still unreadable: {error}")
@@ -12067,11 +12001,7 @@ def get_evaluation(evaluation_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Evaluation not found")
     service._queue_list_progress_refresh("evaluation", [evaluation])
     run = service.database.get_run(evaluation["run_id"], include_payloads=False)
-    evaluation["attempts"] = [
-        attempt
-        for attempt in (run["attempts"] if run else [])
-        if attempt.get("stage_id") == evaluation.get("stage_id")
-    ]
+    evaluation["attempts"] = _stage_attempts(run, evaluation.get("stage_id"))
     artifacts = [
         artifact
         for artifact in (run["artifacts"] if run else [])
@@ -12133,12 +12063,8 @@ def get_evaluation_episode_log(
     )
     if not episode:
         raise HTTPException(status_code=404, detail="Rollout not found")
-    run = service.database.get_run(evaluation["run_id"]) or {}
-    attempts = [
-        a
-        for a in run.get("attempts", [])
-        if a.get("stage_id") == evaluation.get("stage_id")
-    ]
+    run = service.database.get_run(evaluation["run_id"], include_payloads=False)
+    attempts = _stage_attempts(run, evaluation.get("stage_id"))
     if not attempts:
         return "No Slurm attempt recorded."
     metrics = episode.get("metrics_json") or {}
@@ -12146,7 +12072,7 @@ def get_evaluation_episode_log(
     attempt = next(
         (a for a in attempts if job and str(a.get("slurm_job_id")) == str(job)), None
     )
-    attempt = attempt or max(attempts, key=lambda a: a.get("attempt_number") or 0)
+    attempt = attempt or _latest_attempt(attempts)
     worker = metrics.get("worker_index")
     if worker is None:
         return service._read_attempt_log(
@@ -12190,8 +12116,7 @@ def get_evaluation_episode_viewer(evaluation_id: str, episode_id: str):
     if not episode:
         raise HTTPException(status_code=404, detail="Rollout not found")
     run = service.database.get_run(evaluation["run_id"], execution_stage_ids=[evaluation["stage_id"]]) or {}
-    attempts = [a for a in run.get("attempts", []) if a.get("stage_id") == evaluation.get("stage_id")]
-    gateway = (max(attempts, key=lambda a: a.get("attempt_number") or 0).get("gateway") if attempts else "auto") or "auto"
+    gateway = (_latest_stage_attempt(run, evaluation.get("stage_id")) or {}).get("gateway") or "auto"
     spec = run.get("resolved_spec_json") or {}
     stage = next((item for item in run.get("stages", []) if item.get("id") == evaluation.get("stage_id")), {})
     target = ((stage.get("resolved_config_json") or {}).get("context") or {}).get("target_dataset")
@@ -12266,17 +12191,8 @@ def get_evaluation_episode_video(
     ):
         raise HTTPException(status_code=409, detail="Registered rollout video path is invalid")
 
-    run = service.database.get_run(evaluation["run_id"])
-    attempts = [
-        attempt
-        for attempt in ((run or {}).get("attempts") or [])
-        if attempt.get("stage_id") == evaluation.get("stage_id")
-    ]
-    gateway = (
-        max(attempts, key=lambda item: int(item.get("attempt_number") or 0)).get("gateway")
-        if attempts
-        else "auto"
-    ) or "auto"
+    run = service.database.get_run(evaluation["run_id"], include_payloads=False)
+    gateway = (_latest_stage_attempt(run, evaluation.get("stage_id")) or {}).get("gateway") or "auto"
     try:
         host, size = service.cluster.file_size(str(video_path), gateway)
     except Exception as error:
