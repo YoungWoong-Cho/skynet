@@ -13,6 +13,17 @@ CHUNK_BYTES = 64 * 1024
 # Stored as one object so its path can be handed to a job; every other journal is chunked.
 SINGLE_OBJECT_FILE = "tracking-artifact-links.json"
 
+
+def journal_chunks(name: str, text: str) -> list[str]:
+    """The stored pieces of a journal body: whole for the single-object file, else fixed chunks.
+
+    Splitting the decoded text keeps every chunk on a Unicode boundary; JSONL queues
+    may include non-ASCII text.
+    """
+    if name == SINGLE_OBJECT_FILE:
+        return [text]
+    return [text[start:start + CHUNK_BYTES] for start in range(0, len(text), CHUNK_BYTES)]
+
 JOURNAL_FILES = frozenset(
     {
         "mlflow-state.json",
@@ -20,7 +31,7 @@ JOURNAL_FILES = frozenset(
         "wandb-state.json",
         "wandb-spool.jsonl",
         "gpu-statistics.json",
-        "tracking-artifact-links.json",
+        SINGLE_OBJECT_FILE,
     }
 )
 
@@ -89,10 +100,7 @@ class JournalFile:
             store = database.payload_store
             prepared = []
             if store:
-                text = payload.decode("utf-8")
-                chunks = ([text] if self.name == SINGLE_OBJECT_FILE else
-                          [text[start:start + CHUNK_BYTES]
-                           for start in range(0, len(text), CHUNK_BYTES)])
+                chunks = journal_chunks(self.name, payload.decode("utf-8"))
                 contents = {hashlib.sha256(chunk.encode()).hexdigest(): chunk.encode()
                             for chunk in chunks}
                 with database.connection() as connection:
@@ -171,11 +179,7 @@ def encode_payload(connection, store, identifier, name, payload, existing=b""):
     if name == SINGLE_OBJECT_FILE:
         return store.put(connection, "tracking_journals", identifier, name, payload.decode()).encode()
     old = chunk_document(existing) or {"chunks": []}
-    # Split on Unicode boundaries; JSONL queues may include non-ASCII text.
-    text = payload.decode("utf-8")
-    chunks = [
-        text[start : start + CHUNK_BYTES] for start in range(0, len(text), CHUNK_BYTES)
-    ]
+    chunks = journal_chunks(name, payload.decode("utf-8"))
     refs = []
     for index, chunk in enumerate(chunks):
         digest = hashlib.sha256(chunk.encode()).hexdigest()

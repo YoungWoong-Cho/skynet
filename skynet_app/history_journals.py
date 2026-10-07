@@ -5,11 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-from .tracking_journal import (
-    CHUNK_BYTES,
-    decode_payload,
-    encode_payload,
-)
+from .tracking_journal import SINGLE_OBJECT_FILE, decode_payload, encode_payload, journal_chunks
 
 _DROP = object()
 
@@ -105,16 +101,8 @@ def changes(connection, database, run_id, needles):
         }
         if database.payload_store:
             # Identify only old chunks that the replacement does not reuse.
-            text = clean.decode()
-            chunks = (
-                [text]
-                if row[1] == "tracking-artifact-links.json"
-                else [
-                    text[start : start + CHUNK_BYTES]
-                    for start in range(0, len(text), CHUNK_BYTES)
-                ]
-            )
-            retained = {hashlib.sha256(chunk.encode()).hexdigest() for chunk in chunks}
+            retained = {hashlib.sha256(chunk.encode()).hexdigest()
+                        for chunk in journal_chunks(row[1], clean.decode())}
             if journal_refs is None:
                 journal_refs = _journal_payload_refs(connection, run_id)
 
@@ -155,9 +143,7 @@ def prepare(database, plans, needles):
             if hashlib.sha256(content).hexdigest() != plan['after']:
                 raise ValueError("Tracking cleanup changed. Review deletion again")
             result[key] = content
-            text = content.decode()
-            bodies.extend([text] if plan['filename'] == 'tracking-artifact-links.json' else
-                          [text[start:start + CHUNK_BYTES] for start in range(0, len(text), CHUNK_BYTES)])
+            bodies.extend(journal_chunks(plan["filename"], content.decode()))
     return result, bodies
 
 
@@ -177,7 +163,7 @@ def apply(connection, database, plans, needles, prepared=None):
         if hashlib.sha256(content).hexdigest() != plan["after"]:
             raise ValueError("Tracking cleanup changed. Review deletion again")
         if database.payload_store:
-            if plan["filename"] == "tracking-artifact-links.json":
+            if plan["filename"] == SINGLE_OBJECT_FILE:
                 content = database.payload_store.put(
                     connection,
                     "tracking_journals",
